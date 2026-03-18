@@ -40,8 +40,8 @@ See `.env.example` for all available settings. Key variables:
 
 | Variable | Description |
 |---|---|
-| `DATAMINR_CLIENT_ID` | Dataminr API client ID |
-| `DATAMINR_CLIENT_SECRET` | Dataminr API client secret |
+| `DATAMINR_API_USER_ID` | Dataminr First Alert API user ID |
+| `DATAMINR_API_PASSWORD` | Dataminr First Alert API password |
 | `CLEAR_API_URL` | CLEAR GraphQL API endpoint |
 | `CLEAR_API_KEY` | Service account API key (`sk_live_...`) |
 | `ANTHROPIC_API_KEY` | API key for ML inference |
@@ -57,6 +57,62 @@ See `.env.example` for all available settings. Key variables:
 4. **Classify** — ML classifies: disaster types, relevance, severity
 5. **Group** — If relevant, ML clusters into existing or new event
 6. **Escalate** — If severity >= 4, assesses for alert creation (always `draft`)
+
+```mermaid
+sequenceDiagram
+    participant Beat as Celery Beat
+    participant Poll as poll_dataminr
+    participant Redis
+    participant DM as Dataminr API
+    participant Proc as process_signal
+    participant CLEAR as CLEAR API (GraphQL)
+    participant Claude as Claude (Anthropic)
+
+    Beat->>Poll: trigger every 15s
+
+    Note over Poll,Redis: Determine time window
+    Poll->>Redis: get last_synced
+    alt no cached timestamp
+        Poll->>CLEAR: query latest signal publishedAt
+    end
+
+    Note over Poll,DM: Fetch new signals
+    Poll->>DM: POST /auth/1/userAuthorization
+    DM-->>Poll: authorizationToken (DmAuth)
+    Poll->>Redis: cache token (TTL from expirationTime)
+    Poll->>DM: GET /alerts/1/alerts?alertversion=19
+    DM-->>Poll: alerts[]
+    Poll->>Redis: deduplicate (seen set)
+    Poll->>Redis: update last_synced
+
+    loop each new signal
+        Poll->>Proc: dispatch process_signal task
+
+        Note over Proc,CLEAR: Stage 1 — Ingest
+        Proc->>CLEAR: createSignal mutation
+        CLEAR-->>Proc: signal { id }
+
+        Note over Proc,Claude: Stage 2 — Classify
+        Proc->>Claude: classify(title, location, context)
+        Claude-->>Proc: { disaster_types, relevance, severity }
+        Proc->>Redis: cache classification
+
+        alt relevance >= threshold
+            Note over Proc,Claude: Stage 3 — Group
+            Proc->>CLEAR: query recent events
+            Proc->>Claude: group(signal, existing events)
+            Claude-->>Proc: { match existing | create new }
+            Proc->>CLEAR: addSignalToEvent or createEvent
+
+            alt severity >= 4
+                Note over Proc,Claude: Stage 4 — Escalate
+                Proc->>Claude: assess(event, signals)
+                Claude-->>Proc: { should_alert, title, body }
+                Proc->>CLEAR: createAlert (status: draft)
+            end
+        end
+    end
+```
 
 ## Project Structure
 
