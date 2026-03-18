@@ -1,7 +1,7 @@
 """Dataminr First Alert API client with Redis-cached auth tokens."""
 
-import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -26,19 +26,29 @@ def _get_token() -> str:
         settings.dataminr_auth_url,
         data={
             "grant_type": "api_key",
-            "client_id": settings.dataminr_client_id,
-            "client_secret": settings.dataminr_client_secret,
+            "scope": "first_alert_api",
+            "api_user_id": settings.dataminr_api_user_id,
+            "api_password": settings.dataminr_api_password,
         },
         headers={
-            "Accept": "application/json",
             "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
         },
         timeout=30,
     )
     resp.raise_for_status()
-    token = resp.json()["access_token"]
-    _redis.setex("dataminr:token", settings.dataminr_token_ttl, token)
-    logger.info("Dataminr token cached (TTL=%ds)", settings.dataminr_token_ttl)
+    auth_data = resp.json()
+    token = auth_data["authorizationToken"]
+
+    # Calculate TTL from expirationTime (ms since epoch), default 1 hour
+    expiration_ms = auth_data.get("expirationTime")
+    if expiration_ms:
+        ttl = max(int(expiration_ms / 1000 - time.time()), 60)
+    else:
+        ttl = 3600
+
+    _redis.setex("dataminr:token", ttl, token)
+    logger.info("Dataminr token cached (TTL=%ds)", ttl)
     return token
 
 
@@ -65,9 +75,10 @@ def fetch_signals(since: datetime | None = None) -> list[DataminrSignal]:
 
         resp = httpx.get(
             url,
+            params={"alertversion": "19"},
             headers={
                 "Accept": "application/json",
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"DmAuth {token}",
             },
             timeout=60,
         )
@@ -78,9 +89,10 @@ def fetch_signals(since: datetime | None = None) -> list[DataminrSignal]:
             token = _get_token()
             resp = httpx.get(
                 url,
+                params={"alertversion": "19"},
                 headers={
                     "Accept": "application/json",
-                    "Authorization": f"Bearer {token}",
+                    "Authorization": f"DmAuth {token}",
                 },
                 timeout=60,
             )
@@ -90,10 +102,7 @@ def fetch_signals(since: datetime | None = None) -> list[DataminrSignal]:
 
         for signal in data.alerts:
             # Filter by time window
-            try:
-                ts = datetime.fromisoformat(signal.alertTimestamp.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                continue
+            ts = datetime.fromtimestamp(signal.eventTime / 1000, tz=UTC)
 
             if ts < since:
                 # Reached signals older than our window — stop paginating
@@ -110,8 +119,9 @@ def fetch_signals(since: datetime | None = None) -> list[DataminrSignal]:
             all_signals.append(signal)
 
         else:
-            # Only follow nextPage if we didn't break out of the loop
-            url = data.nextPage
+            # Only follow next page if we didn't break out of the loop
+            # Dataminr uses cursor-based pagination via the 'to' field
+            url = None  # Stop after first batch; cursor pagination not yet implemented
 
     logger.info("Fetched %d new signals from Dataminr", len(all_signals))
     return all_signals

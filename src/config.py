@@ -3,11 +3,10 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Dataminr
-    dataminr_client_id: str
-    dataminr_client_secret: str
-    dataminr_auth_url: str = "https://api.dataminr.com/auth/v1/token"
-    dataminr_alerts_url: str = "https://api.dataminr.com/firstalert/v1/alerts"
-    dataminr_token_ttl: int = 12600  # 3.5 hours in seconds
+    dataminr_api_user_id: str
+    dataminr_api_password: str
+    dataminr_auth_url: str = "https://firstalert-api.dataminr.com/auth/1/userAuthorization"
+    dataminr_alerts_url: str = "https://firstalert-api.dataminr.com/alerts/1/alerts"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
