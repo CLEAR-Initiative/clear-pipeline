@@ -24,4 +24,6 @@ app.conf.beat_schedule = {
     },
 }
 
-app.autodiscover_tasks(["src.tasks"])
+app.autodiscover_tasks(["src.tasks"], related_name=None)
+import src.tasks.poll  # noqa: F401, E402
+import src.tasks.process  # noqa: F401, E402
