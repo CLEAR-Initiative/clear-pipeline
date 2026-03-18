@@ -1,0 +1,89 @@
+"""Event grouping prompt: decide if a signal joins an existing event or creates a new one."""
+
+SYSTEM_PROMPT = """\
+You are a humanitarian intelligence analyst for the CLEAR early warning system.
+
+You decide whether a new signal belongs to an existing active event or warrants creating a new event. Events group related signals that describe the same real-world situation.
+
+You MUST respond with valid JSON only — no markdown, no explanation."""
+
+USER_PROMPT_TEMPLATE = """\
+New signal to group:
+
+Title: {title}
+Description: {description}
+Location: {location_name}
+Types: {disaster_types}
+Severity: {severity}
+Summary: {summary}
+Timestamp: {timestamp}
+
+Active events:
+{active_events_list}
+
+Respond with this exact JSON structure:
+
+If the signal belongs to an existing event:
+{{
+  "action": "add_to_existing",
+  "event_id": "<id of the matching event>"
+}}
+
+If the signal represents a new situation:
+{{
+  "action": "create_new",
+  "title": "<event title>",
+  "description": "<2-3 sentence event description>",
+  "types": ["<disaster type strings>"]
+}}
+
+Rules:
+- Group signals about the SAME real-world incident/situation
+- Signals about the same conflict, same flood, same displacement wave = same event
+- Signals about different incidents even if same type = different events
+- Consider geographic proximity and temporal proximity (within ~48h)
+- If no active events exist, always create_new"""
+
+
+def build_group_prompt(
+    title: str | None,
+    description: str | None,
+    location_name: str | None,
+    disaster_types: list[str],
+    severity: int,
+    summary: str,
+    timestamp: str,
+    active_events: list[dict],
+) -> str:
+    """Build the user prompt for event grouping."""
+    if active_events:
+        events_lines = "\n".join(
+            f"  - ID: {e['id']}\n"
+            f"    Title: {e.get('title', '(untitled)')}\n"
+            f"    Types: {e.get('types', [])}\n"
+            f"    Location: {_event_location_name(e)}\n"
+            f"    Valid: {e.get('validFrom', '?')} → {e.get('validTo', '?')}"
+            for e in active_events
+        )
+    else:
+        events_lines = "  (no active events)"
+
+    return USER_PROMPT_TEMPLATE.format(
+        title=title or "(no title)",
+        description=description or "(no description)",
+        location_name=location_name or "(unknown)",
+        disaster_types=", ".join(disaster_types) if disaster_types else "(none)",
+        severity=severity,
+        summary=summary,
+        timestamp=timestamp,
+        active_events_list=events_lines,
+    )
+
+
+def _event_location_name(event: dict) -> str:
+    """Extract a readable location name from an event dict."""
+    for key in ("originLocation", "destinationLocation", "generalLocation"):
+        loc = event.get(key)
+        if loc and loc.get("name"):
+            return loc["name"]
+    return "(unknown)"

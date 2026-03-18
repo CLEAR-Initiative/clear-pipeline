@@ -1,0 +1,216 @@
+"""CLEAR API GraphQL client with retry logic."""
+
+import logging
+import time
+
+import httpx
+
+from src.config import settings
+
+logger = logging.getLogger(__name__)
+
+# ─── Mutations ────────────────────────────────────────────────────────────────
+
+CREATE_SIGNAL = """
+mutation CreateSignal($input: CreateSignalInput!) {
+  createSignal(input: $input) {
+    id
+    title
+    publishedAt
+  }
+}
+"""
+
+CREATE_EVENT = """
+mutation CreateEvent($input: CreateEventInput!) {
+  createEvent(input: $input) {
+    id
+    title
+    types
+  }
+}
+"""
+
+UPDATE_EVENT = """
+mutation UpdateEvent($id: String!, $input: UpdateEventInput!) {
+  updateEvent(id: $id, input: $input) {
+    id
+    title
+  }
+}
+"""
+
+CREATE_ALERT = """
+mutation CreateAlert($input: CreateAlertInput!) {
+  createAlert(input: $input) {
+    id
+    status
+  }
+}
+"""
+
+# ─── Queries ──────────────────────────────────────────────────────────────────
+
+GET_LATEST_SIGNAL = """
+query LatestSignal {
+  signals {
+    id
+    publishedAt
+  }
+}
+"""
+
+GET_EVENTS = """
+query Events {
+  events {
+    id
+    title
+    description
+    types
+    validFrom
+    validTo
+    originLocation { id name }
+    destinationLocation { id name }
+    generalLocation { id name }
+  }
+}
+"""
+
+GET_LOCATIONS = """
+query Locations {
+  locations {
+    id
+    name
+    level
+    parent { id name }
+  }
+}
+"""
+
+GET_DATA_SOURCES = """
+query DataSources {
+  dataSources {
+    id
+    name
+  }
+}
+"""
+
+GET_DISASTER_TYPES = """
+query DisasterTypes {
+  disasterTypes {
+    id
+    disasterType
+    disasterClass
+    glideNumber
+  }
+}
+"""
+
+
+def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dict:
+    """Execute a GraphQL query/mutation with retry logic."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.clear_api_key}",
+    }
+    payload = {"query": query}
+    if variables:
+        payload["variables"] = variables
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = httpx.post(
+                settings.clear_api_url,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+
+            if "errors" in result:
+                logger.error("GraphQL errors: %s", result["errors"])
+                raise RuntimeError(f"GraphQL errors: {result['errors']}")
+
+            return result["data"]
+
+        except (httpx.HTTPError, RuntimeError) as e:
+            if attempt < retries:
+                wait = 2**attempt
+                logger.warning(
+                    "GraphQL request failed (attempt %d/%d), retrying in %ds: %s",
+                    attempt,
+                    retries,
+                    wait,
+                    e,
+                )
+                time.sleep(wait)
+            else:
+                logger.error("GraphQL request failed after %d attempts: %s", retries, e)
+                raise
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+
+def create_signal(input_data: dict) -> dict:
+    result = _execute(CREATE_SIGNAL, {"input": input_data})
+    return result["createSignal"]
+
+
+def create_event(input_data: dict) -> dict:
+    result = _execute(CREATE_EVENT, {"input": input_data})
+    return result["createEvent"]
+
+
+def update_event(event_id: str, input_data: dict) -> dict:
+    result = _execute(UPDATE_EVENT, {"id": event_id, "input": input_data})
+    return result["updateEvent"]
+
+
+def create_alert(input_data: dict) -> dict:
+    result = _execute(CREATE_ALERT, {"input": input_data})
+    return result["createAlert"]
+
+
+def get_latest_signal_timestamp() -> str | None:
+    """Get the publishedAt of the most recent signal, or None if no signals exist."""
+    result = _execute(GET_LATEST_SIGNAL)
+    signals = result.get("signals", [])
+    if not signals:
+        return None
+    # Find the most recent by publishedAt
+    return max(signals, key=lambda s: s["publishedAt"])["publishedAt"]
+
+
+def get_events() -> list[dict]:
+    result = _execute(GET_EVENTS)
+    return result.get("events", [])
+
+
+def get_locations() -> list[dict]:
+    result = _execute(GET_LOCATIONS)
+    return result.get("locations", [])
+
+
+def get_data_sources() -> list[dict]:
+    result = _execute(GET_DATA_SOURCES)
+    return result.get("dataSources", [])
+
+
+def get_disaster_types() -> list[dict]:
+    result = _execute(GET_DISASTER_TYPES)
+    return result.get("disasterTypes", [])
+
+
+def get_dataminr_source_id() -> str:
+    """Find the dataminr data source ID from the CLEAR API."""
+    sources = get_data_sources()
+    for src in sources:
+        if src["name"] == settings.dataminr_source_name:
+            return src["id"]
+    raise RuntimeError(
+        f"Data source '{settings.dataminr_source_name}' not found in CLEAR API. "
+        "Ensure it exists in the data_sources table."
+    )
