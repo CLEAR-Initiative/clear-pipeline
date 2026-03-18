@@ -46,8 +46,8 @@ def poll_dataminr(self):
             return {"signals_found": 0}
 
         # Track the most recent timestamp for next sync
-        latest_ts = max(s.alertTimestamp for s in signals)
-        set_last_synced(datetime.fromisoformat(latest_ts.replace("Z", "+00:00")))
+        latest_event_time = max(s.eventTime for s in signals)
+        set_last_synced(datetime.fromtimestamp(latest_event_time / 1000, tz=UTC))
 
         # Fan out to process_signal tasks
         from src.tasks.process import process_signal

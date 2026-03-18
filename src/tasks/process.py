@@ -93,9 +93,7 @@ def process_signal(self, signal_data: dict):
 
             raw_context = "\n".join(raw_context_parts) if raw_context_parts else "(no additional context)"
 
-            location_name = None
-            if signal.estimatedEventLocation and signal.estimatedEventLocation.name:
-                location_name = signal.estimatedEventLocation.name
+            location_name = signal.locationName
 
             disaster_types = _get_disaster_types()
 
@@ -103,7 +101,7 @@ def process_signal(self, signal_data: dict):
                 title=signal.headline,
                 description=created.get("title"),
                 location_name=location_name,
-                url=signal.publicPost.href if signal.publicPost else None,
+                url=signal.publicPost.link if signal.publicPost else None,
                 timestamp=signal.alertTimestamp,
                 raw_context=raw_context,
                 disaster_types=disaster_types,
@@ -138,17 +136,13 @@ def process_signal(self, signal_data: dict):
                 "alert": None,
             }
 
-        location_name = None
+        location_name = signal.locationName
         origin_id = None
-        if signal.estimatedEventLocation:
-            location_name = signal.estimatedEventLocation.name
-            if signal.estimatedEventLocation.coordinates and len(signal.estimatedEventLocation.coordinates) >= 2:
-                from src.services.geo import resolve_location
+        coords = signal.coordinates
+        if coords:
+            from src.services.geo import resolve_location
 
-                origin_id = resolve_location(
-                    signal.estimatedEventLocation.coordinates[0],
-                    signal.estimatedEventLocation.coordinates[1],
-                )
+            origin_id = resolve_location(coords[0], coords[1])
 
         event = group_signal(
             signal_id=signal_id,

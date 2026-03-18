@@ -22,16 +22,15 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
 
     # URL from publicPost
     url = None
-    if signal.publicPost and signal.publicPost.href:
-        url = signal.publicPost.href
+    if signal.publicPost and signal.publicPost.link:
+        url = signal.publicPost.link
 
     # Location resolution
     origin_id = None
-    if signal.estimatedEventLocation and signal.estimatedEventLocation.coordinates:
-        coords = signal.estimatedEventLocation.coordinates
-        if len(coords) >= 2:
-            lat, lon = coords[0], coords[1]
-            origin_id = resolve_location(lat, lon)
+    coords = signal.coordinates
+    if coords:
+        lat, lon = coords
+        origin_id = resolve_location(lat, lon)
 
     # Full raw payload as JSON
     raw_data = signal.model_dump(mode="json")
