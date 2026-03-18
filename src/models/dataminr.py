@@ -1,13 +1,8 @@
-"""Pydantic models for the Dataminr First Alert API (new v1 format)."""
+"""Pydantic models for the Dataminr First Alert API."""
 
-from pydantic import BaseModel
+from datetime import UTC, datetime
 
-
-class EstimatedEventLocation(BaseModel):
-    name: str | None = None
-    coordinates: list[float] | None = None  # [lat, lon]
-    probabilityRadius: float | None = None
-    MGRS: str | None = None
+from pydantic import BaseModel, computed_field
 
 
 class AlertType(BaseModel):
@@ -20,16 +15,14 @@ class SubHeadline(BaseModel):
 
 
 class PublicPost(BaseModel):
-    href: str | None = None
+    link: str | None = None
     text: str | None = None
     translatedText: str | None = None
     media: list[str] | None = None
 
 
-class ListMatched(BaseModel):
-    id: str | None = None
+class AlertList(BaseModel):
     name: str | None = None
-    topicIds: list[str] | None = None
 
 
 class AlertTopic(BaseModel):
@@ -67,15 +60,15 @@ class DataminrSignal(BaseModel):
     """A single Dataminr 'alert' — which maps to a CLEAR signal."""
 
     alertId: str
-    alertTimestamp: str  # ISO-8601
+    eventTime: int  # Unix timestamp in milliseconds
 
-    estimatedEventLocation: EstimatedEventLocation | None = None
+    estimatedEventLocation: list[str] | None = None  # [name, lat, lon, radius, mgrs]
     alertType: AlertType | None = None
     headline: str | None = None
     subHeadline: SubHeadline | None = None
     publicPost: PublicPost | None = None
-    dataminrAlertUrl: str | None = None
-    listsMatched: list[ListMatched] | None = None
+    firstAlertURL: str | None = None
+    alertLists: list[AlertList] | None = None
     alertTopics: list[AlertTopic] | None = None
     linkedAlerts: list[LinkedAlert] | None = None
     termsOfUse: str | None = None
@@ -83,9 +76,32 @@ class DataminrSignal(BaseModel):
     eventCorroboration: EventCorroboration | None = None
     liveBrief: list[LiveBrief] | None = None
 
+    @computed_field
+    @property
+    def alertTimestamp(self) -> str:
+        """ISO-8601 timestamp derived from eventTime for compatibility."""
+        return datetime.fromtimestamp(self.eventTime / 1000, tz=UTC).isoformat()
+
+    @property
+    def locationName(self) -> str | None:
+        """Extract location name from estimatedEventLocation array."""
+        if self.estimatedEventLocation and len(self.estimatedEventLocation) > 0:
+            return self.estimatedEventLocation[0]
+        return None
+
+    @property
+    def coordinates(self) -> tuple[float, float] | None:
+        """Extract (lat, lon) from estimatedEventLocation array."""
+        if self.estimatedEventLocation and len(self.estimatedEventLocation) >= 3:
+            try:
+                return (float(self.estimatedEventLocation[1]), float(self.estimatedEventLocation[2]))
+            except (ValueError, IndexError):
+                return None
+        return None
+
 
 class DataminrAlertsResponse(BaseModel):
-    """Top-level response from GET /firstalert/v1/alerts."""
+    """Top-level response from GET /alerts/1/alerts."""
 
     alerts: list[DataminrSignal] = []
-    nextPage: str | None = None
+    to: str | None = None  # Cursor for pagination
