@@ -36,7 +36,11 @@ def _get_token() -> str:
         timeout=30,
     )
     resp.raise_for_status()
-    token = resp.json()["access_token"]
+    body = resp.json()
+    logger.debug("Dataminr auth response keys: %s", list(body.keys()))
+    token = body.get("dmaToken") or body.get("token") or body.get("access_token")
+    if not token:
+        raise RuntimeError(f"No token in Dataminr auth response: {list(body.keys())}")
     _redis.setex("dataminr:token", settings.dataminr_token_ttl, token)
     logger.info("Dataminr token cached (TTL=%ds)", settings.dataminr_token_ttl)
     return token

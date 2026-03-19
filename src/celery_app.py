@@ -24,4 +24,7 @@ app.conf.beat_schedule = {
     },
 }
 
-app.autodiscover_tasks(["src.tasks"])
+app.conf.include = [
+    "src.tasks.poll",
+    "src.tasks.process",
+]
