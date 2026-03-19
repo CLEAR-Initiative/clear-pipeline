@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime
 
 from src.celery_app import app
-from src.clients.dataminr import fetch_signals, get_last_synced, set_last_synced
+from src.clients.dataminr import fetch_signals, get_last_synced
 from src.clients.graphql import get_latest_signal_timestamp
 
 logger = logging.getLogger(__name__)
@@ -44,10 +44,6 @@ def poll_dataminr(self):
         if not signals:
             logger.info("No new signals from Dataminr")
             return {"signals_found": 0}
-
-        # Track the most recent timestamp for next sync
-        latest_ts = max(s.alertTimestamp for s in signals)
-        set_last_synced(datetime.fromisoformat(latest_ts.replace("Z", "+00:00")))
 
         # Fan out to process_signal tasks
         from src.tasks.process import process_signal

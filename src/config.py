@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     relevance_threshold: float = 0.5
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"
+    max_pages_per_poll: int = 50  # Safety cap on pagination
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
