@@ -4,7 +4,6 @@ import logging
 
 from src.clients.graphql import create_signal
 from src.models.dataminr import DataminrSignal
-from src.services.geo import resolve_location
 
 logger = logging.getLogger(__name__)
 
@@ -25,26 +24,26 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
     if signal.publicPost and signal.publicPost.href:
         url = signal.publicPost.href
 
-    # Location resolution
-    origin_id = None
-    if signal.estimatedEventLocation and signal.estimatedEventLocation.coordinates:
-        coords = signal.estimatedEventLocation.coordinates
-        if len(coords) >= 2:
-            lat, lon = coords[0], coords[1]
-            origin_id = resolve_location(lat, lon)
-
     # Full raw payload as JSON
     raw_data = signal.model_dump(mode="json")
 
-    return {
+    input_data: dict = {
         "sourceId": source_id,
         "rawData": raw_data,
         "publishedAt": signal.alertTimestamp,
         "url": url,
         "title": signal.headline,
         "description": description,
-        "originId": origin_id,
     }
+
+    # Pass lat/lng for server-side PostGIS geo-resolution
+    if signal.estimatedEventLocation and signal.estimatedEventLocation.coordinates:
+        coords = signal.estimatedEventLocation.coordinates
+        if len(coords) >= 2:
+            input_data["lat"] = coords[0]
+            input_data["lng"] = coords[1]
+
+    return input_data
 
 
 def ingest_signal(signal: DataminrSignal, source_id: str) -> dict:

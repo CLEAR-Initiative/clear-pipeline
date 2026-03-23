@@ -17,6 +17,9 @@ mutation CreateSignal($input: CreateSignalInput!) {
     id
     title
     publishedAt
+    originLocation { id name level }
+    destinationLocation { id name level }
+    generalLocation { id name level }
   }
 }
 """

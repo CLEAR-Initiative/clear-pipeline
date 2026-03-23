@@ -14,6 +14,8 @@ class CreateSignalInput(BaseModel):
     originId: str | None = None
     destinationId: str | None = None
     locationId: str | None = None
+    lat: float | None = None  # For server-side PostGIS geo-resolution
+    lng: float | None = None
 
 
 class CreateEventInput(BaseModel):
@@ -31,6 +33,8 @@ class CreateEventInput(BaseModel):
     types: list[str]
     populationAffected: str | None = None
     rank: float
+    lat: float | None = None  # For server-side PostGIS geo-resolution
+    lng: float | None = None
 
 
 class CreateAlertInput(BaseModel):
