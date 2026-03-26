@@ -139,16 +139,23 @@ def process_signal(self, signal_data: dict):
             }
 
         location_name = None
-        origin_id = None
+        signal_lat = None
+        signal_lng = None
         if signal.estimatedEventLocation:
             location_name = signal.estimatedEventLocation.name
             if signal.estimatedEventLocation.coordinates and len(signal.estimatedEventLocation.coordinates) >= 2:
-                from src.services.geo import resolve_location
+                signal_lat = signal.estimatedEventLocation.coordinates[0]
+                signal_lng = signal.estimatedEventLocation.coordinates[1]
 
-                origin_id = resolve_location(
-                    signal.estimatedEventLocation.coordinates[0],
-                    signal.estimatedEventLocation.coordinates[1],
-                )
+        # Use location resolved by Claude/API during signal creation
+        origin_loc = created.get("originLocation")
+        general_loc = created.get("generalLocation")
+        dest_loc = created.get("destinationLocation")
+        # For event grouping, prefer the most specific resolved location name
+        resolved_loc = origin_loc or general_loc or dest_loc
+        if resolved_loc:
+            location_name = resolved_loc.get("name") or location_name
+        origin_id = origin_loc["id"] if origin_loc else (general_loc["id"] if general_loc else None)
 
         event = group_signal(
             signal_id=signal_id,
@@ -158,6 +165,8 @@ def process_signal(self, signal_data: dict):
             signal_origin_id=origin_id,
             signal_timestamp=signal.alertTimestamp,
             classification=classification,
+            signal_lat=signal_lat,
+            signal_lng=signal_lng,
         )
 
         # ─── Stage 4: Alert escalation (if high severity) ───────────────────

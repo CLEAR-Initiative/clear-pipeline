@@ -1,5 +1,5 @@
 from celery import Celery
-from celery.schedules import timedelta
+from celery.schedules import crontab, timedelta
 
 from src.config import settings
 
@@ -22,9 +22,25 @@ app.conf.beat_schedule = {
         "task": "src.tasks.poll.poll_dataminr",
         "schedule": timedelta(seconds=settings.poll_interval_seconds),
     },
+    # Daily digest — every day at 07:00 UTC
+    "daily-alert-digest": {
+        "task": "src.tasks.notify.send_daily_digest",
+        "schedule": crontab(hour=7, minute=0),
+    },
+    # Weekly digest — every Monday at 07:00 UTC
+    "weekly-alert-digest": {
+        "task": "src.tasks.notify.send_weekly_digest",
+        "schedule": crontab(hour=7, minute=0, day_of_week=1),
+    },
+    # Monthly digest — 1st of each month at 07:00 UTC
+    "monthly-alert-digest": {
+        "task": "src.tasks.notify.send_monthly_digest",
+        "schedule": crontab(hour=7, minute=0, day_of_month=1),
+    },
 }
 
 app.conf.include = [
     "src.tasks.poll",
     "src.tasks.process",
+    "src.tasks.notify",
 ]

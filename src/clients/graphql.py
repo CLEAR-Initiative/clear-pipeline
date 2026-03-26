@@ -17,6 +17,9 @@ mutation CreateSignal($input: CreateSignalInput!) {
     id
     title
     publishedAt
+    originLocation { id name level }
+    destinationLocation { id name level }
+    generalLocation { id name level }
   }
 }
 """
@@ -45,6 +48,31 @@ mutation CreateAlert($input: CreateAlertInput!) {
   createAlert(input: $input) {
     id
     status
+  }
+}
+"""
+
+NOTIFY_ALERT_SUBSCRIBERS = """
+mutation NotifyAlertSubscribers($input: AlertNotifyInput!) {
+  notifyAlertSubscribers(input: $input)
+}
+"""
+
+NOTIFY_ALERT_DIGEST = """
+mutation NotifyAlertDigest($input: AlertDigestInput!) {
+  notifyAlertDigest(input: $input)
+}
+"""
+
+GET_RECENT_ALERTS = """
+query RecentAlerts($since: DateTime!) {
+  alerts(status: published) {
+    id
+    status
+    event {
+      id
+      firstSignalCreatedAt
+    }
   }
 }
 """
@@ -172,6 +200,24 @@ def update_event(event_id: str, input_data: dict) -> dict:
 def create_alert(input_data: dict) -> dict:
     result = _execute(CREATE_ALERT, {"input": input_data})
     return result["createAlert"]
+
+
+def notify_alert_subscribers(alert_id: str) -> int:
+    """Notify immediate subscribers of an alert. Returns notification count."""
+    result = _execute(NOTIFY_ALERT_SUBSCRIBERS, {"input": {"alertId": alert_id}})
+    return result["notifyAlertSubscribers"]
+
+
+def notify_alert_digest(alert_ids: list[str], frequency: str) -> int:
+    """Send digest notifications for alerts. Returns notification count."""
+    result = _execute(NOTIFY_ALERT_DIGEST, {"input": {"alertIds": alert_ids, "frequency": frequency}})
+    return result["notifyAlertDigest"]
+
+
+def get_published_alerts() -> list[dict]:
+    """Get all published alerts."""
+    result = _execute(GET_RECENT_ALERTS)
+    return result.get("alerts", [])
 
 
 def get_latest_signal_timestamp() -> str | None:

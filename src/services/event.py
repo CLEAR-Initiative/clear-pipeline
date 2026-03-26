@@ -43,6 +43,8 @@ def group_signal(
     signal_origin_id: str | None,
     signal_timestamp: str,
     classification: SignalClassification,
+    signal_lat: float | None = None,
+    signal_lng: float | None = None,
 ) -> dict | None:
     """
     Use Claude to decide if a signal belongs to an existing event or creates a new one.
@@ -85,7 +87,7 @@ def group_signal(
             + timedelta(days=7)
         ).isoformat()
 
-        event_input = {
+        event_input: dict = {
             "signalIds": [signal_id],
             "title": result.title,
             "description": result.description,
@@ -97,6 +99,10 @@ def group_signal(
             "rank": classification.severity / 5.0,  # Normalize to 0-1
             "originId": signal_origin_id,
         }
+        # Pass lat/lng for server-side PostGIS geo-resolution
+        if signal_lat is not None and signal_lng is not None:
+            event_input["lat"] = signal_lat
+            event_input["lng"] = signal_lng
         event = create_event(event_input)
         _invalidate_events_cache()
         return event
