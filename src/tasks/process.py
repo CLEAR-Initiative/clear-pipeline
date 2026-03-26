@@ -147,9 +147,15 @@ def process_signal(self, signal_data: dict):
                 signal_lat = signal.estimatedEventLocation.coordinates[0]
                 signal_lng = signal.estimatedEventLocation.coordinates[1]
 
-        # Use origin location resolved by the API during signal creation
-        origin_loc = created.get("originLocation") or created.get("generalLocation")
-        origin_id = origin_loc["id"] if origin_loc else None
+        # Use location resolved by Claude/API during signal creation
+        origin_loc = created.get("originLocation")
+        general_loc = created.get("generalLocation")
+        dest_loc = created.get("destinationLocation")
+        # For event grouping, prefer the most specific resolved location name
+        resolved_loc = origin_loc or general_loc or dest_loc
+        if resolved_loc:
+            location_name = resolved_loc.get("name") or location_name
+        origin_id = origin_loc["id"] if origin_loc else (general_loc["id"] if general_loc else None)
 
         event = group_signal(
             signal_id=signal_id,

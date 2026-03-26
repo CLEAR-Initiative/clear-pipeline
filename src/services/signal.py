@@ -4,6 +4,7 @@ import logging
 
 from src.clients.graphql import create_signal
 from src.models.dataminr import DataminrSignal
+from src.services.location import resolve_signal_location
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +37,61 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
         "description": description,
     }
 
-    # Pass lat/lng for server-side PostGIS geo-resolution
-    if signal.estimatedEventLocation and signal.estimatedEventLocation.coordinates:
-        coords = signal.estimatedEventLocation.coordinates
-        if len(coords) >= 2:
-            input_data["lat"] = coords[0]
-            input_data["lng"] = coords[1]
+    # Check if Dataminr provides coordinates
+    has_coords = False
+    dataminr_location_name = None
+    if signal.estimatedEventLocation:
+        dataminr_location_name = signal.estimatedEventLocation.name
+        if signal.estimatedEventLocation.coordinates:
+            coords = signal.estimatedEventLocation.coordinates
+            if len(coords) >= 2:
+                input_data["lat"] = coords[0]
+                input_data["lng"] = coords[1]
+                has_coords = True
+
+    if has_coords:
+        # Dataminr has coordinates — let the API's PostGIS geo-resolution handle it.
+        # Still use Claude to determine if it's displacement (for origin/destination).
+        loc_result = resolve_signal_location(
+            title=signal.headline,
+            description=description,
+            dataminr_location_name=dataminr_location_name,
+        )
+        if loc_result["location_type"] == "displacement":
+            # Displacement: set origin/destination from Claude, lat/lng stays for API fallback
+            if loc_result["origin_id"]:
+                input_data["originId"] = loc_result["origin_id"]
+            if loc_result["destination_id"]:
+                input_data["destinationId"] = loc_result["destination_id"]
+            logger.info(
+                "Displacement signal (with coords): origin=%s destination=%s",
+                loc_result["origin_id"],
+                loc_result["destination_id"],
+            )
+        else:
+            # General with coords: let PostGIS resolve locationId from lat/lng
+            logger.info("General signal: using lat/lng for PostGIS resolution")
+    else:
+        # No coordinates — use Claude to resolve location from text
+        loc_result = resolve_signal_location(
+            title=signal.headline,
+            description=description,
+            dataminr_location_name=dataminr_location_name,
+        )
+        if loc_result["location_type"] == "displacement":
+            if loc_result["origin_id"]:
+                input_data["originId"] = loc_result["origin_id"]
+            if loc_result["destination_id"]:
+                input_data["destinationId"] = loc_result["destination_id"]
+            logger.info(
+                "Displacement signal (no coords): origin=%s destination=%s",
+                loc_result["origin_id"],
+                loc_result["destination_id"],
+            )
+        else:
+            if loc_result["location_id"]:
+                input_data["locationId"] = loc_result["location_id"]
+            logger.info("General signal (no coords): locationId=%s", loc_result["location_id"])
 
     return input_data
 
@@ -51,8 +101,10 @@ def ingest_signal(signal: DataminrSignal, source_id: str) -> dict:
     input_data = build_signal_input(signal, source_id)
     result = create_signal(input_data)
     logger.info(
-        "Created signal id=%s title=%s",
+        "Created signal id=%s title=%s location=%s",
         result["id"],
         result.get("title", "")[:60],
+        result.get("generalLocation", {}).get("name") if result.get("generalLocation") else
+        result.get("originLocation", {}).get("name") if result.get("originLocation") else "none",
     )
     return result
