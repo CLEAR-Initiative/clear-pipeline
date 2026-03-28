@@ -180,7 +180,11 @@ def fetch_signals(since: datetime | None = None) -> list[DataminrSignal]:
                     # Dataminr returns paths like /v1/alerts?... which need /firstalert prefix
                     if not next_page.startswith("/firstalert"):
                         next_page = f"/firstalert{next_page}"
-                    url = f"https://api.dataminr.com{next_page}"
+                    # Derive base URL from configured alerts URL
+                    from urllib.parse import urlparse
+                    parsed = urlparse(settings.dataminr_alerts_url)
+                    base_url = f"{parsed.scheme}://{parsed.netloc}"
+                    url = f"{base_url}{next_page}"
                 else:
                     url = f"{settings.dataminr_alerts_url}?nextPage={next_page}"
             else:
