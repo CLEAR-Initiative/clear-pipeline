@@ -9,6 +9,13 @@ class Settings(BaseSettings):
     dataminr_alerts_url: str = "https://api.dataminr.com/firstalert/v1/alerts"
     dataminr_token_ttl: int = 12600  # 3.5 hours in seconds
 
+    # Legacy API fallback (firstalert-api.dataminr.com)
+    dataminr_use_legacy: bool = False  # Set to true to force legacy API
+    dataminr_legacy_base_url: str = "https://firstalert-api.dataminr.com"
+    dataminr_legacy_user_id: str = ""
+    dataminr_legacy_password: str = ""
+    dataminr_alert_version: int = 19  # Legacy API alert version param
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
