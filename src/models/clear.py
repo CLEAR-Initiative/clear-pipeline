@@ -39,7 +39,7 @@ class CreateEventInput(BaseModel):
 
 class CreateAlertInput(BaseModel):
     eventId: str
-    status: str | None = "draft"
+    status: str | None = "published"
 
 
 class SignalClassification(BaseModel):
@@ -65,4 +65,4 @@ class AlertAssessment(BaseModel):
     """Output from Claude alert assessment."""
 
     should_alert: bool
-    status: str = "draft"  # "draft" or "published"
+    status: str = "published"  # "draft" or "published"

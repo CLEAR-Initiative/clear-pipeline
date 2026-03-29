@@ -7,7 +7,7 @@ import redis
 
 from src.celery_app import app
 from src.clients.claude import call_claude
-from src.clients.graphql import get_dataminr_source_id, get_disaster_types
+from src.clients.graphql import get_dataminr_source_id, get_disaster_types, update_signal_severity
 from src.config import settings
 from src.models.clear import SignalClassification
 from src.models.dataminr import DataminrSignal
@@ -122,6 +122,12 @@ def process_signal(self, signal_data: dict):
             classification.relevance,
             classification.severity,
         )
+
+        # Update signal severity from classification (overrides Dataminr estimate)
+        existing_severity = created.get("severity")
+        if existing_severity != classification.severity:
+            update_signal_severity(signal_id, classification.severity)
+            logger.info("Signal %s severity updated: %s → %d", signal_id, existing_severity, classification.severity)
 
         # ─── Stage 3: Event grouping (if relevant) ──────────────────────────
         if classification.relevance < settings.relevance_threshold:

@@ -16,10 +16,20 @@ mutation CreateSignal($input: CreateSignalInput!) {
   createSignal(input: $input) {
     id
     title
+    severity
     publishedAt
     originLocation { id name level }
     destinationLocation { id name level }
     generalLocation { id name level }
+  }
+}
+"""
+
+UPDATE_SIGNAL_SEVERITY = """
+mutation UpdateSignalSeverity($id: String!, $severity: Int!) {
+  updateSignalSeverity(id: $id, severity: $severity) {
+    id
+    severity
   }
 }
 """
@@ -185,6 +195,12 @@ def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dic
 def create_signal(input_data: dict) -> dict:
     result = _execute(CREATE_SIGNAL, {"input": input_data})
     return result["createSignal"]
+
+
+def update_signal_severity(signal_id: str, severity: int) -> dict:
+    """Update a signal's severity score (1-5)."""
+    result = _execute(UPDATE_SIGNAL_SEVERITY, {"id": signal_id, "severity": severity})
+    return result["updateSignalSeverity"]
 
 
 def create_event(input_data: dict) -> dict:

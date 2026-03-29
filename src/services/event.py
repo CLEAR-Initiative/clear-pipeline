@@ -96,6 +96,7 @@ def group_signal(
             "firstSignalCreatedAt": signal_timestamp,
             "lastSignalCreatedAt": signal_timestamp,
             "types": result.types or classification.disaster_types,
+            "severity": classification.severity,  # 1-5 from Claude classification
             "rank": classification.severity / 5.0,  # Normalize to 0-1
             "originId": signal_origin_id,
         }
