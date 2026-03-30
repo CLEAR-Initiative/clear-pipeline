@@ -66,9 +66,9 @@ ESCALATE_EVENT = """
 mutation EscalateEvent($eventId: String!, $userId: String!) {
   escalateEvent(eventId: $eventId, userId: $userId) {
     id
-    userId
-    eventId
     isSituation
+    validFrom
+    validTo
   }
 }
 """
