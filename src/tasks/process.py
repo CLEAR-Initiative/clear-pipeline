@@ -196,8 +196,8 @@ def process_signal(self, signal_data: dict):
         raise self.retry(exc=exc, countdown=10)
 
 
-# Trusted source types that get auto-escalated to alerts
-TRUSTED_SOURCE_TYPES = {"field_officer", "partner", "government"}
+# Trusted source names that get auto-escalated to alerts
+TRUSTED_SOURCE_NAMES = {"field_officer", "partner", "government"}
 
 
 @app.task(
@@ -273,7 +273,7 @@ def process_manual_signal(
 
         # ─── Stage 3: Auto-escalate for trusted sources ──────────────────────
         escalated = False
-        if source_type in TRUSTED_SOURCE_TYPES:
+        if source_type in TRUSTED_SOURCE_NAMES:
             logger.info(
                 "Trusted source (%s) — auto-escalating event %s to alert",
                 source_type,
