@@ -56,8 +56,8 @@ class EventGroupingResult(BaseModel):
 
     action: str  # "create_new" or "add_to_existing"
     event_id: str | None = None  # if add_to_existing
-    title: str | None = None  # if create_new
-    description: str | None = None  # if create_new
+    title: str | None = None  # for both actions (updated title when adding to existing)
+    description: str | None = None  # for both actions (updated description when adding to existing)
     types: list[str] | None = None  # if create_new
 
 

@@ -62,6 +62,17 @@ mutation CreateAlert($input: CreateAlertInput!) {
 }
 """
 
+ESCALATE_EVENT = """
+mutation EscalateEvent($eventId: String!, $userId: String!) {
+  escalateEvent(eventId: $eventId, userId: $userId) {
+    id
+    userId
+    eventId
+    isSituation
+  }
+}
+"""
+
 NOTIFY_ALERT_SUBSCRIBERS = """
 mutation NotifyAlertSubscribers($input: AlertNotifyInput!) {
   notifyAlertSubscribers(input: $input)
@@ -105,11 +116,16 @@ query Events {
     title
     description
     types
+    severity
+    rank
     validFrom
     validTo
+    firstSignalCreatedAt
+    lastSignalCreatedAt
     originLocation { id name }
     destinationLocation { id name }
     generalLocation { id name }
+    alerts { id status }
   }
 }
 """
@@ -211,6 +227,12 @@ def create_event(input_data: dict) -> dict:
 def update_event(event_id: str, input_data: dict) -> dict:
     result = _execute(UPDATE_EVENT, {"id": event_id, "input": input_data})
     return result["updateEvent"]
+
+
+def escalate_event(event_id: str, user_id: str) -> dict:
+    """Escalate an event to an alert and record the user escalation."""
+    result = _execute(ESCALATE_EVENT, {"eventId": event_id, "userId": user_id})
+    return result["escalateEvent"]
 
 
 def create_alert(input_data: dict) -> dict:

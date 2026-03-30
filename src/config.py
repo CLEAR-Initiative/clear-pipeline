@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination
 
+    # API server
+    api_port: int = 8000
+    api_shared_secret: str = ""  # Shared secret for clear-api → pipeline calls
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

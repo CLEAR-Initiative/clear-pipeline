@@ -17,18 +17,34 @@ logger = logging.getLogger(__name__)
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 ACTIVE_EVENTS_CACHE_KEY = "events:active"
-ACTIVE_EVENTS_TTL = 3600  # 1 hour
+ACTIVE_EVENTS_TTL = 300  # 5 min (shorter to keep data fresh)
 
 
 def _get_active_events() -> list[dict]:
-    """Get active events from cache or fetch from CLEAR API."""
+    """Get active events from cache or fetch from CLEAR API.
+    Only returns events from the last 7 days."""
     cached = _redis.get(ACTIVE_EVENTS_CACHE_KEY)
     if cached:
         return json.loads(cached)
 
     events = get_events()
-    _redis.setex(ACTIVE_EVENTS_CACHE_KEY, ACTIVE_EVENTS_TTL, json.dumps(events))
-    return events
+
+    # Filter to events from the last 7 days
+    cutoff = datetime.now(UTC) - timedelta(days=7)
+    recent_events = []
+    for e in events:
+        try:
+            last_signal = e.get("lastSignalCreatedAt") or e.get("validFrom", "")
+            ts = datetime.fromisoformat(last_signal.replace("Z", "+00:00"))
+            if ts >= cutoff:
+                recent_events.append(e)
+        except (ValueError, AttributeError):
+            # Include events with unparseable dates (rather than silently drop)
+            recent_events.append(e)
+
+    _redis.setex(ACTIVE_EVENTS_CACHE_KEY, ACTIVE_EVENTS_TTL, json.dumps(recent_events))
+    logger.info("Cached %d active events (out of %d total)", len(recent_events), len(events))
+    return recent_events
 
 
 def _invalidate_events_cache() -> None:
@@ -41,13 +57,14 @@ def group_signal(
     signal_description: str | None,
     signal_location_name: str | None,
     signal_origin_id: str | None,
-    signal_timestamp: str,
+    signal_timestamp: str | None,
     classification: SignalClassification,
     signal_lat: float | None = None,
     signal_lng: float | None = None,
 ) -> dict | None:
     """
     Use Claude to decide if a signal belongs to an existing event or creates a new one.
+    Every signal MUST end up in an event.
 
     Returns the event dict (created or updated) or None if grouping fails.
     """
@@ -68,24 +85,36 @@ def group_signal(
     result = EventGroupingResult.model_validate(result_data)
 
     now_iso = datetime.now(UTC).isoformat()
+    ts = signal_timestamp or now_iso
 
     if result.action == "add_to_existing" and result.event_id:
         logger.info("Adding signal %s to existing event %s", signal_id, result.event_id)
-        # Add signal to existing event's signalIds
-        updated = update_event(result.event_id, {
+
+        update_data: dict = {
             "signalIds": [signal_id],
-            "lastSignalCreatedAt": signal_timestamp,
-        })
+            "lastSignalCreatedAt": ts,
+        }
+
+        # Update title and description if Claude provided new ones
+        if result.title:
+            update_data["title"] = result.title
+        if result.description:
+            update_data["description"] = result.description
+
+        updated = update_event(result.event_id, update_data)
         _invalidate_events_cache()
         return updated
 
     elif result.action == "create_new":
         logger.info("Creating new event for signal %s: %s", signal_id, result.title)
-        valid_from = signal_timestamp
-        valid_to = (
-            datetime.fromisoformat(signal_timestamp.replace("Z", "+00:00"))
-            + timedelta(days=7)
-        ).isoformat()
+        valid_from = ts
+        try:
+            valid_to = (
+                datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                + timedelta(days=7)
+            ).isoformat()
+        except (ValueError, AttributeError):
+            valid_to = (datetime.now(UTC) + timedelta(days=7)).isoformat()
 
         event_input: dict = {
             "signalIds": [signal_id],
@@ -93,14 +122,13 @@ def group_signal(
             "description": result.description,
             "validFrom": valid_from,
             "validTo": valid_to,
-            "firstSignalCreatedAt": signal_timestamp,
-            "lastSignalCreatedAt": signal_timestamp,
+            "firstSignalCreatedAt": ts,
+            "lastSignalCreatedAt": ts,
             "types": result.types or classification.disaster_types,
-            "severity": classification.severity,  # 1-5 from Claude classification
-            "rank": classification.severity / 5.0,  # Normalize to 0-1
+            "severity": classification.severity,
+            "rank": classification.severity / 5.0,
             "originId": signal_origin_id,
         }
-        # Pass lat/lng for server-side PostGIS geo-resolution
         if signal_lat is not None and signal_lng is not None:
             event_input["lat"] = signal_lat
             event_input["lng"] = signal_lng
@@ -109,5 +137,32 @@ def group_signal(
         return event
 
     else:
-        logger.warning("Unexpected grouping action: %s", result.action)
-        return None
+        # Fallback: if Claude returns unexpected action, create a new event anyway
+        # to ensure every signal is associated with an event
+        logger.warning(
+            "Unexpected grouping action '%s' for signal %s — creating fallback event",
+            result.action,
+            signal_id,
+        )
+        try:
+            valid_to = (
+                datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                + timedelta(days=7)
+            ).isoformat()
+        except (ValueError, AttributeError):
+            valid_to = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+
+        event = create_event({
+            "signalIds": [signal_id],
+            "title": signal_title or "Ungrouped Signal",
+            "description": signal_description or classification.summary,
+            "validFrom": ts,
+            "validTo": valid_to,
+            "firstSignalCreatedAt": ts,
+            "lastSignalCreatedAt": ts,
+            "types": classification.disaster_types,
+            "severity": classification.severity,
+            "rank": classification.severity / 5.0,
+        })
+        _invalidate_events_cache()
+        return event
