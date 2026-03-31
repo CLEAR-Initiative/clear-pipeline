@@ -8,6 +8,22 @@ from src.services.location import resolve_signal_location
 
 logger = logging.getLogger(__name__)
 
+# Map Dataminr alertType.name to severity 1-5
+DATAMINR_SEVERITY_MAP: dict[str, int] = {
+    "flash": 5,
+    "urgent": 4,
+    "alert": 3,
+    "watch": 2,
+}
+
+
+def _estimate_severity_from_dataminr(signal: DataminrSignal) -> int | None:
+    """Extract severity from Dataminr alertType, or return None if absent."""
+    if signal.alertType and signal.alertType.name:
+        name = signal.alertType.name.lower().strip()
+        return DATAMINR_SEVERITY_MAP.get(name)
+    return None
+
 
 def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
     """Map a Dataminr signal to a CLEAR CreateSignalInput dict."""
@@ -28,6 +44,9 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
     # Full raw payload as JSON
     raw_data = signal.model_dump(mode="json")
 
+    # Estimate severity from Dataminr alertType (1-5 or None)
+    severity = _estimate_severity_from_dataminr(signal)
+
     input_data: dict = {
         "sourceId": source_id,
         "rawData": raw_data,
@@ -36,6 +55,8 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
         "title": signal.headline,
         "description": description,
     }
+    if severity is not None:
+        input_data["severity"] = severity
 
     # Check if Dataminr provides coordinates
     has_coords = False

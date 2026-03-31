@@ -48,10 +48,10 @@ def assess_and_escalate(
         logger.info("Event %s does not warrant an alert", event["id"])
         return None
 
-    logger.info("Escalating event %s to alert (status=draft)", event["id"])
+    logger.info("Escalating event %s to alert (status=published)", event["id"])
     alert = create_alert({
         "eventId": event["id"],
-        "status": "draft",  # Always draft for human review in v1
+        "status": "published",
     })
     logger.info("Created alert id=%s for event %s", alert["id"], event["id"])
     return alert

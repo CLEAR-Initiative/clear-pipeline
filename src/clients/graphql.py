@@ -16,10 +16,20 @@ mutation CreateSignal($input: CreateSignalInput!) {
   createSignal(input: $input) {
     id
     title
+    severity
     publishedAt
     originLocation { id name level }
     destinationLocation { id name level }
     generalLocation { id name level }
+  }
+}
+"""
+
+UPDATE_SIGNAL_SEVERITY = """
+mutation UpdateSignalSeverity($id: String!, $severity: Int!) {
+  updateSignalSeverity(id: $id, severity: $severity) {
+    id
+    severity
   }
 }
 """
@@ -48,6 +58,17 @@ mutation CreateAlert($input: CreateAlertInput!) {
   createAlert(input: $input) {
     id
     status
+  }
+}
+"""
+
+ESCALATE_EVENT = """
+mutation EscalateEvent($eventId: String!, $userId: String!) {
+  escalateEvent(eventId: $eventId, userId: $userId) {
+    id
+    isSituation
+    validFrom
+    validTo
   }
 }
 """
@@ -95,11 +116,16 @@ query Events {
     title
     description
     types
+    severity
+    rank
     validFrom
     validTo
+    firstSignalCreatedAt
+    lastSignalCreatedAt
     originLocation { id name }
     destinationLocation { id name }
     generalLocation { id name }
+    alerts { id status }
   }
 }
 """
@@ -187,6 +213,12 @@ def create_signal(input_data: dict) -> dict:
     return result["createSignal"]
 
 
+def update_signal_severity(signal_id: str, severity: int) -> dict:
+    """Update a signal's severity score (1-5)."""
+    result = _execute(UPDATE_SIGNAL_SEVERITY, {"id": signal_id, "severity": severity})
+    return result["updateSignalSeverity"]
+
+
 def create_event(input_data: dict) -> dict:
     result = _execute(CREATE_EVENT, {"input": input_data})
     return result["createEvent"]
@@ -195,6 +227,12 @@ def create_event(input_data: dict) -> dict:
 def update_event(event_id: str, input_data: dict) -> dict:
     result = _execute(UPDATE_EVENT, {"id": event_id, "input": input_data})
     return result["updateEvent"]
+
+
+def escalate_event(event_id: str, user_id: str) -> dict:
+    """Escalate an event to an alert and record the user escalation."""
+    result = _execute(ESCALATE_EVENT, {"eventId": event_id, "userId": user_id})
+    return result["escalateEvent"]
 
 
 def create_alert(input_data: dict) -> dict:

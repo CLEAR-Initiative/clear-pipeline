@@ -7,7 +7,7 @@ import redis
 
 from src.celery_app import app
 from src.clients.claude import call_claude
-from src.clients.graphql import get_dataminr_source_id, get_disaster_types
+from src.clients.graphql import get_dataminr_source_id, get_disaster_types, update_signal_severity, escalate_event
 from src.config import settings
 from src.models.clear import SignalClassification
 from src.models.dataminr import DataminrSignal
@@ -123,6 +123,12 @@ def process_signal(self, signal_data: dict):
             classification.severity,
         )
 
+        # Update signal severity from classification (overrides Dataminr estimate)
+        existing_severity = created.get("severity")
+        if existing_severity != classification.severity:
+            update_signal_severity(signal_id, classification.severity)
+            logger.info("Signal %s severity updated: %s → %d", signal_id, existing_severity, classification.severity)
+
         # ─── Stage 3: Event grouping (if relevant) ──────────────────────────
         if classification.relevance < settings.relevance_threshold:
             logger.info(
@@ -187,4 +193,110 @@ def process_signal(self, signal_data: dict):
 
     except Exception as exc:
         logger.error("process_signal failed: %s", exc, exc_info=True)
+        raise self.retry(exc=exc, countdown=10)
+
+
+# Trusted source names that get auto-escalated to alerts
+TRUSTED_SOURCE_NAMES = {"field_officer", "partner", "government"}
+
+
+@app.task(
+    name="src.tasks.process.process_manual_signal",
+    bind=True,
+    max_retries=2,
+    acks_late=True,
+)
+def process_manual_signal(
+    self,
+    signal_id: str,
+    source_type: str,
+    title: str,
+    description: str,
+    severity: int | None = None,
+    user_id: str = "",
+):
+    """
+    Process a manually created signal from a trusted source:
+    1. Classify via Claude (disaster type, severity)
+    2. Group into event (new or existing)
+    3. If source is trusted (field_officer/partner/government): auto-escalate the event to alert
+       and record the user escalation in eventEscaladedByUsers
+    """
+    try:
+        # ─── Stage 1: Classify via Claude ─────────────────────────────────────
+        disaster_types = _get_disaster_types()
+
+        prompt = build_classify_prompt(
+            title=title,
+            description=description,
+            location_name=None,
+            url=None,
+            timestamp=None,
+            raw_context=f"Manual signal from {source_type} source. Description: {description}",
+            disaster_types=disaster_types,
+        )
+
+        result_data = call_claude(CLASSIFY_SYSTEM, prompt)
+        classification = SignalClassification.model_validate(result_data)
+
+        logger.info(
+            "Manual signal %s classified: types=%s severity=%d",
+            signal_id,
+            classification.disaster_types,
+            classification.severity,
+        )
+
+        # Update severity from classification
+        final_severity = severity if severity is not None else classification.severity
+        update_signal_severity(signal_id, final_severity)
+
+        # ─── Stage 2: Event grouping ──────────────────────────────────────────
+        event = group_signal(
+            signal_id=signal_id,
+            signal_title=title,
+            signal_description=description,
+            signal_location_name=None,
+            signal_origin_id=None,
+            signal_timestamp=None,
+            classification=classification,
+        )
+
+        if not event:
+            logger.warning("Manual signal %s: event grouping failed", signal_id)
+            return {
+                "signal_id": signal_id,
+                "classification": classification.model_dump(),
+                "event_id": None,
+                "alert_id": None,
+                "escalated": False,
+            }
+
+        # ─── Stage 3: Auto-escalate for trusted sources ──────────────────────
+        escalated = False
+        if source_type in TRUSTED_SOURCE_NAMES:
+            logger.info(
+                "Trusted source (%s) — auto-escalating event %s to alert",
+                source_type,
+                event["id"],
+            )
+            try:
+                escalation = escalate_event(event["id"], user_id)
+                escalated = True
+                logger.info(
+                    "Event %s escalated: escalation_id=%s",
+                    event["id"],
+                    escalation["id"],
+                )
+            except Exception as e:
+                logger.error("Failed to escalate event %s: %s", event["id"], e)
+
+        return {
+            "signal_id": signal_id,
+            "classification": classification.model_dump(),
+            "event_id": event["id"],
+            "escalated": escalated,
+        }
+
+    except Exception as exc:
+        logger.error("process_manual_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)

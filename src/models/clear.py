@@ -39,7 +39,7 @@ class CreateEventInput(BaseModel):
 
 class CreateAlertInput(BaseModel):
     eventId: str
-    status: str | None = "draft"
+    status: str | None = "published"
 
 
 class SignalClassification(BaseModel):
@@ -56,8 +56,8 @@ class EventGroupingResult(BaseModel):
 
     action: str  # "create_new" or "add_to_existing"
     event_id: str | None = None  # if add_to_existing
-    title: str | None = None  # if create_new
-    description: str | None = None  # if create_new
+    title: str | None = None  # for both actions (updated title when adding to existing)
+    description: str | None = None  # for both actions (updated description when adding to existing)
     types: list[str] | None = None  # if create_new
 
 
@@ -65,4 +65,4 @@ class AlertAssessment(BaseModel):
     """Output from Claude alert assessment."""
 
     should_alert: bool
-    status: str = "draft"  # "draft" or "published"
+    status: str = "published"  # "draft" or "published"
