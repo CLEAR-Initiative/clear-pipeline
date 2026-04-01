@@ -69,7 +69,12 @@ def _parse_event(raw: dict) -> dict | None:
     from_date = props.get("fromdate") or props.get("datestart")
     to_date = props.get("todate") or props.get("dateend")
     country = props.get("country", "")
-    url = props.get("url") or props.get("link", "")
+    # url can be a dict with {geometry, report, details} or a plain string
+    url_field = props.get("url", "")
+    if isinstance(url_field, dict):
+        url = url_field.get("report") or url_field.get("details") or ""
+    else:
+        url = url_field or props.get("link", "")
     glide = props.get("glide", "")
     iso3 = props.get("iso3", "")
 
