@@ -112,13 +112,26 @@ def _fetch_for_country(country: str, since: datetime, now: datetime) -> list[dic
     logger.info("Fetching GDACS events for %s: %s", country, url)
 
     try:
-        resp = httpx.get(url, params=params, timeout=30)
+        resp = httpx.get(url, params=params, headers={"Accept": "application/json"}, timeout=30)
         resp.raise_for_status()
     except httpx.HTTPError as e:
         logger.error("GDACS API request failed for %s: %s", country, e)
         return []
 
-    data = resp.json()
+    # GDACS may return empty body, XML, or HTML instead of JSON
+    content_type = resp.headers.get("content-type", "")
+    if not resp.text.strip():
+        logger.warning("GDACS returned empty response for %s (status=%d)", country, resp.status_code)
+        return []
+    if "json" not in content_type and not resp.text.strip().startswith(("{", "[")):
+        logger.warning("GDACS returned non-JSON response for %s: content-type=%s, body=%s", country, content_type, resp.text[:200])
+        return []
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.error("GDACS JSON parse failed for %s: %s, body=%s", country, e, resp.text[:200])
+        return []
 
     raw_events: list[dict] = []
     if isinstance(data, dict):
