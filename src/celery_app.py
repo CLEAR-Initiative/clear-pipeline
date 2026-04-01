@@ -22,6 +22,10 @@ app.conf.beat_schedule = {
         "task": "src.tasks.poll.poll_dataminr",
         "schedule": timedelta(seconds=settings.poll_interval_seconds),
     },
+    "poll-gdacs": {
+        "task": "src.tasks.poll_gdacs.poll_gdacs",
+        "schedule": timedelta(minutes=settings.gdacs_poll_interval_minutes),
+    },
     # Daily digest — every day at 07:00 UTC
     "daily-alert-digest": {
         "task": "src.tasks.notify.send_daily_digest",
@@ -41,6 +45,7 @@ app.conf.beat_schedule = {
 
 app.conf.include = [
     "src.tasks.poll",
+    "src.tasks.poll_gdacs",
     "src.tasks.process",
     "src.tasks.notify",
 ]

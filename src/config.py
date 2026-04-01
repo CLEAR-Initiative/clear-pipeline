@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     dataminr_legacy_password: str = ""
     dataminr_alert_version: int = 19  # Legacy API alert version param
 
+    # GDACS (public API — no auth required)
+    gdacs_base_url: str = "https://www.gdacs.org/gdacsapi"
+    gdacs_countries: str = "Sudan"  # Comma-separated list of countries
+    gdacs_poll_interval_minutes: int = 30
+    gdacs_source_name: str = "gdacs"
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 

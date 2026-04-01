@@ -300,3 +300,84 @@ def process_manual_signal(
     except Exception as exc:
         logger.error("process_manual_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
+
+
+@app.task(
+    name="src.tasks.process.process_gdacs_signal",
+    bind=True,
+    max_retries=2,
+    acks_late=True,
+)
+def process_gdacs_signal(
+    self,
+    signal_id: str,
+    gdacs_event: dict,
+):
+    """
+    Process a GDACS-sourced signal.
+
+    GDACS events are already structured disaster data, so we:
+    1. Build classification directly from GDACS metadata (skip Claude classification)
+    2. Group into event (new or existing) via Claude
+    3. Assess for alert escalation if high severity
+    """
+    try:
+        glide_type = gdacs_event.get("glide_type", "ot")
+        severity = gdacs_event.get("severity", 3)
+        alert_level = gdacs_event.get("alert_level", "Green")
+        title = gdacs_event.get("title", "GDACS event")
+        description = gdacs_event.get("description")
+        location_name = gdacs_event.get("country")
+
+        # Build classification from GDACS metadata (no Claude needed)
+        classification = SignalClassification(
+            disaster_types=[glide_type],
+            relevance=1.0 if alert_level in ("Red", "Orange") else 0.7,
+            severity=severity,
+            summary=f"GDACS {alert_level} alert: {title}",
+        )
+
+        logger.info(
+            "GDACS signal %s: type=%s severity=%d alert=%s",
+            signal_id, glide_type, severity, alert_level,
+        )
+
+        # Update signal severity
+        update_signal_severity(signal_id, severity)
+
+        # Skip low-relevance events
+        if classification.relevance < settings.relevance_threshold:
+            logger.info("GDACS signal %s below relevance threshold, skipping", signal_id)
+            return {"signal_id": signal_id, "event_id": None, "alert_id": None}
+
+        # Group into event
+        event = group_signal(
+            signal_id=signal_id,
+            signal_title=title,
+            signal_description=description,
+            signal_location_name=location_name,
+            signal_origin_id=None,
+            signal_timestamp=gdacs_event.get("from_date"),
+            classification=classification,
+            signal_lat=gdacs_event.get("lat"),
+            signal_lng=gdacs_event.get("lng"),
+        )
+
+        # Assess for alert if high severity (Red/Orange)
+        alert = None
+        if event and severity >= 4:
+            alert = assess_and_escalate(
+                event=event,
+                signal_summaries=[classification.summary],
+                max_severity=severity,
+            )
+
+        return {
+            "signal_id": signal_id,
+            "event_id": event["id"] if event else None,
+            "alert_id": alert["id"] if alert else None,
+        }
+
+    except Exception as exc:
+        logger.error("process_gdacs_signal failed: %s", exc, exc_info=True)
+        raise self.retry(exc=exc, countdown=10)
