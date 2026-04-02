@@ -326,15 +326,20 @@ def process_gdacs_signal(
         severity = gdacs_event.get("severity", 3)
         alert_level = gdacs_event.get("alert_level", "Green")
         title = gdacs_event.get("title", "GDACS event")
-        description = gdacs_event.get("description")
+        description = gdacs_event.get("description") or ""
         location_name = gdacs_event.get("country")
+        population_affected = gdacs_event.get("population_affected")
+
+        # Enrich description with population data if available
+        if population_affected:
+            description = f"{description} Approximately {population_affected:,} people affected."
 
         # Build classification from GDACS metadata (no Claude needed)
         classification = SignalClassification(
             disaster_types=[glide_type],
             relevance=1.0 if alert_level in ("Red", "Orange") else 0.7,
             severity=severity,
-            summary=f"GDACS {alert_level} alert: {title}",
+            summary=f"GDACS {alert_level} alert: {title}" + (f" ({population_affected:,} affected)" if population_affected else ""),
         )
 
         logger.info(

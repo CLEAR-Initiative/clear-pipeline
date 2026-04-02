@@ -28,7 +28,8 @@ If the signal belongs to an existing event:
   "action": "add_to_existing",
   "event_id": "<id of the matching event>",
   "title": "<updated event title incorporating the new signal information>",
-  "description": "<updated 2-3 sentence event description incorporating new information from this signal>"
+  "description": "<updated 2-3 sentence event description incorporating new information from this signal>",
+  "population_affected": <number or null>
 }}
 
 If the signal represents a new situation:
@@ -36,7 +37,8 @@ If the signal represents a new situation:
   "action": "create_new",
   "title": "<event title>",
   "description": "<2-3 sentence event description>",
-  "types": ["<disaster type strings>"]
+  "types": ["<disaster type strings>"],
+  "population_affected": <number or null>
 }}
 
 Rules:
@@ -47,7 +49,8 @@ Rules:
 - Consider geographic proximity and temporal proximity (within the last 7 days)
 - When adding to an existing event, update the title and description to reflect the latest developments from the new signal
 - If no active events exist or none match, always create_new
-- Prefer adding to an existing event over creating a new one if the situation is the same"""
+- Prefer adding to an existing event over creating a new one if the situation is the same
+- Extract population_affected from the signal text if mentioned (e.g., "9,000 IDPs", "12,000 displaced", "8000 people affected"). Use the highest credible number. Set to null if no population data is mentioned"""
 
 
 def build_group_prompt(

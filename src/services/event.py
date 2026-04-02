@@ -100,6 +100,8 @@ def group_signal(
             update_data["title"] = result.title
         if result.description:
             update_data["description"] = result.description
+        if result.population_affected is not None:
+            update_data["populationAffected"] = str(result.population_affected)
 
         updated = update_event(result.event_id, update_data)
         _invalidate_events_cache()
@@ -129,6 +131,8 @@ def group_signal(
             "rank": classification.severity / 5.0,
             "originId": signal_origin_id,
         }
+        if result.population_affected is not None:
+            event_input["populationAffected"] = str(result.population_affected)
         if signal_lat is not None and signal_lng is not None:
             event_input["lat"] = signal_lat
             event_input["lng"] = signal_lng

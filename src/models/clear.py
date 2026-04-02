@@ -59,6 +59,7 @@ class EventGroupingResult(BaseModel):
     title: str | None = None  # for both actions (updated title when adding to existing)
     description: str | None = None  # for both actions (updated description when adding to existing)
     types: list[str] | None = None  # if create_new
+    population_affected: int | None = None  # extracted from signal text
 
 
 class AlertAssessment(BaseModel):

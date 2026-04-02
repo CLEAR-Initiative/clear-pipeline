@@ -80,6 +80,16 @@ def _parse_event(raw: dict) -> dict | None:
 
     glide_type = GDACS_TYPE_MAP.get(event_type, "ot")
 
+    # Extract population affected from severitydata or direct fields
+    severity_data = props.get("severitydata", {}) or {}
+    population_affected = (
+        props.get("numaffected")
+        or props.get("totalaffected")
+        or severity_data.get("numaffected")
+        or severity_data.get("totalaffected")
+        or None
+    )
+
     # Build title
     title = f"GDACS {alert_level} alert: {name}" if name else f"GDACS {alert_level} {event_type} alert"
 
@@ -99,6 +109,7 @@ def _parse_event(raw: dict) -> dict | None:
         "from_date": from_date,
         "to_date": to_date,
         "url": url,
+        "population_affected": int(population_affected) if population_affected else None,
         "raw": raw,
     }
 
