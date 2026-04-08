@@ -386,3 +386,93 @@ def process_gdacs_signal(
     except Exception as exc:
         logger.error("process_gdacs_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
+
+
+@app.task(
+    name="src.tasks.process.process_acled_signal",
+    bind=True,
+    max_retries=2,
+    acks_late=True,
+)
+def process_acled_signal(
+    self,
+    signal_id: str,
+    acled_event: dict,
+):
+    """
+    Process an ACLED-sourced signal.
+
+    ACLED events are structured conflict data, so we:
+    1. Build classification directly from ACLED metadata (skip Claude classification)
+    2. Group into event (new or existing) via Claude
+    3. Assess for alert escalation if high severity (fatalities / event type)
+    """
+    try:
+        glide_type = acled_event.get("glide_type", "ot")
+        severity = acled_event.get("severity", 2)
+        fatalities = acled_event.get("fatalities", 0)
+        title = acled_event.get("title", "ACLED event")
+        description = acled_event.get("description") or ""
+        location_name = (
+            acled_event.get("location")
+            or acled_event.get("admin2")
+            or acled_event.get("admin1")
+            or acled_event.get("country")
+        )
+
+        # Build classification from ACLED metadata
+        summary = f"ACLED {acled_event.get('event_type', 'conflict')} event"
+        if fatalities:
+            summary += f" ({fatalities} fatalities)"
+
+        classification = SignalClassification(
+            disaster_types=[glide_type],
+            relevance=1.0 if fatalities > 0 or severity >= 4 else 0.8,
+            severity=severity,
+            summary=summary,
+        )
+
+        logger.info(
+            "ACLED signal %s: type=%s severity=%d fatalities=%d",
+            signal_id, glide_type, severity, fatalities,
+        )
+
+        # Update signal severity
+        update_signal_severity(signal_id, severity)
+
+        # Skip low-relevance events
+        if classification.relevance < settings.relevance_threshold:
+            logger.info("ACLED signal %s below relevance threshold, skipping", signal_id)
+            return {"signal_id": signal_id, "event_id": None, "alert_id": None}
+
+        # Group into event
+        event = group_signal(
+            signal_id=signal_id,
+            signal_title=title,
+            signal_description=description,
+            signal_location_name=location_name,
+            signal_origin_id=None,
+            signal_timestamp=acled_event.get("event_date"),
+            classification=classification,
+            signal_lat=acled_event.get("lat"),
+            signal_lng=acled_event.get("lng"),
+        )
+
+        # Assess for alert if high severity
+        alert = None
+        if event and severity >= 4:
+            alert = assess_and_escalate(
+                event=event,
+                signal_summaries=[classification.summary],
+                max_severity=severity,
+            )
+
+        return {
+            "signal_id": signal_id,
+            "event_id": event["id"] if event else None,
+            "alert_id": alert["id"] if alert else None,
+        }
+
+    except Exception as exc:
+        logger.error("process_acled_signal failed: %s", exc, exc_info=True)
+        raise self.retry(exc=exc, countdown=10)

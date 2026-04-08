@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     gdacs_poll_interval_minutes: int = 30
     gdacs_source_name: str = "gdacs"
 
+    # ACLED (Armed Conflict Location & Event Data Project)
+    acled_base_url: str = "https://acleddata.com"
+    acled_username: str = ""
+    acled_password: str = ""  # API key
+    acled_countries: str = "Sudan"  # Comma-separated list
+    acled_poll_interval_minutes: int = 60
+    acled_source_name: str = "acled"
+    acled_token_ttl: int = 23 * 3600  # 23 hours (valid 24h)
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
