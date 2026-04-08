@@ -47,15 +47,17 @@ def _authenticate() -> dict | None:
     cached = _redis.get(ACLED_COOKIE_KEY)
     if cached:
         try:
-            return json.loads(cached)
+            cookies = json.loads(cached)
+            logger.info("[ACLED] Using cached session cookies (%d cookies)", len(cookies))
+            return cookies
         except json.JSONDecodeError:
             _redis.delete(ACLED_COOKIE_KEY)
 
     if not settings.acled_username or not settings.acled_password:
-        logger.error("ACLED credentials not configured (ACLED_USERNAME, ACLED_PASSWORD)")
+        logger.error("[ACLED] credentials not configured (ACLED_USERNAME, ACLED_PASSWORD)")
         return None
 
-    logger.info("Authenticating with ACLED API")
+    logger.info("[ACLED] Authenticating fresh session for user=%s", settings.acled_username)
 
     try:
         with httpx.Client(follow_redirects=True, timeout=30) as client:
@@ -211,6 +213,11 @@ def _fetch_for_country(
     all_events: list[dict] = []
     page = 0
 
+    logger.info(
+        "[ACLED] Fetching events for country=%s date_range=%s|%s url=%s",
+        country, start_date, end_date, url,
+    )
+
     with httpx.Client(cookies=cookies, timeout=60) as client:
         while page < 20:  # Safety cap: 20 pages × 5000 = 100k events
             page += 1
@@ -223,32 +230,51 @@ def _fetch_for_country(
                 "page": page,
             }
 
-            logger.info("Fetching ACLED page %d for %s (%s to %s)", page, country, start_date, end_date)
+            logger.info("[ACLED] GET page=%d params=%s", page, params)
 
             try:
                 resp = client.get(url, params=params)
+                logger.info(
+                    "[ACLED] page=%d status=%d content-type=%s body_size=%d",
+                    page, resp.status_code, resp.headers.get("content-type", "?"), len(resp.content),
+                )
                 resp.raise_for_status()
             except httpx.HTTPError as e:
-                logger.error("ACLED API request failed for %s: %s", country, e)
+                logger.error("[ACLED] API request failed for %s page %d: %s", country, page, e)
+                if hasattr(e, "response") and e.response is not None:
+                    logger.error("[ACLED] response body: %s", e.response.text[:500])
+                break
+
+            if not resp.text.strip():
+                logger.warning("[ACLED] empty response body for %s page %d", country, page)
                 break
 
             try:
                 data = resp.json()
             except Exception as e:
-                logger.error("ACLED JSON parse failed: %s, body=%s", e, resp.text[:300])
+                logger.error("[ACLED] JSON parse failed: %s, body=%s", e, resp.text[:500])
                 break
 
             # Response can be direct list or {success, data: [...]}
             events: list[dict] = []
             if isinstance(data, list):
                 events = data
+                logger.info("[ACLED] page=%d (direct list format)", page)
             elif isinstance(data, dict):
+                logger.info("[ACLED] page=%d (wrapped format) keys=%s", page, list(data.keys()))
                 if not data.get("success", True):
-                    logger.error("ACLED API error: %s", data.get("error"))
+                    logger.error("[ACLED] API error response: %s", data)
                     break
                 events = data.get("data", [])
+                if "count" in data:
+                    logger.info("[ACLED] API reports total count=%s", data["count"])
+                if "messages" in data:
+                    logger.info("[ACLED] API messages: %s", data["messages"])
+            else:
+                logger.error("[ACLED] unexpected response type: %s", type(data).__name__)
+                break
 
-            logger.info("ACLED page %d returned %d events", page, len(events))
+            logger.info("[ACLED] page %d returned %d events for %s", page, len(events), country)
 
             if not events:
                 break
@@ -258,6 +284,7 @@ def _fetch_for_country(
             if len(events) < 5000:
                 break
 
+    logger.info("[ACLED] Total fetched %d events for %s across %d pages", len(all_events), country, page)
     return all_events
 
 
@@ -269,31 +296,43 @@ def fetch_acled_events(since: datetime | None = None) -> list[dict]:
     """
     if since is None:
         since = datetime.now(UTC) - timedelta(days=settings.initial_lookback_days)
+        logger.info("[ACLED] No 'since' provided, using initial lookback of %d days", settings.initial_lookback_days)
 
     now = datetime.now(UTC)
     start_date = since.strftime("%Y-%m-%d")
     end_date = now.strftime("%Y-%m-%d")
 
+    logger.info("[ACLED] Fetch window: %s → %s", start_date, end_date)
+
     cookies = _authenticate()
     if not cookies:
+        logger.error("[ACLED] Authentication failed, aborting fetch")
         return []
 
     countries = [c.strip() for c in settings.acled_countries.split(",") if c.strip()]
+    logger.info("[ACLED] Configured countries: %s", countries)
 
     all_raw: list[dict] = []
     for country in countries:
         raw = _fetch_for_country(cookies, country, start_date, end_date)
+        logger.info("[ACLED] %s: %d raw events fetched", country, len(raw))
         all_raw.extend(raw)
+
+    logger.info("[ACLED] Total raw events across all countries: %d", len(all_raw))
 
     # Parse and deduplicate
     events: list[dict] = []
+    parse_failed = 0
+    deduped = 0
     for raw in all_raw:
         parsed = _parse_event(raw)
         if not parsed:
+            parse_failed += 1
             continue
 
         dedup_key = f"acled:seen:{parsed['acled_id']}"
         if _redis.exists(dedup_key):
+            deduped += 1
             continue
 
         _redis.setex(dedup_key, settings.dedup_ttl_hours * 3600, "1")
@@ -301,10 +340,11 @@ def fetch_acled_events(since: datetime | None = None) -> list[dict]:
 
     if events:
         set_last_synced(now)
+        logger.info("[ACLED] Updated last_synced to %s", now.isoformat())
 
     logger.info(
-        "ACLED: %d new events after dedup (out of %d raw, %d countries)",
-        len(events), len(all_raw), len(countries),
+        "[ACLED] Result: %d new events (parse_failed=%d, already_seen=%d) out of %d raw",
+        len(events), parse_failed, deduped, len(all_raw),
     )
     return events
 

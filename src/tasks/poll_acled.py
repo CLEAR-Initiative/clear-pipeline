@@ -72,18 +72,21 @@ def poll_acled(self):
         since = get_last_synced()
 
         if since:
-            logger.info("Polling ACLED for events since %s", since.isoformat())
+            logger.info("[ACLED] Polling for events since last_synced=%s", since.isoformat())
         else:
-            logger.info("Polling ACLED (initial lookback)")
+            logger.info("[ACLED] No last_synced — using initial lookback")
 
         events = fetch_acled_events(since=since)
 
         if not events:
-            logger.info("No new events from ACLED")
+            logger.info("[ACLED] No new events to ingest")
             return {"events_found": 0, "signals_created": 0}
 
         source_id = _get_acled_source_id()
+        logger.info("[ACLED] Creating signals using source_id=%s", source_id)
+
         created_count = 0
+        failed_count = 0
 
         for event in events:
             try:
@@ -91,10 +94,11 @@ def poll_acled(self):
                 created = create_signal(input_data)
                 signal_id = created["id"]
                 logger.info(
-                    "ACLED signal created: id=%s type=%s title=%s",
+                    "[ACLED] Signal created: id=%s type=%s severity=%d title=%s",
                     signal_id,
                     event.get("event_type"),
-                    event.get("title", "")[:60],
+                    event.get("severity", 0),
+                    event.get("title", "")[:80],
                 )
 
                 from src.tasks.process import process_acled_signal
@@ -105,15 +109,20 @@ def poll_acled(self):
                 created_count += 1
 
             except Exception as e:
+                failed_count += 1
                 logger.error(
-                    "Failed to ingest ACLED event %s: %s",
+                    "[ACLED] Failed to ingest event %s: %s",
                     event.get("acled_id"),
                     e,
+                    exc_info=True,
                 )
 
-        logger.info("ACLED poll complete: %d events → %d signals", len(events), created_count)
-        return {"events_found": len(events), "signals_created": created_count}
+        logger.info(
+            "[ACLED] Poll complete: %d events found → %d signals created (%d failed)",
+            len(events), created_count, failed_count,
+        )
+        return {"events_found": len(events), "signals_created": created_count, "failed": failed_count}
 
     except Exception as exc:
-        logger.error("poll_acled failed: %s", exc, exc_info=True)
+        logger.error("[ACLED] poll_acled failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=60)

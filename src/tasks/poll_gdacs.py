@@ -63,18 +63,21 @@ def poll_gdacs(self):
         since = get_last_synced()
 
         if since:
-            logger.info("Polling GDACS for events since %s", since.isoformat())
+            logger.info("[GDACS] Polling for events since last_synced=%s", since.isoformat())
         else:
-            logger.info("Polling GDACS (initial lookback)")
+            logger.info("[GDACS] No last_synced — using initial lookback")
 
         events = fetch_gdacs_events(since=since)
 
         if not events:
-            logger.info("No new events from GDACS")
+            logger.info("[GDACS] No new events to ingest")
             return {"events_found": 0, "signals_created": 0}
 
         source_id = _get_gdacs_source_id()
+        logger.info("[GDACS] Creating signals using source_id=%s", source_id)
+
         created_count = 0
+        failed_count = 0
 
         for event in events:
             try:
@@ -82,10 +85,11 @@ def poll_gdacs(self):
                 created = create_signal(input_data)
                 signal_id = created["id"]
                 logger.info(
-                    "GDACS signal created: id=%s type=%s title=%s",
+                    "[GDACS] Signal created: id=%s type=%s severity=%d title=%s",
                     signal_id,
                     event.get("event_type"),
-                    event.get("title", "")[:60],
+                    event.get("severity", 0),
+                    event.get("title", "")[:80],
                 )
 
                 # Dispatch to the standard processing pipeline
@@ -97,15 +101,20 @@ def poll_gdacs(self):
                 created_count += 1
 
             except Exception as e:
+                failed_count += 1
                 logger.error(
-                    "Failed to ingest GDACS event %s: %s",
+                    "[GDACS] Failed to ingest event %s: %s",
                     event.get("gdacs_id"),
                     e,
+                    exc_info=True,
                 )
 
-        logger.info("GDACS poll complete: %d events → %d signals", len(events), created_count)
-        return {"events_found": len(events), "signals_created": created_count}
+        logger.info(
+            "[GDACS] Poll complete: %d events found → %d signals created (%d failed)",
+            len(events), created_count, failed_count,
+        )
+        return {"events_found": len(events), "signals_created": created_count, "failed": failed_count}
 
     except Exception as exc:
-        logger.error("poll_gdacs failed: %s", exc, exc_info=True)
+        logger.error("[GDACS] poll_gdacs failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=60)

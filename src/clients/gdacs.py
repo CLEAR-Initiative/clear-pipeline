@@ -125,28 +125,28 @@ def _fetch_for_country(country: str, since: datetime, now: datetime) -> list[dic
     }
 
     url = f"{settings.gdacs_base_url}/api/Events/geteventlist/search"
-    logger.info("Fetching GDACS events for %s: %s", country, url)
+    logger.info("[GDACS] Fetching events for country=%s url=%s", country, url)
 
     try:
         resp = httpx.get(url, params=params, headers={"Accept": "application/json"}, timeout=30)
         resp.raise_for_status()
     except httpx.HTTPError as e:
-        logger.error("GDACS API request failed for %s: %s", country, e)
+        logger.error("[GDACS] API request failed for %s: %s", country, e)
         return []
 
     # GDACS may return empty body, XML, or HTML instead of JSON
     content_type = resp.headers.get("content-type", "")
     if not resp.text.strip():
-        logger.warning("GDACS returned empty response for %s (status=%d)", country, resp.status_code)
+        logger.warning("[GDACS] empty response for %s (status=%d)", country, resp.status_code)
         return []
     if "json" not in content_type and not resp.text.strip().startswith(("{", "[")):
-        logger.warning("GDACS returned non-JSON response for %s: content-type=%s, body=%s", country, content_type, resp.text[:200])
+        logger.warning("[GDACS] non-JSON response for %s: content-type=%s, body=%s", country, content_type, resp.text[:200])
         return []
 
     try:
         data = resp.json()
     except Exception as e:
-        logger.error("GDACS JSON parse failed for %s: %s, body=%s", country, e, resp.text[:200])
+        logger.error("[GDACS] JSON parse failed for %s: %s, body=%s", country, e, resp.text[:200])
         return []
 
     raw_events: list[dict] = []
@@ -160,7 +160,7 @@ def _fetch_for_country(country: str, since: datetime, now: datetime) -> list[dic
     elif isinstance(data, list):
         raw_events = data
 
-    logger.info("GDACS returned %d raw events for %s", len(raw_events), country)
+    logger.info("[GDACS] returned %d raw events for %s", len(raw_events), country)
     return raw_events
 
 
@@ -173,23 +173,35 @@ def fetch_gdacs_events(since: datetime | None = None) -> list[dict]:
     """
     if since is None:
         since = datetime.now(UTC) - timedelta(days=settings.initial_lookback_days)
+        logger.info("[GDACS] No 'since' provided, using initial lookback of %d days", settings.initial_lookback_days)
 
     now = datetime.now(UTC)
     countries = [c.strip() for c in settings.gdacs_countries.split(",") if c.strip()]
 
+    logger.info("[GDACS] Fetch window: %s → %s", since.isoformat(), now.isoformat())
+    logger.info("[GDACS] Configured countries: %s", countries)
+
     all_raw: list[dict] = []
     for country in countries:
-        all_raw.extend(_fetch_for_country(country, since, now))
+        raw = _fetch_for_country(country, since, now)
+        logger.info("[GDACS] %s: %d raw events fetched", country, len(raw))
+        all_raw.extend(raw)
+
+    logger.info("[GDACS] Total raw events across all countries: %d", len(all_raw))
 
     # Parse and deduplicate
     events: list[dict] = []
+    parse_failed = 0
+    deduped = 0
     for raw in all_raw:
         parsed = _parse_event(raw)
         if not parsed:
+            parse_failed += 1
             continue
 
         dedup_key = f"gdacs:seen:{parsed['gdacs_id']}"
         if _redis.exists(dedup_key):
+            deduped += 1
             continue
 
         _redis.setex(dedup_key, settings.dedup_ttl_hours * 3600, "1")
@@ -197,10 +209,11 @@ def fetch_gdacs_events(since: datetime | None = None) -> list[dict]:
 
     if events:
         set_last_synced(now)
+        logger.info("[GDACS] Updated last_synced to %s", now.isoformat())
 
     logger.info(
-        "GDACS: %d new events after dedup (out of %d raw, %d countries)",
-        len(events), len(all_raw), len(countries),
+        "[GDACS] Result: %d new events (parse_failed=%d, already_seen=%d) out of %d raw",
+        len(events), parse_failed, deduped, len(all_raw),
     )
     return events
 
