@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination
 
+    # S3 storage (for population GeoTIFF and other assets)
+    s3_endpoint: str = ""
+    s3_bucket: str = ""
+    s3_region: str = "auto"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+
     # API server
     api_port: int = 8000
     api_shared_secret: str = ""  # Shared secret for clear-api → pipeline calls

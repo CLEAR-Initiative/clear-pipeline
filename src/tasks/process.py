@@ -147,11 +147,14 @@ def process_signal(self, signal_data: dict):
         location_name = None
         signal_lat = None
         signal_lng = None
+        probability_radius_km = None
         if signal.estimatedEventLocation:
             location_name = signal.estimatedEventLocation.name
             if signal.estimatedEventLocation.coordinates and len(signal.estimatedEventLocation.coordinates) >= 2:
                 signal_lat = signal.estimatedEventLocation.coordinates[0]
                 signal_lng = signal.estimatedEventLocation.coordinates[1]
+            if signal.estimatedEventLocation.probabilityRadius is not None:
+                probability_radius_km = signal.estimatedEventLocation.probabilityRadius
 
         # Use location resolved by Claude/API during signal creation
         origin_loc = created.get("originLocation")
@@ -173,6 +176,7 @@ def process_signal(self, signal_data: dict):
             classification=classification,
             signal_lat=signal_lat,
             signal_lng=signal_lng,
+            probability_radius_km=probability_radius_km,
         )
 
         # ─── Stage 4: Alert escalation (if high severity) ───────────────────
@@ -355,7 +359,7 @@ def process_gdacs_signal(
             logger.info("GDACS signal %s below relevance threshold, skipping", signal_id)
             return {"signal_id": signal_id, "event_id": None, "alert_id": None}
 
-        # Group into event
+        # Group into event (no probabilityRadius for GDACS — uses default 1km)
         event = group_signal(
             signal_id=signal_id,
             signal_title=title,
