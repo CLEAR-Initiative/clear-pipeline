@@ -13,11 +13,6 @@ import os
 import tempfile
 from pathlib import Path
 
-import numpy as np
-import rasterio
-from rasterio.mask import mask as raster_mask
-from shapely.geometry import Point, mapping
-
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -99,8 +94,10 @@ def _circle_polygon(lat: float, lng: float, radius_km: float, n_points: int = 64
     return Polygon(coords)
 
 
-def _sum_valid_pixels(arr: np.ndarray, nodata: float | int | None) -> float:
+def _sum_valid_pixels(arr, nodata: float | int | None) -> float:
     """Sum finite pixels, excluding nodata values."""
+    import numpy as np
+
     m = np.isfinite(arr)
     if nodata is not None:
         if isinstance(nodata, float) and np.isnan(nodata):
@@ -137,6 +134,10 @@ def estimate_population_from_raster(
         return None
 
     try:
+        import rasterio
+        from rasterio.mask import mask as raster_mask
+        from shapely.geometry import mapping
+
         circle = _circle_polygon(lat, lng, radius_km)
         circle_geojson = mapping(circle)
 

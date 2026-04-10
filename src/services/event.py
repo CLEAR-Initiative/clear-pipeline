@@ -11,7 +11,6 @@ from src.clients.graphql import create_event, get_events, update_event
 from src.config import settings
 from src.models.clear import EventGroupingResult, SignalClassification
 from src.prompts.group import SYSTEM_PROMPT, build_group_prompt
-from src.services.population import estimate_population_for_signal
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +91,8 @@ def group_signal(
     # Estimate population from GeoTIFF if Claude didn't extract it
     population = result.population_affected
     if population is None and signal_lat is not None and signal_lng is not None:
+        from src.services.population import estimate_population_for_signal
+
         population = estimate_population_for_signal(
             lat=signal_lat,
             lng=signal_lng,
