@@ -28,6 +28,10 @@ POPULATION_TIFF_S3_KEYS: dict[str, str] = {
 # Default radius in km when signal doesn't provide one
 DEFAULT_RADIUS_KM = 1.0
 
+# Minimum effective radius — very small radii (e.g. Dataminr's 0.16 km) cover
+# too few 100m pixels to give meaningful population estimates
+MIN_EFFECTIVE_RADIUS_KM = 1.0
+
 
 def _get_s3_client():
     """Get a boto3 S3 client configured for the pipeline's S3 storage."""
@@ -60,12 +64,24 @@ def _ensure_geotiff(iso3: str) -> Path:
 
     # Download from S3
     os.makedirs(local_path.parent, exist_ok=True)
-    logger.info("[POPULATION] Downloading GeoTIFF from S3: %s → %s", s3_key, local_path)
+    logger.info(
+        "[POPULATION] Downloading GeoTIFF from S3: bucket=%s key=%s endpoint=%s → %s",
+        settings.s3_bucket, s3_key, settings.s3_endpoint, local_path,
+    )
+
+    if not settings.s3_endpoint or not settings.s3_bucket or not settings.s3_access_key_id:
+        raise FileNotFoundError(
+            f"S3 not configured (endpoint={settings.s3_endpoint!r}, "
+            f"bucket={settings.s3_bucket!r}, key_id={'set' if settings.s3_access_key_id else 'empty'})"
+        )
 
     s3 = _get_s3_client()
     s3.download_file(settings.s3_bucket, s3_key, str(local_path))
 
-    logger.info("[POPULATION] GeoTIFF downloaded: %s (%.1f MB)", local_path, local_path.stat().st_size / 1e6)
+    file_size = local_path.stat().st_size
+    logger.info("[POPULATION] GeoTIFF downloaded: %s (%.1f MB)", local_path, file_size / 1e6)
+    if file_size < 1000:
+        logger.warning("[POPULATION] GeoTIFF suspiciously small (%d bytes) — may be corrupted", file_size)
     return local_path
 
 
@@ -134,18 +150,44 @@ def estimate_population_from_raster(
         return None
 
     try:
+        import numpy as np
         import rasterio
         from rasterio.mask import mask as raster_mask
         from shapely.geometry import mapping
 
         circle = _circle_polygon(lat, lng, radius_km)
         circle_geojson = mapping(circle)
+        bounds = circle.bounds  # (minx, miny, maxx, maxy)
+        logger.info(
+            "[POPULATION] Circle bounds: minx=%.6f miny=%.6f maxx=%.6f maxy=%.6f (radius=%.3f km)",
+            bounds[0], bounds[1], bounds[2], bounds[3], radius_km,
+        )
 
         with rasterio.open(tiff_path) as src:
             nodata = src.nodata
+            raster_bounds = src.bounds
+            raster_crs = src.crs
+            raster_res = src.res
+            logger.info(
+                "[POPULATION] Raster info: crs=%s, resolution=%s, nodata=%s, bounds=%s",
+                raster_crs, raster_res, nodata, raster_bounds,
+            )
+
+            # Check if point is within raster bounds
+            if (
+                lng < raster_bounds.left
+                or lng > raster_bounds.right
+                or lat < raster_bounds.bottom
+                or lat > raster_bounds.top
+            ):
+                logger.warning(
+                    "[POPULATION] Point (%.4f, %.4f) is OUTSIDE raster bounds %s",
+                    lat, lng, raster_bounds,
+                )
+                return None
 
             # Mask the raster with the circle polygon
-            out, _ = raster_mask(
+            out, out_transform = raster_mask(
                 src,
                 [circle_geojson],
                 crop=True,
@@ -153,12 +195,40 @@ def estimate_population_from_raster(
                 filled=True,
             )
             region_arr = out[0] if out.ndim == 3 else out
+
+            # Debug: inspect the masked array
+            total_pixels = region_arr.size
+            finite_mask = np.isfinite(region_arr)
+            finite_pixels = int(np.sum(finite_mask))
+            if nodata is not None:
+                valid_mask = finite_mask & (region_arr != nodata)
+            else:
+                valid_mask = finite_mask
+            valid_pixels = int(np.sum(valid_mask))
+            nonzero_pixels = int(np.sum(region_arr[valid_mask] > 0)) if valid_pixels > 0 else 0
+
+            logger.info(
+                "[POPULATION] Masked array: shape=%s, total_pixels=%d, finite=%d, valid=%d, nonzero=%d",
+                region_arr.shape, total_pixels, finite_pixels, valid_pixels, nonzero_pixels,
+            )
+            if valid_pixels > 0:
+                valid_values = region_arr[valid_mask]
+                logger.info(
+                    "[POPULATION] Pixel stats: min=%.6f, max=%.6f, mean=%.6f, sum=%.2f",
+                    float(np.min(valid_values)),
+                    float(np.max(valid_values)),
+                    float(np.mean(valid_values)),
+                    float(np.sum(valid_values)),
+                )
+            else:
+                logger.warning("[POPULATION] No valid pixels found in masked region!")
+
             pop = _sum_valid_pixels(region_arr, nodata)
 
         estimate = max(int(round(pop)), 0)
         logger.info(
-            "[POPULATION] Estimated %d people within %.1f km of (%.4f, %.4f)",
-            estimate, radius_km, lat, lng,
+            "[POPULATION] Final estimate: %d people (raw_sum=%.2f) within %.3f km of (%.4f, %.4f)",
+            estimate, pop, radius_km, lat, lng,
         )
         return estimate
 
@@ -191,9 +261,21 @@ def estimate_population_for_signal(
         Estimated population or None.
     """
     if lat is None or lng is None:
+        logger.debug("[POPULATION] estimate_population_for_signal skipped: lat=%s lng=%s", lat, lng)
         return None
 
     radius = probability_radius_km if probability_radius_km else DEFAULT_RADIUS_KM
+    # Enforce minimum radius — small radii cover too few raster pixels
+    if radius < MIN_EFFECTIVE_RADIUS_KM:
+        logger.info(
+            "[POPULATION] Radius %.3f km below minimum, using %.1f km instead",
+            radius, MIN_EFFECTIVE_RADIUS_KM,
+        )
+        radius = MIN_EFFECTIVE_RADIUS_KM
+    logger.info(
+        "[POPULATION] estimate_population_for_signal: lat=%.4f lng=%.4f radius_input=%s effective_radius=%.3f km",
+        lat, lng, probability_radius_km, radius,
+    )
 
     return estimate_population_from_raster(lat, lng, radius, iso3=iso3)
 

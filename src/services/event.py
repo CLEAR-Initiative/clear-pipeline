@@ -90,6 +90,10 @@ def group_signal(
 
     # Estimate population from GeoTIFF if Claude didn't extract it
     population = result.population_affected
+    logger.info(
+        "[EVENT] Population from Claude for signal %s: %s (lat=%s lng=%s radius=%s)",
+        signal_id, population, signal_lat, signal_lng, probability_radius_km,
+    )
     if population is None and signal_lat is not None and signal_lng is not None:
         from src.services.population import estimate_population_for_signal
 
@@ -98,11 +102,10 @@ def group_signal(
             lng=signal_lng,
             probability_radius_km=probability_radius_km,
         )
-        if population is not None:
-            logger.info(
-                "Population estimated from GeoTIFF for signal %s: %d (radius=%.1f km)",
-                signal_id, population, probability_radius_km or 1.0,
-            )
+        logger.info(
+            "[EVENT] Population from GeoTIFF for signal %s: %s (radius=%.3f km)",
+            signal_id, population, probability_radius_km or 1.0,
+        )
 
     if result.action == "add_to_existing" and result.event_id:
         logger.info("Adding signal %s to existing event %s", signal_id, result.event_id)
