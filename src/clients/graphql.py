@@ -115,6 +115,7 @@ query LocationWithGeometry($id: String!) {
     level
     population
     geometry
+    parent { id name level }
   }
 }
 """

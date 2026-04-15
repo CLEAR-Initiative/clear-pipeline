@@ -21,42 +21,92 @@ from src.services.population import estimate_population_for_districts
 logger = logging.getLogger(__name__)
 
 
+def _geometry_is_areal(geometry: dict | None) -> bool:
+    """Only Polygon/MultiPolygon geometries can be raster-masked meaningfully.
+    Point locations (level 4) produce near-zero population and should fall back."""
+    if not geometry:
+        return False
+    return geometry.get("type") in ("Polygon", "MultiPolygon")
+
+
+def _resolve_location_for_population(loc: dict) -> dict | None:
+    """Return a location dict that has either a cached population OR an areal
+    geometry. If the given location is a point (or has no geometry and no
+    cached population), walk up to its parent. Returns None if no usable
+    ancestor is found."""
+    current = loc
+    while current is not None:
+        has_cached = current.get("population") is not None
+        has_areal = _geometry_is_areal(current.get("geometry"))
+        if has_cached or has_areal:
+            return current
+
+        parent_stub = current.get("parent")
+        if not parent_stub:
+            return None
+        logger.info(
+            "[SITUATION] Location %s (%s, level=%s) has no cached population or "
+            "areal geometry — falling back to parent %s",
+            current.get("name"), current.get("id"), current.get("level"),
+            parent_stub.get("name"),
+        )
+        current = graphql.get_location_with_geometry(parent_stub["id"])
+    return None
+
+
 def _compute_population_in_area(district_ids: list[str]) -> int | None:
-    """Sum cached location.population; fall back to raster for missing districts."""
+    """Sum cached location.population; fall back to raster for missing areals,
+    and fall back to parent location when a district is a point or has no
+    usable geometry.
+
+    De-duplicates by resolved location ID so shared parents aren't summed twice.
+    """
     if not district_ids:
         return None
 
-    cached_total = 0
-    missing_geometries: list[dict] = []
-    all_cached = True
-
+    resolved_by_id: dict[str, dict] = {}
     for did in district_ids:
         loc = graphql.get_location_with_geometry(did)
         if not loc:
             logger.warning("[SITUATION] District %s not found", did)
             continue
+
+        resolved = _resolve_location_for_population(loc)
+        if not resolved:
+            logger.warning(
+                "[SITUATION] No usable ancestor for district %s (%s)",
+                loc.get("name"), did,
+            )
+            continue
+
+        # De-duplicate: if two districts resolved to the same state, only count once
+        resolved_by_id[resolved["id"]] = resolved
+
+    if not resolved_by_id:
+        logger.warning("[SITUATION] No usable locations resolved")
+        return None
+
+    cached_total = 0
+    missing_geometries: list[dict] = []
+    for loc in resolved_by_id.values():
         pop_str = loc.get("population")
         if pop_str is not None:
             cached_total += int(pop_str)
-        else:
-            all_cached = False
-            if loc.get("geometry"):
-                missing_geometries.append(loc["geometry"])
-            else:
-                logger.warning(
-                    "[SITUATION] District %s has no geometry and no cached population",
-                    did,
-                )
+        elif _geometry_is_areal(loc.get("geometry")):
+            missing_geometries.append(loc["geometry"])
 
-    if all_cached:
-        logger.info("[SITUATION] All %d districts cached: %d", len(district_ids), cached_total)
+    if not missing_geometries:
+        logger.info(
+            "[SITUATION] All %d resolved locations cached: populationInArea=%d",
+            len(resolved_by_id), cached_total,
+        )
         return cached_total
 
     raster_pop = estimate_population_for_districts(missing_geometries) or 0
     total = cached_total + raster_pop
     logger.info(
-        "[SITUATION] Mixed: cached=%d raster=%d → populationInArea=%d",
-        cached_total, raster_pop, total,
+        "[SITUATION] Mixed (%d resolved): cached=%d raster=%d → populationInArea=%d",
+        len(resolved_by_id), cached_total, raster_pop, total,
     )
     return total
 
