@@ -131,6 +131,22 @@ query LocationsByLevel($level: Int!) {
 }
 """
 
+GET_EVENT_FOR_SITUATION = """
+query EventForSituation($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    severity
+    populationAffected
+    originLocation { name }
+    destinationLocation { name }
+    generalLocation { name }
+  }
+}
+"""
+
 GET_RECENT_ALERTS = """
 query RecentAlerts($since: DateTime!) {
   alerts(status: published) {
@@ -379,14 +395,25 @@ def update_situation_population(
     situation_id: str,
     population_affected: int | None = None,
     population_in_area: int | None = None,
+    title: str | None = None,
+    summary: str | None = None,
 ) -> dict:
     input_data: dict = {}
     if population_affected is not None:
         input_data["populationAffected"] = str(population_affected)
     if population_in_area is not None:
         input_data["populationInArea"] = str(population_in_area)
+    if title is not None:
+        input_data["title"] = title
+    if summary is not None:
+        input_data["summary"] = summary
     result = _execute(
         UPDATE_SITUATION_POPULATION,
         {"id": situation_id, "input": input_data},
     )
     return result["updateSituationPopulation"]
+
+
+def get_event_for_situation(event_id: str) -> dict | None:
+    result = _execute(GET_EVENT_FOR_SITUATION, {"id": event_id})
+    return result.get("event")

@@ -67,3 +67,10 @@ class AlertAssessment(BaseModel):
 
     should_alert: bool
     status: str = "published"  # "draft" or "published"
+
+
+class SituationNarrative(BaseModel):
+    """Output from Claude situation narrative generation."""
+
+    title: str
+    summary: str
