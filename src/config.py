@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_shared_secret: str = ""  # Shared secret for clear-api → pipeline calls
 
+    # Observability
+    logtail_source_token: str = ""
+    sentry_dsn: str = ""
+    sentry_env: str = "development"
+    log_level: str = "INFO"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

@@ -335,3 +335,78 @@ def estimate_population_for_event(
         return result
 
     return None
+
+
+def estimate_population_for_polygon(
+    geojson_geometry: dict,
+    iso3: str = "SDN",
+) -> int | None:
+    """Estimate population residing within an arbitrary polygon (GeoJSON).
+
+    Used to compute a location's cached `population` from its admin boundary,
+    and to sum population across a set of district polygons for a situation.
+
+    Args:
+        geojson_geometry: GeoJSON Polygon or MultiPolygon (not a Feature).
+        iso3: Country ISO3 code.
+
+    Returns:
+        Estimated population or None.
+    """
+    try:
+        tiff_path = _ensure_geotiff(iso3)
+    except FileNotFoundError as e:
+        logger.warning("[POPULATION] %s", e)
+        return None
+    except Exception as e:
+        logger.error("[POPULATION] Failed to get GeoTIFF: %s", e)
+        return None
+
+    try:
+        import rasterio
+        from rasterio.mask import mask as raster_mask
+
+        with rasterio.open(tiff_path) as src:
+            nodata = src.nodata
+            out, _ = raster_mask(
+                src,
+                [geojson_geometry],
+                crop=True,
+                indexes=1,
+                filled=True,
+            )
+            region_arr = out[0] if out.ndim == 3 else out
+            pop = _sum_valid_pixels(region_arr, nodata)
+
+        estimate = max(int(round(pop)), 0)
+        logger.info("[POPULATION] Polygon estimate: %d people", estimate)
+        return estimate
+
+    except Exception as e:
+        logger.error("[POPULATION] Polygon raster estimation failed: %s", e, exc_info=True)
+        return None
+
+
+def estimate_population_for_districts(
+    geometries: list[dict],
+    iso3: str = "SDN",
+) -> int | None:
+    """Sum population across a list of district polygons (unioned first).
+
+    Used for situation `populationInArea`: the total population residing in
+    every district touched by linked events.
+    """
+    if not geometries:
+        return None
+
+    try:
+        from shapely.geometry import shape
+        from shapely.ops import unary_union
+
+        shapes = [shape(g) for g in geometries]
+        union = unary_union(shapes)
+        union_geojson = __import__("shapely.geometry", fromlist=["mapping"]).mapping(union)
+        return estimate_population_for_polygon(union_geojson, iso3=iso3)
+    except Exception as e:
+        logger.error("[POPULATION] District union failed: %s", e, exc_info=True)
+        return None
