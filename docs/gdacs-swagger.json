@@ -1,0 +1,6540 @@
+{
+  "openapi": "3.0.4",
+  "info": {
+    "title": "Global Disaster Alert and Coordination System  API",
+    "description": "An ASP.NET Core Web API for getting GDACS data",
+    "version": "v1"
+  },
+  "servers": [
+    {
+      "url": "/gdacsapi"
+    }
+  ],
+  "paths": {
+    "/api/AdaptiveCard/getevent/data": {
+      "get": {
+        "tags": ["AdaptiveCard"],
+        "summary": "Get the eventdata for AdaptiveCard",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/AdaptiveCard/getevent/card": {
+      "get": {
+        "tags": ["AdaptiveCard"],
+        "summary": "Get the  AdaptiveCard  by parameters",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/AdaptiveCard/geteventlist/data": {
+      "get": {
+        "tags": ["AdaptiveCard"],
+        "summary": "Search a list of events by parameter, it returns the first 100 elements, it is possible to obtain record by paging specifying the page size and page number.\r\nThe records are ordered by todate desc",
+        "parameters": [
+          {
+            "name": "eventlist",
+            "in": "query",
+            "description": "the list of eventtypes to search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alertlevel",
+            "in": "query",
+            "description": "the alertlevel filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "Optional: the datestart to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "Optional: the dateend  to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Optional: the country  to filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "Optional: the number of record in the page (Max 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "pageNumber",
+            "in": "query",
+            "description": "Optional: the page number of recordset",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/AdaptiveCard/geteventlist/card": {
+      "get": {
+        "tags": ["AdaptiveCard"],
+        "summary": "Search a list of events by parameter, it returns the first 100 elements, it is possible to obtain record by paging specifying the page size and page number.\r\nThe records are ordered by todate desc",
+        "parameters": [
+          {
+            "name": "eventlist",
+            "in": "query",
+            "description": "the list of eventtypes to search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alertlevel",
+            "in": "query",
+            "description": "the alertlevel filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "Optional: the datestart to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "Optional: the dateend  to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Optional: the country  to filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "Optional: the number of record in the page (Max 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "pageNumber",
+            "in": "query",
+            "description": "Optional: the page number of recordset",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/AdaptiveCard/geteventlist/schema": {
+      "get": {
+        "tags": ["AdaptiveCard"],
+        "summary": "Get the adaptivecard schema for generic eventlist",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm0byiso3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 0 by Iso3",
+        "parameters": [
+          {
+            "name": "Iso3",
+            "in": "query",
+            "description": "The Iso3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Gadm0Dtos"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm0all": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get All Gadms at level 0",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm0Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm1byiso3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 1 by Iso3",
+        "parameters": [
+          {
+            "name": "Iso3",
+            "in": "query",
+            "description": "The Iso3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm1Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm2byiso3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 2 by Iso3",
+        "parameters": [
+          {
+            "name": "Iso3",
+            "in": "query",
+            "description": "The Iso3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm2Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm2bygid1": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 2 by GID.1 code of gadm level 1",
+        "parameters": [
+          {
+            "name": "Gid1",
+            "in": "query",
+            "description": "The Gid1 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm2Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm3byiso3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 3 by Iso3",
+        "parameters": [
+          {
+            "name": "Iso3",
+            "in": "query",
+            "description": "The Iso3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm3Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm3bygid1": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 3 by GID.1 code of gadm level 1",
+        "parameters": [
+          {
+            "name": "Gid1",
+            "in": "query",
+            "description": "The Gid1 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm3Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm3bygid2": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 3 by GID.2 code of gadm level 2",
+        "parameters": [
+          {
+            "name": "Gid2",
+            "in": "query",
+            "description": "The Gid2 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm3Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm4byiso3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 4 by Iso3",
+        "parameters": [
+          {
+            "name": "Iso3",
+            "in": "query",
+            "description": "The Iso3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm4Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm4bygid1": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 4 by GID.1 code of gadm level 1",
+        "parameters": [
+          {
+            "name": "Gid1",
+            "in": "query",
+            "description": "The Gid1 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm4Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm4bygid2": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 4 by GID.2 code of gadm level 2",
+        "parameters": [
+          {
+            "name": "Gid2",
+            "in": "query",
+            "description": "The Gid2 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm4Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm4bygid3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 4 by GID.3 code of gadm level 3",
+        "parameters": [
+          {
+            "name": "Gid3",
+            "in": "query",
+            "description": "The Gid3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm4Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm5byiso3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 5 by Iso3",
+        "parameters": [
+          {
+            "name": "Iso3",
+            "in": "query",
+            "description": "The Iso3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm5Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm5bygid1": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 5 by GID.1 code of gadm level 1",
+        "parameters": [
+          {
+            "name": "Gid1",
+            "in": "query",
+            "description": "The Gid1 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm5Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm5bygid2": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 5 by GID.3 code of gadm level 2",
+        "parameters": [
+          {
+            "name": "Gid2",
+            "in": "query",
+            "description": "The Gid2 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm5Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm5bygid3": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 5 by GID.3 code of gadm level 3",
+        "parameters": [
+          {
+            "name": "Gid3",
+            "in": "query",
+            "description": "The Gid3 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm5Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Administrative/gadm5bygid4": {
+      "get": {
+        "tags": ["Administrative"],
+        "summary": "Get Gadm at level 5 by GID.4 code of gadm level 4",
+        "parameters": [
+          {
+            "name": "Gid4",
+            "in": "query",
+            "description": "The Gid4 Code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Gadm5Dtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/CopernicusActivation/getcopernicusaoi": {
+      "get": {
+        "tags": ["CopernicusActivation"],
+        "summary": "Get the Copernicus AOIs by key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/CopernicusActivation/getcopernicusobserved": {
+      "get": {
+        "tags": ["CopernicusActivation"],
+        "summary": "Get the Copernicus Observed by key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Cyclonesurge/getdetails": {
+      "get": {
+        "tags": ["Cyclonesurge"],
+        "summary": "Get the Tropical Cyclone MODELS detail by internal id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "the internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Cyclonesurge/gettcactive4de": {
+      "get": {
+        "tags": ["Cyclonesurge"],
+        "summary": "Get the list of Tropical cyclone active for Destination Earth env.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CycloneInfo4DE"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CycloneInfo4DE"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CycloneInfo4DE"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/Documents/download": {
+      "get": {
+        "tags": ["Documents"],
+        "summary": "Download the document specified by oid",
+        "parameters": [
+          {
+            "name": "oid",
+            "in": "query",
+            "description": "the internal document oid to download",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "the type of document to download: image (Optional: first page document preview  ) or document (Default)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/admin/Documents/getdocumentsbyevent": {
+      "get": {
+        "tags": ["Documents"],
+        "summary": "Get Documents by GDACS Eventkey",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype event keyword",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid event keyword",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/admin/Documents/getdocumentsbytext": {
+      "get": {
+        "tags": ["Documents"],
+        "summary": "Get Documents by text",
+        "parameters": [
+          {
+            "name": "textvalue",
+            "in": "query",
+            "description": "The text to search to identifiy document (in title,descritpion,Contributors,Authors and Publisher table fields)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageNumber",
+            "in": "query",
+            "description": "Optional:  the page of recordset",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "Optional: the number of record in the page (max 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Emdat/getemdatbyeventkey": {
+      "get": {
+        "tags": ["Emdat"],
+        "summary": "Get Emdat collection data by event key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Emdat/getemdatbydisno": {
+      "get": {
+        "tags": ["Emdat"],
+        "summary": "Get Emdat data by disanter number",
+        "parameters": [
+          {
+            "name": "disno",
+            "in": "query",
+            "description": "the disaster number",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/Emdat"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Emdat"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Emdat"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Emdat/getemdatbyiso3": {
+      "get": {
+        "tags": ["Emdat"],
+        "summary": "Get Emdat data by Iso3",
+        "parameters": [
+          {
+            "name": "iso3",
+            "in": "query",
+            "description": "the iso3 code",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Emdat/getemdatbyiso3list": {
+      "get": {
+        "tags": ["Emdat"],
+        "summary": "Get Emdat data by Iso3 list",
+        "parameters": [
+          {
+            "name": "iso3list",
+            "in": "query",
+            "description": "the list of iso3 code separated by ;",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Emdat/getemdatlist": {
+      "get": {
+        "tags": ["Emdat"],
+        "summary": "Get Emdat all collection data",
+        "parameters": [
+          {
+            "name": "PageNumber",
+            "in": "query",
+            "description": "The number of page to show",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "The max element in page (the limit is 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Emdat"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Emm/getemmnewsbykey": {
+      "get": {
+        "tags": ["Emm"],
+        "summary": "Get Emmnews collection data by key eventtype,eventid specifying the limit object to return",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "the limit of object to return",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmmNews"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmmNews"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmmNews"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Emm/getemmnewsstatisticbykey": {
+      "get": {
+        "tags": ["Emm"],
+        "summary": "Get Statistic EMM data by key eventtype,eventid",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "keywords",
+            "in": "query",
+            "description": "the keyword for statistic separated by ;",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatisticEmmNews"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatisticEmmNews"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatisticEmmNews"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Events/geteventdata": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get Event data specified by eventtype and eventid",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "the source to filter episode (cyclone)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Events/geteventdataapp": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get a tag Html events to show in Gdacs_App",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "the the source to filter episode (cyclone)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Events/getepisodedata": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get the episode information by keywords eventtype, eventid, episodeid and source",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "episodeid",
+            "in": "query",
+            "description": "the specific episodeid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "the the source to filter episode (cyclone)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/map": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get events' list to show in the homepage's map",
+        "parameters": [
+          {
+            "name": "eventtypes",
+            "in": "query",
+            "description": "Optional: the list of eventtypes to extract separate by ;",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/homepagetable": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get events' list to show in the homepage's table",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/forsocial": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get a list of events for social media scope",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/allpaging": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get a list of last 6 month events ordered by date descending and specifying the paging and the query filter based on eventid or alertlevel or eventtype",
+        "parameters": [
+          {
+            "name": "PageNumber",
+            "in": "query",
+            "description": "The number of page to show",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "description": "The max element in page (the limit is 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "Query",
+            "in": "query",
+            "description": "The query to macth with starts of eventid,alertlevel or eventtype",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/archive": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get the events' list to show in archive page",
+        "parameters": [
+          {
+            "name": "eventlist",
+            "in": "query",
+            "description": "Optional: the list of eventtypes to extract separate by ;",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/eventsbyarea": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get the events' list based on geometry match in the last days",
+        "parameters": [
+          {
+            "name": "geometryArea",
+            "in": "query",
+            "description": "The geometry text in WKT format",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Optional: the number of days to research the events in archive (default 4, max 30)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/search": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Search a list of events by parameter, it returns the first 100 elements, it is possible to obtain record by paging specifying the page size and page number.\r\nThe records are ordered by todate desc",
+        "parameters": [
+          {
+            "name": "eventlist",
+            "in": "query",
+            "description": "the list of eventtypes to search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alertlevel",
+            "in": "query",
+            "description": "the alertlevel filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "Optional: the datestart to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "Optional: the dateend  to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Optional: the country  to filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "description": "Optional: the severity filter",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "Optional: the number of record in the page (Max 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "pageNumber",
+            "in": "query",
+            "description": "Optional: the page number of recordset",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "caller",
+            "in": "query",
+            "description": "Optional: The code to identify the caller of api",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/latest": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Search a list of events by parameter, it returns the first 100 elements, it is possible to obtain record by paging specifying the page size and page number.\r\nThe records are ordered by todate desc",
+        "parameters": [
+          {
+            "name": "eventlist",
+            "in": "query",
+            "description": "the list of eventtypes to search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alertlevel",
+            "in": "query",
+            "description": "the alertlevel filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "datemodified",
+            "in": "query",
+            "description": "Optional: the date modified to filter (if empty get last 6 months)",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Optional: the country  to filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "in": "query",
+            "description": "Optional: the severity filter",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "Optional: the number of record in the page (Max 100)",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "pageNumber",
+            "in": "query",
+            "description": "Optional: the page number of recordset",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/statistic": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Search a list of events by parameter, it returns the first 100 elements, it is possible to obtain record by paging specifying the page size and page number.\r\nThe records are ordered by todate desc",
+        "parameters": [
+          {
+            "name": "eventlist",
+            "in": "query",
+            "description": "the list of eventtypes to search",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "alertlevel",
+            "in": "query",
+            "description": "the alertlevel filter",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "Optional: the datestart to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "Optional: the dateend  to filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "country",
+            "in": "query",
+            "description": "Optional: the country  to filter",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoricalEvents"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoricalEvents"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoricalEvents"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Events/geteventlist/events4app": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Search a list of events based on GDACS APP criteria for visualization\r\nThe records are ordered by todate desc",
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/getstructure/forsocial": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get the Event data in a format adapted to social environment",
+        "parameters": [
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/getepisodealertlevel": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get a list of alertlevels calculated for episode specified by keywords eventtype,eventid,episodeid and source",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "episodeid",
+            "in": "query",
+            "description": "the episodeid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "[optional] the Source for those evenat can have multiple episodeid source for same episodeid",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/geteventalertlevel": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get a list of alertlevels calculated for episodes specified by keywords eventtype and eventid.",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Events/getnpp": {
+      "get": {
+        "tags": ["Events"],
+        "summary": "Get Nuclear Power Plant by event keys eventtype, eventid and source",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "the source to filter episode (cyclone)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/getlocations": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get the Locations data Related to Earthquake with Tsunami or Tropical Cyclones with stormsurge (tsunami/stormsurge affected) by internal id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "the internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/getids": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get the all id referred to a specific event",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "description": "The id keyword to identify the ids",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "value",
+            "in": "query",
+            "description": "The keyword value to identify the ids",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "output",
+            "in": "query",
+            "description": "Optional:the single id to returns",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/getaffectedlocations": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get affected locations by internal id related to Events that need impact analysis (Earthquake, Tropical Cyclones, Volcanoes, ForestFire)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "the internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/getimpact": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get the impact analysis by internal id related to Events that need impact analysis (Earthquake, Tropical Cyclones, Volcanoes, ForestFire)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "the internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/gettimeline": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get the Tropical cyclone timeline by internal id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/getpopdense": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get the population affected analysis for Shakemap or Cyclones MODELS impact by internal id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "the internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Export/getaoi": {
+      "get": {
+        "tags": ["Export"],
+        "summary": "Get the AOI information related to Eartquakes and Tropical Cyclones by internal id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/FloodGfm/getfloodgfmwmsbykeys/bydate": {
+      "get": {
+        "tags": ["FloodGfm"],
+        "summary": "Get the Flood GFM Observed by key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "referencedate",
+            "in": "query",
+            "description": "the date of flood observation",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/FloodGfm/getfloodgfmwmsbykeys/overall": {
+      "get": {
+        "tags": ["FloodGfm"],
+        "summary": "Get the Overall Flood GFM Observed by key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Gts/getdatabykey": {
+      "get": {
+        "tags": ["Gts"],
+        "summary": "Get GTS data by key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Gts/getdatabyperiod": {
+      "get": {
+        "tags": ["Gts"],
+        "summary": "Get GTS data by period",
+        "parameters": [
+          {
+            "name": "fromdate",
+            "in": "query",
+            "description": "date from for search",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "todate",
+            "in": "query",
+            "description": "date to for search",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/Api/InfoProduct/getinfoproduct": {
+      "get": {
+        "tags": ["InfoProduct"],
+        "summary": "Get the infoproduct dat by event key",
+        "parameters": [
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdacsExportInfoProdcut"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdacsExportInfoProdcut"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdacsExportInfoProdcut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/News/getnewsbygdacskey": {
+      "get": {
+        "tags": ["News"],
+        "summary": "Get The News related to the event indicated by gdacs key",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "The eventtype code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "The eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NewsDtos"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NewsDtos"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NewsDtos"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Polygons/getgeometry": {
+      "get": {
+        "tags": ["Polygons"],
+        "summary": "Get the polygons geometry by keys eventtype, eventid, episodeid, polygontype",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "episodeid",
+            "in": "query",
+            "description": "the episodeid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "polygontype",
+            "in": "query",
+            "description": "the polygontype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Optional: the source",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "showPreliminary",
+            "in": "query",
+            "description": "Optional: Only for Earthquake, flag true to show circle and preliminary shakemap polygons always,otherwise, if there are, show last official shakemap polygons",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "showBaseGeometry",
+            "in": "query",
+            "description": "Optional: Only for Earthquake and showPreliminary=false, flag true to show 100km circle",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Polygons/getgeometry/aoi": {
+      "get": {
+        "tags": ["Polygons"],
+        "summary": "Get the geometry AOI for cyclone",
+        "parameters": [
+          {
+            "name": "eventtype",
+            "in": "query",
+            "description": "the eventtype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "episodeid",
+            "in": "query",
+            "description": "the episodeid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "polygontype",
+            "in": "query",
+            "description": "the polygontype",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Optional: the source",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Shakemap/getdetails": {
+      "get": {
+        "tags": ["Shakemap"],
+        "summary": "Get the Earthquake Shakemap details by internal id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "description": "the internal id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Feature"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Shakemap/getgeometry": {
+      "get": {
+        "tags": ["Shakemap"],
+        "summary": "Get the Earthquake Shakemap geomtery by keys eventid and shakeid",
+        "parameters": [
+          {
+            "name": "eventid",
+            "in": "query",
+            "description": "the eventid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "shakeid",
+            "in": "query",
+            "description": "the shakeid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/azurecontent/StaticData/comparefiles": {
+      "post": {
+        "tags": ["StaticData"],
+        "summary": "Compare the files on azure storage",
+        "requestBody": {
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/FileToUpload"
+                }
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/FileToUpload"
+                }
+              }
+            },
+            "text/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/FileToUpload"
+                }
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/FileToUpload"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/azurecontent/StaticData/updaterepository": {
+      "post": {
+        "tags": ["StaticData"],
+        "summary": "Update Storage Repository used by AI volcano",
+        "requestBody": {
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/azurecontent/StaticData/updategenericrepository": {
+      "post": {
+        "tags": ["StaticData"],
+        "summary": "Update Storage Repository used by GDACS Contecxt data",
+        "requestBody": {
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/azurecontent/StaticData/updategenericrepositorysync": {
+      "post": {
+        "tags": ["StaticData"],
+        "summary": "Update Storage Repository used by GDACS Contecxt data",
+        "requestBody": {
+          "content": {
+            "application/json-patch+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            },
+            "application/*+json": {
+              "schema": {
+                "$ref": "#/components/schemas/AzureRepoSchema"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/Vaac/getgeometry": {
+      "get": {
+        "tags": ["Vaac"],
+        "summary": "Get the Shakemap geomtry by key",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the shakeid",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Vaac/getvaacdata": {
+      "get": {
+        "tags": ["Vaac"],
+        "summary": "Get the VaacDatafor volcanoid specified in the period indicated",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcanoid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "fromdate",
+            "in": "query",
+            "description": "from date",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "todate",
+            "in": "query",
+            "description": "to date",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaacDataInfo"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaacDataInfo"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaacDataInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Vaac/getvaacbulletin": {
+      "get": {
+        "tags": ["Vaac"],
+        "summary": "Get the VaacDatafor volcanoid specified in the period indicated",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcanoid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "fromdate",
+            "in": "query",
+            "description": "from date",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "todate",
+            "in": "query",
+            "description": "to date",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "pageNumber",
+            "in": "query",
+            "description": "The number of page to show",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "description": "The maximum record to show in the response",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaacBulletin"
+                  }
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaacBulletin"
+                  }
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VaacBulletin"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Vaac/getvaacbulletintext": {
+      "get": {
+        "tags": ["Vaac"],
+        "summary": "Get the Vaac Bulletin text by internal id",
+        "parameters": [
+          {
+            "name": "idbulletin",
+            "in": "query",
+            "description": "the volcanoid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaacBulletin"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaacBulletin"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VaacBulletin"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Vaac/getgeometrypop": {
+      "get": {
+        "tags": ["Vaac"],
+        "summary": "Get the Shakemap geomtry by key",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the shakeid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureCollection"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Volcano/getseismicdata": {
+      "get": {
+        "tags": ["Volcano"],
+        "summary": "Get Seismic activity in a buffer having the radius specified around the volcano position in a period indicated",
+        "parameters": [
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "the search to date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcano id to consider in the filter area",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "radiusKm",
+            "in": "query",
+            "description": "the radius in km to apply at the buffers around the volcano position",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SesismicCollection"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Volcano/getvolcanoesinfo": {
+      "get": {
+        "tags": ["Volcano"],
+        "summary": "Get Volcanoes position and related seismic activities in a specified radius in the period indicated",
+        "parameters": [
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "the search to date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "radiusKm",
+            "in": "query",
+            "description": "the radius in km to apply at the buffers around the volcano position",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolcanoesCollection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Volcano/getvolcanoesinfoinperiod": {
+      "get": {
+        "tags": ["Volcano"],
+        "summary": "Get Volcanoes position and basic info in a specified radius",
+        "parameters": [
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "active",
+            "in": "query",
+            "description": "Set true obtain volcanos having vaa info from date specified, false to obtain inactive",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolcanoesCollection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Volcano/getvolcanoinfo": {
+      "get": {
+        "tags": ["Volcano"],
+        "summary": "Get Volcano position and related seismic activities in a specified radius in the period indicated",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcano id",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "the search to date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "radiusKm",
+            "in": "query",
+            "description": "the radius in km to apply at the buffers around the volcano position",
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolcanoesCollection"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/Volcano/getseismicdata_area": {
+      "get": {
+        "tags": ["Volcano"],
+        "summary": "Get Seismic activity in a buffer having the radius specified around the volcano position in a period indicated",
+        "parameters": [
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "the search to date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SesismicCollection"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/VolcanoAdditional/getmountdata": {
+      "get": {
+        "tags": ["VolcanoAdditional"],
+        "summary": "Get Volacano additional mount data for te volcano specified volcano position in a period indicated",
+        "parameters": [
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "the search to date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcano id to consider in the filter area",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "sourcecode",
+            "in": "query",
+            "description": "the source code of data to extract (\"SO2\",\"DISP\" [deformation])",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AdditionalData"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/VolcanoAdditional/getmirovadata": {
+      "get": {
+        "tags": ["VolcanoAdditional"],
+        "summary": "Get Volacano additional mirova data for te volcano specified volcano position in a period indicated",
+        "parameters": [
+          {
+            "name": "fromDate",
+            "in": "query",
+            "description": "the search start date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "toDate",
+            "in": "query",
+            "description": "the search to date to apply at the filter",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcano id to consider in the filter area",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AdditionalData"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Unprocessable Content",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrMsg"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/VolcanoSmithNews/getsmithsonianbyvolcanoid": {
+      "get": {
+        "tags": ["VolcanoSmithNews"],
+        "summary": "Get the Smithsonian Volcano news by volcanoid",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcanoid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GdacsVolcanoesNewsSi"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/VolcanoSmithNews/getsmithsonianbykey": {
+      "get": {
+        "tags": ["VolcanoSmithNews"],
+        "summary": "Get the single Smithsonian Volcano news by volcanoid and date",
+        "parameters": [
+          {
+            "name": "volcanoid",
+            "in": "query",
+            "description": "the volcanoid",
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "date",
+            "in": "query",
+            "description": "the date of smithsonian report to search",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GdacsVolcanoesNewsSi"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdditionalData": {
+        "type": "object",
+        "properties": {
+          "volcanoid": {
+            "type": "integer",
+            "description": "The Volcnoid",
+            "format": "int32"
+          },
+          "source": {
+            "type": "string",
+            "description": "The souurce of data (SO2,...)",
+            "nullable": true
+          },
+          "unit": {
+            "type": "string",
+            "description": "The unit",
+            "nullable": true
+          },
+          "value": {
+            "type": "number",
+            "description": "The Value detected",
+            "format": "double"
+          },
+          "referencedate": {
+            "type": "string",
+            "description": "The reference date",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The class represent the additional data related to volcano"
+      },
+      "AzureRepoSchema": {
+        "type": "object",
+        "properties": {
+          "containername": {
+            "type": "string",
+            "nullable": true
+          },
+          "filename": {
+            "type": "string",
+            "nullable": true
+          },
+          "content": {
+            "type": "string",
+            "nullable": true
+          },
+          "contentByte": {
+            "type": "string",
+            "format": "byte",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "CycloneInfo4DE": {
+        "type": "object",
+        "properties": {
+          "fromDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "toDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "eventid": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "eventName": {
+            "type": "string",
+            "nullable": true
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "boundingbox": {
+            "type": "string",
+            "nullable": true
+          },
+          "tracksdetails": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CycloneInfo4DETracksDetails"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "CycloneInfo4DETracksDetails": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "nullable": true
+          },
+          "datetrack": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Daily": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "The date",
+            "format": "date-time"
+          },
+          "dateString": {
+            "type": "string",
+            "description": "The date in string format to show on the table (\"dd/MM\")",
+            "nullable": true,
+            "readOnly": true
+          },
+          "total": {
+            "type": "integer",
+            "description": "Totla news released",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The daily class with the info of news daily"
+      },
+      "Emdat": {
+        "type": "object",
+        "properties": {
+          "disasternumber": {
+            "type": "string",
+            "description": "The disaster number, which is a unique identifier for the disaster in the EMDAT database.",
+            "nullable": true
+          },
+          "historical": {
+            "type": "boolean",
+            "description": "Flag to indicate if it is an historical disaster or not.",
+            "nullable": true
+          },
+          "classificationkey": {
+            "type": "string",
+            "description": "The classification key, which is used to categorize the disaster in the EMDAT database.",
+            "nullable": true
+          },
+          "groupname": {
+            "type": "string",
+            "description": "The group name, which is used to group similar disasters together in the EMDAT database.",
+            "nullable": true
+          },
+          "subgroupname": {
+            "type": "string",
+            "description": "The subgroup name, which is used to further categorize the disaster within its group in the EMDAT database.",
+            "nullable": true
+          },
+          "disastertype": {
+            "type": "string",
+            "description": "The disaster type, which indicates the nature of the disaster (e.g., earthquake, flood, etc.).",
+            "nullable": true
+          },
+          "disastersubtype": {
+            "type": "string",
+            "description": "the disaster subtype, which provides more specific information about the type of disaster (e.g., tropical cyclone, drought, etc.).",
+            "nullable": true
+          },
+          "externalids": {
+            "type": "string",
+            "description": "The external IDs, which are used to link the disaster to external sources or databases for additional information.",
+            "nullable": true
+          },
+          "disastername": {
+            "type": "string",
+            "description": "The disaster name, which is a descriptive name for the disaster.",
+            "nullable": true
+          },
+          "iso3": {
+            "type": "string",
+            "description": "The ISO 3 code, which is a three-letter country code used to identify the country associated with the disaster.",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "description": "The country name, which provides the full name of the country associated with the disaster.",
+            "nullable": true
+          },
+          "subregion": {
+            "type": "string",
+            "description": "The subregion, which provides additional geographical information about the location of the disaster within the country (e.g., region, state, province).",
+            "nullable": true
+          },
+          "location": {
+            "type": "string",
+            "description": "The location, which provides specific information about the geographical area affected by the disaster (e.g., city, town, or region).",
+            "nullable": true
+          },
+          "origin": {
+            "type": "string",
+            "description": "The origin, which indicates the source or origin of the disaster data (e.g., national disaster agency, international organization).",
+            "nullable": true
+          },
+          "associatedtype": {
+            "type": "string",
+            "description": "The associated type, which provides additional information about the nature of the disaster (e.g., natural disaster, technological disaster).",
+            "nullable": true
+          },
+          "ofdaresponse": {
+            "type": "boolean",
+            "description": "The falg to indicate if the disaster is a complex emergency or not.",
+            "nullable": true
+          },
+          "appeal": {
+            "type": "boolean",
+            "description": "The flag to indicate if the disaster is a complex emergency or not.",
+            "nullable": true
+          },
+          "declaration": {
+            "type": "boolean",
+            "description": "The flag to indicate if the disaster has a declaration or not",
+            "nullable": true
+          },
+          "aidcontribution": {
+            "type": "integer",
+            "description": "The flag to indicate if the disaster has a AID contibution",
+            "format": "int32",
+            "nullable": true
+          },
+          "magnitude": {
+            "type": "number",
+            "description": "The magnitude of the disaster, which is a numerical value representing the severity or intensity of the disaster (e.g., earthquake magnitude, flood level).",
+            "format": "double",
+            "nullable": true
+          },
+          "magnitudescale": {
+            "type": "string",
+            "description": "The scale of the magnitude",
+            "nullable": true
+          },
+          "latitude": {
+            "type": "number",
+            "description": "The latitude of the disaster location, which indicates the geographical coordinate of the disaster's epicenter or affected area.",
+            "format": "double",
+            "nullable": true
+          },
+          "longitude": {
+            "type": "number",
+            "description": "The longitude of the disaster location, which indicates the geographical coordinate of the disaster's epicenter or affected area.",
+            "format": "double",
+            "nullable": true
+          },
+          "riverbasin": {
+            "type": "string",
+            "description": "The riverbasin , which provides information about the river basin associated with the disaster, if applicable (e.g., for floods or water-related disasters).",
+            "nullable": true
+          },
+          "volcanoid": {
+            "type": "integer",
+            "description": "The volcano id if the disaster is a volcanic event, which is a unique identifier for the volcano associated with the disaster.",
+            "format": "int32",
+            "nullable": true
+          },
+          "startyear": {
+            "type": "integer",
+            "description": "The start year of the event",
+            "format": "int32",
+            "nullable": true
+          },
+          "startmonth": {
+            "type": "integer",
+            "description": "The start month of the event, which indicates the month when the disaster event began (1 for January, 2 for February, etc.).",
+            "format": "int32",
+            "nullable": true
+          },
+          "startday": {
+            "type": "integer",
+            "description": "The start day of the event, which indicates the day when the disaster event began (1 for the first day of the month, 2 for the second day, etc.).",
+            "format": "int32",
+            "nullable": true
+          },
+          "endyear": {
+            "type": "integer",
+            "description": "The end year of the event, which indicates the year when the disaster event ended or was last recorded.",
+            "format": "int32",
+            "nullable": true
+          },
+          "endmonth": {
+            "type": "integer",
+            "description": "The end month of the event, which indicates the month when the disaster event ended or was last recorded (1 for January, 2 for February, etc.).",
+            "format": "int32",
+            "nullable": true
+          },
+          "endday": {
+            "type": "integer",
+            "description": "The end day of the event, which indicates the day when the disaster event ended or was last recorded (1 for the first day of the month, 2 for the second day, etc.).",
+            "format": "int32",
+            "nullable": true
+          },
+          "totaldeaths": {
+            "type": "integer",
+            "description": "The total number of deaths",
+            "format": "int32",
+            "nullable": true
+          },
+          "numinjured": {
+            "type": "integer",
+            "description": "The injured number",
+            "format": "int32",
+            "nullable": true
+          },
+          "numaffected": {
+            "type": "integer",
+            "description": "The number of affected people, which indicates the total number of individuals affected by the disaster, including those injured, displaced, or otherwise impacted.",
+            "format": "int32",
+            "nullable": true
+          },
+          "numhomeless": {
+            "type": "integer",
+            "description": "The number of displaced people, which indicates the total number of individuals who were forced to leave their homes due to the disaster.",
+            "format": "int32",
+            "nullable": true
+          },
+          "totalaffected": {
+            "type": "integer",
+            "description": "The total number of people affected by the disaster, which includes all individuals who were impacted in any way (e.g., deaths, injuries, displacement).",
+            "format": "int32",
+            "nullable": true
+          },
+          "reconstrdam": {
+            "type": "number",
+            "description": "The reconstruction damage, which indicates the estimated cost of rebuilding or repairing infrastructure and property damaged by the disaster.",
+            "format": "double",
+            "nullable": true
+          },
+          "reconstrdamadj": {
+            "type": "number",
+            "description": "The reconstruction damage adjusted, which indicates the estimated cost of rebuilding or repairing infrastructure and property damaged by the disaster, adjusted for inflation or other factors.",
+            "format": "double",
+            "nullable": true
+          },
+          "insurdam": {
+            "type": "number",
+            "description": "The insured damage, which indicates the estimated cost of damage covered by insurance policies as a result of the disaster.",
+            "format": "double",
+            "nullable": true
+          },
+          "insurdamadj": {
+            "type": "number",
+            "description": "The insured damage adjusted, which indicates the estimated cost of damage covered by insurance policies as a result of the disaster, adjusted for inflation or other factors.",
+            "format": "double",
+            "nullable": true
+          },
+          "totaldam": {
+            "type": "number",
+            "description": "The total damage, which indicates the overall estimated cost of damage caused by the disaster, including both insured and uninsured losses.",
+            "format": "double",
+            "nullable": true
+          },
+          "totaldamadj": {
+            "type": "number",
+            "description": "The total damage adjusted, which indicates the overall estimated cost of damage caused by the disaster, adjusted for inflation or other factors.",
+            "format": "double",
+            "nullable": true
+          },
+          "cpi": {
+            "type": "number",
+            "description": "The total economic damage, which indicates the overall estimated cost of economic losses caused by the disaster, including both direct and indirect impacts.",
+            "format": "double",
+            "nullable": true
+          },
+          "fromDate": {
+            "type": "string",
+            "description": "The from date of the disaster, which indicates the start date of the disaster event based on startyear, startmonth, and startday properties.",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "toDate": {
+            "type": "string",
+            "description": "The end date of the disaster, which indicates the end date of the disaster event based on endyear, endmonth, and endday properties.",
+            "format": "date-time",
+            "readOnly": true
+          },
+          "eventkeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Eventkey"
+            },
+            "description": "The list of key-event related to this emdat",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The emdat class to expose information"
+      },
+      "EmmNews": {
+        "type": "object",
+        "properties": {
+          "emmid": {
+            "type": "string",
+            "description": "The EMMID",
+            "nullable": true
+          },
+          "pubdate": {
+            "type": "string",
+            "description": "The publication date",
+            "format": "date-time"
+          },
+          "source": {
+            "type": "string",
+            "description": "The news's source",
+            "nullable": true
+          },
+          "link": {
+            "type": "string",
+            "description": "The link of the original news",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "description": "The title of the news",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "description": "Te contento of the news",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Class to represent the Emmnews to export"
+      },
+      "ErrMsg": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The error message text",
+            "nullable": true
+          },
+          "errcode": {
+            "type": "integer",
+            "description": "The error code",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Class to exposes the error message"
+      },
+      "Eventdetail": {
+        "type": "object",
+        "properties": {
+          "eventtype": {
+            "type": "string",
+            "description": "The eventtype",
+            "nullable": true
+          },
+          "eventid": {
+            "type": "integer",
+            "description": "The eventid",
+            "format": "int32"
+          },
+          "country": {
+            "type": "string",
+            "description": "The country",
+            "nullable": true
+          },
+          "alertlevel": {
+            "type": "string",
+            "description": "The alertlevel",
+            "nullable": true
+          },
+          "fromdate": {
+            "type": "string",
+            "description": "The date when event started",
+            "format": "date-time"
+          },
+          "todate": {
+            "type": "string",
+            "description": "The date when event ended",
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string",
+            "description": "The event description",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Class to expose event detail"
+      },
+      "Eventkey": {
+        "type": "object",
+        "properties": {
+          "eventtype": {
+            "type": "string",
+            "description": "The eventtype",
+            "nullable": true
+          },
+          "eventid": {
+            "type": "integer",
+            "description": "The eventid",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The Key event object"
+      },
+      "Feature": {
+        "required": ["type", "geometry"],
+        "type": "object",
+        "properties": {
+          "type": {
+            "enum": ["Feature"],
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "geometry": {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          "properties": {
+            "type": "object"
+          }
+        },
+        "description": "GeoJSON Feature",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.2"
+        }
+      },
+      "Feature1": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "image": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "date": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "contributors": {
+            "type": "string",
+            "nullable": true
+          },
+          "oid": {
+            "type": "string",
+            "nullable": true
+          },
+          "datestring": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "link": {
+            "type": "string",
+            "nullable": true
+          },
+          "linkresource": {
+            "type": "string",
+            "nullable": true
+          },
+          "eventtype": {
+            "type": "string",
+            "nullable": true
+          },
+          "categoryMap": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "productprovider": {
+            "type": "string",
+            "nullable": true
+          },
+          "mapType": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "FeatureCollection": {
+        "required": ["type", "features"],
+        "type": "object",
+        "properties": {
+          "type": {
+            "enum": ["FeatureCollection"],
+            "type": "string"
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Feature"
+            }
+          }
+        },
+        "description": "GeoJSON Feature collection",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.3"
+        }
+      },
+      "FileToUpload": {
+        "type": "object",
+        "properties": {
+          "fileName": {
+            "type": "string",
+            "nullable": true
+          },
+          "byteLength": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "fileAsh": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Gadm0Dtos": {
+        "type": "object",
+        "properties": {
+          "gid0": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Gadm1Dtos": {
+        "type": "object",
+        "properties": {
+          "fid1": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "gid0": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid1": {
+            "type": "string",
+            "nullable": true
+          },
+          "name1": {
+            "type": "string",
+            "nullable": true
+          },
+          "varname1": {
+            "type": "string",
+            "nullable": true
+          },
+          "nlName1": {
+            "type": "string",
+            "nullable": true
+          },
+          "type1": {
+            "type": "string",
+            "nullable": true
+          },
+          "engtype1": {
+            "type": "string",
+            "nullable": true
+          },
+          "cc1": {
+            "type": "string",
+            "nullable": true
+          },
+          "hasc1": {
+            "type": "string",
+            "nullable": true
+          },
+          "iso1": {
+            "type": "string",
+            "nullable": true
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Gadm2Dtos": {
+        "type": "object",
+        "properties": {
+          "fid1": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "gid0": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid1": {
+            "type": "string",
+            "nullable": true
+          },
+          "name1": {
+            "type": "string",
+            "nullable": true
+          },
+          "nlName1": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid2": {
+            "type": "string",
+            "nullable": true
+          },
+          "name2": {
+            "type": "string",
+            "nullable": true
+          },
+          "varname2": {
+            "type": "string",
+            "nullable": true
+          },
+          "nlName2": {
+            "type": "string",
+            "nullable": true
+          },
+          "type2": {
+            "type": "string",
+            "nullable": true
+          },
+          "engtype2": {
+            "type": "string",
+            "nullable": true
+          },
+          "cc2": {
+            "type": "string",
+            "nullable": true
+          },
+          "hasc2": {
+            "type": "string",
+            "nullable": true
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Gadm3Dtos": {
+        "type": "object",
+        "properties": {
+          "gid0": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid1": {
+            "type": "string",
+            "nullable": true
+          },
+          "name1": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid2": {
+            "type": "string",
+            "nullable": true
+          },
+          "name2": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid3": {
+            "type": "string",
+            "nullable": true
+          },
+          "name3": {
+            "type": "string",
+            "nullable": true
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Gadm4Dtos": {
+        "type": "object",
+        "properties": {
+          "gid0": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid1": {
+            "type": "string",
+            "nullable": true
+          },
+          "name1": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid2": {
+            "type": "string",
+            "nullable": true
+          },
+          "name2": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid3": {
+            "type": "string",
+            "nullable": true
+          },
+          "name3": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid4": {
+            "type": "string",
+            "nullable": true
+          },
+          "name4": {
+            "type": "string",
+            "nullable": true
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Gadm5Dtos": {
+        "type": "object",
+        "properties": {
+          "gid0": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid1": {
+            "type": "string",
+            "nullable": true
+          },
+          "name1": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid2": {
+            "type": "string",
+            "nullable": true
+          },
+          "name2": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid3": {
+            "type": "string",
+            "nullable": true
+          },
+          "name3": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid4": {
+            "type": "string",
+            "nullable": true
+          },
+          "name4": {
+            "type": "string",
+            "nullable": true
+          },
+          "gid5": {
+            "type": "string",
+            "nullable": true
+          },
+          "name5": {
+            "type": "string",
+            "nullable": true
+          },
+          "shape": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GdacsExportInfoProdcut": {
+        "type": "object",
+        "properties": {
+          "keyevent": {
+            "type": "string",
+            "nullable": true
+          },
+          "titleevent": {
+            "type": "string",
+            "nullable": true
+          },
+          "eventtype": {
+            "type": "string",
+            "nullable": true
+          },
+          "hasunosatmaps": {
+            "type": "boolean"
+          },
+          "hasunosatreport": {
+            "type": "boolean"
+          },
+          "hascopernicusactivation": {
+            "type": "boolean"
+          },
+          "hascopernicusmap": {
+            "type": "boolean"
+          },
+          "hasdaily": {
+            "type": "boolean"
+          },
+          "hasemergencyreport": {
+            "type": "boolean"
+          },
+          "hasadam": {
+            "type": "boolean"
+          },
+          "hasocha": {
+            "type": "boolean"
+          },
+          "hasregional": {
+            "type": "boolean"
+          },
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Feature1"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "GdacsVolcanoesNewsSi": {
+        "type": "object",
+        "properties": {
+          "oid": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "oidVolcano": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "datereference": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "link": {
+            "type": "string",
+            "nullable": true
+          },
+          "neweruption": {
+            "type": "boolean",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Geometry": {
+        "required": ["type"],
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "object",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Point"
+              },
+              {
+                "$ref": "#/components/schemas/MultiPoint"
+              },
+              {
+                "$ref": "#/components/schemas/LineString"
+              },
+              {
+                "$ref": "#/components/schemas/MultiLineString"
+              },
+              {
+                "$ref": "#/components/schemas/Polygon"
+              },
+              {
+                "$ref": "#/components/schemas/MultiPolygon"
+              },
+              {
+                "$ref": "#/components/schemas/GeometryCollection"
+              }
+            ],
+            "description": "the geometry type"
+          }
+        },
+        "description": "GeoJSON geometry",
+        "discriminator": {
+          "propertyName": "type"
+        },
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1"
+        }
+      },
+      "GeometryCollection": {
+        "required": ["type", "geometries"],
+        "type": "object",
+        "properties": {
+          "type": {
+            "enum": ["GeometryCollection"],
+            "type": "string"
+          },
+          "geometries": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Point"
+                },
+                {
+                  "$ref": "#/components/schemas/MultiPoint"
+                },
+                {
+                  "$ref": "#/components/schemas/LineString"
+                },
+                {
+                  "$ref": "#/components/schemas/MultiLineString"
+                },
+                {
+                  "$ref": "#/components/schemas/Polygon"
+                },
+                {
+                  "$ref": "#/components/schemas/MultiPolygon"
+                }
+              ]
+            }
+          }
+        },
+        "description": "GeoJSON geometry collection",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.8"
+        }
+      },
+      "HistoricalEvents": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "description": "The total events",
+            "format": "int32"
+          },
+          "fromDate": {
+            "type": "string",
+            "description": "The from date",
+            "format": "date-time",
+            "nullable": true
+          },
+          "toDate": {
+            "type": "string",
+            "description": "The To date",
+            "format": "date-time",
+            "nullable": true
+          },
+          "alertLevelTotals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsAlertLevel"
+            },
+            "description": "The list of alertlevels and the count",
+            "nullable": true
+          },
+          "eventtypeTotals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsEventtype"
+            },
+            "description": "The list of eventtype and the count by alertlevel",
+            "nullable": true
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Eventdetail"
+            },
+            "description": "The list of events with small details",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "the class that represente the historical events, and counter for a specific country in a date range"
+      },
+      "InfoDetail": {
+        "type": "object",
+        "properties": {
+          "dataType": {
+            "type": "string",
+            "description": "The type of data recorded (e.g., \"VAA\", \"SO2\", \"SCORE\")",
+            "nullable": true
+          },
+          "referenceDate": {
+            "type": "string",
+            "description": "The reference date of the data recorded",
+            "format": "date-time",
+            "nullable": true
+          },
+          "referenceDateStr": {
+            "type": "string",
+            "description": "The reference date of the data recorded in string format",
+            "nullable": true,
+            "readOnly": true
+          },
+          "value": {
+            "type": "number",
+            "description": "The value recorded",
+            "format": "double",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The info detail class"
+      },
+      "LineString": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": ["LineString"],
+                "type": "string"
+              },
+              "coordinates": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Point3D"
+                }
+              }
+            }
+          }
+        ],
+        "description": "GeoJSON LineString",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.4"
+        }
+      },
+      "MediaCoverage": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "description": "Total news",
+            "format": "int32"
+          },
+          "casualties": {
+            "type": "integer",
+            "description": "Casualties identified",
+            "format": "int32"
+          },
+          "casualtiesx100": {
+            "type": "number",
+            "description": "% of casualties",
+            "format": "double"
+          },
+          "lastHour": {
+            "type": "integer",
+            "description": "Numer of news in the last hour",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The media coverage class with detailed info"
+      },
+      "MultiLineString": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": ["MultiLineString"],
+                "type": "string"
+              },
+              "coordinates": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Point3D"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "GeoJSON MultiLineString",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.5"
+        }
+      },
+      "MultiPoint": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": ["MultiPoint"],
+                "type": "string"
+              },
+              "coordinates": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Point3D"
+                }
+              }
+            }
+          }
+        ],
+        "description": "GeoJSON MultiPolygon",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.3"
+        }
+      },
+      "MultiPolygon": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": ["MultiPolygon"],
+                "type": "string"
+              },
+              "coordinates": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Point3D"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "GeoJSON MultiPolygon",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.7"
+        }
+      },
+      "NewsDtos": {
+        "type": "object",
+        "properties": {
+          "oid": {
+            "type": "integer",
+            "description": "Internal ID",
+            "format": "int32"
+          },
+          "pubdate": {
+            "type": "string",
+            "description": "The date when the news was published",
+            "format": "date-time",
+            "nullable": true
+          },
+          "datefrom": {
+            "type": "string",
+            "description": "The date range for the news, indicating when it is valid or relevant",
+            "format": "date-time",
+            "nullable": true
+          },
+          "dateto": {
+            "type": "string",
+            "description": "The end date of the news validity period, if applicable",
+            "format": "date-time",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "description": "The title of the news article or entry",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "description": "The description of the news article, providing additional context or information",
+            "nullable": true
+          },
+          "shortdescription": {
+            "type": "string",
+            "description": "The Short description of the news article, providing a brief summary",
+            "nullable": true
+          },
+          "link": {
+            "type": "string",
+            "description": "The external link to the news article or resource, allowing users to access the full content",
+            "nullable": true
+          },
+          "author": {
+            "type": "string",
+            "description": "The author of the news article, typically the person or organization that created it",
+            "nullable": true
+          },
+          "visible": {
+            "type": "boolean",
+            "description": "Flag indicating whether the news is visible or not",
+            "nullable": true
+          },
+          "dateinsert": {
+            "type": "string",
+            "description": "The date when the news was inserted into the system",
+            "format": "date-time",
+            "nullable": true
+          },
+          "datemodified": {
+            "type": "string",
+            "description": "The date when the news was last modified",
+            "format": "date-time",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Modet news to export"
+      },
+      "Point": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": ["Point"],
+                "type": "string",
+                "description": "the geometry type"
+              },
+              "coordinates": {
+                "$ref": "#/components/schemas/Point3D"
+              }
+            }
+          }
+        ],
+        "description": "GeoJSON Point",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.2"
+        }
+      },
+      "Point3D": {
+        "maxItems": 3,
+        "minItems": 2,
+        "type": "array",
+        "items": {
+          "type": "number"
+        },
+        "description": "Point in 3D space",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.1"
+        }
+      },
+      "Polygon": {
+        "type": "object",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Geometry"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": ["Polygon"],
+                "type": "string"
+              },
+              "coordinates": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Point3D"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "GeoJSON Polygon",
+        "externalDocs": {
+          "url": "https://datatracker.ietf.org/doc/html/rfc7946#section-3.1.6"
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "detail": {
+            "type": "string",
+            "nullable": true
+          },
+          "instance": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": {}
+      },
+      "SesismicCollection": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "The type of the geojson object",
+            "nullable": true
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SesismicFeature"
+            },
+            "description": "The list of features",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "the class that represent seismic data collection"
+      },
+      "SesismicFeature": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "The type of the geojson object",
+            "nullable": true
+          },
+          "properties": {
+            "$ref": "#/components/schemas/SesismicProperties"
+          },
+          "geometry": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false,
+        "description": "the class that represent a seismic feature"
+      },
+      "SesismicProperties": {
+        "type": "object",
+        "properties": {
+          "eventdate": {
+            "type": "string",
+            "description": "The date of seismic event",
+            "format": "date-time"
+          },
+          "magnitude": {
+            "type": "number",
+            "description": "The magnitude",
+            "format": "double"
+          },
+          "depth": {
+            "type": "number",
+            "description": "the depth of seismic event",
+            "format": "double"
+          },
+          "source": {
+            "type": "string",
+            "description": "The source of seismic event",
+            "nullable": true
+          },
+          "icon": {
+            "type": "string",
+            "description": "The link of the icon representing the seismic event",
+            "nullable": true
+          },
+          "class": {
+            "type": "string",
+            "description": "The class used to represent geometri on the map",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The     properties of the seismic event"
+      },
+      "StatisticEmmNews": {
+        "type": "object",
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/MediaCoverage"
+          },
+          "dailyNews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Daily"
+            },
+            "description": "List of news per day",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Class to expose the EMM news statistic"
+      },
+      "StatsAlertLevel": {
+        "type": "object",
+        "properties": {
+          "alertlevel": {
+            "type": "string",
+            "description": "The alertlevel code",
+            "nullable": true
+          },
+          "total": {
+            "type": "integer",
+            "description": "The number of alertlevel found",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false,
+        "description": "Class to expose the alertlevel and the count"
+      },
+      "StatsEventtype": {
+        "type": "object",
+        "properties": {
+          "eventtype": {
+            "type": "string",
+            "description": "The eventtype code",
+            "nullable": true
+          },
+          "eventtypeDescription": {
+            "type": "string",
+            "description": "The eventtype description",
+            "nullable": true
+          },
+          "alertLevelTotals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsAlertLevel"
+            },
+            "description": "The listo of alertelvels associated",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "Class to expose the eventtype with detailed alertlevel"
+      },
+      "VaacBulletin": {
+        "type": "object",
+        "properties": {
+          "volcanoid": {
+            "type": "integer",
+            "description": "The volcano id",
+            "format": "int32"
+          },
+          "vaacDate": {
+            "type": "string",
+            "description": "The Vaac date",
+            "format": "date-time",
+            "nullable": true
+          },
+          "advisoryNumber": {
+            "type": "string",
+            "description": "The advisory number specified",
+            "nullable": true
+          },
+          "vaaccenter": {
+            "type": "string",
+            "description": "The vaac center that emitted the advisory",
+            "nullable": true
+          },
+          "plumHeight": {
+            "type": "number",
+            "description": "The plume hieght in meter (the observed one)",
+            "format": "double",
+            "nullable": true
+          },
+          "vei": {
+            "type": "number",
+            "description": "The VEI calculated (the based on the observed plume)",
+            "format": "double",
+            "nullable": true
+          },
+          "aviationColor": {
+            "type": "string",
+            "description": "The aviation color",
+            "nullable": true
+          },
+          "obsPlumHeight": {
+            "type": "number",
+            "description": "The observed plume",
+            "format": "double",
+            "nullable": true
+          },
+          "rmkPlumHeight": {
+            "type": "number",
+            "description": "The plume specified in the remarks",
+            "format": "double",
+            "nullable": true
+          },
+          "bulletinText": {
+            "type": "string",
+            "description": "The original VAA text",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The model to represent the VAAC data info"
+      },
+      "VaacDataInfo": {
+        "type": "object",
+        "properties": {
+          "volcanoid": {
+            "type": "integer",
+            "description": "The volcano id",
+            "format": "int32"
+          },
+          "vaacDate": {
+            "type": "string",
+            "description": "The Vaac date",
+            "format": "date-time",
+            "nullable": true
+          },
+          "advisoryNumber": {
+            "type": "string",
+            "description": "The advisory number specified",
+            "nullable": true
+          },
+          "vaaccenter": {
+            "type": "string",
+            "description": "The vaac center that emitted the advisory",
+            "nullable": true
+          },
+          "plumHeight": {
+            "type": "number",
+            "description": "The plume hieght in meter (the observed one)",
+            "format": "double",
+            "nullable": true
+          },
+          "vei": {
+            "type": "number",
+            "description": "The VEI calculated (the based on the observed plume)",
+            "format": "double",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The model to represent the VAAC main data info"
+      },
+      "VolcanoFeature": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Type of the GeoJSON object, always \"Feature\"",
+            "nullable": true
+          },
+          "properties": {
+            "$ref": "#/components/schemas/VolcanoProperties"
+          },
+          "geometry": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false,
+        "description": "The class to represent the volcano feature"
+      },
+      "VolcanoProperties": {
+        "type": "object",
+        "properties": {
+          "oid": {
+            "type": "integer",
+            "description": "The Volcanoid",
+            "format": "int32",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "description": "The Volano name",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "description": "The country of volcano",
+            "nullable": true
+          },
+          "primatyTypeVo": {
+            "type": "string",
+            "description": "The type of vulcano",
+            "nullable": true
+          },
+          "rockType": {
+            "type": "string",
+            "description": "The rocktype of volcano",
+            "nullable": true
+          },
+          "pei": {
+            "type": "number",
+            "description": "The population exposure index",
+            "format": "double",
+            "nullable": true
+          },
+          "maxVei": {
+            "type": "string",
+            "description": "The max vei assigned to volcano",
+            "nullable": true
+          },
+          "icon": {
+            "type": "string",
+            "description": "The icon link to represent volcano",
+            "nullable": true
+          },
+          "class": {
+            "type": "string",
+            "description": "The class assignet to volcano for the representation on map",
+            "nullable": true
+          },
+          "label": {
+            "type": "string",
+            "description": "The description label",
+            "nullable": true
+          },
+          "latestVaacCount": {
+            "type": "integer",
+            "description": "The number of Vaa emitted for the volcano in the period requested",
+            "format": "int32"
+          },
+          "latestVaacDate": {
+            "type": "string",
+            "description": "The date of the latest vaa emitted",
+            "format": "date-time",
+            "nullable": true
+          },
+          "latestVaacDateStr": {
+            "type": "string",
+            "description": "The Date in string format of the latest vaa emitted",
+            "nullable": true,
+            "readOnly": true
+          },
+          "urlApiSeismicData": {
+            "type": "string",
+            "description": "The url to obtain the seismic data",
+            "nullable": true
+          },
+          "currentDetail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InfoDetail"
+            },
+            "description": "The detail information about current situation",
+            "nullable": true
+          },
+          "highDetail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InfoDetail"
+            },
+            "description": "the detail of highest value detected in the period",
+            "nullable": true
+          },
+          "lastDetail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InfoDetail"
+            },
+            "description": "the detail of latest  value detected in the period",
+            "nullable": true
+          },
+          "seismicData": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VolcanoSesismicProperties"
+            },
+            "description": "The info related to seismic data for the volcano",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The class to represent the volcano properties"
+      },
+      "VolcanoSesismicProperties": {
+        "type": "object",
+        "properties": {
+          "eventdate": {
+            "type": "string",
+            "description": "The date of seismic event",
+            "format": "date-time"
+          },
+          "magnitude": {
+            "type": "number",
+            "description": "The magnitude",
+            "format": "double"
+          },
+          "depth": {
+            "type": "number",
+            "description": "the depth of seismic event",
+            "format": "double"
+          },
+          "source": {
+            "type": "string",
+            "description": "The source of seismic event",
+            "nullable": true
+          },
+          "icon": {
+            "type": "string",
+            "description": "The link of the icon representing the seismic event",
+            "nullable": true
+          },
+          "class": {
+            "type": "string",
+            "description": "The class used to represent geometri on the map",
+            "nullable": true
+          },
+          "geometry": {
+            "$ref": "#/components/schemas/Geometry"
+          }
+        },
+        "additionalProperties": false
+      },
+      "VolcanoesCollection": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Type of the GeoJSON object, always \"FeatureCollection\"",
+            "nullable": true
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VolcanoFeature"
+            },
+            "description": "The list of volcano features",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false,
+        "description": "The class to represent the volcano collection data to export as GeoJSON format"
+      }
+    }
+  }
+}

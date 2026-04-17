@@ -147,11 +147,14 @@ def process_signal(self, signal_data: dict):
         location_name = None
         signal_lat = None
         signal_lng = None
+        probability_radius_km = None
         if signal.estimatedEventLocation:
             location_name = signal.estimatedEventLocation.name
             if signal.estimatedEventLocation.coordinates and len(signal.estimatedEventLocation.coordinates) >= 2:
                 signal_lat = signal.estimatedEventLocation.coordinates[0]
                 signal_lng = signal.estimatedEventLocation.coordinates[1]
+            if signal.estimatedEventLocation.probabilityRadius is not None:
+                probability_radius_km = signal.estimatedEventLocation.probabilityRadius
 
         # Use location resolved by Claude/API during signal creation
         origin_loc = created.get("originLocation")
@@ -173,6 +176,7 @@ def process_signal(self, signal_data: dict):
             classification=classification,
             signal_lat=signal_lat,
             signal_lng=signal_lng,
+            probability_radius_km=probability_radius_km,
         )
 
         # ─── Stage 4: Alert escalation (if high severity) ───────────────────
@@ -299,4 +303,180 @@ def process_manual_signal(
 
     except Exception as exc:
         logger.error("process_manual_signal failed: %s", exc, exc_info=True)
+        raise self.retry(exc=exc, countdown=10)
+
+
+@app.task(
+    name="src.tasks.process.process_gdacs_signal",
+    bind=True,
+    max_retries=2,
+    acks_late=True,
+)
+def process_gdacs_signal(
+    self,
+    signal_id: str,
+    gdacs_event: dict,
+):
+    """
+    Process a GDACS-sourced signal.
+
+    GDACS events are already structured disaster data, so we:
+    1. Build classification directly from GDACS metadata (skip Claude classification)
+    2. Group into event (new or existing) via Claude
+    3. Assess for alert escalation if high severity
+    """
+    try:
+        glide_type = gdacs_event.get("glide_type", "ot")
+        severity = gdacs_event.get("severity", 3)
+        alert_level = gdacs_event.get("alert_level", "Green")
+        title = gdacs_event.get("title", "GDACS event")
+        description = gdacs_event.get("description") or ""
+        location_name = gdacs_event.get("country")
+        population_affected = gdacs_event.get("population_affected")
+
+        # Enrich description with population data if available
+        if population_affected:
+            description = f"{description} Approximately {population_affected:,} people affected."
+
+        # Build classification from GDACS metadata (no Claude needed)
+        classification = SignalClassification(
+            disaster_types=[glide_type],
+            relevance=1.0 if alert_level in ("Red", "Orange") else 0.7,
+            severity=severity,
+            summary=f"GDACS {alert_level} alert: {title}" + (f" ({population_affected:,} affected)" if population_affected else ""),
+        )
+
+        logger.info(
+            "GDACS signal %s: type=%s severity=%d alert=%s",
+            signal_id, glide_type, severity, alert_level,
+        )
+
+        # Update signal severity
+        update_signal_severity(signal_id, severity)
+
+        # Skip low-relevance events
+        if classification.relevance < settings.relevance_threshold:
+            logger.info("GDACS signal %s below relevance threshold, skipping", signal_id)
+            return {"signal_id": signal_id, "event_id": None, "alert_id": None}
+
+        # Group into event (no probabilityRadius for GDACS — uses default 1km)
+        event = group_signal(
+            signal_id=signal_id,
+            signal_title=title,
+            signal_description=description,
+            signal_location_name=location_name,
+            signal_origin_id=None,
+            signal_timestamp=gdacs_event.get("from_date"),
+            classification=classification,
+            signal_lat=gdacs_event.get("lat"),
+            signal_lng=gdacs_event.get("lng"),
+        )
+
+        # Assess for alert if high severity (Red/Orange)
+        alert = None
+        if event and severity >= 4:
+            alert = assess_and_escalate(
+                event=event,
+                signal_summaries=[classification.summary],
+                max_severity=severity,
+            )
+
+        return {
+            "signal_id": signal_id,
+            "event_id": event["id"] if event else None,
+            "alert_id": alert["id"] if alert else None,
+        }
+
+    except Exception as exc:
+        logger.error("process_gdacs_signal failed: %s", exc, exc_info=True)
+        raise self.retry(exc=exc, countdown=10)
+
+
+@app.task(
+    name="src.tasks.process.process_acled_signal",
+    bind=True,
+    max_retries=2,
+    acks_late=True,
+)
+def process_acled_signal(
+    self,
+    signal_id: str,
+    acled_event: dict,
+):
+    """
+    Process an ACLED-sourced signal.
+
+    ACLED events are structured conflict data, so we:
+    1. Build classification directly from ACLED metadata (skip Claude classification)
+    2. Group into event (new or existing) via Claude
+    3. Assess for alert escalation if high severity (fatalities / event type)
+    """
+    try:
+        glide_type = acled_event.get("glide_type", "ot")
+        severity = acled_event.get("severity", 2)
+        fatalities = acled_event.get("fatalities", 0)
+        title = acled_event.get("title", "ACLED event")
+        description = acled_event.get("description") or ""
+        location_name = (
+            acled_event.get("location")
+            or acled_event.get("admin2")
+            or acled_event.get("admin1")
+            or acled_event.get("country")
+        )
+
+        # Build classification from ACLED metadata
+        summary = f"ACLED {acled_event.get('event_type', 'conflict')} event"
+        if fatalities:
+            summary += f" ({fatalities} fatalities)"
+
+        classification = SignalClassification(
+            disaster_types=[glide_type],
+            relevance=1.0 if fatalities > 0 or severity >= 4 else 0.8,
+            severity=severity,
+            summary=summary,
+        )
+
+        logger.info(
+            "ACLED signal %s: type=%s severity=%d fatalities=%d",
+            signal_id, glide_type, severity, fatalities,
+        )
+
+        # Update signal severity
+        update_signal_severity(signal_id, severity)
+
+        # Skip low-relevance events
+        if classification.relevance < settings.relevance_threshold:
+            logger.info("ACLED signal %s below relevance threshold, skipping", signal_id)
+            return {"signal_id": signal_id, "event_id": None, "alert_id": None}
+
+        # Group into event
+        event = group_signal(
+            signal_id=signal_id,
+            signal_title=title,
+            signal_description=description,
+            signal_location_name=location_name,
+            signal_origin_id=None,
+            signal_timestamp=acled_event.get("event_date"),
+            classification=classification,
+            signal_lat=acled_event.get("lat"),
+            signal_lng=acled_event.get("lng"),
+        )
+
+        # Assess for alert if high severity
+        alert = None
+        if event and severity >= 4:
+            alert = assess_and_escalate(
+                event=event,
+                signal_summaries=[classification.summary],
+                max_severity=severity,
+            )
+
+        return {
+            "signal_id": signal_id,
+            "event_id": event["id"] if event else None,
+            "alert_id": alert["id"] if alert else None,
+        }
+
+    except Exception as exc:
+        logger.error("process_acled_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)

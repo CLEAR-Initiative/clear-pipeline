@@ -33,7 +33,7 @@ def _wait_for_rate_limit() -> None:
             break
         ttl = _redis.ttl(RATE_LIMIT_KEY)
         wait = max(ttl, 1)
-        logger.warning("Dataminr rate limit reached (%s/%d), waiting %ds", current, RATE_LIMIT_MAX_REQUESTS, wait)
+        logger.warning("[DATAMINR] rate limit reached (%s/%d), waiting %ds", current, RATE_LIMIT_MAX_REQUESTS, wait)
         time.sleep(wait)
 
 
@@ -60,7 +60,7 @@ def _request_with_rate_limit(method: str, url: str, token: str, auth_scheme: str
 
     if resp.status_code == 429:
         retry_after = int(resp.headers.get("Retry-After", "30"))
-        logger.warning("Dataminr 429 rate limited, backing off %ds", retry_after)
+        logger.warning("[DATAMINR] 429 rate limited, backing off %ds", retry_after)
         time.sleep(retry_after)
         _wait_for_rate_limit()
         _record_request()
@@ -79,7 +79,7 @@ def _get_token() -> str:
     if cached:
         return cached
 
-    logger.info("Fetching new Dataminr access token (current API)")
+    logger.info("[DATAMINR] Fetching new access token (current API)")
     _wait_for_rate_limit()
     _record_request()
 
@@ -98,12 +98,12 @@ def _get_token() -> str:
     )
     resp.raise_for_status()
     body = resp.json()
-    logger.debug("Dataminr auth response keys: %s", list(body.keys()))
+    logger.debug("[DATAMINR] auth response keys: %s", list(body.keys()))
     token = body.get("dmaToken") or body.get("token") or body.get("access_token")
     if not token:
         raise RuntimeError(f"No token in Dataminr auth response: {list(body.keys())}")
     _redis.setex("dataminr:token", settings.dataminr_token_ttl, token)
-    logger.info("Dataminr token cached (TTL=%ds)", settings.dataminr_token_ttl)
+    logger.info("[DATAMINR] token cached (TTL=%ds)", settings.dataminr_token_ttl)
     return token
 
 
@@ -118,7 +118,7 @@ def _fetch_signals_current(since: datetime) -> list[DataminrSignal]:
 
     while url and page < settings.max_pages_per_poll:
         page += 1
-        logger.info("Fetching Dataminr page %d (url=%s...)", page, url[:80])
+        logger.info("[DATAMINR] Fetching page %d (url=%s...)", page, url[:80])
 
         resp = _request_with_rate_limit("GET", url, token)
 
@@ -140,7 +140,7 @@ def _fetch_signals_current(since: datetime) -> list[DataminrSignal]:
                 latest_seen = ts
 
             if ts < since:
-                logger.info("Reached signals before %s, stopping pagination", since.isoformat())
+                logger.info("[DATAMINR] Reached signals before %s, stopping pagination", since.isoformat())
                 url = None
                 break
 
@@ -168,13 +168,13 @@ def _fetch_signals_current(since: datetime) -> list[DataminrSignal]:
                 url = None
 
     if page >= settings.max_pages_per_poll:
-        logger.warning("Hit max page cap (%d), some older signals may be missed", settings.max_pages_per_poll)
+        logger.warning("[DATAMINR] Hit max page cap (%d), some older signals may be missed", settings.max_pages_per_poll)
 
     if latest_seen:
         set_last_synced(latest_seen)
-        logger.info("Updated last_synced to %s", latest_seen.isoformat())
+        logger.info("[DATAMINR] Updated last_synced to %s", latest_seen.isoformat())
 
-    logger.info("Fetched %d new signals from Dataminr current API (across %d pages)", len(all_signals), page)
+    logger.info("[DATAMINR] Fetched %d new signals from current API (across %d pages)", len(all_signals), page)
     return all_signals
 
 
@@ -194,7 +194,7 @@ def _get_legacy_token() -> str:
             "Set DATAMINR_LEGACY_USER_ID and DATAMINR_LEGACY_PASSWORD in .env"
         )
 
-    logger.info("Fetching new Dataminr access token (legacy API)")
+    logger.info("[DATAMINR] Fetching new access token (legacy API)")
     _wait_for_rate_limit()
     _record_request()
 
@@ -227,7 +227,7 @@ def _get_legacy_token() -> str:
         expires_in = 3600
 
     _redis.setex("dataminr:legacy_token", expires_in, token)
-    logger.info("Dataminr legacy token cached (TTL=%ds)", expires_in)
+    logger.info("[DATAMINR] legacy token cached (TTL=%ds)", expires_in)
     return token
 
 
@@ -299,7 +299,7 @@ def _fetch_signals_legacy(since: datetime) -> list[DataminrSignal]:
         if cursor_from:
             params["from"] = cursor_from
 
-        logger.info("Fetching Dataminr legacy page %d", page)
+        logger.info("[DATAMINR] Fetching legacy page %d", page)
 
         resp = _request_with_rate_limit("GET", alerts_url, token, auth_scheme="DmAuth", params=params)
 
@@ -330,7 +330,7 @@ def _fetch_signals_legacy(since: datetime) -> list[DataminrSignal]:
                 latest_seen = ts
 
             if ts < since:
-                logger.info("Reached signals before %s, stopping legacy pagination", since.isoformat())
+                logger.info("[DATAMINR] Reached signals before %s, stopping legacy pagination", since.isoformat())
                 cursor_to = None
                 break
 
@@ -347,9 +347,9 @@ def _fetch_signals_legacy(since: datetime) -> list[DataminrSignal]:
 
     if latest_seen:
         set_last_synced(latest_seen)
-        logger.info("Updated last_synced to %s (legacy)", latest_seen.isoformat())
+        logger.info("[DATAMINR] Updated last_synced to %s (legacy)", latest_seen.isoformat())
 
-    logger.info("Fetched %d new signals from Dataminr legacy API (across %d pages)", len(all_signals), page)
+    logger.info("[DATAMINR] Fetched %d new signals from legacy API (across %d pages)", len(all_signals), page)
     return all_signals
 
 
@@ -371,23 +371,23 @@ def fetch_signals(since: datetime | None = None) -> list[DataminrSignal]:
         since = datetime.now(UTC) - timedelta(days=settings.initial_lookback_days)
 
     if settings.dataminr_use_legacy:
-        logger.info("Using Dataminr legacy API (forced via config)")
+        logger.info("[DATAMINR] Using legacy API (forced via config)")
         return _fetch_signals_legacy(since)
 
     try:
         return _fetch_signals_current(since)
     except Exception as e:
-        logger.warning("Current Dataminr API failed (%s), falling back to legacy API", e)
+        logger.warning("[DATAMINR] Current API failed (%s), falling back to legacy API", e)
 
         # Check if legacy credentials are configured
         if not settings.dataminr_legacy_user_id or not settings.dataminr_legacy_password:
-            logger.error("Legacy API credentials not configured, cannot fallback")
+            logger.error("[DATAMINR] Legacy API credentials not configured, cannot fallback")
             raise
 
         try:
             return _fetch_signals_legacy(since)
         except Exception as legacy_err:
-            logger.error("Legacy Dataminr API also failed: %s", legacy_err)
+            logger.error("[DATAMINR] Legacy API also failed: %s", legacy_err)
             raise
 
 

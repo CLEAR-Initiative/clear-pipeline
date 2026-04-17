@@ -61,6 +61,7 @@ def group_signal(
     classification: SignalClassification,
     signal_lat: float | None = None,
     signal_lng: float | None = None,
+    probability_radius_km: float | None = None,
 ) -> dict | None:
     """
     Use Claude to decide if a signal belongs to an existing event or creates a new one.
@@ -87,6 +88,25 @@ def group_signal(
     now_iso = datetime.now(UTC).isoformat()
     ts = signal_timestamp or now_iso
 
+    # Estimate population from GeoTIFF if Claude didn't extract it
+    population = result.population_affected
+    logger.info(
+        "[EVENT] Population from Claude for signal %s: %s (lat=%s lng=%s radius=%s)",
+        signal_id, population, signal_lat, signal_lng, probability_radius_km,
+    )
+    if population is None and signal_lat is not None and signal_lng is not None:
+        from src.services.population import estimate_population_for_signal
+
+        population = estimate_population_for_signal(
+            lat=signal_lat,
+            lng=signal_lng,
+            probability_radius_km=probability_radius_km,
+        )
+        logger.info(
+            "[EVENT] Population from GeoTIFF for signal %s: %s (radius=%.3f km)",
+            signal_id, population, probability_radius_km or 1.0,
+        )
+
     if result.action == "add_to_existing" and result.event_id:
         logger.info("Adding signal %s to existing event %s", signal_id, result.event_id)
 
@@ -100,6 +120,8 @@ def group_signal(
             update_data["title"] = result.title
         if result.description:
             update_data["description"] = result.description
+        if population is not None:
+            update_data["populationAffected"] = str(population)
 
         updated = update_event(result.event_id, update_data)
         _invalidate_events_cache()
@@ -129,6 +151,8 @@ def group_signal(
             "rank": classification.severity / 5.0,
             "originId": signal_origin_id,
         }
+        if population is not None:
+            event_input["populationAffected"] = str(population)
         if signal_lat is not None and signal_lng is not None:
             event_input["lat"] = signal_lat
             event_input["lng"] = signal_lng

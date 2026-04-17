@@ -59,6 +59,7 @@ class EventGroupingResult(BaseModel):
     title: str | None = None  # for both actions (updated title when adding to existing)
     description: str | None = None  # for both actions (updated description when adding to existing)
     types: list[str] | None = None  # if create_new
+    population_affected: int | None = None  # extracted from signal text
 
 
 class AlertAssessment(BaseModel):
@@ -66,3 +67,10 @@ class AlertAssessment(BaseModel):
 
     should_alert: bool
     status: str = "published"  # "draft" or "published"
+
+
+class SituationNarrative(BaseModel):
+    """Output from Claude situation narrative generation."""
+
+    title: str
+    summary: str

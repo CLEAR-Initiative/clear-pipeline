@@ -1,7 +1,35 @@
 from celery import Celery
 from celery.schedules import crontab, timedelta
+from celery.signals import (
+    after_setup_logger,
+    after_setup_task_logger,
+    worker_process_init,
+)
 
 from src.config import settings
+
+
+@worker_process_init.connect
+def _init_worker(**kwargs):
+    """Initialise logging + Sentry in each forked worker process."""
+    from src.logging_setup import setup_logging
+    setup_logging()
+
+
+# Celery overrides handlers after worker boot. These signals run AFTER
+# Celery's setup, giving us a chance to (re)attach our stdout + Logtail
+# handlers so task logger.info() calls from child workers are visible.
+@after_setup_logger.connect
+def _setup_root_logger(logger, **kwargs):
+    from src.logging_setup import attach_handlers_to
+    attach_handlers_to(logger)
+
+
+@after_setup_task_logger.connect
+def _setup_task_logger(logger, **kwargs):
+    from src.logging_setup import attach_handlers_to
+    attach_handlers_to(logger)
+
 
 app = Celery("clear_pipeline", broker=settings.celery_broker_url)
 
@@ -22,6 +50,14 @@ app.conf.beat_schedule = {
         "task": "src.tasks.poll.poll_dataminr",
         "schedule": timedelta(seconds=settings.poll_interval_seconds),
     },
+    "poll-gdacs": {
+        "task": "src.tasks.poll_gdacs.poll_gdacs",
+        "schedule": timedelta(minutes=settings.gdacs_poll_interval_minutes),
+    },
+    "poll-acled": {
+        "task": "src.tasks.poll_acled.poll_acled",
+        "schedule": timedelta(minutes=settings.acled_poll_interval_minutes),
+    },
     # Daily digest — every day at 07:00 UTC
     "daily-alert-digest": {
         "task": "src.tasks.notify.send_daily_digest",
@@ -41,6 +77,11 @@ app.conf.beat_schedule = {
 
 app.conf.include = [
     "src.tasks.poll",
+    "src.tasks.poll_gdacs",
+    "src.tasks.poll_acled",
     "src.tasks.process",
     "src.tasks.notify",
+    "src.tasks.population",
+    "src.tasks.geometries",
+    "src.tasks.situation",
 ]

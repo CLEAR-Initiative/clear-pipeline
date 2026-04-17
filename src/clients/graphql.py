@@ -85,6 +85,69 @@ mutation NotifyAlertDigest($input: AlertDigestInput!) {
 }
 """
 
+UPDATE_LOCATION_GEOMETRY = """
+mutation UpdateLocationGeometry($id: String!, $geometry: GeoJSON!) {
+  updateLocationGeometry(id: $id, geometry: $geometry) { id }
+}
+"""
+
+UPDATE_LOCATION_POPULATION = """
+mutation UpdateLocationPopulation($id: String!, $population: String!) {
+  updateLocationPopulation(id: $id, population: $population) { id population }
+}
+"""
+
+UPDATE_SITUATION_POPULATION = """
+mutation UpdateSituationPopulation($id: String!, $input: UpdateSituationPopulationInput!) {
+  updateSituationPopulation(id: $id, input: $input) {
+    id
+    populationAffected
+    populationInArea
+  }
+}
+"""
+
+GET_LOCATION_WITH_GEOMETRY = """
+query LocationWithGeometry($id: String!) {
+  location(id: $id) {
+    id
+    name
+    level
+    population
+    geometry
+    parent { id name level }
+  }
+}
+"""
+
+GET_LOCATIONS_BY_LEVEL = """
+query LocationsByLevel($level: Int!) {
+  locations(level: $level) {
+    id
+    name
+    level
+    pCode
+    population
+  }
+}
+"""
+
+GET_EVENT_FOR_SITUATION = """
+query EventForSituation($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    severity
+    populationAffected
+    originLocation { name }
+    destinationLocation { name }
+    generalLocation { name }
+  }
+}
+"""
+
 GET_RECENT_ALERTS = """
 query RecentAlerts($since: DateTime!) {
   alerts(status: published) {
@@ -298,3 +361,60 @@ def get_dataminr_source_id() -> str:
         f"Data source '{settings.dataminr_source_name}' not found in CLEAR API. "
         "Ensure it exists in the data_sources table."
     )
+
+
+# ─── Population / Geometry helpers ────────────────────────────────────────────
+
+
+def get_location_with_geometry(location_id: str) -> dict | None:
+    result = _execute(GET_LOCATION_WITH_GEOMETRY, {"id": location_id})
+    return result.get("location")
+
+
+def get_locations_by_level(level: int) -> list[dict]:
+    result = _execute(GET_LOCATIONS_BY_LEVEL, {"level": level})
+    return result.get("locations", [])
+
+
+def update_location_geometry(location_id: str, geometry: dict) -> dict:
+    result = _execute(
+        UPDATE_LOCATION_GEOMETRY,
+        {"id": location_id, "geometry": geometry},
+    )
+    return result["updateLocationGeometry"]
+
+
+def update_location_population(location_id: str, population: int) -> dict:
+    result = _execute(
+        UPDATE_LOCATION_POPULATION,
+        {"id": location_id, "population": str(population)},
+    )
+    return result["updateLocationPopulation"]
+
+
+def update_situation_population(
+    situation_id: str,
+    population_affected: int | None = None,
+    population_in_area: int | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+) -> dict:
+    input_data: dict = {}
+    if population_affected is not None:
+        input_data["populationAffected"] = str(population_affected)
+    if population_in_area is not None:
+        input_data["populationInArea"] = str(population_in_area)
+    if title is not None:
+        input_data["title"] = title
+    if summary is not None:
+        input_data["summary"] = summary
+    result = _execute(
+        UPDATE_SITUATION_POPULATION,
+        {"id": situation_id, "input": input_data},
+    )
+    return result["updateSituationPopulation"]
+
+
+def get_event_for_situation(event_id: str) -> dict | None:
+    result = _execute(GET_EVENT_FOR_SITUATION, {"id": event_id})
+    return result.get("event")

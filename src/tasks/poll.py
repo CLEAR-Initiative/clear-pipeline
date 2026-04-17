@@ -31,18 +31,18 @@ def poll_dataminr(self):
             latest = get_latest_signal_timestamp()
             if latest:
                 since = datetime.fromisoformat(latest.replace("Z", "+00:00"))
-                logger.info("Resuming from latest signal in DB: %s", since.isoformat())
+                logger.info("[DATAMINR] Resuming from latest signal in DB: %s", since.isoformat())
             # If still None, fetch_signals will use INITIAL_LOOKBACK_DAYS default
 
         if since:
-            logger.info("Polling Dataminr for signals since %s", since.isoformat())
+            logger.info("[DATAMINR] Polling for signals since %s", since.isoformat())
         else:
-            logger.info("Polling Dataminr (initial lookback)")
+            logger.info("[DATAMINR] Polling (initial lookback)")
 
         signals = fetch_signals(since=since)
 
         if not signals:
-            logger.info("No new signals from Dataminr")
+            logger.info("[DATAMINR] No new signals")
             return {"signals_found": 0}
 
         # Fan out to process_signal tasks
@@ -51,9 +51,9 @@ def poll_dataminr(self):
         for signal in signals:
             process_signal.delay(signal.model_dump(mode="json"))
 
-        logger.info("Dispatched %d signals for processing", len(signals))
+        logger.info("[DATAMINR] Dispatched %d signals for processing", len(signals))
         return {"signals_found": len(signals)}
 
     except Exception as exc:
-        logger.error("poll_dataminr failed: %s", exc, exc_info=True)
+        logger.error("[DATAMINR] poll_dataminr failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=30)
