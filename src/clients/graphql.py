@@ -97,6 +97,18 @@ mutation UpdateLocationPopulation($id: String!, $population: String!) {
 }
 """
 
+UPDATE_LOCATION = """
+mutation UpdateLocation($id: String!, $input: UpdateLocationInput!) {
+  updateLocation(id: $id, input: $input) { id pCode name }
+}
+"""
+
+CREATE_LOCATION = """
+mutation CreateLocation($input: CreateLocationInput!) {
+  createLocation(input: $input) { id name level pCode }
+}
+"""
+
 UPDATE_SITUATION_POPULATION = """
 mutation UpdateSituationPopulation($id: String!, $input: UpdateSituationPopulationInput!) {
   updateSituationPopulation(id: $id, input: $input) {
@@ -393,6 +405,24 @@ def update_location_population(location_id: str, population: int) -> dict:
         {"id": location_id, "population": str(population)},
     )
     return result["updateLocationPopulation"]
+
+
+def update_location(location_id: str, **fields) -> dict:
+    """Update a location's scalar fields (pCode, name, geoId, osmId, level, parentId).
+    Only fields passed are changed."""
+    result = _execute(
+        UPDATE_LOCATION,
+        {"id": location_id, "input": fields},
+    )
+    return result["updateLocation"]
+
+
+def create_location(name: str, level: int, **fields) -> dict:
+    """Create a new location (geometry defaults to POINT(0 0); set via
+    update_location_geometry afterwards)."""
+    payload = {"name": name, "level": level, **fields}
+    result = _execute(CREATE_LOCATION, {"input": payload})
+    return result["createLocation"]
 
 
 def update_situation_population(
