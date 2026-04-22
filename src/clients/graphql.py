@@ -220,6 +220,9 @@ query DisasterTypes {
     disasterType
     disasterClass
     glideNumber
+    level1
+    level2
+    idType
   }
 }
 """
