@@ -11,6 +11,7 @@ from src.clients.graphql import create_event, get_events, update_event
 from src.config import settings
 from src.models.clear import EventGroupingResult, SignalClassification
 from src.prompts.group import GROUP_PROMPT_VERSION, SYSTEM_PROMPT, build_group_prompt
+from src.services.redis_lock import redis_lock
 from src.services.event_grouping_v2 import group_signal_v2
 
 
@@ -94,6 +95,53 @@ def group_signal(
 
     Returns the event dict (created or updated) or None if grouping fails.
     """
+    # Lock key approximates "signals that could plausibly cluster together":
+    # (some location key + primary disaster type). Two workers hitting the
+    # same bucket serialise, so the second one sees the first one's newly
+    # created event instead of calling Claude with the same context twice.
+    loc_key = (
+        signal_origin_id
+        or (signal_location_name or "").strip().lower()
+        or "unknown"
+    )
+    type_key = classification.disaster_types[0] if classification.disaster_types else "ot"
+    lock_key = f"group:v1:{loc_key}:{type_key}"
+
+    with redis_lock(lock_key, ttl_seconds=30, wait_seconds=20) as acquired:
+        if not acquired:
+            logger.warning(
+                "[GROUPING v1] Could not acquire %s within deadline — "
+                "proceeding unlocked (duplicate event risk accepted).",
+                lock_key,
+            )
+        return _group_signal_locked(
+            signal_id=signal_id,
+            signal_title=signal_title,
+            signal_description=signal_description,
+            signal_location_name=signal_location_name,
+            signal_origin_id=signal_origin_id,
+            signal_timestamp=signal_timestamp,
+            classification=classification,
+            signal_lat=signal_lat,
+            signal_lng=signal_lng,
+            probability_radius_km=probability_radius_km,
+        )
+
+
+def _group_signal_locked(
+    signal_id: str,
+    signal_title: str | None,
+    signal_description: str | None,
+    signal_location_name: str | None,
+    signal_origin_id: str | None,
+    signal_timestamp: str | None,
+    classification: SignalClassification,
+    signal_lat: float | None = None,
+    signal_lng: float | None = None,
+    probability_radius_km: float | None = None,
+) -> dict | None:
+    """The original body of `group_signal`, extracted so the public entry
+    point can wrap it in a Redis lock."""
     active_events = _get_active_events()
 
     prompt = build_group_prompt(

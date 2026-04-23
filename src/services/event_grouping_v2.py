@@ -42,6 +42,7 @@ from src.services.classifier_singleton import (
     get_classifier,
     level2_to_codes_map,
 )
+from src.services.redis_lock import redis_lock
 
 logger = logging.getLogger(__name__)
 
@@ -258,11 +259,12 @@ def group_signal_v2(
             signal_id,
         )
 
-    # ── 3. Match against active events ─────────────────────────────────
-    active = _get_active_events_v2()
-    matches: list[dict] = []
-    if admin2_id:
-        matches = [e for e in active if _event_matches(e, admin2_id, level_2)]
+    # ── 3. Lock on (admin2, level_2) to serialise cache-read-then-create ─
+    # Two concurrent workers with signals in the same district+type would
+    # otherwise both see no match and both call create_event. The lock gates
+    # the critical section; the loser waits, re-reads the cache, and picks up
+    # the new event created by the winner.
+    lock_key = f"group:v2:{admin2_id or 'none'}:{level_2}"
 
     # ── Common metadata ────────────────────────────────────────────────
     now_iso = datetime.now(UTC).isoformat()
@@ -275,6 +277,68 @@ def group_signal_v2(
             primary = created_signal[key]
             break
     location_name = primary.get("name") if primary else None
+
+    # If we don't have an admin2, there's nothing to race against — two
+    # isolated events for different unknown locations don't conflict.
+    if not admin2_id:
+        return _match_and_act(
+            signal_id=signal_id,
+            signal_title=signal_title,
+            signal_description=signal_description,
+            classification=classification,
+            admin2_id=None,
+            level_2=level_2,
+            glide_code=glide_code,
+            ts=ts,
+            location_name=location_name,
+            primary=primary,
+        )
+
+    # ttl_seconds = 30 is enough to cover worst-case Claude rewrite latency.
+    # wait_seconds = 20 gives the first worker plenty of room to finish and
+    # invalidate the cache before we re-read it.
+    with redis_lock(lock_key, ttl_seconds=30, wait_seconds=20) as acquired:
+        if not acquired:
+            logger.warning(
+                "[GROUPING v2] Could not acquire %s within deadline — "
+                "proceeding unlocked (duplicate event risk accepted).",
+                lock_key,
+            )
+        return _match_and_act(
+            signal_id=signal_id,
+            signal_title=signal_title,
+            signal_description=signal_description,
+            classification=classification,
+            admin2_id=admin2_id,
+            level_2=level_2,
+            glide_code=glide_code,
+            ts=ts,
+            location_name=location_name,
+            primary=primary,
+        )
+
+
+def _match_and_act(
+    *,
+    signal_id: str,
+    signal_title: str | None,
+    signal_description: str | None,
+    classification: SignalClassification,
+    admin2_id: str | None,
+    level_2: str,
+    glide_code: str,
+    ts: str,
+    location_name: str | None,
+    primary: dict | None,
+) -> dict | None:
+    """The race-prone section extracted so `group_signal_v2` can wrap it in
+    a lock. Reads the active-events cache, picks a match (or creates one),
+    then applies the rewrite pass."""
+
+    active = _get_active_events_v2()
+    matches: list[dict] = []
+    if admin2_id:
+        matches = [e for e in active if _event_matches(e, admin2_id, level_2)]
 
     # ── 4a. ADD to most recent matching event ──────────────────────────
     if matches:
