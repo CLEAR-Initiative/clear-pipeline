@@ -11,7 +11,11 @@ from src.clients.graphql import get_dataminr_source_id, get_disaster_types, upda
 from src.config import settings
 from src.models.clear import SignalClassification
 from src.models.dataminr import DataminrSignal
-from src.prompts.classify import SYSTEM_PROMPT as CLASSIFY_SYSTEM, build_classify_prompt
+from src.prompts.classify import (
+    CLASSIFY_PROMPT_VERSION,
+    SYSTEM_PROMPT as CLASSIFY_SYSTEM,
+    build_classify_prompt,
+)
 from src.services.alert import assess_and_escalate
 from src.services.event import group_signal
 from src.services.signal import ingest_signal
@@ -109,7 +113,13 @@ def process_signal(self, signal_data: dict):
                 disaster_types=disaster_types,
             )
 
-            result_data = call_claude(CLASSIFY_SYSTEM, prompt)
+            result_data = call_claude(
+                CLASSIFY_SYSTEM,
+                prompt,
+                stage="classify",
+                prompt_version=CLASSIFY_PROMPT_VERSION,
+                signal_id=signal_id,
+            )
             classification = SignalClassification.model_validate(result_data)
 
             # Cache classification
@@ -246,7 +256,13 @@ def process_manual_signal(
             disaster_types=disaster_types,
         )
 
-        result_data = call_claude(CLASSIFY_SYSTEM, prompt)
+        result_data = call_claude(
+            CLASSIFY_SYSTEM,
+            prompt,
+            stage="classify",
+            prompt_version=CLASSIFY_PROMPT_VERSION,
+            signal_id=signal_id,
+        )
         classification = SignalClassification.model_validate(result_data)
 
         logger.info(

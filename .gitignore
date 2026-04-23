@@ -6,6 +6,8 @@ build/
 .eggs/
 *.egg
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 .mypy_cache/

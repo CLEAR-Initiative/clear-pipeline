@@ -1,5 +1,8 @@
 """Situation narrative prompt: generate a coherent title + summary across events."""
 
+# Bump whenever the prompt text changes (see CLASSIFY_PROMPT_VERSION for rationale).
+SITUATION_PROMPT_VERSION = "situation-v1"
+
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system.
 

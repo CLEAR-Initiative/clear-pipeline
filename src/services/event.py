@@ -10,7 +10,7 @@ from src.clients.claude import call_claude
 from src.clients.graphql import create_event, get_events, update_event
 from src.config import settings
 from src.models.clear import EventGroupingResult, SignalClassification
-from src.prompts.group import SYSTEM_PROMPT, build_group_prompt
+from src.prompts.group import GROUP_PROMPT_VERSION, SYSTEM_PROMPT, build_group_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,13 @@ def group_signal(
         active_events=active_events,
     )
 
-    result_data = call_claude(SYSTEM_PROMPT, prompt)
+    result_data = call_claude(
+        SYSTEM_PROMPT,
+        prompt,
+        stage="group",
+        prompt_version=GROUP_PROMPT_VERSION,
+        signal_id=signal_id,
+    )
     result = EventGroupingResult.model_validate(result_data)
 
     now_iso = datetime.now(UTC).isoformat()
