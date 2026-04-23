@@ -18,9 +18,9 @@ mutation CreateSignal($input: CreateSignalInput!) {
     title
     severity
     publishedAt
-    originLocation { id name level }
-    destinationLocation { id name level }
-    generalLocation { id name level }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
   }
 }
 """
@@ -166,6 +166,42 @@ query EventForSituation($id: String!) {
 }
 """
 
+GET_EVENT_WITH_SIGNALS = """
+query EventWithSignals($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    severity
+    signals {
+      id
+      title
+      description
+      severity
+      publishedAt
+      source { id name type }
+    }
+  }
+}
+"""
+
+GET_LOCATION_METADATA = """
+query LocationMetadata($locationId: String!, $type: String) {
+  locationMetadata(locationId: $locationId, type: $type) {
+    id
+    type
+    data
+  }
+}
+"""
+
+UPSERT_LOCATION_METADATA = """
+mutation UpsertLocationMetadata($input: UpsertLocationMetadataInput!) {
+  upsertLocationMetadata(input: $input) { id type data updatedAt }
+}
+"""
+
 GET_RECENT_ALERTS = """
 query RecentAlerts($since: DateTime!) {
   alerts(status: published) {
@@ -203,9 +239,9 @@ query Events {
     validTo
     firstSignalCreatedAt
     lastSignalCreatedAt
-    originLocation { id name }
-    destinationLocation { id name }
-    generalLocation { id name }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
     alerts { id status }
   }
 }
@@ -464,3 +500,28 @@ def update_situation_population(
 def get_event_for_situation(event_id: str) -> dict | None:
     result = _execute(GET_EVENT_FOR_SITUATION, {"id": event_id})
     return result.get("event")
+
+
+def get_event_with_signals(event_id: str) -> dict | None:
+    """Fetch an event plus all its linked signals. Used by the rewrite pass
+    of the new grouping algorithm."""
+    result = _execute(GET_EVENT_WITH_SIGNALS, {"id": event_id})
+    return result.get("event")
+
+
+def get_location_metadata(location_id: str, type_: str | None = None) -> list[dict]:
+    """Return all locationMetadata rows for a location, optionally filtered by type."""
+    variables: dict = {"locationId": location_id}
+    if type_ is not None:
+        variables["type"] = type_
+    result = _execute(GET_LOCATION_METADATA, variables)
+    return result.get("locationMetadata", []) or []
+
+
+def upsert_location_metadata(location_id: str, type_: str, data: dict) -> dict:
+    """Create or update a location's metadata entry for a given type."""
+    result = _execute(
+        UPSERT_LOCATION_METADATA,
+        {"input": {"locationId": location_id, "type": type_, "data": data}},
+    )
+    return result["upsertLocationMetadata"]

@@ -97,6 +97,7 @@ def poll_gdacs(self):
                 process_gdacs_signal.delay(
                     signal_id=signal_id,
                     gdacs_event=event,
+                    created_signal=created,
                 )
                 created_count += 1
 

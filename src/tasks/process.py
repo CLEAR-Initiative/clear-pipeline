@@ -17,7 +17,7 @@ from src.prompts.classify import (
     build_classify_prompt,
 )
 from src.services.alert import assess_and_escalate
-from src.services.event import group_signal
+from src.services.event import dispatch_group_signal
 from src.services.signal import ingest_signal
 
 logger = logging.getLogger(__name__)
@@ -133,11 +133,18 @@ def process_signal(self, signal_data: dict):
             classification.severity,
         )
 
-        # Update signal severity from classification (overrides Dataminr estimate)
+        # Signal severity policy differs between grouping algorithms:
+        #   v1 — Claude's classifier score wins (overrides the Dataminr estimate).
+        #   v2 — source-provided severity is authoritative; Claude's value is
+        #        only used as an event-level fallback and must NOT overwrite
+        #        the signal row. A signal with no source severity stays null.
         existing_severity = created.get("severity")
-        if existing_severity != classification.severity:
+        if settings.grouping_algo == "v1" and existing_severity != classification.severity:
             update_signal_severity(signal_id, classification.severity)
-            logger.info("Signal %s severity updated: %s → %d", signal_id, existing_severity, classification.severity)
+            logger.info(
+                "Signal %s severity updated (v1): %s → %d",
+                signal_id, existing_severity, classification.severity,
+            )
 
         # ─── Stage 3: Event grouping (if relevant) ──────────────────────────
         if classification.relevance < settings.relevance_threshold:
@@ -176,7 +183,7 @@ def process_signal(self, signal_data: dict):
             location_name = resolved_loc.get("name") or location_name
         origin_id = origin_loc["id"] if origin_loc else (general_loc["id"] if general_loc else None)
 
-        event = group_signal(
+        event = dispatch_group_signal(
             signal_id=signal_id,
             signal_title=signal.headline,
             signal_description=created.get("title"),
@@ -187,6 +194,7 @@ def process_signal(self, signal_data: dict):
             signal_lat=signal_lat,
             signal_lng=signal_lng,
             probability_radius_km=probability_radius_km,
+            created_signal=created,
         )
 
         # ─── Stage 4: Alert escalation (if high severity) ───────────────────
@@ -272,12 +280,21 @@ def process_manual_signal(
             classification.severity,
         )
 
-        # Update severity from classification
-        final_severity = severity if severity is not None else classification.severity
-        update_signal_severity(signal_id, final_severity)
+        # Update severity. v1: Claude's classifier value is a valid fallback.
+        # v2: only write if the caller provided a source severity — otherwise
+        # the signal stays null and the event-level calculator handles it.
+        if severity is not None:
+            update_signal_severity(signal_id, severity)
+        elif settings.grouping_algo == "v1":
+            update_signal_severity(signal_id, classification.severity)
 
         # ─── Stage 2: Event grouping ──────────────────────────────────────────
-        event = group_signal(
+        # Manual signals don't carry a created_signal record with resolved
+        # locations yet (the manual-signal mutation handles creation API-side).
+        # v2 grouping will still work — admin-2 resolution returns None and
+        # the signal becomes its own event, which matches the pre-existing
+        # behaviour for manual entries.
+        event = dispatch_group_signal(
             signal_id=signal_id,
             signal_title=title,
             signal_description=description,
@@ -285,6 +302,7 @@ def process_manual_signal(
             signal_origin_id=None,
             signal_timestamp=None,
             classification=classification,
+            created_signal={},
         )
 
         if not event:
@@ -344,6 +362,7 @@ def process_gdacs_signal(
     self,
     signal_id: str,
     gdacs_event: dict,
+    created_signal: dict | None = None,
 ):
     """
     Process a GDACS-sourced signal.
@@ -388,7 +407,7 @@ def process_gdacs_signal(
             return {"signal_id": signal_id, "event_id": None, "alert_id": None}
 
         # Group into event (no probabilityRadius for GDACS — uses default 1km)
-        event = group_signal(
+        event = dispatch_group_signal(
             signal_id=signal_id,
             signal_title=title,
             signal_description=description,
@@ -398,6 +417,7 @@ def process_gdacs_signal(
             classification=classification,
             signal_lat=gdacs_event.get("lat"),
             signal_lng=gdacs_event.get("lng"),
+            created_signal=created_signal or {},
         )
 
         # Assess for alert if high severity (Red/Orange)
@@ -436,6 +456,7 @@ def process_acled_signal(
     self,
     signal_id: str,
     acled_event: dict,
+    created_signal: dict | None = None,
 ):
     """
     Process an ACLED-sourced signal.
@@ -484,7 +505,7 @@ def process_acled_signal(
             return {"signal_id": signal_id, "event_id": None, "alert_id": None}
 
         # Group into event
-        event = group_signal(
+        event = dispatch_group_signal(
             signal_id=signal_id,
             signal_title=title,
             signal_description=description,
@@ -494,6 +515,7 @@ def process_acled_signal(
             classification=classification,
             signal_lat=acled_event.get("lat"),
             signal_lng=acled_event.get("lng"),
+            created_signal=created_signal or {},
         )
 
         # Assess for alert if high severity

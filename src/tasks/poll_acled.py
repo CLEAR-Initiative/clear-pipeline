@@ -105,6 +105,7 @@ def poll_acled(self):
                 process_acled_signal.delay(
                     signal_id=signal_id,
                     acled_event=event,
+                    created_signal=created,
                 )
                 created_count += 1
 

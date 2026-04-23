@@ -74,3 +74,18 @@ class SituationNarrative(BaseModel):
 
     title: str
     summary: str
+
+
+class EventRewrite(BaseModel):
+    """Output from Claude event rewrite. Used by the new district+type grouping
+    algorithm, where Claude no longer makes clustering decisions — only polishes
+    the human-facing text and provides severity / displacement fallbacks."""
+
+    title: str
+    description: str
+    """Severity fallback (1-5). Only consulted when at least one signal lacks
+    a source-provided severity value. Null means Claude couldn't judge."""
+    severity: int | None = None
+    """Population displaced (primary source: signal text). Null means no signal
+    mentioned a displacement count."""
+    population_displaced: int | None = None

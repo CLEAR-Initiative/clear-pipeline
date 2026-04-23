@@ -1,0 +1,315 @@
+{
+    "openapi": "3.0.1",
+    "info": {
+        "title": "IOM-DTM.Services.API V3",
+        "version": "v3"
+    },
+    "servers": [
+        {
+            "url": "https://dtmapi.iom.int/v3"
+        },
+        {
+            "url": "https://dtm-apim.iom.int/v3"
+        }
+    ],
+    "paths": {
+        "/displacement/country-list": {
+            "get": {
+                "tags": [
+                    "CountryList"
+                ],
+                "summary": "/displacement/country-list - GET",
+                "description": "/displacement/country-list - GET",
+                "operationId": "get-displacement-country-list",
+                "responses": {
+                    "200": {
+                        "description": "Success"
+                    }
+                }
+            }
+        },
+        "/displacement/admin0": {
+            "get": {
+                "tags": [
+                    "IdpAdmin0Data"
+                ],
+                "summary": "/displacement/admin0 - GET",
+                "description": "/displacement/admin0 - GET",
+                "operationId": "get-displacement-admin0",
+                "parameters": [
+                    {
+                        "name": "Operation",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "CountryName",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin0Pcode",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "FromReportingDate",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "ToReportingDate",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "FromRoundNumber",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    },
+                    {
+                        "name": "ToRoundNumber",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success"
+                    }
+                }
+            }
+        },
+        "/displacement/admin1": {
+            "get": {
+                "tags": [
+                    "IdpAdmin1Data"
+                ],
+                "summary": "/displacement/admin1 - GET",
+                "description": "/displacement/admin1 - GET",
+                "operationId": "get-displacement-admin1",
+                "parameters": [
+                    {
+                        "name": "Operation",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "CountryName",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin0Pcode",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin1Name",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin1Pcode",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "FromReportingDate",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "ToReportingDate",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "FromRoundNumber",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    },
+                    {
+                        "name": "ToRoundNumber",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success"
+                    }
+                }
+            }
+        },
+        "/displacement/admin2": {
+            "get": {
+                "tags": [
+                    "IdpAdmin2Data"
+                ],
+                "summary": "/displacement/admin2 - GET",
+                "description": "/displacement/admin2 - GET",
+                "operationId": "get-displacement-admin2",
+                "parameters": [
+                    {
+                        "name": "Operation",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "CountryName",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin0Pcode",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin1Name",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin1Pcode",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin2Name",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "Admin2Pcode",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "FromReportingDate",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "ToReportingDate",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "FromRoundNumber",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    },
+                    {
+                        "name": "ToRoundNumber",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "format": "int32"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Success"
+                    }
+                }
+            }
+        },
+        "/displacement/operation-list": {
+            "get": {
+                "tags": [
+                    "OperationList"
+                ],
+                "summary": "/displacement/operation-list - GET",
+                "description": "/displacement/operation-list - GET",
+                "operationId": "get-displacement-operation-list",
+                "responses": {
+                    "200": {
+                        "description": "Success"
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "apiKeyHeader": {
+                "type": "apiKey",
+                "name": "Ocp-Apim-Subscription-Key",
+                "in": "header"
+            },
+            "apiKeyQuery": {
+                "type": "apiKey",
+                "name": "subscription-key",
+                "in": "query"
+            }
+        }
+    },
+    "security": [
+        {
+            "apiKeyHeader": []
+        },
+        {
+            "apiKeyQuery": []
+        }
+    ]
+}

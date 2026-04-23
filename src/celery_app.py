@@ -80,6 +80,12 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=3, minute=0),
         "kwargs": {"older_than_days": 14},
     },
+    # Weekly IOM DTM backfill — Mondays at 02:00 UTC. Refreshes
+    # locationMetadata(type="iom_dtm_displacement") per admin-2.
+    "backfill-dtm-displacement": {
+        "task": "src.tasks.dtm.backfill_dtm_displacement",
+        "schedule": crontab(hour=2, minute=0, day_of_week=1),
+    },
 }
 
 app.conf.include = [
@@ -92,4 +98,5 @@ app.conf.include = [
     "src.tasks.geometries",
     "src.tasks.situation",
     "src.tasks.archive",
+    "src.tasks.dtm",
 ]

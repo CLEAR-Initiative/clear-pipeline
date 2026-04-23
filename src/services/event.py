@@ -11,6 +11,31 @@ from src.clients.graphql import create_event, get_events, update_event
 from src.config import settings
 from src.models.clear import EventGroupingResult, SignalClassification
 from src.prompts.group import GROUP_PROMPT_VERSION, SYSTEM_PROMPT, build_group_prompt
+from src.services.event_grouping_v2 import group_signal_v2
+
+
+def dispatch_group_signal(
+    *,
+    algo: str | None = None,
+    **kwargs,
+) -> dict | None:
+    """Pick the grouping implementation based on `settings.grouping_algo`
+    (or the `algo` override). `kwargs` are passed to the chosen function —
+    extra kwargs unused by one variant are dropped cleanly below.
+    """
+    algo_sel = (algo or settings.grouping_algo or "v1").lower()
+    if algo_sel == "v2":
+        v2_keys = {
+            "signal_id", "signal_title", "signal_description",
+            "signal_timestamp", "classification", "created_signal",
+        }
+        return group_signal_v2(**{k: v for k, v in kwargs.items() if k in v2_keys})
+    v1_keys = {
+        "signal_id", "signal_title", "signal_description",
+        "signal_location_name", "signal_origin_id", "signal_timestamp",
+        "classification", "signal_lat", "signal_lng", "probability_radius_km",
+    }
+    return group_signal(**{k: v for k, v in kwargs.items() if k in v1_keys})
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +145,22 @@ def group_signal(
             "signalIds": [signal_id],
             "lastSignalCreatedAt": ts,
         }
+
+        # Bump event severity (and derived rank) to the MAX across signals —
+        # otherwise event.severity stays frozen at the first signal's value.
+        existing_event = next(
+            (e for e in active_events if e.get("id") == result.event_id),
+            None,
+        )
+        existing_severity = (existing_event or {}).get("severity") or 0
+        max_severity = max(existing_severity, classification.severity)
+        if max_severity > existing_severity:
+            update_data["severity"] = max_severity
+            update_data["rank"] = max_severity / 5.0
+            logger.info(
+                "[EVENT] Severity bumped on event %s: %d → %d",
+                result.event_id, existing_severity, max_severity,
+            )
 
         # Update title and description if Claude provided new ones
         if result.title:
