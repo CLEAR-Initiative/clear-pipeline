@@ -192,6 +192,8 @@ query LocationMetadata($locationId: String!, $type: String) {
     id
     type
     data
+    validFrom
+    validTo
   }
 }
 """
@@ -199,6 +201,23 @@ query LocationMetadata($locationId: String!, $type: String) {
 UPSERT_LOCATION_METADATA = """
 mutation UpsertLocationMetadata($input: UpsertLocationMetadataInput!) {
   upsertLocationMetadata(input: $input) { id type data updatedAt }
+}
+"""
+
+UPSERT_LOCATION_METADATA_BATCH = """
+mutation UpsertLocationMetadataBatch($inputs: [UpsertLocationMetadataInput!]!) {
+  upsertLocationMetadataBatch(inputs: $inputs) { id type }
+}
+"""
+
+ALL_LOCATION_METADATA = """
+query AllLocationMetadata($type: String!) {
+  allLocationMetadata(type: $type) {
+    id
+    type
+    data
+    location { id name pCode }
+  }
 }
 """
 
@@ -525,3 +544,22 @@ def upsert_location_metadata(location_id: str, type_: str, data: dict) -> dict:
         {"input": {"locationId": location_id, "type": type_, "data": data}},
     )
     return result["upsertLocationMetadata"]
+
+
+def upsert_location_metadata_batch(
+    rows: list[dict],
+) -> list[dict]:
+    """Bulk upsert. Each row must have {locationId, type, data}. Returns the
+    resulting rows (order not guaranteed). Rows whose locationId doesn't exist
+    are silently skipped by the server.
+    """
+    if not rows:
+        return []
+    result = _execute(UPSERT_LOCATION_METADATA_BATCH, {"inputs": rows})
+    return result.get("upsertLocationMetadataBatch", []) or []
+
+
+def get_all_location_metadata(type_: str) -> list[dict]:
+    """Return every locationMetadata row of a given type across all locations."""
+    result = _execute(ALL_LOCATION_METADATA, {"type": type_})
+    return result.get("allLocationMetadata", []) or []

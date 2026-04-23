@@ -77,6 +77,8 @@ def backfill_dtm_displacement(
             len(pcode_to_id),
         )
 
+        # Build a single batch of rows, then send in one mutation.
+        batch: list[dict] = []
         for pcode, rec in latest.items():
             clear_id = pcode_to_id.get(pcode)
             if not clear_id:
@@ -106,20 +108,20 @@ def backfill_dtm_displacement(
                 "source": "iom_dtm_v3",
             }
             stats["matched"] += 1
+            batch.append({
+                "locationId": clear_id,
+                "type": METADATA_TYPE,
+                "data": payload,
+            })
+
+        if batch:
             try:
-                graphql.upsert_location_metadata(
-                    clear_id, METADATA_TYPE, payload,
-                )
-                stats["upserted"] += 1
-                logger.info(
-                    "[IOM DTM] %s → population_displaced=%d (round %s, %s)",
-                    pcode, value, payload["round_number"], payload["reporting_date"],
-                )
+                written = graphql.upsert_location_metadata_batch(batch)
+                stats["upserted"] = len(written)
+                logger.info("[IOM DTM] Bulk-upserted %d rows", len(written))
             except Exception as e:
-                stats["failed"] += 1
-                logger.error(
-                    "[IOM DTM] Upsert failed for pCode=%s: %s", pcode, e,
-                )
+                stats["failed"] = len(batch)
+                logger.error("[IOM DTM] Bulk upsert failed: %s", e, exc_info=True)
 
         logger.info("[IOM DTM] Done: %s", stats)
         return stats

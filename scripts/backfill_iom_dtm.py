@@ -108,6 +108,7 @@ def run(country_name: str, admin0_pcode: str, dry_run: bool) -> dict:
             len(clear_no_dtm), clear_no_dtm[:20],
         )
 
+    batch: list[dict] = []
     for pcode, rec in latest.items():
         clear_id = pcode_to_id.get(pcode)
         if not clear_id:
@@ -148,16 +149,20 @@ def run(country_name: str, admin0_pcode: str, dry_run: bool) -> dict:
             )
             continue
 
+        batch.append({
+            "locationId": clear_id,
+            "type": METADATA_TYPE,
+            "data": payload,
+        })
+
+    if batch and not dry_run:
         try:
-            graphql.upsert_location_metadata(clear_id, METADATA_TYPE, payload)
-            stats["upserted"] += 1
-            logger.info(
-                "[OK] %s → population_displaced=%d (round %s)",
-                pcode, value, payload["round_number"],
-            )
+            written = graphql.upsert_location_metadata_batch(batch)
+            stats["upserted"] = len(written)
+            logger.info("[OK] Bulk-upserted %d rows in one call", len(written))
         except Exception as e:
-            stats["failed"] += 1
-            logger.error("[FAILED] pCode=%s: %s", pcode, e)
+            stats["failed"] = len(batch)
+            logger.error("[FAILED] Bulk upsert: %s", e, exc_info=True)
 
     return stats
 
