@@ -24,6 +24,9 @@ def invalidate_locations_cache() -> None:
     _locations_cache = None
 
 
+# Bump whenever SYSTEM_PROMPT below changes (see CLASSIFY_PROMPT_VERSION for rationale).
+LOCATION_PROMPT_VERSION = "location-v1"
+
 SYSTEM_PROMPT = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on Sudan.
 
 Your task is to extract location information from signal/alert text and match it to known locations in the database.
@@ -113,7 +116,12 @@ def resolve_signal_location(
     prompt = _build_prompt(title, description, dataminr_location_name, locations)
 
     try:
-        result = call_claude(SYSTEM_PROMPT, prompt)
+        result = call_claude(
+            SYSTEM_PROMPT,
+            prompt,
+            stage="location",
+            prompt_version=LOCATION_PROMPT_VERSION,
+        )
 
         # Validate returned IDs against known locations
         known_ids = {loc["id"] for loc in locations}

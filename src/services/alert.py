@@ -5,7 +5,7 @@ import logging
 from src.clients.claude import call_claude
 from src.clients.graphql import create_alert
 from src.models.clear import AlertAssessment
-from src.prompts.assess import SYSTEM_PROMPT, build_assess_prompt
+from src.prompts.assess import ASSESS_PROMPT_VERSION, SYSTEM_PROMPT, build_assess_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,13 @@ def assess_and_escalate(
         signal_summaries=signal_summaries,
     )
 
-    result_data = call_claude(SYSTEM_PROMPT, prompt)
+    result_data = call_claude(
+        SYSTEM_PROMPT,
+        prompt,
+        stage="assess",
+        prompt_version=ASSESS_PROMPT_VERSION,
+        event_id=event.get("id"),
+    )
     assessment = AlertAssessment.model_validate(result_data)
 
     if not assessment.should_alert:

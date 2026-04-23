@@ -17,6 +17,7 @@ import time
 
 import anthropic
 
+from src.clients.insights import record_call
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -123,11 +124,24 @@ def _extract_json(text: str) -> str | None:
     return None
 
 
-def call_claude(system_prompt: str, user_prompt: str) -> dict:
+def call_claude(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    stage: str | None = None,
+    prompt_version: str | None = None,
+    signal_id: str | None = None,
+    event_id: str | None = None,
+) -> dict:
     """
     Call Claude with a system + user prompt and parse JSON response.
 
     The system prompt should instruct Claude to respond with valid JSON.
+
+    Telemetry: when stage and prompt_version are passed, every call (success,
+    parse failure, or API failure including rate-limit) is reported to the
+    insights dashboard via record_call(). Telemetry is fire-and-forget —
+    never raises.
 
     Raises:
       ClaudeRateLimited: 429 after SDK retries. Callers should reschedule
@@ -137,8 +151,14 @@ def call_claude(system_prompt: str, user_prompt: str) -> dict:
         JSON-extraction fallbacks.
     """
     client = _get_client()
+    started = time.monotonic()
+    raw_text = ""
+    parsed: dict | None = None
+    parse_error: str | None = None
+    api_error: BaseException | None = None
+    rate_limit_after: float | None = None
+    usage_dict: dict[str, int | None] = {}
 
-    t0 = time.monotonic()
     try:
         response = client.messages.create(
             model=settings.claude_model,
@@ -146,39 +166,74 @@ def call_claude(system_prompt: str, user_prompt: str) -> dict:
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        raw_text = response.content[0].text.strip()
+        # Translate Anthropic SDK usage names → insights API names
+        u = response.usage
+        usage_dict = {
+            "input_tokens": getattr(u, "input_tokens", None),
+            "output_tokens": getattr(u, "output_tokens", None),
+            "cache_read_tokens": getattr(u, "cache_read_input_tokens", None),
+            "cache_create_tokens": getattr(u, "cache_creation_input_tokens", None),
+        }
+
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError:
+            extracted = _extract_json(raw_text)
+            if extracted:
+                try:
+                    parsed = json.loads(extracted)
+                except json.JSONDecodeError as e:
+                    parse_error = f"JSONDecodeError after extraction: {e}"
+            else:
+                parse_error = "Could not extract valid JSON from response"
     except anthropic.RateLimitError as err:
-        retry_after = _retry_after_from_error(err)
+        rate_limit_after = _retry_after_from_error(err)
         logger.warning(
             "[CLAUDE] Rate-limited (after SDK retries). Will suggest retry_after=%.1fs. Error: %s",
-            retry_after, err,
+            rate_limit_after, err,
         )
-        raise ClaudeRateLimited(str(err), retry_after=retry_after) from err
+        api_error = err
+        parse_error = f"RateLimitError: {err}"
     except anthropic.APIStatusError as err:
-        # 400/401/403/404 etc. — don't retry, bubble up.
         logger.error("[CLAUDE] API error: status=%s message=%s", err.status_code, err)
-        raise
+        api_error = err
+        parse_error = f"{type(err).__name__}: {err}"
+    except Exception as exc:
+        api_error = exc
+        parse_error = f"{type(exc).__name__}: {exc}"
 
-    elapsed_ms = (time.monotonic() - t0) * 1000
-    logger.debug("[CLAUDE] API call ok in %.0fms", elapsed_ms)
+    latency_ms = int((time.monotonic() - started) * 1000)
 
-    text = response.content[0].text.strip()
-
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Extract JSON from prose/markdown
-    extracted = _extract_json(text)
-    if extracted:
+    if stage and prompt_version:
         try:
-            return json.loads(extracted)
-        except json.JSONDecodeError:
-            pass
+            record_call(
+                stage=stage,
+                prompt_version=prompt_version,
+                model=settings.claude_model,
+                signal_id=signal_id,
+                event_id=event_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                raw_response=raw_text,
+                parsed_response=parsed,
+                parse_error=parse_error,
+                usage=usage_dict,
+                latency_ms=latency_ms,
+            )
+        except Exception as telemetry_exc:
+            logger.warning("[insights] record_call raised unexpectedly: %s", telemetry_exc)
 
-    logger.error(
-        "Failed to parse Claude response as JSON. Full response (first 500 chars): %s",
-        text[:500],
-    )
-    raise json.JSONDecodeError("Could not extract valid JSON from Claude response", text, 0)
+    if rate_limit_after is not None:
+        raise ClaudeRateLimited(str(api_error), retry_after=rate_limit_after) from api_error
+    if api_error is not None:
+        raise api_error
+    if parsed is None:
+        logger.error(
+            "Failed to parse Claude response as JSON. Full response (first 500 chars): %s",
+            raw_text[:500],
+        )
+        raise json.JSONDecodeError(
+            "Could not extract valid JSON from Claude response", raw_text, 0
+        )
+    return parsed

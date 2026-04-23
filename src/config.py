@@ -70,7 +70,18 @@ class Settings(BaseSettings):
     sentry_env: str = "development"
     log_level: str = "INFO"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # Insights dashboard (LLM call telemetry — see clear-pipeline-insights repo)
+    insights_api_url: str = "https://clear-pipeline-insights.vercel.app"
+    insights_ingest_token: str = ""  # empty disables telemetry
+    pipeline_env: str = ""  # empty → derived as local-{whoami} at runtime
+
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        # Tolerate unknown keys in .env so a stray/legacy var doesn't crash boot.
+        # The pipeline still warns via missing-field errors for required vars.
+        "extra": "ignore",
+    }
 
 
 settings = Settings()

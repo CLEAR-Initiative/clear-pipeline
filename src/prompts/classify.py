@@ -1,5 +1,9 @@
 """Signal classification prompt: determine disaster type, relevance, severity."""
 
+# Bump whenever the prompt text changes — the insights dashboard groups calls
+# by version to track quality across iterations.
+CLASSIFY_PROMPT_VERSION = "classify-v1"
+
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system focused on Sudan.
 
