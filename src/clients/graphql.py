@@ -17,6 +17,7 @@ mutation CreateSignal($input: CreateSignalInput!) {
     id
     title
     severity
+    externalId
     publishedAt
     originLocation { id name level ancestorIds }
     destinationLocation { id name level ancestorIds }

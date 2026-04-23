@@ -49,6 +49,10 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
 
     input_data: dict = {
         "sourceId": source_id,
+        # Idempotent ingestion key — the clear-api upsert behaviour keys on
+        # (sourceId, externalId), so re-ingesting the same Dataminr alert
+        # returns the existing row instead of creating a duplicate.
+        "externalId": f"dataminr:{signal.alertId}",
         "rawData": raw_data,
         "publishedAt": signal.alertTimestamp,
         "url": url,

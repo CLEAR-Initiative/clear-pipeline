@@ -41,6 +41,10 @@ def _build_signal_input(event: dict, source_id: str) -> dict:
 
     input_data: dict = {
         "sourceId": source_id,
+        # Dedup key — ACLED retroactively updates events across rounds and
+        # sometimes re-emits them; (sourceId, externalId) ensures we only
+        # ever store one row per event.
+        "externalId": f"acled:{event['acled_id']}",
         "rawData": event["raw"],
         "publishedAt": published_at,
         "title": event["title"],

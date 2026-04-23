@@ -80,41 +80,59 @@ def _unwrap_records(payload: Any) -> list[dict]:
     return []
 
 
-def fetch_admin2_displacement(
+def _fetch_admin(
+    admin_level: int,
     *,
     country_name: str | None = None,
     admin0_pcode: str | None = None,
+    admin1_pcode: str | None = None,
     admin2_pcode: str | None = None,
     from_round: int | None = None,
     to_round: int | None = None,
     timeout: float = 60.0,
 ) -> list[dict]:
-    """Call GET /v3/displacement/admin2 with the given filters.
+    """Generic GET /v3/displacement/admin{level} call."""
+    if admin_level not in (0, 1, 2):
+        raise ValueError(f"admin_level must be 0, 1, or 2 — got {admin_level}")
 
-    Returns a list of record dicts (potentially multiple rounds per admin-2).
-    Caller is responsible for picking the latest round it cares about.
-    """
     params: dict[str, Any] = {}
     if country_name:
         params["CountryName"] = country_name
     if admin0_pcode:
         params["Admin0Pcode"] = admin0_pcode
-    if admin2_pcode:
+    if admin1_pcode and admin_level >= 1:
+        params["Admin1Pcode"] = admin1_pcode
+    if admin2_pcode and admin_level >= 2:
         params["Admin2Pcode"] = admin2_pcode
     if from_round is not None:
         params["FromRoundNumber"] = from_round
     if to_round is not None:
         params["ToRoundNumber"] = to_round
 
-    url = f"{settings.iom_dtm_base_url.rstrip('/')}/displacement/admin2"
+    url = f"{settings.iom_dtm_base_url.rstrip('/')}/displacement/admin{admin_level}"
     logger.info("[IOM DTM] GET %s params=%s", url, params)
 
     resp = httpx.get(url, params=params, headers=_headers(), timeout=timeout)
     resp.raise_for_status()
 
     records = _unwrap_records(resp.json())
-    logger.info("[IOM DTM] Received %d admin2 records", len(records))
+    logger.info("[IOM DTM] Received %d admin%d records", len(records), admin_level)
     return records
+
+
+def fetch_admin0_displacement(**kwargs) -> list[dict]:
+    """GET /v3/displacement/admin0 — country-level displacement."""
+    return _fetch_admin(0, **kwargs)
+
+
+def fetch_admin1_displacement(**kwargs) -> list[dict]:
+    """GET /v3/displacement/admin1 — state/province-level displacement."""
+    return _fetch_admin(1, **kwargs)
+
+
+def fetch_admin2_displacement(**kwargs) -> list[dict]:
+    """GET /v3/displacement/admin2 — district-level displacement."""
+    return _fetch_admin(2, **kwargs)
 
 
 def extract_displacement_value(record: dict) -> int | None:
@@ -134,13 +152,18 @@ def extract_displacement_value(record: dict) -> int | None:
     return None
 
 
-def latest_round_per_admin2(records: list[dict]) -> dict[str, dict]:
-    """Group records by `admin2Pcode` and keep the record with the highest
-    `roundNumber` (tie-break by `reportingDate`). Returns `{pcode: record}`.
+def latest_round_per_pcode(records: list[dict], admin_level: int) -> dict[str, dict]:
+    """Group records by `admin{level}Pcode` and keep the record with the
+    highest `roundNumber` (tie-break by `reportingDate`).
+
+    Returns `{pcode: record}` — pcodes with no value are dropped.
     """
+    key_camel = f"admin{admin_level}Pcode"
+    key_pascal = f"Admin{admin_level}Pcode"
+
     latest: dict[str, dict] = {}
     for rec in records:
-        pcode = rec.get("admin2Pcode") or rec.get("Admin2Pcode")
+        pcode = rec.get(key_camel) or rec.get(key_pascal)
         if not pcode:
             continue
         rn = rec.get("roundNumber") or rec.get("RoundNumber") or 0
@@ -154,3 +177,18 @@ def latest_round_per_admin2(records: list[dict]) -> dict[str, dict]:
         if (rn, rd) > (cur_rn, cur_rd):
             latest[pcode] = rec
     return latest
+
+
+def latest_round_per_admin2(records: list[dict]) -> dict[str, dict]:
+    """Backwards-compatible shim — level-2 specific wrapper."""
+    return latest_round_per_pcode(records, admin_level=2)
+
+
+def record_pcode(record: dict, admin_level: int) -> str | None:
+    """Return the admin{N}Pcode from a DTM record, handling camel/pascal case."""
+    return record.get(f"admin{admin_level}Pcode") or record.get(f"Admin{admin_level}Pcode")
+
+
+def record_name(record: dict, admin_level: int) -> str | None:
+    """Return the admin{N}Name from a DTM record, handling camel/pascal case."""
+    return record.get(f"admin{admin_level}Name") or record.get(f"Admin{admin_level}Name")
