@@ -73,6 +73,13 @@ app.conf.beat_schedule = {
         "task": "src.tasks.notify.send_monthly_digest",
         "schedule": crontab(hour=7, minute=0, day_of_month=1),
     },
+    # Daily archival — 03:00 UTC, archive alerts whose event last saw
+    # a signal more than 14 days ago.
+    "archive-stale-alerts": {
+        "task": "src.tasks.archive.archive_stale_alerts",
+        "schedule": crontab(hour=3, minute=0),
+        "kwargs": {"older_than_days": 14},
+    },
 }
 
 app.conf.include = [
@@ -84,4 +91,5 @@ app.conf.include = [
     "src.tasks.population",
     "src.tasks.geometries",
     "src.tasks.situation",
+    "src.tasks.archive",
 ]

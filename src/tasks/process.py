@@ -6,7 +6,7 @@ import logging
 import redis
 
 from src.celery_app import app
-from src.clients.claude import call_claude
+from src.clients.claude import ClaudeRateLimited, call_claude
 from src.clients.graphql import get_dataminr_source_id, get_disaster_types, update_signal_severity, escalate_event
 from src.config import settings
 from src.models.clear import SignalClassification
@@ -195,6 +195,12 @@ def process_signal(self, signal_data: dict):
             "alert_id": alert["id"] if alert else None,
         }
 
+    except ClaudeRateLimited as exc:
+        logger.warning(
+            "[CLAUDE RATE-LIMIT] process_signal backing off %.0fs",
+            exc.retry_after,
+        )
+        raise self.retry(exc=exc, countdown=int(exc.retry_after))
     except Exception as exc:
         logger.error("process_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
@@ -301,6 +307,12 @@ def process_manual_signal(
             "escalated": escalated,
         }
 
+    except ClaudeRateLimited as exc:
+        logger.warning(
+            "[CLAUDE RATE-LIMIT] process_manual_signal backing off %.0fs",
+            exc.retry_after,
+        )
+        raise self.retry(exc=exc, countdown=int(exc.retry_after))
     except Exception as exc:
         logger.error("process_manual_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
@@ -387,6 +399,12 @@ def process_gdacs_signal(
             "alert_id": alert["id"] if alert else None,
         }
 
+    except ClaudeRateLimited as exc:
+        logger.warning(
+            "[CLAUDE RATE-LIMIT] process_gdacs_signal backing off %.0fs",
+            exc.retry_after,
+        )
+        raise self.retry(exc=exc, countdown=int(exc.retry_after))
     except Exception as exc:
         logger.error("process_gdacs_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
@@ -477,6 +495,12 @@ def process_acled_signal(
             "alert_id": alert["id"] if alert else None,
         }
 
+    except ClaudeRateLimited as exc:
+        logger.warning(
+            "[CLAUDE RATE-LIMIT] process_acled_signal backing off %.0fs",
+            exc.retry_after,
+        )
+        raise self.retry(exc=exc, countdown=int(exc.retry_after))
     except Exception as exc:
         logger.error("process_acled_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)

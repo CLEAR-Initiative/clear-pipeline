@@ -109,6 +109,12 @@ mutation CreateLocation($input: CreateLocationInput!) {
 }
 """
 
+ARCHIVE_STALE_ALERTS = """
+mutation ArchiveStaleAlerts($olderThanDays: Int) {
+  archiveStaleAlerts(olderThanDays: $olderThanDays) { alertsArchived }
+}
+"""
+
 UPDATE_SITUATION_POPULATION = """
 mutation UpdateSituationPopulation($id: String!, $input: UpdateSituationPopulationInput!) {
   updateSituationPopulation(id: $id, input: $input) {
@@ -423,6 +429,13 @@ def create_location(name: str, level: int, **fields) -> dict:
     payload = {"name": name, "level": level, **fields}
     result = _execute(CREATE_LOCATION, {"input": payload})
     return result["createLocation"]
+
+
+def archive_stale_alerts(older_than_days: int = 14) -> int:
+    """Archive alerts whose event.lastSignalCreatedAt is older than N days.
+    Returns the number of rows affected."""
+    result = _execute(ARCHIVE_STALE_ALERTS, {"olderThanDays": older_than_days})
+    return int(result["archiveStaleAlerts"]["alertsArchived"])
 
 
 def update_situation_population(

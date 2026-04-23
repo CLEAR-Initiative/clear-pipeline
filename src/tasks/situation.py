@@ -13,7 +13,7 @@ import logging
 
 from src.celery_app import app
 from src.clients import graphql
-from src.clients.claude import call_claude
+from src.clients.claude import ClaudeRateLimited, call_claude
 from src.models.clear import SituationNarrative
 from src.prompts.situation import SYSTEM_PROMPT, build_situation_prompt
 from src.services.population import estimate_population_for_districts
@@ -189,6 +189,12 @@ def enrich_situation(
             "summary": summary,
         }
 
+    except ClaudeRateLimited as exc:
+        logger.warning(
+            "[CLAUDE RATE-LIMIT] enrich_situation backing off %.0fs",
+            exc.retry_after,
+        )
+        raise self.retry(exc=exc, countdown=int(exc.retry_after))
     except Exception as exc:
         logger.error(
             "[SITUATION] enrich_situation failed for %s: %s",
