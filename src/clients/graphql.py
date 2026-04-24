@@ -22,6 +22,11 @@ mutation CreateSignal($input: CreateSignalInput!) {
     originLocation { id name level ancestorIds }
     destinationLocation { id name level ancestorIds }
     generalLocation { id name level ancestorIds }
+    # If the API returned an existing row (idempotent ingest), it may
+    # already be linked to an event from a prior run. group_signal_v2 uses
+    # this to short-circuit — a signal that already has an event must not
+    # spawn another one.
+    events { id title types severity }
   }
 }
 """
@@ -302,8 +307,19 @@ query DisasterTypes {
 """
 
 
+class GraphQLClientError(Exception):
+    """4xx / validation / schema errors from clear-api. NOT retryable —
+    these indicate a bug in the request shape, missing field, bad auth,
+    etc. Retrying them just amplifies damage (see the populationDisplaced
+    incident: each retry created another duplicate event)."""
+
+
 def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dict:
-    """Execute a GraphQL query/mutation with retry logic."""
+    """Execute a GraphQL query/mutation with retry logic.
+
+    4xx responses raise `GraphQLClientError` immediately with no retry.
+    5xx / connection errors are retried with exponential backoff.
+    """
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.clear_api_key}",
@@ -320,6 +336,18 @@ def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dic
                 headers=headers,
                 timeout=30,
             )
+
+            # 4xx → treat as non-retryable bug, raise and stop. The body
+            # often has useful detail the default message hides.
+            if 400 <= resp.status_code < 500:
+                body_snippet = resp.text[:500] if resp.text else "(empty)"
+                msg = (
+                    f"GraphQL {resp.status_code} (non-retryable) for {settings.clear_api_url}: "
+                    f"{body_snippet}"
+                )
+                logger.error(msg)
+                raise GraphQLClientError(msg)
+
             resp.raise_for_status()
             result = resp.json()
 
@@ -328,6 +356,10 @@ def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dic
                 raise RuntimeError(f"GraphQL errors: {result['errors']}")
 
             return result["data"]
+
+        except GraphQLClientError:
+            # Never retry 4xx
+            raise
 
         except (httpx.HTTPError, RuntimeError) as e:
             if attempt < retries:

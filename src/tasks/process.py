@@ -7,7 +7,13 @@ import redis
 
 from src.celery_app import app
 from src.clients.claude import ClaudeRateLimited, call_claude
-from src.clients.graphql import get_dataminr_source_id, get_disaster_types, update_signal_severity, escalate_event
+from src.clients.graphql import (
+    GraphQLClientError,
+    escalate_event,
+    get_dataminr_source_id,
+    get_disaster_types,
+    update_signal_severity,
+)
 from src.config import settings
 from src.models.clear import SignalClassification
 from src.models.dataminr import DataminrSignal
@@ -219,6 +225,12 @@ def process_signal(self, signal_data: dict):
             exc.retry_after,
         )
         raise self.retry(exc=exc, countdown=int(exc.retry_after))
+    except GraphQLClientError as exc:
+        # 4xx from clear-api = bug in our request. Fail loudly and stop;
+        # retrying would only create duplicate rows (see populationDisplaced
+        # incident that spawned the Wave-4 fix).
+        logger.error("process_signal permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("process_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
@@ -347,6 +359,9 @@ def process_manual_signal(
             exc.retry_after,
         )
         raise self.retry(exc=exc, countdown=int(exc.retry_after))
+    except GraphQLClientError as exc:
+        logger.error("process_manual_signal permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("process_manual_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
@@ -441,6 +456,9 @@ def process_gdacs_signal(
             exc.retry_after,
         )
         raise self.retry(exc=exc, countdown=int(exc.retry_after))
+    except GraphQLClientError as exc:
+        logger.error("process_gdacs_signal permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("process_gdacs_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)
@@ -539,6 +557,9 @@ def process_acled_signal(
             exc.retry_after,
         )
         raise self.retry(exc=exc, countdown=int(exc.retry_after))
+    except GraphQLClientError as exc:
+        logger.error("process_acled_signal permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("process_acled_signal failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=10)

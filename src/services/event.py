@@ -35,6 +35,7 @@ def dispatch_group_signal(
         "signal_id", "signal_title", "signal_description",
         "signal_location_name", "signal_origin_id", "signal_timestamp",
         "classification", "signal_lat", "signal_lng", "probability_radius_km",
+        "created_signal",
     }
     return group_signal(**{k: v for k, v in kwargs.items() if k in v1_keys})
 
@@ -88,6 +89,7 @@ def group_signal(
     signal_lat: float | None = None,
     signal_lng: float | None = None,
     probability_radius_km: float | None = None,
+    created_signal: dict | None = None,
 ) -> dict | None:
     """
     Use Claude to decide if a signal belongs to an existing event or creates a new one.
@@ -95,6 +97,20 @@ def group_signal(
 
     Returns the event dict (created or updated) or None if grouping fails.
     """
+    # Short-circuit: when a prior run already linked this signal to an
+    # event, return that event instead of asking Claude to re-cluster.
+    # Without this, a task retried after a downstream failure would ask
+    # Claude to decide again and potentially create a second event.
+    if created_signal:
+        existing_events = created_signal.get("events") or []
+        if existing_events:
+            existing = existing_events[0]
+            logger.info(
+                "[GROUPING v1] Signal %s already linked to event %s — returning existing",
+                signal_id, existing.get("id"),
+            )
+            return existing
+
     # Lock key approximates "signals that could plausibly cluster together":
     # (some location key + primary disaster type). Two workers hitting the
     # same bucket serialise, so the second one sees the first one's newly

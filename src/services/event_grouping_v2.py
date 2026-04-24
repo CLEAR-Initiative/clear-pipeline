@@ -229,7 +229,25 @@ def group_signal_v2(
     `created_signal` is the full createSignal GraphQL result, used to:
       - pick the primary location (origin > general > destination)
       - walk up to admin-2 via ancestorIds
+      - detect "signal already linked to an event" (from a prior retried run)
     """
+
+    # ── 0. Short-circuit if the signal is already grouped ──────────────
+    # When clear-api returns an existing signal via its idempotent
+    # createSignal, the row may already be linked to an event from a
+    # previous pipeline run (e.g. the first attempt succeeded at
+    # create_event but crashed on the follow-up update_event). Without
+    # this guard, a retried task would create a second event and link the
+    # same signal to both.
+    existing_events = created_signal.get("events") or []
+    if existing_events:
+        existing = existing_events[0]
+        logger.info(
+            "[GROUPING v2] Signal %s is already linked to event %s — "
+            "returning existing; skipping classification + grouping.",
+            signal_id, existing.get("id"),
+        )
+        return existing
 
     # ── 1. Classify the signal ─────────────────────────────────────────
     classifier = get_classifier()
