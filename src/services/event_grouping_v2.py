@@ -397,9 +397,13 @@ def _match_and_act(
     except (ValueError, AttributeError):
         valid_to = (datetime.now(UTC) + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)).isoformat()
 
-    # Event-level location — prefer the admin-2 itself if we have it, else
-    # use the signal's resolved location id directly (API will store it).
-    origin_id = admin2_id or (primary.get("id") if primary else None)
+    # Event-level location: the admin-2 district we clustered on IS the
+    # event's location. Stored in `locationId` (generalLocation) — the
+    # semantically correct slot for "the event is happening here". Falls
+    # back to the signal's primary location when we couldn't resolve an
+    # admin-2 (shouldn't happen for signals with coords, but safe for
+    # text-only signals whose location is still unknown).
+    event_location_id = admin2_id or (primary.get("id") if primary else None)
 
     # Bootstrap title/description from the signal; Claude will polish below.
     boot_title = signal_title or f"{level_2.title()} in {location_name or 'unknown location'}"
@@ -415,7 +419,7 @@ def _match_and_act(
         "lastSignalCreatedAt": ts,
         "types": [glide_code],
         "rank": 0.0,
-        "originId": origin_id,
+        "locationId": event_location_id,
     }
 
     event = create_event(event_input)
