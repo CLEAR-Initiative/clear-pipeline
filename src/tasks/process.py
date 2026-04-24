@@ -22,8 +22,9 @@ from src.prompts.classify import (
     SYSTEM_PROMPT as CLASSIFY_SYSTEM,
     build_classify_prompt,
 )
-from src.services.alert import assess_and_escalate
+from src.services.alert import maybe_escalate
 from src.services.event import dispatch_group_signal
+from src.services.local_classify import classify_locally
 from src.services.signal import ingest_signal
 
 logger = logging.getLogger(__name__)
@@ -72,13 +73,22 @@ def process_signal(self, signal_data: dict):
         signal_id = created["id"]
         logger.info("Signal ingested: %s", signal_id)
 
-        # ─── Stage 2: Classify via Claude ────────────────────────────────────
-        # Check cache first
+        # ─── Stage 2: Classify ───────────────────────────────────────────────
+        # In v2 mode we use the local EventClassifier (no Claude call), which
+        # drops ~3k tokens/signal off our Anthropic budget. v1 still relies
+        # on Claude for the SignalClassification contract.
         cache_key = f"classification:{signal_id}"
         cached = _redis.get(cache_key)
 
         if cached:
             classification = SignalClassification.model_validate_json(cached)
+        elif settings.grouping_algo == "v2":
+            classification = classify_locally(
+                title=signal.headline,
+                description=created.get("title"),
+                source_severity=created.get("severity"),
+            )
+            _redis.setex(cache_key, 24 * 3600, classification.model_dump_json())
         else:
             # Build context from raw data
             raw_context_parts = []
@@ -206,7 +216,7 @@ def process_signal(self, signal_data: dict):
         # ─── Stage 4: Alert escalation (if high severity) ───────────────────
         alert = None
         if event and classification.severity >= 4:
-            alert = assess_and_escalate(
+            alert = maybe_escalate(
                 event=event,
                 signal_summaries=[classification.summary],
                 max_severity=classification.severity,
@@ -263,27 +273,32 @@ def process_manual_signal(
        and record the user escalation in eventEscaladedByUsers
     """
     try:
-        # ─── Stage 1: Classify via Claude ─────────────────────────────────────
-        disaster_types = _get_disaster_types()
-
-        prompt = build_classify_prompt(
-            title=title,
-            description=description,
-            location_name=None,
-            url=None,
-            timestamp=None,
-            raw_context=f"Manual signal from {source_type} source. Description: {description}",
-            disaster_types=disaster_types,
-        )
-
-        result_data = call_claude(
-            CLASSIFY_SYSTEM,
-            prompt,
-            stage="classify",
-            prompt_version=CLASSIFY_PROMPT_VERSION,
-            signal_id=signal_id,
-        )
-        classification = SignalClassification.model_validate(result_data)
+        # ─── Stage 1: Classify ────────────────────────────────────────────────
+        if settings.grouping_algo == "v2":
+            classification = classify_locally(
+                title=title,
+                description=description,
+                source_severity=severity,
+            )
+        else:
+            disaster_types = _get_disaster_types()
+            prompt = build_classify_prompt(
+                title=title,
+                description=description,
+                location_name=None,
+                url=None,
+                timestamp=None,
+                raw_context=f"Manual signal from {source_type} source. Description: {description}",
+                disaster_types=disaster_types,
+            )
+            result_data = call_claude(
+                CLASSIFY_SYSTEM,
+                prompt,
+                stage="classify",
+                prompt_version=CLASSIFY_PROMPT_VERSION,
+                signal_id=signal_id,
+            )
+            classification = SignalClassification.model_validate(result_data)
 
         logger.info(
             "Manual signal %s classified: types=%s severity=%d",
@@ -438,7 +453,7 @@ def process_gdacs_signal(
         # Assess for alert if high severity (Red/Orange)
         alert = None
         if event and severity >= 4:
-            alert = assess_and_escalate(
+            alert = maybe_escalate(
                 event=event,
                 signal_summaries=[classification.summary],
                 max_severity=severity,
@@ -539,7 +554,7 @@ def process_acled_signal(
         # Assess for alert if high severity
         alert = None
         if event and severity >= 4:
-            alert = assess_and_escalate(
+            alert = maybe_escalate(
                 event=event,
                 signal_summaries=[classification.summary],
                 max_severity=severity,
