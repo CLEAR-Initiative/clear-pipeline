@@ -21,4 +21,4 @@ RUN python -c "from sentence_transformers import SentenceTransformer; \
 COPY . .
 
 # Default: run Celery worker + beat
-CMD ["celery", "-A", "src.celery_app", "worker", "--beat", "--loglevel=info", "--concurrency=4"]
+CMD ["celery", "-A", "src.celery_app", "worker", "--beat", "--loglevel=info", "--concurrency=2"]
