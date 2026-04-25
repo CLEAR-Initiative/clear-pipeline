@@ -40,7 +40,25 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
+    # Default model — used unless a per-stage override below is set.
     claude_model: str = "claude-sonnet-4-6"
+
+    # Per-stage model overrides. Lighter stages (boolean / NER / pattern
+    # matching) default to Haiku; user-facing narrative stages stay on the
+    # default model. Each can be flipped via env without code changes.
+    #
+    #   classify   — v1 signal classification (taxonomy lookup + severity)
+    #   group      — v1 add-vs-create event clustering decision
+    #   assess     — v1 alert-worthiness boolean
+    #   rewrite    — v2 event title/description (USER-FACING)
+    #   situation  — situation narrative (USER-FACING, less frequent)
+    #   location   — text → location-name extraction (NER)
+    claude_model_classify: str = "claude-haiku-4-5-20251001"
+    claude_model_group: str = ""  # "" → falls back to claude_model
+    claude_model_assess: str = "claude-haiku-4-5-20251001"
+    claude_model_rewrite: str = ""  # falls back to claude_model
+    claude_model_situation: str = ""  # falls back to claude_model
+    claude_model_location: str = "claude-haiku-4-5-20251001"
 
     # Celery
     celery_broker_url: str = "redis://localhost:6379/0"

@@ -124,6 +124,15 @@ def _extract_json(text: str) -> str | None:
     return None
 
 
+def model_for_stage(stage: str | None) -> str:
+    """Resolve the model to use for a given stage. Stage-specific override
+    in settings wins; falls back to settings.claude_model."""
+    if not stage:
+        return settings.claude_model
+    override = getattr(settings, f"claude_model_{stage}", "") or ""
+    return override or settings.claude_model
+
+
 def call_claude(
     system_prompt: str,
     user_prompt: str,
@@ -132,11 +141,18 @@ def call_claude(
     prompt_version: str | None = None,
     signal_id: str | None = None,
     event_id: str | None = None,
+    model: str | None = None,
+    max_tokens: int = 1024,
 ) -> dict:
     """
     Call Claude with a system + user prompt and parse JSON response.
 
     The system prompt should instruct Claude to respond with valid JSON.
+
+    Model selection priority:
+      1. explicit `model=` parameter
+      2. settings.claude_model_<stage> if set
+      3. settings.claude_model (global default)
 
     Telemetry: when stage and prompt_version are passed, every call (success,
     parse failure, or API failure including rate-limit) is reported to the
@@ -151,6 +167,7 @@ def call_claude(
         JSON-extraction fallbacks.
     """
     client = _get_client()
+    chosen_model = model or model_for_stage(stage)
     started = time.monotonic()
     raw_text = ""
     parsed: dict | None = None
@@ -161,8 +178,8 @@ def call_claude(
 
     try:
         response = client.messages.create(
-            model=settings.claude_model,
-            max_tokens=1024,
+            model=chosen_model,
+            max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -210,7 +227,7 @@ def call_claude(
             record_call(
                 stage=stage,
                 prompt_version=prompt_version,
-                model=settings.claude_model,
+                model=chosen_model,
                 signal_id=signal_id,
                 event_id=event_id,
                 system_prompt=system_prompt,
