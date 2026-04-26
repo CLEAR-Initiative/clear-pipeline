@@ -195,6 +195,9 @@ def backfill_admin_geometries(
         logger.info("[GEOMETRIES] Done: %s", stats)
         return stats
 
+    except graphql.GraphQLClientError as exc:
+        logger.error("[GEOMETRIES] permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error(
             "[GEOMETRIES] backfill_admin_geometries failed: %s",

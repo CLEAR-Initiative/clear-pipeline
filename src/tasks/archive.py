@@ -28,6 +28,9 @@ def archive_stale_alerts(self, older_than_days: int = 14) -> dict:
         count = graphql.archive_stale_alerts(older_than_days=older_than_days)
         logger.info("[ARCHIVE] Archived %d stale alert(s)", count)
         return {"alerts_archived": count}
+    except graphql.GraphQLClientError as exc:
+        logger.error("[ARCHIVE] permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("[ARCHIVE] archive_stale_alerts failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=300)

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from src.celery_app import app
 from src.clients.gdacs import fetch_gdacs_events, get_last_synced
-from src.clients.graphql import create_signal, get_data_sources
+from src.clients.graphql import GraphQLClientError, create_signal, get_data_sources
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,9 @@ def poll_gdacs(self):
         )
         return {"events_found": len(events), "signals_created": created_count, "failed": failed_count}
 
+    except GraphQLClientError as exc:
+        logger.error("[GDACS] poll_gdacs permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("[GDACS] poll_gdacs failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=60)
