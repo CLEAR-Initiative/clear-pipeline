@@ -34,6 +34,9 @@ def _build_signal_input(event: dict, source_id: str) -> dict:
     """Convert a parsed GDACS event into a CLEAR CreateSignalInput dict."""
     input_data: dict = {
         "sourceId": source_id,
+        # Dedup key — (sourceId, externalId) is unique, so re-ingesting the
+        # same GDACS event (across poll rounds) returns the existing row.
+        "externalId": f"gdacs:{event['gdacs_id']}",
         "rawData": event["raw"],
         "publishedAt": event.get("from_date") or datetime.now(UTC).isoformat(),
         "url": event.get("url"),
@@ -97,6 +100,7 @@ def poll_gdacs(self):
                 process_gdacs_signal.delay(
                     signal_id=signal_id,
                     gdacs_event=event,
+                    created_signal=created,
                 )
                 created_count += 1
 

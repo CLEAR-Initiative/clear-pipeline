@@ -10,7 +10,34 @@ from src.clients.claude import call_claude
 from src.clients.graphql import create_event, get_events, update_event
 from src.config import settings
 from src.models.clear import EventGroupingResult, SignalClassification
-from src.prompts.group import SYSTEM_PROMPT, build_group_prompt
+from src.prompts.group import GROUP_PROMPT_VERSION, SYSTEM_PROMPT, build_group_prompt
+from src.services.redis_lock import redis_lock
+from src.services.event_grouping_v2 import group_signal_v2
+
+
+def dispatch_group_signal(
+    *,
+    algo: str | None = None,
+    **kwargs,
+) -> dict | None:
+    """Pick the grouping implementation based on `settings.grouping_algo`
+    (or the `algo` override). `kwargs` are passed to the chosen function —
+    extra kwargs unused by one variant are dropped cleanly below.
+    """
+    algo_sel = (algo or settings.grouping_algo or "v1").lower()
+    if algo_sel == "v2":
+        v2_keys = {
+            "signal_id", "signal_title", "signal_description",
+            "signal_timestamp", "classification", "created_signal",
+        }
+        return group_signal_v2(**{k: v for k, v in kwargs.items() if k in v2_keys})
+    v1_keys = {
+        "signal_id", "signal_title", "signal_description",
+        "signal_location_name", "signal_origin_id", "signal_timestamp",
+        "classification", "signal_lat", "signal_lng", "probability_radius_km",
+        "created_signal",
+    }
+    return group_signal(**{k: v for k, v in kwargs.items() if k in v1_keys})
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +89,7 @@ def group_signal(
     signal_lat: float | None = None,
     signal_lng: float | None = None,
     probability_radius_km: float | None = None,
+    created_signal: dict | None = None,
 ) -> dict | None:
     """
     Use Claude to decide if a signal belongs to an existing event or creates a new one.
@@ -69,6 +97,67 @@ def group_signal(
 
     Returns the event dict (created or updated) or None if grouping fails.
     """
+    # Short-circuit: when a prior run already linked this signal to an
+    # event, return that event instead of asking Claude to re-cluster.
+    # Without this, a task retried after a downstream failure would ask
+    # Claude to decide again and potentially create a second event.
+    if created_signal:
+        existing_events = created_signal.get("events") or []
+        if existing_events:
+            existing = existing_events[0]
+            logger.info(
+                "[GROUPING v1] Signal %s already linked to event %s — returning existing",
+                signal_id, existing.get("id"),
+            )
+            return existing
+
+    # Lock key approximates "signals that could plausibly cluster together":
+    # (some location key + primary disaster type). Two workers hitting the
+    # same bucket serialise, so the second one sees the first one's newly
+    # created event instead of calling Claude with the same context twice.
+    loc_key = (
+        signal_origin_id
+        or (signal_location_name or "").strip().lower()
+        or "unknown"
+    )
+    type_key = classification.disaster_types[0] if classification.disaster_types else "ot"
+    lock_key = f"group:v1:{loc_key}:{type_key}"
+
+    with redis_lock(lock_key, ttl_seconds=30, wait_seconds=20) as acquired:
+        if not acquired:
+            logger.warning(
+                "[GROUPING v1] Could not acquire %s within deadline — "
+                "proceeding unlocked (duplicate event risk accepted).",
+                lock_key,
+            )
+        return _group_signal_locked(
+            signal_id=signal_id,
+            signal_title=signal_title,
+            signal_description=signal_description,
+            signal_location_name=signal_location_name,
+            signal_origin_id=signal_origin_id,
+            signal_timestamp=signal_timestamp,
+            classification=classification,
+            signal_lat=signal_lat,
+            signal_lng=signal_lng,
+            probability_radius_km=probability_radius_km,
+        )
+
+
+def _group_signal_locked(
+    signal_id: str,
+    signal_title: str | None,
+    signal_description: str | None,
+    signal_location_name: str | None,
+    signal_origin_id: str | None,
+    signal_timestamp: str | None,
+    classification: SignalClassification,
+    signal_lat: float | None = None,
+    signal_lng: float | None = None,
+    probability_radius_km: float | None = None,
+) -> dict | None:
+    """The original body of `group_signal`, extracted so the public entry
+    point can wrap it in a Redis lock."""
     active_events = _get_active_events()
 
     prompt = build_group_prompt(
@@ -82,7 +171,13 @@ def group_signal(
         active_events=active_events,
     )
 
-    result_data = call_claude(SYSTEM_PROMPT, prompt)
+    result_data = call_claude(
+        SYSTEM_PROMPT,
+        prompt,
+        stage="group",
+        prompt_version=GROUP_PROMPT_VERSION,
+        signal_id=signal_id,
+    )
     result = EventGroupingResult.model_validate(result_data)
 
     now_iso = datetime.now(UTC).isoformat()
@@ -114,6 +209,22 @@ def group_signal(
             "signalIds": [signal_id],
             "lastSignalCreatedAt": ts,
         }
+
+        # Bump event severity (and derived rank) to the MAX across signals —
+        # otherwise event.severity stays frozen at the first signal's value.
+        existing_event = next(
+            (e for e in active_events if e.get("id") == result.event_id),
+            None,
+        )
+        existing_severity = (existing_event or {}).get("severity") or 0
+        max_severity = max(existing_severity, classification.severity)
+        if max_severity > existing_severity:
+            update_data["severity"] = max_severity
+            update_data["rank"] = max_severity / 5.0
+            logger.info(
+                "[EVENT] Severity bumped on event %s: %d → %d",
+                result.event_id, existing_severity, max_severity,
+            )
 
         # Update title and description if Claude provided new ones
         if result.title:

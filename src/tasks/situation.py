@@ -13,9 +13,13 @@ import logging
 
 from src.celery_app import app
 from src.clients import graphql
-from src.clients.claude import call_claude
+from src.clients.claude import ClaudeRateLimited, call_claude
 from src.models.clear import SituationNarrative
-from src.prompts.situation import SYSTEM_PROMPT, build_situation_prompt
+from src.prompts.situation import (
+    SITUATION_PROMPT_VERSION,
+    SYSTEM_PROMPT,
+    build_situation_prompt,
+)
 from src.services.population import estimate_population_for_districts
 
 logger = logging.getLogger(__name__)
@@ -129,7 +133,12 @@ def _generate_narrative(events: list[dict]) -> tuple[str, str] | None:
     prompt = build_situation_prompt(events, locations)
 
     try:
-        result_data = call_claude(SYSTEM_PROMPT, prompt)
+        result_data = call_claude(
+            SYSTEM_PROMPT,
+            prompt,
+            stage="situation",
+            prompt_version=SITUATION_PROMPT_VERSION,
+        )
         narrative = SituationNarrative.model_validate(result_data)
         return narrative.title, narrative.summary
     except Exception as e:
@@ -189,6 +198,12 @@ def enrich_situation(
             "summary": summary,
         }
 
+    except ClaudeRateLimited as exc:
+        logger.warning(
+            "[CLAUDE RATE-LIMIT] enrich_situation backing off %.0fs",
+            exc.retry_after,
+        )
+        raise self.retry(exc=exc, countdown=int(exc.retry_after))
     except Exception as exc:
         logger.error(
             "[SITUATION] enrich_situation failed for %s: %s",

@@ -1,5 +1,9 @@
 """Signal classification prompt: determine disaster type, relevance, severity."""
 
+# Bump whenever the prompt text changes — the insights dashboard groups calls
+# by version to track quality across iterations.
+CLASSIFY_PROMPT_VERSION = "classify-v1"
+
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system focused on Sudan.
 
@@ -19,19 +23,20 @@ Timestamp: {timestamp}
 Additional context from raw data:
 {raw_context}
 
-Available disaster types (use glide_number codes):
+Available disaster types — each code belongs to a level_1 category and a level_2 group:
 {disaster_types_list}
 
 Respond with this exact JSON structure:
 {{
-  "disaster_types": ["<glide_number>", ...],
+  "disaster_types": ["<code>", ...],
   "relevance": <float 0.0-1.0>,
   "severity": <int 1-5>,
   "summary": "<one-line summary>"
 }}
 
 Rules:
-- disaster_types: array of glide_number codes from the list above (can be multiple)
+- disaster_types: array of codes from the list above. Pick the most specific level_3 code that applies.
+- IMPORTANT: if you return multiple codes, they MUST all belong to the same level_1 category. A single signal describes one humanitarian situation (e.g. a conflict OR a flood, not both). If the event mixes level_1 categories, return only the dominant level_1's codes.
 - relevance: how relevant this is to Sudan humanitarian monitoring (0.0 = irrelevant, 1.0 = critical)
 - severity: 1=minimal, 2=low, 3=moderate, 4=high, 5=critical
 - summary: concise one-line description of the event for analysts"""
@@ -47,11 +52,23 @@ def build_classify_prompt(
     disaster_types: list[dict],
 ) -> str:
     """Build the user prompt for signal classification."""
-    dt_lines = "\n".join(
-        f"  {dt['glideNumber']}: {dt['disasterType']}"
-        + (f" ({dt['disasterClass']})" if dt.get("disasterClass") else "")
-        for dt in disaster_types
-    )
+    # Group codes by level_1 → level_2 so the LLM sees the hierarchy clearly.
+    # Falls back to flat listing if the new level1/level2 fields aren't set.
+    by_l1: dict[str, dict[str, list[dict]]] = {}
+    for dt in disaster_types:
+        l1 = dt.get("level1") or dt.get("disasterClass") or "other"
+        l2 = dt.get("level2") or dt.get("disasterType") or "other"
+        by_l1.setdefault(l1, {}).setdefault(l2, []).append(dt)
+
+    lines: list[str] = []
+    for l1_name, groups in sorted(by_l1.items()):
+        lines.append(f"\n[{l1_name}]")
+        for l2_name, rows in sorted(groups.items()):
+            for dt in rows:
+                code = dt.get("glideNumber", "")
+                label = dt.get("disasterType", "")
+                lines.append(f"  {code}: {label}  (level_2: {l2_name})")
+    dt_lines = "\n".join(lines)
 
     return USER_PROMPT_TEMPLATE.format(
         title=title or "(no title)",

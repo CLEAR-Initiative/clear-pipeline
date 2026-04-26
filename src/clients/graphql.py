@@ -17,10 +17,16 @@ mutation CreateSignal($input: CreateSignalInput!) {
     id
     title
     severity
+    externalId
     publishedAt
-    originLocation { id name level }
-    destinationLocation { id name level }
-    generalLocation { id name level }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+    # If the API returned an existing row (idempotent ingest), it may
+    # already be linked to an event from a prior run. group_signal_v2 uses
+    # this to short-circuit — a signal that already has an event must not
+    # spawn another one.
+    events { id title types severity }
   }
 }
 """
@@ -97,6 +103,24 @@ mutation UpdateLocationPopulation($id: String!, $population: String!) {
 }
 """
 
+UPDATE_LOCATION = """
+mutation UpdateLocation($id: String!, $input: UpdateLocationInput!) {
+  updateLocation(id: $id, input: $input) { id pCode name }
+}
+"""
+
+CREATE_LOCATION = """
+mutation CreateLocation($input: CreateLocationInput!) {
+  createLocation(input: $input) { id name level pCode }
+}
+"""
+
+ARCHIVE_STALE_ALERTS = """
+mutation ArchiveStaleAlerts($olderThanDays: Int) {
+  archiveStaleAlerts(olderThanDays: $olderThanDays) { alertsArchived }
+}
+"""
+
 UPDATE_SITUATION_POPULATION = """
 mutation UpdateSituationPopulation($id: String!, $input: UpdateSituationPopulationInput!) {
   updateSituationPopulation(id: $id, input: $input) {
@@ -148,6 +172,61 @@ query EventForSituation($id: String!) {
 }
 """
 
+GET_EVENT_WITH_SIGNALS = """
+query EventWithSignals($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    severity
+    signals {
+      id
+      title
+      description
+      severity
+      publishedAt
+      source { id name type }
+    }
+  }
+}
+"""
+
+GET_LOCATION_METADATA = """
+query LocationMetadata($locationId: String!, $type: String) {
+  locationMetadata(locationId: $locationId, type: $type) {
+    id
+    type
+    data
+    validFrom
+    validTo
+  }
+}
+"""
+
+UPSERT_LOCATION_METADATA = """
+mutation UpsertLocationMetadata($input: UpsertLocationMetadataInput!) {
+  upsertLocationMetadata(input: $input) { id type data updatedAt }
+}
+"""
+
+UPSERT_LOCATION_METADATA_BATCH = """
+mutation UpsertLocationMetadataBatch($inputs: [UpsertLocationMetadataInput!]!) {
+  upsertLocationMetadataBatch(inputs: $inputs) { id type }
+}
+"""
+
+ALL_LOCATION_METADATA = """
+query AllLocationMetadata($type: String!) {
+  allLocationMetadata(type: $type) {
+    id
+    type
+    data
+    location { id name pCode }
+  }
+}
+"""
+
 GET_RECENT_ALERTS = """
 query RecentAlerts($since: DateTime!) {
   alerts(status: published) {
@@ -185,9 +264,9 @@ query Events {
     validTo
     firstSignalCreatedAt
     lastSignalCreatedAt
-    originLocation { id name }
-    destinationLocation { id name }
-    generalLocation { id name }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
     alerts { id status }
   }
 }
@@ -220,13 +299,27 @@ query DisasterTypes {
     disasterType
     disasterClass
     glideNumber
+    level1
+    level2
+    idType
   }
 }
 """
 
 
+class GraphQLClientError(Exception):
+    """4xx / validation / schema errors from clear-api. NOT retryable —
+    these indicate a bug in the request shape, missing field, bad auth,
+    etc. Retrying them just amplifies damage (see the populationDisplaced
+    incident: each retry created another duplicate event)."""
+
+
 def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dict:
-    """Execute a GraphQL query/mutation with retry logic."""
+    """Execute a GraphQL query/mutation with retry logic.
+
+    4xx responses raise `GraphQLClientError` immediately with no retry.
+    5xx / connection errors are retried with exponential backoff.
+    """
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.clear_api_key}",
@@ -243,6 +336,18 @@ def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dic
                 headers=headers,
                 timeout=30,
             )
+
+            # 4xx → treat as non-retryable bug, raise and stop. The body
+            # often has useful detail the default message hides.
+            if 400 <= resp.status_code < 500:
+                body_snippet = resp.text[:500] if resp.text else "(empty)"
+                msg = (
+                    f"GraphQL {resp.status_code} (non-retryable) for {settings.clear_api_url}: "
+                    f"{body_snippet}"
+                )
+                logger.error(msg)
+                raise GraphQLClientError(msg)
+
             resp.raise_for_status()
             result = resp.json()
 
@@ -251,6 +356,10 @@ def _execute(query: str, variables: dict | None = None, retries: int = 3) -> dic
                 raise RuntimeError(f"GraphQL errors: {result['errors']}")
 
             return result["data"]
+
+        except GraphQLClientError:
+            # Never retry 4xx
+            raise
 
         except (httpx.HTTPError, RuntimeError) as e:
             if attempt < retries:
@@ -392,6 +501,31 @@ def update_location_population(location_id: str, population: int) -> dict:
     return result["updateLocationPopulation"]
 
 
+def update_location(location_id: str, **fields) -> dict:
+    """Update a location's scalar fields (pCode, name, geoId, osmId, level, parentId).
+    Only fields passed are changed."""
+    result = _execute(
+        UPDATE_LOCATION,
+        {"id": location_id, "input": fields},
+    )
+    return result["updateLocation"]
+
+
+def create_location(name: str, level: int, **fields) -> dict:
+    """Create a new location (geometry defaults to POINT(0 0); set via
+    update_location_geometry afterwards)."""
+    payload = {"name": name, "level": level, **fields}
+    result = _execute(CREATE_LOCATION, {"input": payload})
+    return result["createLocation"]
+
+
+def archive_stale_alerts(older_than_days: int = 14) -> int:
+    """Archive alerts whose event.lastSignalCreatedAt is older than N days.
+    Returns the number of rows affected."""
+    result = _execute(ARCHIVE_STALE_ALERTS, {"olderThanDays": older_than_days})
+    return int(result["archiveStaleAlerts"]["alertsArchived"])
+
+
 def update_situation_population(
     situation_id: str,
     population_affected: int | None = None,
@@ -418,3 +552,47 @@ def update_situation_population(
 def get_event_for_situation(event_id: str) -> dict | None:
     result = _execute(GET_EVENT_FOR_SITUATION, {"id": event_id})
     return result.get("event")
+
+
+def get_event_with_signals(event_id: str) -> dict | None:
+    """Fetch an event plus all its linked signals. Used by the rewrite pass
+    of the new grouping algorithm."""
+    result = _execute(GET_EVENT_WITH_SIGNALS, {"id": event_id})
+    return result.get("event")
+
+
+def get_location_metadata(location_id: str, type_: str | None = None) -> list[dict]:
+    """Return all locationMetadata rows for a location, optionally filtered by type."""
+    variables: dict = {"locationId": location_id}
+    if type_ is not None:
+        variables["type"] = type_
+    result = _execute(GET_LOCATION_METADATA, variables)
+    return result.get("locationMetadata", []) or []
+
+
+def upsert_location_metadata(location_id: str, type_: str, data: dict) -> dict:
+    """Create or update a location's metadata entry for a given type."""
+    result = _execute(
+        UPSERT_LOCATION_METADATA,
+        {"input": {"locationId": location_id, "type": type_, "data": data}},
+    )
+    return result["upsertLocationMetadata"]
+
+
+def upsert_location_metadata_batch(
+    rows: list[dict],
+) -> list[dict]:
+    """Bulk upsert. Each row must have {locationId, type, data}. Returns the
+    resulting rows (order not guaranteed). Rows whose locationId doesn't exist
+    are silently skipped by the server.
+    """
+    if not rows:
+        return []
+    result = _execute(UPSERT_LOCATION_METADATA_BATCH, {"inputs": rows})
+    return result.get("upsertLocationMetadataBatch", []) or []
+
+
+def get_all_location_metadata(type_: str) -> list[dict]:
+    """Return every locationMetadata row of a given type across all locations."""
+    result = _execute(ALL_LOCATION_METADATA, {"type": type_})
+    return result.get("allLocationMetadata", []) or []

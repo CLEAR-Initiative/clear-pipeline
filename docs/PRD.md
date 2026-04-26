@@ -1,5 +1,11 @@
 # CLEAR Pipeline — Product Requirements Document
 
+> **Note (historical):** This PRD captures the original single-source
+> (Dataminr) pipeline spec that kicked off the project. The pipeline has
+> since expanded to include GDACS, ACLED, manual signals, situation
+> enrichment, admin-geometry backfill, population computation, and more.
+> For the current system reference, see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ## Overview
 
 **clear-pipeline** is a standalone Python data ingestion service that retrieves real-time signals from the Dataminr First Alert API (Dataminr calls them "alerts", we call them **signals**), processes them through Claude-powered ML stages for classification, event clustering, and severity assessment, then writes structured results into the CLEAR system via the Apollo GraphQL API (`clear-api`).

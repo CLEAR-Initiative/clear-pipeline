@@ -40,7 +40,25 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
+    # Default model — used unless a per-stage override below is set.
     claude_model: str = "claude-sonnet-4-6"
+
+    # Per-stage model overrides. Lighter stages (boolean / NER / pattern
+    # matching) default to Haiku; user-facing narrative stages stay on the
+    # default model. Each can be flipped via env without code changes.
+    #
+    #   classify   — v1 signal classification (taxonomy lookup + severity)
+    #   group      — v1 add-vs-create event clustering decision
+    #   assess     — v1 alert-worthiness boolean
+    #   rewrite    — v2 event title/description (USER-FACING)
+    #   situation  — situation narrative (USER-FACING, less frequent)
+    #   location   — text → location-name extraction (NER)
+    claude_model_classify: str = "claude-haiku-4-5-20251001"
+    claude_model_group: str = ""  # "" → falls back to claude_model
+    claude_model_assess: str = "claude-haiku-4-5-20251001"
+    claude_model_rewrite: str = ""  # falls back to claude_model
+    claude_model_situation: str = ""  # falls back to claude_model
+    claude_model_location: str = "claude-haiku-4-5-20251001"
 
     # Celery
     celery_broker_url: str = "redis://localhost:6379/0"
@@ -70,7 +88,33 @@ class Settings(BaseSettings):
     sentry_env: str = "development"
     log_level: str = "INFO"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    # Insights dashboard (LLM call telemetry — see clear-pipeline-insights repo)
+    insights_api_url: str = "https://clear-pipeline-insights.vercel.app"
+    insights_ingest_token: str = ""  # empty disables telemetry
+    pipeline_env: str = ""  # empty → derived as local-{whoami} at runtime
+
+    # Grouping algorithm selector.
+    #   "v1" (default) — legacy semantic grouping: Claude decides add-vs-create.
+    #   "v2"           — new district+type grouping (EventClassifier + Claude rewrite only).
+    grouping_algo: str = "v1"
+
+    # Last-resort default for `events.population_displaced` when neither
+    # the signal text nor the admin-2 DTM row provides a value.
+    default_population_displaced: int = 1670
+
+    # IOM DTM API — displaced-person data per admin level
+    iom_dtm_base_url: str = "https://dtmapi.iom.int/v3"
+    iom_dtm_subscription_key: str = ""  # empty disables DTM backfill
+    iom_dtm_country_name: str = "Sudan"
+    iom_dtm_admin0_pcode: str = "SDN"
+
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        # Tolerate unknown keys in .env so a stray/legacy var doesn't crash boot.
+        # The pipeline still warns via missing-field errors for required vars.
+        "extra": "ignore",
+    }
 
 
 settings = Settings()

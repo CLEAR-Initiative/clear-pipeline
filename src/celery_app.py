@@ -73,6 +73,19 @@ app.conf.beat_schedule = {
         "task": "src.tasks.notify.send_monthly_digest",
         "schedule": crontab(hour=7, minute=0, day_of_month=1),
     },
+    # Daily archival — 03:00 UTC, archive alerts whose event last saw
+    # a signal more than 14 days ago.
+    "archive-stale-alerts": {
+        "task": "src.tasks.archive.archive_stale_alerts",
+        "schedule": crontab(hour=3, minute=0),
+        "kwargs": {"older_than_days": 14},
+    },
+    # Weekly IOM DTM backfill — Mondays at 02:00 UTC. Refreshes
+    # locationMetadata(type="iom_dtm_displacement") per admin-2.
+    "backfill-dtm-displacement": {
+        "task": "src.tasks.dtm.backfill_dtm_displacement",
+        "schedule": crontab(hour=2, minute=0, day_of_week=1),
+    },
 }
 
 app.conf.include = [
@@ -84,4 +97,6 @@ app.conf.include = [
     "src.tasks.population",
     "src.tasks.geometries",
     "src.tasks.situation",
+    "src.tasks.archive",
+    "src.tasks.dtm",
 ]

@@ -1,5 +1,8 @@
 """Event grouping prompt: decide if a signal joins an existing event or creates a new one."""
 
+# Bump whenever the prompt text changes (see CLASSIFY_PROMPT_VERSION for rationale).
+GROUP_PROMPT_VERSION = "group-v1"
+
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system.
 

@@ -1,5 +1,8 @@
 """Alert assessment prompt: decide if an event should become an alert."""
 
+# Bump whenever the prompt text changes (see CLASSIFY_PROMPT_VERSION for rationale).
+ASSESS_PROMPT_VERSION = "assess-v1"
+
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system.
 
