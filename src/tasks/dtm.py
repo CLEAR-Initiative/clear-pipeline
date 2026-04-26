@@ -188,6 +188,9 @@ def backfill_dtm_displacement(
         logger.info("[IOM DTM] Done: %s", all_stats)
         return all_stats
 
+    except graphql.GraphQLClientError as exc:
+        logger.error("[IOM DTM] permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("[IOM DTM] backfill_dtm_displacement failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=300)

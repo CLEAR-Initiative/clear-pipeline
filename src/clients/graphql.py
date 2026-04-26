@@ -228,7 +228,7 @@ query AllLocationMetadata($type: String!) {
 """
 
 GET_RECENT_ALERTS = """
-query RecentAlerts($since: DateTime!) {
+query RecentAlerts {
   alerts(status: published) {
     id
     status

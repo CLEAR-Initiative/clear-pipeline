@@ -204,6 +204,12 @@ def enrich_situation(
             exc.retry_after,
         )
         raise self.retry(exc=exc, countdown=int(exc.retry_after))
+    except graphql.GraphQLClientError as exc:
+        logger.error(
+            "[SITUATION] enrich_situation %s permanently failed (non-retryable): %s",
+            situation_id, exc,
+        )
+        raise
     except Exception as exc:
         logger.error(
             "[SITUATION] enrich_situation failed for %s: %s",

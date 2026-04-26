@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from src.celery_app import app
 from src.clients.dataminr import fetch_signals, get_last_synced
-from src.clients.graphql import get_latest_signal_timestamp
+from src.clients.graphql import GraphQLClientError, get_latest_signal_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,9 @@ def poll_dataminr(self):
         logger.info("[DATAMINR] Dispatched %d signals for processing", len(signals))
         return {"signals_found": len(signals)}
 
+    except GraphQLClientError as exc:
+        logger.error("[DATAMINR] poll_dataminr permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("[DATAMINR] poll_dataminr failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=30)

@@ -78,6 +78,9 @@ def backfill_location_population(self, levels: list[int] | None = None) -> dict:
         )
         return {"processed": processed, "updated": updated, "skipped": skipped}
 
+    except graphql.GraphQLClientError as exc:
+        logger.error("[POPULATION] permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error(
             "[POPULATION] backfill_location_population failed: %s",

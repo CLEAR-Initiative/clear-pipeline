@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 import redis
 
 from src.celery_app import app
-from src.clients.graphql import get_published_alerts, notify_alert_digest
+from src.clients.graphql import GraphQLClientError, get_published_alerts, notify_alert_digest
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,9 @@ def send_daily_digest(self):
 
         return {"frequency": "daily", "alerts": len(alert_ids), "notified": count}
 
+    except GraphQLClientError as exc:
+        logger.error("send_daily_digest permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("send_daily_digest failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=60)
@@ -91,6 +94,9 @@ def send_weekly_digest(self):
 
         return {"frequency": "weekly", "alerts": len(alert_ids), "notified": count}
 
+    except GraphQLClientError as exc:
+        logger.error("send_weekly_digest permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("send_weekly_digest failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=60)
@@ -120,6 +126,9 @@ def send_monthly_digest(self):
 
         return {"frequency": "monthly", "alerts": len(alert_ids), "notified": count}
 
+    except GraphQLClientError as exc:
+        logger.error("send_monthly_digest permanently failed (non-retryable): %s", exc)
+        raise
     except Exception as exc:
         logger.error("send_monthly_digest failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=60)
