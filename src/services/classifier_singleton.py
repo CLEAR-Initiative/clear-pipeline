@@ -87,3 +87,17 @@ def code_to_level1_map() -> dict[str, str]:
         if code and l1:
             out[code] = l1
     return out
+
+
+def code_to_level3_map() -> dict[str, str]:
+    """Glide code → level_3 sub-type name (e.g. 'ba' → 'armed clash',
+    'pp' → 'peaceful protest'). Used for the per-event-type stats lookup
+    (acled_event_type_stats.json), whose keys are the level_3 strings."""
+    taxonomy = _load_taxonomy()
+    out: dict[str, str] = {}
+    for row in taxonomy:
+        code = row.get("id")
+        l3 = row.get("type_level_3")
+        if code and l3:
+            out[code] = l3
+    return out

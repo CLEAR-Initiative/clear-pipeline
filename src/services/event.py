@@ -29,6 +29,7 @@ def dispatch_group_signal(
         v2_keys = {
             "signal_id", "signal_title", "signal_description",
             "signal_timestamp", "classification", "created_signal",
+            "signal_actual_population_affected",
         }
         return group_signal_v2(**{k: v for k, v in kwargs.items() if k in v2_keys})
     v1_keys = {

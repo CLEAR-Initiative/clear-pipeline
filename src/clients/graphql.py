@@ -27,7 +27,7 @@ mutation CreateSignal($input: CreateSignalInput!) {
     # already be linked to an event from a prior run. group_signal_v2 uses
     # this to short-circuit — a signal that already has an event must not
     # spawn another one.
-    events { id title types severity casualties }
+    events { id title types severity casualties populationAffected }
   }
 }
 """
@@ -182,6 +182,7 @@ query EventWithSignals($id: String!) {
     types
     severity
     casualties
+    populationAffected
     signals {
       id
       title
@@ -262,6 +263,8 @@ query Events {
     description
     types
     severity
+    casualties
+    populationAffected
     rank
     validFrom
     validTo

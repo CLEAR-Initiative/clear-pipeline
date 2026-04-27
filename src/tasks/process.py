@@ -199,6 +199,14 @@ def process_signal(self, signal_data: dict):
             location_name = resolved_loc.get("name") or location_name
         origin_id = origin_loc["id"] if origin_loc else (general_loc["id"] if general_loc else None)
 
+        # Best-effort populationAffected from raw text (Dataminr has no
+        # structured field for this). The grouping layer prefers this over
+        # the per-event-type stats lookup when set.
+        from src.services.signal import extract_population_affected_from_text
+        actual_pop = extract_population_affected_from_text(
+            signal.headline, created.get("title"), created.get("description"),
+        )
+
         event = dispatch_group_signal(
             signal_id=signal_id,
             signal_title=signal.headline,
@@ -211,6 +219,7 @@ def process_signal(self, signal_data: dict):
             signal_lng=signal_lng,
             probability_radius_km=probability_radius_km,
             created_signal=created,
+            signal_actual_population_affected=actual_pop,
         )
 
         # ─── Stage 4: Alert escalation (if high severity) ───────────────────
@@ -321,6 +330,9 @@ def process_manual_signal(
         # v2 grouping will still work — admin-2 resolution returns None and
         # the signal becomes its own event, which matches the pre-existing
         # behaviour for manual entries.
+        from src.services.signal import extract_population_affected_from_text
+        actual_pop = extract_population_affected_from_text(title, description)
+
         event = dispatch_group_signal(
             signal_id=signal_id,
             signal_title=title,
@@ -330,6 +342,7 @@ def process_manual_signal(
             signal_timestamp=None,
             classification=classification,
             created_signal={},
+            signal_actual_population_affected=actual_pop,
         )
 
         if not event:
@@ -448,6 +461,8 @@ def process_gdacs_signal(
             signal_lat=gdacs_event.get("lat"),
             signal_lng=gdacs_event.get("lng"),
             created_signal=created_signal or {},
+            # GDACS exposure data ships an actual affected-population estimate.
+            signal_actual_population_affected=population_affected,
         )
 
         # Assess for alert if high severity (Red/Orange)

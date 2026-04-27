@@ -65,6 +65,66 @@ def extract_casualties_from_text(*texts: str | None) -> int | None:
     return best
 
 
+# Match common phrasings of population-affected counts in news/alert text:
+#   "10,000 displaced", "5000 evacuated", "3 million affected",
+#   "displacing 12k people", "leaving 8000 homeless".
+# Includes scale modifiers (k/thousand/million) so we capture rough orders
+# of magnitude when sources don't give exact counts.
+_POP_NUM = r"(\d{1,3}(?:[,\s]\d{3})*|\d+(?:\.\d+)?)\s*(k|thousand|m|million|mln)?"
+_POPULATION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        rf"\b(?:at least|over|more than|nearly|around|about|approximately)?\s*{_POP_NUM}\s+(?:people\s+)?(?:were\s+|are\s+|have been\s+)?(?:displaced|evacuated|affected|homeless|forced to flee|fled their homes)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:displacing|evacuating|affecting|leaving)\s+(?:at least\s+|over\s+|more than\s+|nearly\s+|about\s+|approximately\s+)?{_POP_NUM}\s+(?:people|residents|civilians|families)?\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _parse_pop_match(num_str: str, scale: str | None) -> int | None:
+    """Resolve a (number, scale) regex capture into an absolute integer."""
+    cleaned = num_str.replace(",", "").replace(" ", "").strip()
+    try:
+        base = float(cleaned)
+    except ValueError:
+        return None
+    if scale:
+        s = scale.lower()
+        if s in ("k", "thousand"):
+            base *= 1_000
+        elif s in ("m", "million", "mln"):
+            base *= 1_000_000
+    if base < 1 or base > 100_000_000:
+        return None
+    return int(base)
+
+
+def extract_population_affected_from_text(*texts: str | None) -> int | None:
+    """Best-effort affected-population count parsed from free text.
+
+    Returns the maximum across all matches. Recognises common phrasings
+    ("10,000 displaced", "3 million affected", "evacuating 5000 people").
+    Returns None if no pattern matches.
+    """
+    best: int | None = None
+    for text in texts:
+        if not text:
+            continue
+        for pat in _POPULATION_PATTERNS:
+            for m in pat.finditer(text):
+                try:
+                    val = _parse_pop_match(m.group(1), m.group(2))
+                except (IndexError, ValueError):
+                    continue
+                if val is None:
+                    continue
+                if best is None or val > best:
+                    best = val
+    return best
+
+
 def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
     """Map a Dataminr signal to a CLEAR CreateSignalInput dict."""
     # Build description from subHeadline fields

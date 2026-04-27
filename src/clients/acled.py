@@ -116,6 +116,7 @@ def _parse_event(raw: dict) -> dict | None:
         return None
 
     event_type = raw.get("event_type", "") or ""
+    sub_event_type = raw.get("sub_event_type", "") or ""
     disorder_type = raw.get("disorder_type", "") or ""
 
     # Map to glide type
@@ -187,6 +188,7 @@ def _parse_event(raw: dict) -> dict | None:
         "description": description,
         "severity": severity,
         "event_type": event_type,
+        "sub_event_type": sub_event_type,
         "disorder_type": disorder_type,
         "glide_type": glide_type,
         "fatalities": fatalities,

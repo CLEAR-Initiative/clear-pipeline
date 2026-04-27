@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     # the signal text nor the admin-2 DTM row provides a value.
     default_population_displaced: int = 1670
 
+    # Last-resort default for `events.population_affected` when neither the
+    # raw signal extraction (ACLED has none, GDACS exposure data,
+    # Dataminr/manual regex) nor the per-event-type lookup (median pop_1km
+    # via acled_event_type_stats.json) produces a value.
+    default_population_affected: int = 1715
+
     # IOM DTM API — displaced-person data per admin level
     iom_dtm_base_url: str = "https://dtmapi.iom.int/v3"
     iom_dtm_subscription_key: str = ""  # empty disables DTM backfill
