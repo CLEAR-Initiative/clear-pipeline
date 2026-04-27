@@ -50,6 +50,9 @@ def _build_signal_input(event: dict, source_id: str) -> dict:
         "title": event["title"],
         "description": event.get("description"),
         "severity": event.get("severity"),
+        # ACLED ships `fatalities` directly; pass through as casualties so the
+        # API persists it on the signal row.
+        "casualties": event.get("fatalities") or None,
     }
 
     if event.get("source_url"):

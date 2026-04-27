@@ -72,6 +72,18 @@ def _compute_event_severity(
     return claude_fallback
 
 
+def _aggregate_casualties(signals: list[dict]) -> int | None:
+    """Event-level casualties = max across the event's signals.
+
+    Why max (not sum): multiple sources often report the same incident with
+    overlapping or running totals (e.g. ACLED + Dataminr both covering the
+    same strike). Summing would double-count; the upper bound is the
+    conservative estimate. Returns None when no signal carries a value.
+    """
+    values = [s.get("casualties") for s in signals if s.get("casualties") is not None]
+    return max(values) if values else None
+
+
 def _resolve_population_displaced(
     claude_value: int | None,
     admin2_id: str | None,
@@ -386,6 +398,7 @@ def _match_and_act(
             claude_value=rewrite.population_displaced if rewrite else None,
             admin2_id=admin2_id,
         )
+        event_casualties = _aggregate_casualties(signals)
 
         final_update: dict = {}
         if rewrite:
@@ -396,6 +409,8 @@ def _match_and_act(
             final_update["rank"] = event_severity / 5.0
         if pop_displaced is not None:
             final_update["populationDisplaced"] = str(pop_displaced)
+        if event_casualties is not None:
+            final_update["casualties"] = event_casualties
 
         updated = update_event(target_id, final_update) if final_update else target
         _invalidate_events_cache_v2()
@@ -454,6 +469,7 @@ def _match_and_act(
         claude_value=rewrite.population_displaced if rewrite else None,
         admin2_id=admin2_id,
     )
+    event_casualties = _aggregate_casualties(signals)
 
     final_update: dict = {}
     if rewrite:
@@ -464,6 +480,8 @@ def _match_and_act(
         final_update["rank"] = event_severity / 5.0
     if pop_displaced is not None:
         final_update["populationDisplaced"] = str(pop_displaced)
+    if event_casualties is not None:
+        final_update["casualties"] = event_casualties
 
     if final_update:
         update_event(event["id"], final_update)

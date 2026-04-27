@@ -5,7 +5,7 @@ Tasks:
   - backfill_location_population: run the raster against each location's
     geometry and cache the result on locations.population.
 
-Note: situation population is computed inside `src.tasks.situation.enrich_situation`,
+Note: crisis population is computed inside `src.tasks.crisis.enrich_crisis`,
 which also handles title/summary narrative generation.
 """
 

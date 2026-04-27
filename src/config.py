@@ -51,13 +51,13 @@ class Settings(BaseSettings):
     #   group      — v1 add-vs-create event clustering decision
     #   assess     — v1 alert-worthiness boolean
     #   rewrite    — v2 event title/description (USER-FACING)
-    #   situation  — situation narrative (USER-FACING, less frequent)
+    #   crisis     — crisis narrative (USER-FACING, less frequent)
     #   location   — text → location-name extraction (NER)
     claude_model_classify: str = "claude-haiku-4-5-20251001"
     claude_model_group: str = ""  # "" → falls back to claude_model
     claude_model_assess: str = "claude-haiku-4-5-20251001"
     claude_model_rewrite: str = ""  # falls back to claude_model
-    claude_model_situation: str = ""  # falls back to claude_model
+    claude_model_crisis: str = ""  # falls back to claude_model
     claude_model_location: str = "claude-haiku-4-5-20251001"
 
     # Celery

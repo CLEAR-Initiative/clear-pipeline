@@ -96,7 +96,7 @@ app.conf.include = [
     "src.tasks.notify",
     "src.tasks.population",
     "src.tasks.geometries",
-    "src.tasks.situation",
+    "src.tasks.crisis",
     "src.tasks.archive",
     "src.tasks.dtm",
 ]
