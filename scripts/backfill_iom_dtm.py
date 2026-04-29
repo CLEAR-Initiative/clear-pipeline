@@ -77,6 +77,8 @@ def run_level(
     admin_level: int,
     country_name: str,
     admin0_pcode: str,
+    operation: str | None,
+    from_round: int | None,
     dry_run: bool,
 ) -> dict:
     stats = {
@@ -95,8 +97,16 @@ def run_level(
 
     fetch = _LEVEL_FETCH[admin_level]
     logger.info("=" * 60)
-    logger.info("Level %d — fetching IOM DTM admin%d for %s…", admin_level, admin_level, country_name)
-    records = fetch(country_name=country_name, admin0_pcode=admin0_pcode)
+    logger.info(
+        "Level %d — fetching IOM DTM admin%d for %s (operation=%r from_round=%s)…",
+        admin_level, admin_level, country_name, operation, from_round,
+    )
+    records = fetch(
+        country_name=country_name,
+        admin0_pcode=admin0_pcode,
+        operation=operation,
+        from_round=from_round,
+    )
     stats["fetched"] = len(records)
 
     stats["records_without_pcode"] = sum(
@@ -217,7 +227,14 @@ def run_level(
     return stats
 
 
-def run(levels: list[int], country_name: str, admin0_pcode: str, dry_run: bool) -> dict:
+def run(
+    levels: list[int],
+    country_name: str,
+    admin0_pcode: str,
+    operation: str | None,
+    from_round: int | None,
+    dry_run: bool,
+) -> dict:
     if not settings.iom_dtm_subscription_key:
         raise SystemExit(
             "IOM_DTM_SUBSCRIPTION_KEY is not set. "
@@ -226,7 +243,9 @@ def run(levels: list[int], country_name: str, admin0_pcode: str, dry_run: bool) 
 
     all_stats: dict = {}
     for lvl in levels:
-        all_stats[f"admin{lvl}"] = run_level(lvl, country_name, admin0_pcode, dry_run)
+        all_stats[f"admin{lvl}"] = run_level(
+            lvl, country_name, admin0_pcode, operation, from_round, dry_run,
+        )
 
     all_stats["total_upserted"] = sum(
         s.get("upserted", 0) for s in all_stats.values() if isinstance(s, dict)
@@ -247,6 +266,23 @@ def main() -> None:
         help=f"Admin0Pcode filter (default: {settings.iom_dtm_admin0_pcode}).",
     )
     parser.add_argument(
+        "--operation",
+        default=settings.iom_dtm_operation,
+        help=(
+            "DTM Operation (data-gathering project) name. Pass an empty string "
+            f"to fetch across all operations. Default: {settings.iom_dtm_operation!r}."
+        ),
+    )
+    parser.add_argument(
+        "--from-round",
+        type=int,
+        default=settings.iom_dtm_from_round,
+        help=(
+            "Lower bound on FromRoundNumber. 0 (default) means no lower bound — "
+            "all rounds are fetched and the latest per pCode wins."
+        ),
+    )
+    parser.add_argument(
         "--levels",
         default=None,
         help="Comma-separated admin levels to process (default: 0,1,2).",
@@ -255,12 +291,15 @@ def main() -> None:
     args = parser.parse_args()
 
     levels = parse_levels(args.levels)
+    operation = args.operation or None
+    from_round = args.from_round if args.from_round and args.from_round > 0 else None
+
     logger.info(
-        "Starting IOM DTM backfill: country=%s admin0=%s levels=%s dry_run=%s",
-        args.country, args.admin0_pcode, levels, args.dry_run,
+        "Starting IOM DTM backfill: country=%s admin0=%s operation=%r from_round=%s levels=%s dry_run=%s",
+        args.country, args.admin0_pcode, operation, from_round, levels, args.dry_run,
     )
 
-    stats = run(levels, args.country, args.admin0_pcode, args.dry_run)
+    stats = run(levels, args.country, args.admin0_pcode, operation, from_round, args.dry_run)
     logger.info("Done: %s", json.dumps(stats, indent=2))
 
 
