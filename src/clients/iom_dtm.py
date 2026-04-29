@@ -87,11 +87,18 @@ def _fetch_admin(
     admin0_pcode: str | None = None,
     admin1_pcode: str | None = None,
     admin2_pcode: str | None = None,
+    operation: str | None = None,
     from_round: int | None = None,
     to_round: int | None = None,
     timeout: float = 60.0,
 ) -> list[dict]:
-    """Generic GET /v3/displacement/admin{level} call."""
+    """Generic GET /v3/displacement/admin{level} call.
+
+    `operation` scopes to a single DTM "Operation" (their term for a data-
+    gathering project). For Sudan, the active project is
+    "Armed Clashes in Sudan (Overview)" — older operations exist but are
+    stale and dominate when the filter is omitted.
+    """
     if admin_level not in (0, 1, 2):
         raise ValueError(f"admin_level must be 0, 1, or 2 — got {admin_level}")
 
@@ -104,6 +111,8 @@ def _fetch_admin(
         params["Admin1Pcode"] = admin1_pcode
     if admin2_pcode and admin_level >= 2:
         params["Admin2Pcode"] = admin2_pcode
+    if operation:
+        params["Operation"] = operation
     if from_round is not None:
         params["FromRoundNumber"] = from_round
     if to_round is not None:

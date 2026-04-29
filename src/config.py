@@ -113,6 +113,14 @@ class Settings(BaseSettings):
     iom_dtm_subscription_key: str = ""  # empty disables DTM backfill
     iom_dtm_country_name: str = "Sudan"
     iom_dtm_admin0_pcode: str = "SDN"
+    # IOM DTM "Operation" (data-gathering project). The default points at the
+    # currently-active Sudan project; older operations exist on the API but
+    # are out-of-date and dominate when no filter is applied.
+    iom_dtm_operation: str = "Armed Clashes in Sudan (Overview)"
+    # Optional lower bound on round number. Leave unset (0/None) to fetch all
+    # rounds and let `latest_round_per_pcode` pick the newest per pcode — that
+    # gives us full backtrack history. Set to a specific round to constrain.
+    iom_dtm_from_round: int = 0
 
     model_config = {
         "env_file": ".env",

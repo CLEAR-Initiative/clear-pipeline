@@ -46,6 +46,8 @@ def _process_level(
     admin_level: int,
     country_name: str,
     admin0_pcode: str,
+    operation: str | None,
+    from_round: int | None,
 ) -> dict:
     """Fetch the latest DTM round per pCode at `admin_level` and bulk-upsert
     into location_metadata. Returns per-level stats."""
@@ -60,7 +62,12 @@ def _process_level(
     }
 
     fetch = _LEVEL_FETCH[admin_level]
-    records = fetch(country_name=country_name, admin0_pcode=admin0_pcode)
+    records = fetch(
+        country_name=country_name,
+        admin0_pcode=admin0_pcode,
+        operation=operation,
+        from_round=from_round,
+    )
     stats["fetched"] = len(records)
 
     latest = iom_dtm.latest_round_per_pcode(records, admin_level=admin_level)
@@ -158,21 +165,34 @@ def backfill_dtm_displacement(
     self,
     country_name: str | None = None,
     admin0_pcode: str | None = None,
+    operation: str | None = None,
+    from_round: int | None = None,
     levels: list[int] | None = None,
 ) -> dict:
     """Fetch IOM DTM displacement data at admin levels 0, 1, and 2 and upsert
     into locationMetadata for every matching CLEAR location.
 
     `levels` lets callers scope to specific levels (default: all three).
+    `operation` overrides settings.iom_dtm_operation.
+    `from_round` overrides settings.iom_dtm_from_round.
     Returns per-level stats plus a top-level "total_upserted" convenience count.
     """
     country = country_name or settings.iom_dtm_country_name
     admin0 = admin0_pcode or settings.iom_dtm_admin0_pcode
+    op = operation if operation is not None else (settings.iom_dtm_operation or None)
+    # 0 in settings means "no lower bound" — treat as None for the API call.
+    fr_setting = from_round if from_round is not None else settings.iom_dtm_from_round
+    fr = fr_setting if fr_setting and fr_setting > 0 else None
     target_levels = levels or [0, 1, 2]
 
     if not settings.iom_dtm_subscription_key:
         logger.warning("[IOM DTM] Subscription key not configured — skipping")
         return {"skipped": "no_subscription_key"}
+
+    logger.info(
+        "[IOM DTM] backfill country=%s admin0=%s operation=%r from_round=%s levels=%s",
+        country, admin0, op, fr, target_levels,
+    )
 
     all_stats: dict = {}
     try:
@@ -180,7 +200,7 @@ def backfill_dtm_displacement(
             if lvl not in _LEVEL_FETCH:
                 logger.warning("[IOM DTM] Unsupported admin level %s — skipping", lvl)
                 continue
-            all_stats[f"admin{lvl}"] = _process_level(lvl, country, admin0)
+            all_stats[f"admin{lvl}"] = _process_level(lvl, country, admin0, op, fr)
 
         all_stats["total_upserted"] = sum(
             s.get("upserted", 0) for s in all_stats.values() if isinstance(s, dict)
