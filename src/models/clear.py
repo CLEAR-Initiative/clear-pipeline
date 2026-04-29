@@ -69,8 +69,8 @@ class AlertAssessment(BaseModel):
     status: str = "published"  # "draft" or "published"
 
 
-class SituationNarrative(BaseModel):
-    """Output from Claude situation narrative generation."""
+class CrisisNarrative(BaseModel):
+    """Output from Claude crisis narrative generation."""
 
     title: str
     summary: str

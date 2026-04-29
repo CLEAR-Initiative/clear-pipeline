@@ -39,9 +39,11 @@ from src.prompts.rewrite import (
 from src.services.admin_resolver import resolve_admin2, resolve_signal_admin2
 from src.services.classifier_singleton import (
     code_to_level2_map,
+    code_to_level3_map,
     get_classifier,
     level2_to_codes_map,
 )
+from src.services.event_type_stats import get_stats_for_event_type
 from src.services.redis_lock import redis_lock
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,95 @@ def _compute_event_severity(
         mean = sum(severities) / len(severities)
         return max(1, min(5, round(mean)))
     return claude_fallback
+
+
+def _stats_for_glide(glide_code: str | None) -> dict:
+    """Resolve (q75 fatalities, median pop_1km) for a glide code via its
+    level_3 sub-type. Returns {casualties, population_affected} with None
+    for either field when the glide code's level_3 isn't in the stats file
+    (e.g. natural-hazard types currently have no entries)."""
+    if not glide_code:
+        return {"casualties": None, "population_affected": None}
+    code_l3 = code_to_level3_map()
+    level_3 = code_l3.get(glide_code)
+    if not level_3:
+        return {"casualties": None, "population_affected": None}
+    return get_stats_for_event_type(level_3)
+
+
+def _resolve_signal_stats(
+    actual_casualties: int | None,
+    actual_population: int | None,
+    glide_code: str | None,
+) -> dict:
+    """Per-signal stats with a 3-tier fallback chain:
+      1. Raw-extracted actual from the source (ACLED fatalities, GDACS
+         population_affected, Dataminr/manual regex).
+      2. Per-event-type historical lookup via the signal's level_3 sub-type
+         (q75 fatalities / median pop_1km).
+      3. For populationAffected only: settings.default_population_affected
+         as a last-resort constant so events always carry some estimate.
+
+    Casualties stays None when both (1) and (2) produce nothing — there's
+    no sensible global default for fatalities.
+    """
+    fallback = _stats_for_glide(glide_code)
+
+    casualties: int | None
+    if actual_casualties is not None:
+        casualties = actual_casualties
+    elif fallback["casualties"] is not None:
+        casualties = fallback["casualties"]
+    else:
+        casualties = None
+
+    population: int
+    if actual_population is not None:
+        population = actual_population
+    elif fallback["population_affected"] is not None:
+        population = fallback["population_affected"]
+    else:
+        population = settings.default_population_affected
+
+    return {"casualties": casualties, "population_affected": population}
+
+
+def _merge_event_stats(target: dict, resolved: dict) -> dict:
+    """Compute the new (casualties, populationAffected) for an event after a
+    new signal is attached.
+
+    First-signal semantics is handled at the call site (new event creation
+    passes resolved values through directly). For subsequent signals here,
+    the rule is:
+      - casualties: existing + new_resolved (sum across attached signals)
+      - populationAffected: max(existing, new_resolved)
+
+    Returns a dict suitable for splicing into update_event input — only
+    populated when at least one of the two stats is non-zero. Note:
+    casualties summing is delta-based; if the same celery task retries after
+    a partial failure the running total may double-count. The signalEvents
+    unique constraint prevents the underlying signal from actually attaching
+    twice, but the population fields are absolute writes.
+    """
+    new_casualties = resolved["casualties"] or 0
+    new_pop = resolved["population_affected"] or 0
+
+    existing_casualties = target.get("casualties") or 0
+    existing_pop_raw = target.get("populationAffected")
+    try:
+        existing_pop = int(existing_pop_raw) if existing_pop_raw is not None else 0
+    except (TypeError, ValueError):
+        existing_pop = 0
+
+    out: dict = {}
+    total_casualties = existing_casualties + new_casualties
+    if total_casualties > 0:
+        out["casualties"] = total_casualties
+
+    max_pop = max(existing_pop, new_pop)
+    if max_pop > 0:
+        out["populationAffected"] = str(max_pop)
+    return out
 
 
 def _resolve_population_displaced(
@@ -222,6 +313,7 @@ def group_signal_v2(
     signal_timestamp: str | None,
     classification: SignalClassification,
     created_signal: dict[str, Any],
+    signal_actual_population_affected: int | None = None,
 ) -> dict | None:
     """District+type grouping. Returns the event dict (created or updated)
     or None on failure.
@@ -298,6 +390,15 @@ def group_signal_v2(
 
     # If we don't have an admin2, there's nothing to race against — two
     # isolated events for different unknown locations don't conflict.
+    # Resolve the per-signal stats once: prefer raw-extracted values when the
+    # source provided them, otherwise fall back to the per-event-type lookup.
+    actual_casualties = created_signal.get("casualties") if created_signal else None
+    resolved_stats = _resolve_signal_stats(
+        actual_casualties=actual_casualties,
+        actual_population=signal_actual_population_affected,
+        glide_code=glide_code,
+    )
+
     if not admin2_id:
         return _match_and_act(
             signal_id=signal_id,
@@ -310,6 +411,7 @@ def group_signal_v2(
             ts=ts,
             location_name=location_name,
             primary=primary,
+            resolved_stats=resolved_stats,
         )
 
     # ttl_seconds = 30 is enough to cover worst-case Claude rewrite latency.
@@ -333,6 +435,7 @@ def group_signal_v2(
             ts=ts,
             location_name=location_name,
             primary=primary,
+            resolved_stats=resolved_stats,
         )
 
 
@@ -348,6 +451,7 @@ def _match_and_act(
     ts: str,
     location_name: str | None,
     primary: dict | None,
+    resolved_stats: dict,
 ) -> dict | None:
     """The race-prone section extracted so `group_signal_v2` can wrap it in
     a lock. Reads the active-events cache, picks a match (or creates one),
@@ -386,6 +490,12 @@ def _match_and_act(
             claude_value=rewrite.population_displaced if rewrite else None,
             admin2_id=admin2_id,
         )
+        # Subsequent-signal stats: add casualties to the running total, take
+        # max() for populationAffected. Per-signal values prefer raw-extracted
+        # actuals (ACLED fatalities, GDACS population, Dataminr regex) and
+        # fall back to the per-event-type stats lookup keyed off the signal's
+        # glide. Skipped entirely when neither source produced a value.
+        merged_stats = _merge_event_stats(target, resolved_stats)
 
         final_update: dict = {}
         if rewrite:
@@ -396,6 +506,7 @@ def _match_and_act(
             final_update["rank"] = event_severity / 5.0
         if pop_displaced is not None:
             final_update["populationDisplaced"] = str(pop_displaced)
+        final_update.update(merged_stats)
 
         updated = update_event(target_id, final_update) if final_update else target
         _invalidate_events_cache_v2()
@@ -427,6 +538,11 @@ def _match_and_act(
     boot_title = signal_title or f"{level_2.title()} in {location_name or 'unknown location'}"
     boot_desc = signal_description or classification.summary
 
+    # First-signal stats: casualties + populationAffected come from the
+    # already-resolved (actual-or-fallback) values for this signal. Either
+    # may be None for non-conflict glides whose level_3 isn't in the lookup
+    # AND whose source didn't ship a structured value — in which case we
+    # leave the field unset.
     event_input: dict = {
         "signalIds": [signal_id],
         "title": boot_title,
@@ -439,6 +555,10 @@ def _match_and_act(
         "rank": 0.0,
         "locationId": event_location_id,
     }
+    if resolved_stats["casualties"] is not None:
+        event_input["casualties"] = resolved_stats["casualties"]
+    if resolved_stats["population_affected"] is not None:
+        event_input["populationAffected"] = str(resolved_stats["population_affected"])
 
     event = create_event(event_input)
     _invalidate_events_cache_v2()
@@ -455,6 +575,9 @@ def _match_and_act(
         admin2_id=admin2_id,
     )
 
+    # casualties + populationAffected were already set at create_event() time
+    # from this first signal's glide-derived stats. They're maintained via
+    # _merge_event_stats() in the update branch as more signals attach.
     final_update: dict = {}
     if rewrite:
         final_update["title"] = rewrite.title

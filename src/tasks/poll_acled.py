@@ -50,6 +50,10 @@ def _build_signal_input(event: dict, source_id: str) -> dict:
         "title": event["title"],
         "description": event.get("description"),
         "severity": event.get("severity"),
+        # ACLED ships `fatalities` directly; pass through as casualties.
+        # Event-level casualties is derived from a per-sub_event_type lookup
+        # in the grouping layer; this signal-level value is just the raw count.
+        "casualties": event.get("fatalities") or None,
     }
 
     if event.get("source_url"):

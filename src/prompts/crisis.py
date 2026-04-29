@@ -1,20 +1,20 @@
-"""Situation narrative prompt: generate a coherent title + summary across events."""
+"""Crisis narrative prompt: generate a coherent title + summary across events."""
 
 # Bump whenever the prompt text changes (see CLASSIFY_PROMPT_VERSION for rationale).
-SITUATION_PROMPT_VERSION = "situation-v1"
+CRISIS_PROMPT_VERSION = "crisis-v1"
 
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system.
 
 You write concise, actionable narratives for humanitarian workers and NGOs
 operating in crisis zones. Your summaries connect multiple events into a
-single coherent situation so responders can act quickly.
+single coherent crisis so responders can act quickly.
 
 You MUST respond with valid JSON only — no markdown, no explanation before or after."""
 
 
 USER_PROMPT_TEMPLATE = """\
-Generate a title and summary for a humanitarian situation linking the events below.
+Generate a title and summary for a humanitarian crisis linking the events below.
 
 Events ({event_count}):
 {events_block}
@@ -36,7 +36,7 @@ Respond with this exact JSON structure:
 """
 
 
-def build_situation_prompt(events: list[dict], locations: list[str]) -> str:
+def build_crisis_prompt(events: list[dict], locations: list[str]) -> str:
     lines = []
     for i, e in enumerate(events, 1):
         title = e.get("title") or "(untitled)"

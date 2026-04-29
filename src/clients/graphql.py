@@ -17,6 +17,7 @@ mutation CreateSignal($input: CreateSignalInput!) {
     id
     title
     severity
+    casualties
     externalId
     publishedAt
     originLocation { id name level ancestorIds }
@@ -26,7 +27,7 @@ mutation CreateSignal($input: CreateSignalInput!) {
     # already be linked to an event from a prior run. group_signal_v2 uses
     # this to short-circuit — a signal that already has an event must not
     # spawn another one.
-    events { id title types severity }
+    events { id title types severity casualties populationAffected }
   }
 }
 """
@@ -72,7 +73,7 @@ ESCALATE_EVENT = """
 mutation EscalateEvent($eventId: String!, $userId: String!) {
   escalateEvent(eventId: $eventId, userId: $userId) {
     id
-    isSituation
+    isCrisis
     validFrom
     validTo
   }
@@ -121,9 +122,9 @@ mutation ArchiveStaleAlerts($olderThanDays: Int) {
 }
 """
 
-UPDATE_SITUATION_POPULATION = """
-mutation UpdateSituationPopulation($id: String!, $input: UpdateSituationPopulationInput!) {
-  updateSituationPopulation(id: $id, input: $input) {
+UPDATE_CRISIS_POPULATION = """
+mutation UpdateCrisisPopulation($id: String!, $input: UpdateCrisisPopulationInput!) {
+  updateCrisisPopulation(id: $id, input: $input) {
     id
     populationAffected
     populationInArea
@@ -156,8 +157,8 @@ query LocationsByLevel($level: Int!) {
 }
 """
 
-GET_EVENT_FOR_SITUATION = """
-query EventForSituation($id: String!) {
+GET_EVENT_FOR_CRISIS = """
+query EventForCrisis($id: String!) {
   event(id: $id) {
     id
     title
@@ -180,11 +181,14 @@ query EventWithSignals($id: String!) {
     description
     types
     severity
+    casualties
+    populationAffected
     signals {
       id
       title
       description
       severity
+      casualties
       publishedAt
       source { id name type }
     }
@@ -259,6 +263,8 @@ query Events {
     description
     types
     severity
+    casualties
+    populationAffected
     rank
     validFrom
     validTo
@@ -526,8 +532,8 @@ def archive_stale_alerts(older_than_days: int = 14) -> int:
     return int(result["archiveStaleAlerts"]["alertsArchived"])
 
 
-def update_situation_population(
-    situation_id: str,
+def update_crisis_population(
+    crisis_id: str,
     population_affected: int | None = None,
     population_in_area: int | None = None,
     title: str | None = None,
@@ -543,14 +549,14 @@ def update_situation_population(
     if summary is not None:
         input_data["summary"] = summary
     result = _execute(
-        UPDATE_SITUATION_POPULATION,
-        {"id": situation_id, "input": input_data},
+        UPDATE_CRISIS_POPULATION,
+        {"id": crisis_id, "input": input_data},
     )
-    return result["updateSituationPopulation"]
+    return result["updateCrisisPopulation"]
 
 
-def get_event_for_situation(event_id: str) -> dict | None:
-    result = _execute(GET_EVENT_FOR_SITUATION, {"id": event_id})
+def get_event_for_crisis(event_id: str) -> dict | None:
+    result = _execute(GET_EVENT_FOR_CRISIS, {"id": event_id})
     return result.get("event")
 
 

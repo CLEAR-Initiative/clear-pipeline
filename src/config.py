@@ -51,13 +51,13 @@ class Settings(BaseSettings):
     #   group      — v1 add-vs-create event clustering decision
     #   assess     — v1 alert-worthiness boolean
     #   rewrite    — v2 event title/description (USER-FACING)
-    #   situation  — situation narrative (USER-FACING, less frequent)
+    #   crisis     — crisis narrative (USER-FACING, less frequent)
     #   location   — text → location-name extraction (NER)
     claude_model_classify: str = "claude-haiku-4-5-20251001"
     claude_model_group: str = ""  # "" → falls back to claude_model
     claude_model_assess: str = "claude-haiku-4-5-20251001"
     claude_model_rewrite: str = ""  # falls back to claude_model
-    claude_model_situation: str = ""  # falls back to claude_model
+    claude_model_crisis: str = ""  # falls back to claude_model
     claude_model_location: str = "claude-haiku-4-5-20251001"
 
     # Celery
@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # Last-resort default for `events.population_displaced` when neither
     # the signal text nor the admin-2 DTM row provides a value.
     default_population_displaced: int = 1670
+
+    # Last-resort default for `events.population_affected` when neither the
+    # raw signal extraction (ACLED has none, GDACS exposure data,
+    # Dataminr/manual regex) nor the per-event-type lookup (median pop_1km
+    # via acled_event_type_stats.json) produces a value.
+    default_population_affected: int = 1715
 
     # IOM DTM API — displaced-person data per admin level
     iom_dtm_base_url: str = "https://dtmapi.iom.int/v3"

@@ -1,6 +1,7 @@
 """Signal creation: map Dataminr payload → CLEAR signal and persist via GraphQL."""
 
 import logging
+import re
 
 from src.clients.graphql import create_signal
 from src.models.dataminr import DataminrSignal
@@ -23,6 +24,105 @@ def _estimate_severity_from_dataminr(signal: DataminrSignal) -> int | None:
         name = signal.alertType.name.lower().strip()
         return DATAMINR_SEVERITY_MAP.get(name)
     return None
+
+
+# Match common phrasings of fatality counts in news/alert text:
+#   "12 killed", "at least 5 dead", "3 fatalities", "killed 8 people",
+#   "death toll of 14", "leaving 6 dead". We deliberately stay narrow on
+#   the verb list to avoid false positives ("injured", "displaced" are
+#   tracked separately and don't belong here).
+_NUM = r"(\d{1,5})"
+_CASUALTY_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(rf"\b(?:at least|over|more than|nearly|around|about)?\s*{_NUM}\s+(?:people\s+)?(?:were\s+|are\s+)?(?:killed|dead|deceased|fatalities)\b", re.IGNORECASE),
+    re.compile(rf"\b(?:killed|leaving|left)\s+(?:at least\s+|over\s+|more than\s+|nearly\s+)?{_NUM}\s+(?:people|dead|civilians|soldiers)?\b", re.IGNORECASE),
+    re.compile(rf"\bdeath toll\s+(?:of|at|reaches?|rose to|climbed to|stands at)\s+{_NUM}\b", re.IGNORECASE),
+    re.compile(rf"\b{_NUM}\s+(?:civilians?|soldiers?|militants?|protesters?)\s+(?:were\s+)?killed\b", re.IGNORECASE),
+]
+
+
+def extract_casualties_from_text(*texts: str | None) -> int | None:
+    """Best-effort fatality count parsed from free-text headlines/descriptions.
+
+    Returns the maximum number found across all matched patterns (multiple
+    sources sometimes mention different running totals; the upper bound is
+    the most useful for severity assessment). Returns None if no pattern
+    matches.
+    """
+    best: int | None = None
+    for text in texts:
+        if not text:
+            continue
+        for pat in _CASUALTY_PATTERNS:
+            for m in pat.finditer(text):
+                try:
+                    val = int(m.group(1))
+                except (ValueError, IndexError):
+                    continue
+                if val < 0 or val > 100_000:
+                    continue
+                if best is None or val > best:
+                    best = val
+    return best
+
+
+# Match common phrasings of population-affected counts in news/alert text:
+#   "10,000 displaced", "5000 evacuated", "3 million affected",
+#   "displacing 12k people", "leaving 8000 homeless".
+# Includes scale modifiers (k/thousand/million) so we capture rough orders
+# of magnitude when sources don't give exact counts.
+_POP_NUM = r"(\d{1,3}(?:[,\s]\d{3})*|\d+(?:\.\d+)?)\s*(k|thousand|m|million|mln)?"
+_POPULATION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(
+        rf"\b(?:at least|over|more than|nearly|around|about|approximately)?\s*{_POP_NUM}\s+(?:people\s+)?(?:were\s+|are\s+|have been\s+)?(?:displaced|evacuated|affected|homeless|forced to flee|fled their homes)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:displacing|evacuating|affecting|leaving)\s+(?:at least\s+|over\s+|more than\s+|nearly\s+|about\s+|approximately\s+)?{_POP_NUM}\s+(?:people|residents|civilians|families)?\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _parse_pop_match(num_str: str, scale: str | None) -> int | None:
+    """Resolve a (number, scale) regex capture into an absolute integer."""
+    cleaned = num_str.replace(",", "").replace(" ", "").strip()
+    try:
+        base = float(cleaned)
+    except ValueError:
+        return None
+    if scale:
+        s = scale.lower()
+        if s in ("k", "thousand"):
+            base *= 1_000
+        elif s in ("m", "million", "mln"):
+            base *= 1_000_000
+    if base < 1 or base > 100_000_000:
+        return None
+    return int(base)
+
+
+def extract_population_affected_from_text(*texts: str | None) -> int | None:
+    """Best-effort affected-population count parsed from free text.
+
+    Returns the maximum across all matches. Recognises common phrasings
+    ("10,000 displaced", "3 million affected", "evacuating 5000 people").
+    Returns None if no pattern matches.
+    """
+    best: int | None = None
+    for text in texts:
+        if not text:
+            continue
+        for pat in _POPULATION_PATTERNS:
+            for m in pat.finditer(text):
+                try:
+                    val = _parse_pop_match(m.group(1), m.group(2))
+                except (IndexError, ValueError):
+                    continue
+                if val is None:
+                    continue
+                if best is None or val > best:
+                    best = val
+    return best
 
 
 def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
@@ -61,6 +161,12 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
     }
     if severity is not None:
         input_data["severity"] = severity
+
+    # Dataminr has no structured casualties field; parse it from the headline
+    # and description text. Best-effort — only set when a match is found.
+    casualties = extract_casualties_from_text(signal.headline, description)
+    if casualties is not None:
+        input_data["casualties"] = casualties
 
     # Check if Dataminr provides coordinates
     has_coords = False
