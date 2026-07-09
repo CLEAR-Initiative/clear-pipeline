@@ -1,0 +1,3393 @@
+openapi: 3.1.0
+info:
+  title: ReliefWeb API - OpenAPI 3.1
+  description: >-
+    This is the swagger UI for the OpenAPI definition of the ReliefWeb API.
+
+    #### Objet parameter serialization
+
+    Some query parameters like `query` or `filter` are nested objects which are
+    serialized in the form `root[property][subproperty]=value`.
+
+    For example the following `query` parameter:
+
+    <code><pre>{
+      "value": "Situation Report",
+      "fields": ["title", "body"]
+    }</code></pre>
+
+    is serialized as
+
+    `query[value]=Situation+Report&fields[0]=title&fields[1]=body`
+    <br><br>
+    The definitions of those parameters have a `x-reliefweb-api-serialization`
+    custom property to help identify them.
+  version: 2.0.0
+servers:
+  - url: https://api.reliefweb.int/v2
+    description: ReliefWeb API
+  - url: https://rwint-api-local.test/v2
+    description: ReliefWeb API - local development
+tags:
+  - name: Reports
+    description: Reports, maps, infographics
+  - name: Jobs
+    description: Jobs
+  - name: Training
+    description: Training
+  - name: Blog
+    description: Blog posts
+  - name: Topics
+    description: Topics
+  - name: Countries
+    description: Countries
+  - name: Disasters
+    description: Disasters
+  - name: Sources
+    description: Sources
+  - name: References
+    description: Reference resource used to tag other resources
+paths:
+  /reports:
+    summary: Reports, maps, infographics
+    get:
+      tags:
+        - Reports
+      summary: Retrieve a list of reports with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessReports'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Reports
+      summary: Retrieve a list of reports with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessReports'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /reports/{id}:
+    summary: Single report
+    get:
+      tags:
+        - Reports
+      summary: Retrieve a single report
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessReports'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /reports/{uuid}:
+    summary: Single report
+    put:
+      tags:
+        - Reports
+      summary: Create or update a single report
+      parameters:
+        - $ref: '#/components/parameters/uuid'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/x-rw-post-api-key'
+        - $ref: '#/components/parameters/x-rw-post-api-provider'
+      requestBody:
+        description: The data to create the resource from.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: 'https://reliefweb.int/post-api-schemas/v2/report.json'
+      responses:
+        200:
+          $ref: '#/components/responses/JsonStringSuccess'
+        400:
+          $ref: '#/components/responses/JsonStringBadRequest'
+        403:
+          $ref: '#/components/responses/JsonStringAccessDenied'
+  /jobs:
+    summary: Jobs
+    get:
+      tags:
+        - Jobs
+      summary: Retrieve a list of jobs with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobs'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Jobs
+      summary: Retrieve a list of jobs with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobs'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /jobs/{id}:
+    summary: Single job
+    get:
+      tags:
+        - Jobs
+      summary: Retrieve a single job
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobs'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /jobs/{uuid}:
+    summary: Single job
+    put:
+      tags:
+        - Jobs
+      summary: Create or update a single job
+      parameters:
+        - $ref: '#/components/parameters/uuid'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/x-rw-post-api-key'
+        - $ref: '#/components/parameters/x-rw-post-api-provider'
+      requestBody:
+        description: The data to create the resource from.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: 'https://reliefweb.int/post-api-schemas/v2/job.json'
+      responses:
+        200:
+          $ref: '#/components/responses/JsonStringSuccess'
+        400:
+          $ref: '#/components/responses/JsonStringBadRequest'
+        403:
+          $ref: '#/components/responses/JsonStringAccessDenied'
+  /training:
+    summary: Training
+    get:
+      tags:
+        - Training
+      summary: Retrieve a list of training with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTraining'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Training
+      summary: Retrieve a list of training with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTraining'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /training/{id}:
+    summary: Single training
+    get:
+      tags:
+        - Training
+      summary: Retrieve a single training
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTraining'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /training/{uuid}:
+    summary: Single training
+    put:
+      tags:
+        - Training
+      summary: Create or update a single training
+      parameters:
+        - $ref: '#/components/parameters/uuid'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/x-rw-post-api-key'
+        - $ref: '#/components/parameters/x-rw-post-api-provider'
+      requestBody:
+        description: The data to create the resource from.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: 'https://reliefweb.int/post-api-schemas/v2/training.json'
+      responses:
+        200:
+          $ref: '#/components/responses/JsonStringSuccess'
+        400:
+          $ref: '#/components/responses/JsonStringBadRequest'
+        403:
+          $ref: '#/components/responses/JsonStringAccessDenied'
+  /blog:
+    summary: Blog posts
+    get:
+      tags:
+        - Blog
+      summary: Retrieve a list of blog posts with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessBlog'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Blog
+      summary: Retrieve a list of blog posts with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessBlog'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /blog/{id}:
+    summary: Single blog post
+    get:
+      tags:
+        - Blog
+      summary: Retrieve a single blog post
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessBlog'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /topics:
+    summary: Topics
+    get:
+      tags:
+        - Topics
+      summary: Retrieve a list of topics with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTopics'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Topics
+      summary: Retrieve a list of topics with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTopics'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /topics/{id}:
+    summary: Single topic
+    get:
+      tags:
+        - Topics
+      summary: Retrieve a single topic
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTopics'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /countries:
+    summary: Countries
+    get:
+      tags:
+        - Countries
+      summary: Retrieve a list of countries with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessCountries'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Countries
+      summary: Retrieve a list of countries with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessCountries'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /countries/{id}:
+    summary: Single country
+    get:
+      tags:
+        - Countries
+      summary: Retrieve a single country
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessCountries'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /disasters:
+    summary: Disasters
+    get:
+      tags:
+        - Disasters
+      summary: Retrieve a list of disasters with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessDisasters'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Disasters
+      summary: Retrieve a list of disasters with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessDisasters'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /disasters/{id}:
+    summary: Single disaster
+    get:
+      tags:
+        - Disasters
+      summary: Retrieve a single disaster
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessDisasters'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /sources:
+    summary: Sources
+    get:
+      tags:
+        - Sources
+      summary: Retrieve a list of sources with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessSources'
+        400:
+          $ref: '#/components/responses/BadRequest'
+    post:
+      tags:
+        - Sources
+      summary: Retrieve a list of sources with a json request body
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      requestBody:
+        $ref: '#/components/requestBodies/Search'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessSources'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /sources/{id}:
+    summary: Single source
+    get:
+      tags:
+        - Sources
+      summary: Retrieve a single source
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessSources'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references:
+    summary: References (taxonomies)
+    get:
+      tags:
+        - References
+      summary: References (taxonomies)
+      responses:
+        200:
+          description: References (taxonomies)
+          content:
+            application/json:
+              schema:
+                type: object
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/career-categories:
+    summary: Career categories
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of career categories with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessCareerCategoryReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/career-categories/{id}:
+    summary: Single career category
+    get:
+      tags:
+        - References
+      summary: Retrieve a single career category
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessCareerCategoryReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/content-formats:
+    summary: content formats
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of content formats with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessContentFormatReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/content-formats/{id}:
+    summary: Single content format
+    get:
+      tags:
+        - References
+      summary: Retrieve a single content format
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessContentFormatReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/disaster-types:
+    summary: disaster types
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of disaster types with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessDisasterTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/disaster-types/{id}:
+    summary: Single disaster type
+    get:
+      tags:
+        - References
+      summary: Retrieve a single disaster type
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessDisasterTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/features:
+    summary: features
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of features with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessFeatureReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/features/{id}:
+    summary: Single feature
+    get:
+      tags:
+        - References
+      summary: Retrieve a single feature
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessFeatureReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/job-experience:
+    summary: job experience
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of job experience with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobExperienceReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/job-experience/{id}:
+    summary: Single job experience
+    get:
+      tags:
+        - References
+      summary: Retrieve a single job experience
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobExperienceReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/job-types:
+    summary: job types
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of job types with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/job-types/{id}:
+    summary: Single job type
+    get:
+      tags:
+        - References
+      summary: Retrieve a single job type
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessJobTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/languages:
+    summary: languages
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of languages with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessLanguageReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/languages/{id}:
+    summary: Single language
+    get:
+      tags:
+        - References
+      summary: Retrieve a single language
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessLanguageReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/ocha-products:
+    summary: ocha products
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of ocha products with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessOchaProductReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/ocha-products/{id}:
+    summary: Single ocha product
+    get:
+      tags:
+        - References
+      summary: Retrieve a single ocha product
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessOchaProductReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/organization-types:
+    summary: organization types
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of organization types with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessOrganizationTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/organization-types/{id}:
+    summary: Single organization type
+    get:
+      tags:
+        - References
+      summary: Retrieve a single organization type
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessOrganizationTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/themes:
+    summary: themes
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of themes with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessThemeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/themes/{id}:
+    summary: Single theme
+    get:
+      tags:
+        - References
+      summary: Retrieve a single theme
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessThemeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/training-formats:
+    summary: training formats
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of training formats with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTrainingFormatReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/training-formats/{id}:
+    summary: Single training format
+    get:
+      tags:
+        - References
+      summary: Retrieve a single training format
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTrainingFormatReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/training-types:
+    summary: training types
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of training types with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTrainingTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/training-types/{id}:
+    summary: Single training type
+    get:
+      tags:
+        - References
+      summary: Retrieve a single training type
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessTrainingTypeReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/vulnerable-groups:
+    summary: vulnerable groups
+    get:
+      tags:
+        - References
+      summary: Retrieve a list of vulnerable groups with query parameters
+      parameters:
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/query'
+        - $ref: '#/components/parameters/filter'
+        - $ref: '#/components/parameters/facets'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/preset'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+        - $ref: '#/components/parameters/verbose'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessVulnerableGroupReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+  /references/vulnerable-groups/{id}:
+    summary: Single vulnerable group
+    get:
+      tags:
+        - References
+      summary: Retrieve a single vulnerable group
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/appname'
+        - $ref: '#/components/parameters/profile'
+        - $ref: '#/components/parameters/fields'
+        - $ref: '#/components/parameters/slim'
+      responses:
+        200:
+          $ref: '#/components/responses/SuccessVulnerableGroupReferences'
+        400:
+          $ref: '#/components/responses/BadRequest'
+components:
+  parameters:
+    appname:
+      name: appname
+      in: query
+      description: Name of the application or URL of website using the API
+      required: true
+      schema:
+        $ref: '#/components/schemas/AppnameParameter'
+      examples:
+        name:
+          summary: application or website name
+          value: ReliefWeb
+        site:
+          summary: a website url
+          value: m.reliefweb.int
+    query:
+      name: query
+      in: query
+      description: >-
+        Full text search query
+
+        *(x-reliefweb-api-serialization)*
+      x-reliefweb-api-serialization: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/QueryParameter'
+      example:
+        value: Situation Report
+        fields:
+          - title
+          - body
+          - format.name
+    filter:
+      name: filter
+      in: query
+      description: >-
+        Condition(s) to filter the list of resources
+
+        *(x-reliefweb-api-serialization)*
+      x-reliefweb-api-serialization: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FilterParameter'
+      example:
+        field: source
+        value:
+          - UNICEF
+          - OCHA
+        operator: OR
+    facets:
+      name: facets
+      in: query
+      description: >-
+        Aggregate information about the resources
+
+        *(x-reliefweb-api-serialization)*
+      x-reliefweb-api-serialization: true
+      default: []
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FacetsParameter'
+    limit:
+      name: limit
+      in: query
+      description: Number of resources to return. Max 1000
+      schema:
+        $ref: '#/components/schemas/LimitParameter'
+    offset:
+      name: offset
+      in: query
+      description: >-
+        Number of resources to skip. Used for paging through the results
+      schema:
+        $ref: '#/components/schemas/OffsetParameter'
+    sort:
+      name: sort
+      in: query
+      description: >-
+        How to order the resources in the form `field:order` where `field` is
+        a sortable field of the resource and `order` is the direction: `desc`
+        or `asc`. Several fields can be used with the first having higher
+        priority for the ordering. Without a `sort` parameter, the results
+        are order by `relevance` (special `score` field, ex: "score:desc"). If
+        there is no sort specified, results may not be consistent
+      schema:
+        $ref: '#/components/schemas/SortParameter'
+    profile:
+      name: profile
+      in: query
+      description: >-
+        A shorthand specification for which sets of fields to include in result
+
+        - `minimal`: just the `title` or `name` of the resource (default)
+        - `full`: all the resource fields
+        - `list`: set of fields used to produce lists like https://reliefweb.int/updates
+        - `suggest`: only for references, countries, disasters and sources,
+          to have relevant fields for autocomplete suggestion purposes (name etc.)
+      schema:
+        $ref: '#/components/schemas/ProfileParameter'
+    preset:
+      name: preset
+      in: query
+      description: >-
+        A shorthand specification for which sets of fields to include in result
+
+        - `analysis`: include archived disasters and expired jobs and training
+          which otherwise would be excluded from results. This is useful for
+          visualizing trends and performing analysis of past content
+        - `full`: sorts by date for appropriate content types. Countries and
+          sources are sorted by `id`. Use this for `list` requests
+        - `suggest`: only for references, countries, disasters and sources; sets
+          the full text search mode to `suggestion` and limit fields to query;
+          useful for autocomplete suggestions
+          example
+        - `minimal`: basic sensible status filters and default fields of the
+          full text search queries
+        - `default`: default sensible status filters for most requests
+      schema:
+        $ref: '#/components/schemas/PresetParameter'
+    fields:
+      name: fields
+      in: query
+      description: >-
+        List of resource fields to include or exclude in the results
+        Nested fields are expressed as `field.subfield.subsubfield`
+
+        *(x-reliefweb-api-serialization)*
+      x-reliefweb-api-serialization: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FieldsParameter'
+      example:
+        include:
+          - title
+          - url_alias
+          - source.name
+          - country
+        exclude:
+          - country.name
+          - country.id
+    slim:
+      name: slim
+      in: query
+      description: >-
+        Flag to reduce the reponse body by removing the hypermedia links
+        Defaults to 0 (hypermedia links are present)
+      schema:
+        $ref: '#/components/schemas/SlimParameter'
+    verbose:
+      name: verbose
+      in: query
+      description: >-
+        When set to `1`, a `details` section is added to the response body
+        containing the query parameters as a JSON object. Useful to inspect
+        the request and response. Defaults to 0 (not verbose)
+      schema:
+        $ref: '#/components/schemas/VerboseParameter'
+    id:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ResourceIdParameter'
+    uuid:
+      name: uuid
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ResourceUuidParameter'
+    x-rw-post-api-key:
+      name: X-RW-POST-API-KEY
+      in: header
+      description: API Key of a provider allowed to submit content.
+      required: true
+      schema:
+        type: string
+    x-rw-post-api-provider:
+      name: X-RW-POST-API-provider
+      in: header
+      description: ID of a provider allowed to submit content.
+      required: true
+      schema:
+        type: string
+        format: uuid
+  requestBodies:
+    Search:
+      description: Search request payload
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PostRequestPayload'
+  responses:
+    JsonStringSuccess:
+      description: Success
+      content:
+        application/json:
+          schema:
+            type: string
+    JsonStringBadRequest:
+      description: Invalid requests, often due to bad parameters or payload
+      content:
+        application/json:
+          schema:
+            type: string
+    JsonStringAccessDenied:
+      description: Missing API credentials
+      content:
+        application/json:
+          schema:
+            type: string
+    BadRequest:
+      description: Invalid requests, often due to bad parameters or payload
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultError'
+    SuccessReports:
+      description: List of reports or single report
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultReports'
+    SuccessJobs:
+      description: List of jobs or single job
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultJobs'
+    SuccessTraining:
+      description: List of training or single training
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultTraining'
+    SuccessBlog:
+      description: List of blog posts or single blog post
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultBlog'
+    SuccessTopics:
+      description: List of topics or single topic
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultTopics'
+    SuccessCountries:
+      description: List of countries or single country
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultCountries'
+    SuccessDisasters:
+      description: List of disasters or single disaster
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultDisasters'
+    SuccessSources:
+      description: List of sources or single source
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultSources'
+    SuccessCareerCategoryReferences:
+      description: List of career categories or single career category
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultCareerCategoryReferences'
+    SuccessContentFormatReferences:
+      description: List of content formats or single content format
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultContentFormatReferences'
+    SuccessDisasterTypeReferences:
+      description: List of disaster types or single disaster type
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultDisasterTypeReferences'
+    SuccessFeatureReferences:
+      description: List of features or single feature
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultFeatureReferences'
+    SuccessJobExperienceReferences:
+      description: List of job experience references or single job experience
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultJobExperienceReferences'
+    SuccessJobTypeReferences:
+      description: List of job types or single job type
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultJobTypeReferences'
+    SuccessLanguageReferences:
+      description: List of languages or single language
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultLanguageReferences'
+    SuccessOchaProductReferences:
+      description: List of OCHA products or single OCHA product
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultOchaProductReferences'
+    SuccessOrganizationTypeReferences:
+      description: List of organization types or single organization type
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultOrganizationTypeReferences'
+    SuccessThemeReferences:
+      description: List of themes or single theme
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultThemeReferences'
+    SuccessTrainingFormatReferences:
+      description: List of training formats or single training format
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultTrainingFormatReferences'
+    SuccessTrainingTypeReferences:
+      description: List of training types or single training type
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultTrainingTypeReferences'
+    SuccessVulnerableGroupReferences:
+      description: List of vulnerable groups or single vulnerable group
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ResultVulnerableGroupReferences'
+  schemas:
+    # Requests
+    PostRequestPayload:
+      type: object
+      properties:
+        query:
+          $ref: '#/components/schemas/QueryParameter'
+        filter:
+          $ref: '#/components/schemas/FilterParameter'
+        facets:
+          $ref: '#/components/schemas/FacetsParameter'
+        limit:
+          $ref: '#/components/schemas/LimitParameter'
+        offset:
+          $ref: '#/components/schemas/OffsetParameter'
+        sort:
+          $ref: '#/components/schemas/SortParameter'
+        profile:
+          $ref: '#/components/schemas/ProfileParameter'
+        preset:
+          $ref: '#/components/schemas/PresetParameter'
+        fields:
+          $ref: '#/components/schemas/FieldsParameter'
+    # Parameters
+    AppnameParameter:
+      description: Name of the application or URL of website using the API
+      type: string
+    QueryParameter:
+      description: Full text search query
+      type: object
+      properties:
+        value:
+          type: string
+          description: Text to search for
+        fields:
+          type: array
+          description: >-
+            List of fields to query on
+            See the schema of the resource for the available fields
+          items:
+            type: string
+        operator:
+          type: string
+          description: >-
+            Default conjunction between words in the search query
+            Defaults to `OR`
+          enum:
+            - AND
+            - OR
+    FilterParameter:
+      description: Condition(s) to filter the list of resources
+      allOf:
+        - type: object
+        - $ref: '#/components/schemas/Filter'
+    FacetsParameter:
+      description: Aggregate information about the resources
+      type: array
+      items:
+        $ref: '#/components/schemas/Facet'
+    LimitParameter:
+      description: Number of resources to return. Max 1000
+      type: integer
+      minimum: 0
+      maximum: 1000
+    OffsetParameter:
+      description: >-
+        Number of resources to skip. Used for paging through the results
+      type: integer
+      minimum: 0
+    SortParameter:
+      description: >-
+        How to order the resources in the form `field:order` where `field` is
+        a sortable field of the resource and `order` is the direction: `desc`
+        or `asc`. Several fields can be used with the first having higher
+        priority for the ordering. Without a `sort` parameter, the results
+        are order by `relevance` (special `score` field, ex: "score:desc"). If
+        there is no sort specified, results may not be consistent
+      type: array
+      items:
+        type: string
+    ProfileParameter:
+      description: >-
+        A shorthand specification for which sets of fields to include in result
+
+        - `minimal`: just the `title` or `name` of the resource (default)
+        - `full`: all the resource fields
+        - `list`: set of fields used to produce lists like https://reliefweb.int/updates
+        - `suggest`: only for references, countries, disasters and sources,
+          to have relevant fields for autocomplete suggestion purposes (name etc.)
+      type: string
+      enum:
+        - minimal
+        - full
+        - list
+        - suggest
+    PresetParameter:
+      description: >-
+        A shorthand specification for which sets of fields to include in result
+
+        - `analysis`: include archived disasters and expired jobs and training
+          which otherwise would be excluded from results. This is useful for
+          visualizing trends and performing analysis of past content
+        - `full`: sorts by date for appropriate content types. Countries and
+          sources are sorted by `id`. Use this for `list` requests
+        - `suggest`: only for references, countries, disasters and sources; sets
+          the full text search mode to `suggestion` and limit fields to query;
+          useful for autocomplete suggestions
+          example
+        - `minimal`: basic sensible status filters and default fields of the
+          full text search queries
+        - `default`: default sensible status filters for most requests
+      type: string
+      enum:
+        - analysis
+        - latest
+        - suggest
+        - minimal
+        - default
+    FieldsParameter:
+      description: >-
+        List of resource fields to include or exclude in the results
+        Nested fields are expressed as `field.subfield.subsubfield`
+      type: object
+      properties:
+        include:
+          type: array
+          items:
+            type: string
+        exclude:
+          type: array
+          items:
+            type: string
+    SlimParameter:
+      description: >-
+        Flag to reduce the reponse body by removing the hypermedia links
+        Defaults to 0 (hypermedia links are present)
+      type: integer
+      enum:
+        - 0
+        - 1
+    VerboseParameter:
+      description: >-
+        When set to `1`, a `details` section is added to the response body
+        containing the query parameters as a JSON object. Useful to inspect
+        the request and response. Defaults to 0 (not verbose)
+      type: integer
+      enum:
+        - 0
+        - 1
+    ResourceIdParameter:
+      description: The identifier of a resource
+      oneOf:
+        - $ref: '#/components/schemas/IdField'
+        - $ref: '#/components/schemas/UuidField'
+    ResourceUuidParameter:
+      description: The UUID of a resource
+      $ref: '#/components/schemas/UuidField'
+    # Filter definitions
+    FilterDateValue:
+      type: string
+      description: Date in the ISO-8601 format
+      format: date
+      example: '2022-11-17T05:13:54+00:00'
+    FilterSingleValue:
+      anyOf:
+        - type: boolean
+        - type: number
+        - type: string
+        - $ref: '#/components/schemas/FilterDateValue'
+    FilterNumberRangeValue:
+      type: object
+      properties:
+        from:
+          type: number
+          description: >-
+            Lower bound of the range (will match higher than or equal values)
+        to:
+          type: number
+          description: >-
+            Higher bound of the range (will match lower than or equal values)
+    FilterDateRangeValue:
+      type: object
+      properties:
+        from:
+          description: >-
+            Lower bound of the range (will match higher than or equal values)
+          allOf:
+            - $ref: '#/components/schemas/FilterDateValue'
+        to:
+          description: >-
+            Higher bound of the range (will match lower than or equal values)
+          allOf:
+            - $ref: '#/components/schemas/FilterDateValue'
+    FilterArrayValue:
+      type: array
+      items:
+        $ref: '#/components/schemas/FilterSingleValue'
+    FilterRangeValue:
+      oneOf:
+        - $ref: '#/components/schemas/FilterDateRangeValue'
+        - $ref: '#/components/schemas/FilterNumberRangeValue'
+    FilterValue:
+      oneOf:
+        - $ref: '#/components/schemas/FilterArrayValue'
+        - $ref: '#/components/schemas/FilterRangeValue'
+        - $ref: '#/components/schemas/FilterSingleValue'
+    FilterField:
+      type: string
+      description: >-
+        Field to filter on
+        See the list of fields for the resource
+    FilterNegate:
+      type: boolean
+      description: Negate the filter (find resource not matching the filter)
+    FilterOperator:
+      type: string
+      description: >-
+        Conjunction (`AND` or `OR`) to combine the filter values or conditions
+        Defaults to `OR`
+      enum:
+        - AND
+        - OR
+    ExistenceFilter:
+      description: Match resources that have a value for the given field
+      type: object
+      properties:
+        field:
+          $ref: '#/components/schemas/FilterField'
+        negate:
+          $ref: '#/components/schemas/FilterNegate'
+      required:
+        - field
+    SingleValueFilter:
+      type: object
+      description: Match resources having the given value
+      properties:
+        field:
+          $ref: '#/components/schemas/FilterField'
+        value:
+          $ref: '#/components/schemas/FilterSingleValue'
+        negate:
+          $ref: '#/components/schemas/FilterNegate'
+      required:
+        - field
+        - value
+    ArrayValueFilter:
+      type: object
+      description: Match resources having all or any of the given values
+      properties:
+        field:
+          $ref: '#/components/schemas/FilterField'
+        value:
+          $ref: '#/components/schemas/FilterArrayValue'
+        negate:
+          $ref: '#/components/schemas/FilterNegate'
+        operator:
+          $ref: '#/components/schemas/FilterOperator'
+      required:
+        - field
+        - value
+    RangeValueFilter:
+      type: object
+      description: Match resources having the given value
+      properties:
+        field:
+          $ref: '#/components/schemas/FilterField'
+        value:
+          $ref: '#/components/schemas/FilterRangeValue'
+        negate:
+          $ref: '#/components/schemas/FilterNegate'
+      required:
+        - field
+        - value
+    ConditionListFilter:
+      type: object
+      description: Filter containing a list of other filters
+      properties:
+        conditions:
+          type: array
+          items:
+            anyOf:
+              - $ref: '#/components/schemas/ExistenceFilter'
+              - $ref: '#/components/schemas/SingleValueFilter'
+              - $ref: '#/components/schemas/ArrayValueFilter'
+              - $ref: '#/components/schemas/RangeValueFilter'
+        negate:
+          $ref: '#/components/schemas/FilterNegate'
+        operator:
+          $ref: '#/components/schemas/FilterOperator'
+      required:
+        - conditions
+    Filter:
+      description: Filter or list of filters
+      oneOf:
+        - $ref: '#/components/schemas/ExistenceFilter'
+        - $ref: '#/components/schemas/SingleValueFilter'
+        - $ref: '#/components/schemas/ArrayValueFilter'
+        - $ref: '#/components/schemas/RangeValueFilter'
+        - $ref: '#/components/schemas/ConditionListFilter'
+    # Facet definition
+    Facet:
+      type: object
+      properties:
+        field:
+          type: string
+          description: The field on which to perform the aggregation
+        name:
+          type: string
+          description: An optional label to identify the facet
+        limit:
+          type: integer
+          description: >-
+            The maximum number of aggregated results to return
+            Defaults to 10
+        sort:
+            type: string
+            description: >-
+              The sort order for **non-date** facets. Either sort number of
+              aggregated results or the value of the aggregated field
+              Defaults to `count:desc`
+            enum:
+              - value:asc
+              - valie:desc
+              - count:asc
+              - count:desc
+        filter:
+          description: >-
+            Additional filter(s) applied to the resources for the aggregated
+            data of this facet
+          allOf:
+            - $ref: '#/components/schemas/Filter'
+        interval:
+          type: string
+          description: >-
+            For date facets. Breaks down by `year`, `month`, `week` or `day`
+          enum:
+            - year
+            - month
+            - week
+            - day
+        scope:
+          type: string
+          description: >-
+            Refines how the main query and filters apply to the resources when
+            aggregating data for the facet. It can be `global` in which case,
+            the main full text search query and filters are ignored or `query`
+            in which case only the main full text search query applies or
+            `default` in which case both the main fill text search query and
+            filters apply to determine the resources on which to perform the
+            aggregation
+          enum:
+            - default
+            - query
+            - global
+      required:
+        - field
+    # Result definitions
+    ResultError:
+      type: object
+      properties:
+        status:
+          type: integer
+          description: The status code
+        time:
+          type: integer
+          description: The time it took to generate the response
+        error:
+          type: object
+          description: The description of the error
+          properties:
+            type:
+              type: string
+              description: The error type
+            message:
+              type: string
+              description: The error message
+    ResultCommon:
+      type: object
+      properties:
+        time:
+          type: integer
+          description: Total time it took to return the data
+        href:
+          type: string
+          format: url
+          description: Link to this resource
+        links:
+          type: object
+          description: Hypermedia links
+          properties:
+            self:
+              type: string
+              format: url
+              description: Link to this resource
+            next:
+              type: string
+              format: url
+              description: Link to the next page of this type of resource
+            previous:
+              type: string
+              format: url
+              description:  Link to the previous page of this type of resource
+        took:
+          type: integer
+          description: Time it took to retrieve the data
+        totalCount:
+          type: integer
+          description: Total number of resources
+        count:
+          type: integer
+          description: Number of resources in this resultset
+    ResultReports:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Report'
+    ResultJobs:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Job'
+    ResultTraining:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Training'
+    ResultBlog:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Blog'
+    ResultTopics:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Topic'
+    ResultCountries:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Country'
+    ResultDisasters:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Disaster'
+    ResultSources:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Source'
+    ResultCareerCategoryReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/CareerCategoryReference'
+    ResultContentFormatReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/ContentFormatReference'
+    ResultDisasterTypeReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/DisasterTypeReference'
+    ResultFeatureReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/FeatureReference'
+    ResultJobExperienceReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/JobExperienceReference'
+    ResultJobTypeReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/JobTypeReference'
+    ResultLanguageReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/LanguageReference'
+    ResultOchaProductReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/OchaProductReference'
+    ResultOrganizationTypeReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/OrganizationTypeReference'
+    ResultThemeReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/ThemeReference'
+    ResultTrainingFormatReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/TrainingFormatReference'
+    ResultTrainingTypeReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/TrainingTypeReference'
+    ResultVulnerableGroupReferences:
+      allOf:
+        - $ref: '#/components/schemas/ResultCommon'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/VulnerableGroupReference'
+    # Resource Definitions
+    File:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Internal use
+        url:
+          type: string
+          format: url
+          description: URL to raw image
+        filename:
+          type: string
+          description: File name
+        filesize:
+          type: string
+          description: File size in Bytes
+        mimetype:
+          type: string
+          description: 'Mime-type (example: image/png)'
+        description:
+          type: string
+          description: Description of the attachment
+        preview:
+          type: object
+          description: Cover preview
+          properties:
+            url:
+              type: string
+              format: url
+              description: URL to raw image
+            url-thumb:
+              type: string
+              format: url
+              description: >-
+                URL to image in thumbnail format (max width: 220px,
+                max height: 140px)
+            url-small:
+              type: string
+              format: url
+              description: >-
+                URL to image with small size (width: 200px, height:
+                variable)
+            url-large:
+              type: string
+              format: url
+              description: >-
+                URL to image with large size (width: 680px, height:
+                variable)
+      required:
+        - id
+        - url
+        - filename
+        - filesize
+        - mimetype
+    Image:
+      type: object
+      properties:
+        id:
+          type: integer
+          description: Internal use
+        url:
+          type: string
+          format: url
+          description: URL to raw image
+        url-thumb:
+          type: string
+          format: url
+          description: 'URL to image in thumbnail format (max width: 220px, max height: 140px)'
+        url-small:
+          type: string
+          format: url
+          description: 'URL to image with small size (width: 200px, height: variable)'
+        url-large:
+          type: string
+          format: url
+          description: 'URL to image with large size (width: 680px, height: variable)'
+        width:
+          type: integer
+          description: width of the raw image
+        height:
+          type: integer
+          description: height of the raw image
+        filename:
+          type: string
+          description: File name
+        filesize:
+          type: string
+          description: File size in Bytes
+        mimetype:
+          type: string
+          description: 'Mime-type (example: image/png)'
+        copyright:
+          type: string
+          description: Image copyright information
+        caption:
+          type: string
+          description: Image caption
+      required:
+        - id
+        - url
+        - url-thumb
+        - url-small
+        - url-large
+        - width
+        - height
+        - filename
+        - filesize
+        - mimetype
+        - copyright
+        - caption
+    Location:
+      type: object
+      description: Centroid coordinates
+      properties:
+        lat:
+          type: number
+        lon:
+          type: number
+    ProfileReliefWebLink:
+      type: object
+      properties:
+        title:
+          type: string
+          description: Document title
+        url:
+          type: string
+          format: url
+          description: URL to the document on the ReliefWeb website
+        cover:
+          type: string
+          format: url
+          description: URL to the cover preview of the document PDF if any
+      required:
+        - title
+        - url
+    ProfileExternalLink:
+      type: object
+      properties:
+        title:
+          type: string
+          description: External link title
+        url:
+          type: string
+          format: url
+          description: Link URL outside of the ReliefWeb website
+        logo:
+          type: string
+          format: url
+          description: External link logo url
+      required:
+        - title
+        - url
+    Profile:
+      type: object
+      properties:
+        overview:
+          type: string
+          format: markdown
+          description: Description/overview in markdown format
+        overview-html:
+          type: string
+          format: html
+          description: Description/overview in HTML format
+        appeals_response_plans:
+          type: object
+          properties:
+            title:
+              type: string
+              description: English title of the profile section
+              pattern: /^Appeals & Response Plans$/
+            active:
+              type: array
+              description: >-
+                List of links to the active appeals and response plans
+              items:
+                $ref: '#/components/schemas/ProfileReliefWebLink'
+            archive:
+              type: array
+              description: Archive of links to older appeals and response plans
+              items:
+                $ref: '#/components/schemas/ProfileReliefWebLink'
+          required:
+            - title
+            - active
+        key_content:
+          type: object
+          properties:
+            title:
+              type: string
+              description: English title of the profile section
+              pattern: /^Key Content$/
+            active:
+              type: array
+              description: List of links to the active key content
+              items:
+                $ref: '#/components/schemas/ProfileReliefWebLink'
+            archive:
+              type: array
+              description: Archive of links to older key content
+              items:
+                $ref: '#/components/schemas/ProfileReliefWebLink'
+          required:
+            - title
+            - active
+        useful_links:
+          type: object
+          properties:
+            title:
+              type: string
+              description: English title of the profile section
+              pattern: /^Useful Links$/
+            active:
+              type: array
+              description: List of useful links
+              items:
+                $ref: '#/components/schemas/ProfileExternalLink'
+          required:
+            - title
+            - active
+    RiverSearch:
+      type: object
+      description: A URL to a river (list of documents) on ReliefWeb
+      properties:
+        id:
+          type: string
+          description: ID of the river search URL
+        title:
+          type: string
+          description: Title for the river search URL
+        url:
+          type: string
+          format: url
+          description: URL of the river search URL on the ReliefWeb website
+        override:
+          type: integer
+          description: ID of an highlighted resource for the river
+      required:
+        - id
+        - title
+        - url
+    IdField:
+      type: integer
+      description: ID of the resource
+    UuidField:
+      type: string
+      format: uuid
+      description: UUID of the resource
+    UrlField:
+      type: string
+      format: url
+      description: >-
+        URL of the resource on the ReliefWeb website - permanent url
+    UrlAliasField:
+      type: string
+      format: url
+      description: >-
+        URL of the resource on the ReliefWeb website - canonical url
+    RedirectsField:
+      type: array
+      description: >-
+        Legacy URLs of the resource on the ReliefWeb website
+      items:
+        type: string
+        format: url
+    DateField:
+      type: object
+      description: Dates associated with a resource
+      properties:
+        created:
+          type: string
+          format: date-time
+          description: Creation date on ReliefWeb
+        changed:
+          type: string
+          format: date-time
+          description: Date of the latest change
+      required:
+        - created
+        - changed
+    CityField:
+      type: object
+      description: >-
+        List of cities
+      properties:
+        name:
+          type: string
+          description: City name
+      required:
+        - name
+    # References
+    Reference:
+      description: >-
+        Term reference
+        (see https://api.reliefweb.int/v2/references)
+      type: object
+      properties:
+        id:
+          type: integer
+          description: ID of the reference resource
+        name:
+          type: string
+          description: name of the reference resource
+      required:
+        - id
+        - name
+    CareerCategoryReference:
+      description: >-
+        Ccareer category or Professional function reference
+        (see https://api.reliefweb.int/v2/references/career-categories)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    ContentFormatReference:
+      description: >-
+        Content format reference
+        (see https://api.reliefweb.int/v2/references/content-formats)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    CountryReference:
+      description: >-
+        Country reference
+        (see https://api.reliefweb.int/v2/countries)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+        - type: object
+          properties:
+            shortname:
+              type: string
+              description: Short name of the country
+            iso3:
+              type: string
+              description: ISO3 code of the country
+            primary:
+              type: boolean
+              description: >-
+                Indicates that the country is the primary country for the
+                disaster
+          required:
+            - shortname
+            - iso3
+    DisasterReference:
+      description: >-
+        Disaster type reference
+        (see https://api.reliefweb.int/v2/references/disaster-types)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+        - type: object
+          properties:
+            id:
+              type: integer
+              description: ID of the disaster
+            name:
+              type: string
+              description: Name of the disaster
+            glide:
+              type: string
+              description: >-
+                GLIDE number of the disaster (see http://glidenumber.net)
+            type:
+              type: array
+              description: Disaster types
+              items:
+                $ref: '#/components/schemas/DisasterTypeReference'
+              minItems: 1
+          required:
+            - id
+            - name
+            - type
+    DisasterTypeReference:
+      description: >-
+        Disaster type reference
+        (see https://api.reliefweb.int/v2/references/disaster-types)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+        - type: object
+          properties:
+            code:
+              type: string
+              description: >-
+                2 letters code reprensenting the disaster type as defined on
+                http://glidenumber.net
+            primary:
+              type: boolean
+              description: >-
+                Indicates that the disaster type is the primary type for the
+                disaster
+          required:
+            - code
+    FeatureReference:
+      description: >-
+        Report feature reference
+        (see https://api.reliefweb.int/v2/references/features)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    JobExperienceReference:
+      description: >-
+        Required years of experience reference
+        (see https://api.reliefweb.int/v2/references/job-experience)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    JobTypeReference:
+      description: >-
+        Job type reference
+        (see https://api.reliefweb.int/v2/references/job-types)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    LanguageReference:
+      description: >-
+        Language reference
+        (see https://api.reliefweb.int/v2/references/languages)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+        - type: object
+          properties:
+            code:
+              type: string
+              description: ISO2 code of the language resource
+          required:
+            - code
+    OchaProductReference:
+      description: >-
+        OCHA product reference
+        (see https://api.reliefweb.int/v2/references/ocha-products)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    OrganizationTypeReference:
+      description: >-
+        Organization type reference
+        (see https://api.reliefweb.int/v2/references/organization-types)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    SourceReference:
+      description: >-
+        Source reference
+        (see https://api.reliefweb.int/v2/sources)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+        - type: object
+          properties:
+            shortname:
+              type: string
+              description: Short name of the organization
+            longname:
+              type: string
+              description: Long name of the organization
+            spanish_name:
+              type: string
+              description: Spanish name of the organization
+            homepage:
+              type: string
+              format: url
+              description: URL to the homepage of the organization
+            type:
+              $ref: '#/components/schemas/OrganizationTypeReference'
+            disclaimer:
+              type: string
+              description: >-
+                Disclaimer about the reports from this organization,
+                posted on ReliefWeb
+          required:
+            - shortname
+            - type
+    TagReference:
+      description: >-
+        Tag reference
+        (see https://api.reliefweb.int/v2/references/tags)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    ThemeReference:
+      description: >-
+        Theme reference
+        (see https://api.reliefweb.int/v2/references/themes)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    TrainingFormatReference:
+      description: >-
+        Training format reference
+        (see https://api.reliefweb.int/v2/references/training-formats)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    TrainingTypeReference:
+      description: >-
+        Training type reference
+        (see https://api.reliefweb.int/v2/references/training-types)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    VulnerableGroupReference:
+      description: >-
+        Vulnerable group reference
+        (see https://api.reliefweb.int/v2/references/vulnerable-groups)
+      allOf:
+        - $ref: '#/components/schemas/Reference'
+    # Content resources
+    Report:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: Publication status of the report
+              enum:
+                - published
+            date:
+              allOf:
+                - $ref: '#/components/schemas/DateField'
+                - type: object
+                  properties:
+                    original:
+                      type: string
+                      format: date-time
+                      description: Original publication date
+                  required:
+                    - original
+            origin:
+              type: string
+              format: url
+              description: Origin of the document
+            title:
+              type: string
+              description: Title of the report
+            language:
+              type: array
+              description: Language(s) of the document and its attachments
+              items:
+                $ref: '#/components/schemas/LanguageReference'
+              minItems: 1
+            body:
+              type: string
+              format: markdown
+              description: Content of the report in Markdown format
+            body-html:
+              type: string
+              format: html
+              description: Content of the report in HTML format
+            headline:
+              type: object
+              description: >-
+                Headline information if the document has been marked as headline
+              properties:
+                title:
+                  type: string
+                  description: Headline title
+                summary:
+                  type: string
+                  description: Content's summary in plain text
+                image:
+                  description: Headline image
+                  allOf:
+                    - $ref: '#/components/schemas/Image'
+              required:
+                - title
+                - summary
+            primary_country:
+              description: Main focused country in the document
+              allOf:
+                - $ref: '#/components/schemas/CountryReference'
+            country:
+              type: array
+              description: Countries focused in the document
+              items:
+                $ref: '#/components/schemas/CountryReference'
+              minItems: 1
+            source:
+              type: array
+              description: Source organizations of the document
+              items:
+                $ref: '#/components/schemas/SourceReference'
+              minItems: 1
+            disaster:
+              type: array
+              description: List of disasters focused in the document
+              items:
+                $ref: '#/components/schemas/DisasterReference'
+            format:
+              type: array
+              description: >-
+                Content format (ex: situation report, map) of the document
+              items:
+                $ref: '#/components/schemas/ContentFormatReference'
+              minItems: 1
+              maxItems: 1
+            theme:
+              type: array
+              description: List of humanitarian themes focused in the document
+              items:
+                $ref: '#/components/schemas/ThemeReference'
+            disaster_type:
+              type: array
+              description: List of disaster types focused in the document
+              items:
+                $ref: '#/components/schemas/DisasterTypeReference'
+            vulnerable_groups:
+              type: array
+              description: List of vulnerable groups focused in the document
+              items:
+                $ref: '#/components/schemas/VulnerableGroupReference'
+            ocha_product:
+              type: array
+              description: OCHA product - internal use
+              items:
+                $ref: '#/components/schemas/OchaProductReference'
+            feature:
+              type: array
+              description: >-
+                Document features (ex: key content, reference map)
+              items:
+                $ref: '#/components/schemas/FeatureReference'
+            image:
+              description: Report illustrative image
+              allOf:
+                - $ref: '#/components/schemas/Image'
+            file:
+              type: array
+              description: >-
+                List of attachments (ex: PDF report or map)
+              items:
+                $ref: '#/components/schemas/File'
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - date
+            - title
+            - language
+            - body
+            - body-html
+            - source
+            - primary_country
+            - country
+            - format
+      required:
+        - id
+        - fields
+    Job:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: Publication status of the job
+              enum:
+                - published
+                - expired
+            date:
+              allOf:
+                - $ref: '#/components/schemas/DateField'
+                - type: object
+                  properties:
+                    closing:
+                      type: string
+                      format: date-time
+                      description: Closing date for the job application
+                  required:
+                    - original
+            title:
+              type: string
+              description: Title of the job
+            body:
+              type: string
+              format: markdown
+              description: Content of the job in Markdown format
+            body-html:
+              type: string
+              format: html
+              description: Content of the job in HTML format
+            how_to_apply:
+              type: string
+              format: markdown
+              description: >-
+                Application information of the job in Markdown format
+            how_to_apply-html:
+              type: string
+              format: html
+              description: >-
+                Application information of the job in HTML format
+            country:
+              type: array
+              description: >-
+                List of countries in which the job could take place, empty if
+                the job location is unspecified (remote location, roster/roving,
+                location to be determined)
+              items:
+                $ref: '#/components/schemas/CountryReference'
+              minItems: 1
+            city:
+              description: >-
+                List of cities in which the job could take place, empty if the
+                job location is unspecified
+              allOf:
+                - $ref: '#/components/schemas/CityField'
+            source:
+              type: array
+              description: List of organizations that issued the job offer
+              items:
+                $ref: '#/components/schemas/SourceReference'
+              minItems: 1
+              maxItems: 1
+            type:
+              type: array
+              description: Type of the job offer
+              items:
+                $ref: '#/components/schemas/JobTypeReference'
+              minItems: 1
+              maxItems: 1
+            experience:
+              type: array
+              description: >-
+                Years of experience required for the job offer
+              items:
+                $ref: '#/components/schemas/JobExperienceReference'
+              minItems: 1
+              maxItems: 1
+            career_categories:
+              type: array
+              description: >-
+                List of career categories for the job offer
+              items:
+                $ref: '#/components/schemas/CareerCategoryReference'
+              minItems: 1
+              maxItems: 1
+            theme:
+              type: array
+              description: List of humanitarian themes for the job offer
+              items:
+                $ref: '#/components/schemas/ThemeReference'
+              maxItems: 3
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - date
+            - title
+            - body
+            - body-html
+            - how_to_apply
+            - how_to_apply-html
+            - source
+            - type
+            - experience
+            - career_categories
+      required:
+        - id
+        - fields
+    Training:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: Publication status of the training
+              enum:
+                - published
+                - expired
+            date:
+              allOf:
+                - $ref: '#/components/schemas/DateField'
+                - type: object
+                  properties:
+                    registration:
+                      type: string
+                      format: date-time
+                      description: >-
+                        Registration deadline for the training, undefined for
+                        ongoing training
+                    start:
+                      type: string
+                      format: date-time
+                      description: >-
+                        Starting date of the training, undefined for
+                        ongoing training
+                    end:
+                      type: string
+                      format: date-time
+                      description: >-
+                        nding date of the training, undefined for ongoing
+                        training
+            title:
+              type: string
+              description: Title of the training
+            body:
+              type: string
+              format: markdown
+              description: Content of the training in Markdown format
+            body-html:
+              type: string
+              format: html
+              description: Content of the training in HTML format
+            how_to_register:
+              type: string
+              format: markdown
+              description: >-
+                Application information of the training in Markdown format
+            how_to_register-html:
+              type: string
+              format: html
+              description: >-
+                Application information of the training in HTML format
+            cost:
+              type: string
+              description: >-
+                Cost type for the training, details are in the fee information
+                if it's fee-based
+              enum:
+                - free
+                - fee-based
+            fee_information:
+              type: string
+              description: >-
+                Fee information of the training in plain text format
+            language:
+              type: array
+              description: Language(s) in which the training offer has been redacted
+              items:
+                $ref: '#/components/schemas/LanguageReference'
+              minItems: 1
+            training_language:
+              type: array
+              description: >-
+                Language(s) in which the training will be held
+              items:
+                $ref: '#/components/schemas/LanguageReference'
+              minItems: 1
+            country:
+              type: array
+              description: >-
+                List of countries in which the training could take place,
+                empty if the training is only online
+              items:
+                $ref: '#/components/schemas/CountryReference'
+              minItems: 1
+            city:
+              description: >-
+                List of cities in which the training could take place, empty if
+                the training is only online
+              allOf:
+                - $ref: '#/components/schemas/CityField'
+            source:
+              type: array
+              description: List of organizations that issued the job offer
+              items:
+                $ref: '#/components/schemas/SourceReference'
+              minItems: 1
+              maxItems: 1
+            type:
+              type: array
+              description: Category of the training
+              items:
+                $ref: '#/components/schemas/JobTypeReference'
+              minItems: 1
+              maxItems: 1
+            format:
+              type: array
+              description: >-
+                Format(s) of the training (online and/or on-site)' resource
+              items:
+                $ref: '#/components/schemas/JobTypeReference'
+              minItems: 1
+              maxItems: 2
+            career_categories:
+              type: array
+              description: >-
+                List of career categories for the job offer
+              items:
+                $ref: '#/components/schemas/CareerCategoryReference'
+              minItems: 1
+              maxItems: 1
+            theme:
+              type: array
+              description: List of humanitarian themes for the job offer
+              items:
+                $ref: '#/components/schemas/ThemeReference'
+              maxItems: 3
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - date
+            - title
+            - body
+            - body-html
+            - how_to_register
+            - how_to_register-html
+            - cost
+            - language
+            - training_language
+            - source
+            - type
+      required:
+        - id
+        - fields
+    Blog:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: Publication status of the blog post
+              enum:
+                - expired
+            date:
+              $ref: '#/components/schemas/DateField'
+            title:
+              type: string
+              description: Title of the blog post
+            body:
+              type: string
+              format: markdown
+              description: Content of the blog post in Markdown format
+            body-html:
+              type: string
+              format: html
+              description: Content of the blog post in HTML format
+            image:
+              description: Illustration image for the blog post
+              allOf:
+                - $ref: '#/components/schemas/Image'
+            attached_image:
+              type: array
+              description: Images referred to in the the blog post's content
+              items:
+                $ref: '#/components/schemas/Image'
+            tags:
+              type: array
+              description: Terms used to tag the blog post
+              items:
+                $ref: '#/components/schemas/TagReference'
+              minItems: 1
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - date
+            - title
+            - body
+            - body-html
+      required:
+        - id
+        - fields
+    Topic:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: Publication status of the topic
+              enum:
+                - published
+            date:
+             $ref: '#/components/schemas/DateField'
+            title:
+              type: string
+              description: Title of the topic
+            featured:
+              type: boolean
+              description: Topic is more prominent than other topics
+            introduction:
+              type: string
+              format: markdown
+              description: Introduction of the topic in Markdown format
+            introduction-html:
+              type: string
+              format: html
+              description: Introduction of the topic in HTML format
+            overview:
+              type: string
+              format: markdown
+              description: Overview of the topic in Markdown format
+            overview-html:
+              type: string
+              format: html
+              description: Overview of the topic in HTML format
+            resources:
+              type: string
+              format: markdown
+              description: Resources of the topic in Markdown format
+            resources-html:
+              type: string
+              format: html
+              description: Resources of the topic in HTML format
+            icon:
+              description: Icon for the topic
+              allOf:
+                - $ref: '#/components/schemas/Image'
+            rivers:
+              type: array
+              description: >-
+                List of rivers (i.e. search URLs on the main content lists on
+                the ReliefWeb site)
+              items:
+                $ref: '#/components/schemas/RiverSearch'
+            disaster_type:
+              type: array
+              description: List of disaster types focused in the topic
+              items:
+                $ref: '#/components/schemas/DisasterTypeReference'
+            theme:
+              type: array
+              description: List of humanitarian themes focused in the topic
+              items:
+                $ref: '#/components/schemas/ThemeReference'
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - date
+            - title
+      required:
+        - id
+        - fields
+    Country:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: >-
+                Status of the country: 'ongoing' when there is an ongoing
+                humanitarian situation, 'normal' otherwise
+              enum:
+                - normal
+                - ongoing
+            date:
+             $ref: '#/components/schemas/DateField'
+            name:
+              type: string
+              description: Name of the country
+            shortname:
+              type: string
+              description: Short name of the country
+            iso3:
+              type: string
+              description: ISO3 code of the country
+            description:
+              type: string
+              format: markdown
+              description: >-
+                Description/overview of the country's situation with appeals,
+                key content and useful links in markdown format - deprecated,
+                replaced by profile.overview
+            description-html:
+              type: string
+              format: html
+              description: >-
+                Description/overview of the country's situation with appeals,
+                key content and useful links in HTML format - deprecated,
+                replaced by profile.overview-html
+            profile:
+              $ref: '#/components/schemas/Profile'
+            location:
+              $ref: '#/components/schemas/Location'
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - name
+            - shortname
+            - iso3
+      required:
+        - id
+        - fields
+    Disaster:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: >-
+                Status of the disaster: 'alert, 'current' (ongoing disaster) or
+                'past'. (other statuses are for internal use)
+              enum:
+                - alert
+                - current
+                - ongoing
+                - past
+            date:
+             $ref: '#/components/schemas/DateField'
+            name:
+              type: string
+              description: Name of the disaster
+            glide:
+              type: string
+              description: >-
+                GLIDE number of the disaster (see http://glidenumber.net)
+            related_glide:
+              type: array
+              description: >-
+                Other GLIDE numbers related to the disaster (old GLIDE, merged
+                disasters etc.)
+              items:
+                type: string
+            description:
+              type: string
+              format: markdown
+              description: >-
+                Description/overview of the disaster's situation with appeals,
+                key content and useful links in markdown format - deprecated,
+                replaced by profile.overview
+            description-html:
+              type: string
+              format: html
+              description: >-
+                Description/overview of the disaster's situation with appeals,
+                key content and useful links in HTML format - deprecated,
+                replaced by profile.overview-html
+            profile:
+              $ref: '#/components/schemas/Profile'
+            primary_country:
+              description: Main focused country in the document
+              allOf:
+                - $ref: '#/components/schemas/CountryReference'
+            country:
+              type: array
+              description: Countries focused in the document
+              items:
+                $ref: '#/components/schemas/CountryReference'
+              minItems: 1
+            primary_type:
+              description: Main disaster type
+              allOf:
+                - $ref: '#/components/schemas/DisasterTypeReference'
+            type:
+              type: array
+              description: Disaster types
+              items:
+                $ref: '#/components/schemas/DisasterTypeReference'
+              minItems: 1
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - name
+            - glide
+            - primary_country
+            - country
+            - primary_type
+            - type
+      required:
+        - id
+        - fields
+    Source:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/IdField'
+        fields:
+          type: object
+          properties:
+            id:
+              $ref: '#/components/schemas/IdField'
+            uuid:
+              $ref: '#/components/schemas/UuidField'
+            url:
+              $ref: '#/components/schemas/UrlField'
+            url_alias:
+              $ref: '#/components/schemas/UrlAliasField'
+            redirects:
+              $ref: '#/components/schemas/RedirectsField'
+            status:
+              type: string
+              description: >-
+                Status of the source: active if there are published reports or
+                open job/training, inactive or archived otherwise
+              enum:
+                - active
+                - inactive
+                - archived
+            content_type:
+              type: array
+              description: >-
+                Content types published from this source (report,
+                job and/or training)
+              items:
+                type: string
+                enum:
+                  - report
+                  - job
+                  - training
+            date:
+             $ref: '#/components/schemas/DateField'
+            name:
+              type: string
+              description: Name of the organization
+            shortname:
+              type: string
+              description: Short name of the organization
+            longname:
+              type: string
+              description: Long name of the organization
+            spanish_name:
+              type: string
+              description: Spanish name of the organization
+            description:
+              type: string
+              format: markdown
+              description: >-
+                Short description of the organization in Markdown format
+            description-html:
+              type: string
+              format: html
+              description: >-
+                Short description of the organization in HTML format
+            homepage:
+              type: string
+              format: url
+              description: URL to the organization's homepage
+            disclaimer:
+              type: string
+              description: >-
+                Disclaimer about the reports from this organization, posted on
+                ReliefWeb
+            country:
+              type: array
+              description: >-
+                Countries in which there is a headquarter of the organization
+              items:
+                $ref: '#/components/schemas/CountryReference'
+            type:
+              $ref: '#/components/schemas/OrganizationTypeReference'
+            fts_id:
+              type: integer
+              description: >-
+                ID of the organization used in the Financial Tracking System
+                (see https://fts.unocha.org)
+            logo:
+              description: Organization's logo
+              allOf:
+                - $ref: '#/components/schemas/Image'
+          required:
+            - id
+            - url
+            - url_alias
+            - status
+            - content_type
+            - name
+            - shortname
+            - country
+            - type
+      required:
+        - id
+        - fields
