@@ -24,7 +24,12 @@ dependencies = [
 dev = [
     "dagster-dg-cli",
     "dagster-webserver",
+    "pytest>=8.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
 
 [build-system]
 requires = ["hatchling"]

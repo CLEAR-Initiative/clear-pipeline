@@ -65,6 +65,32 @@ mutation UpsertKnowledgebaseChunks(
 }
 """
 
+_UPSERT_REPORT_DATAPOINTS = """
+mutation UpsertReportDatapoints($input: UpsertReportDatapointsInput!) {
+  upsertReportDatapoints(input: $input) {
+    reportId
+    schemaVersion
+    createdOrReplaced
+  }
+}
+"""
+
+_REFRESH_AGGREGATED_DATAPOINTS = """
+mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVersion: String!) {
+  refreshAggregatedDatapoints(from: $from, to: $to, schemaVersion: $schemaVersion) {
+    computedBuckets
+    supersededBuckets
+    schemaVersion
+  }
+}
+"""
+
+_HAS_AGGREGATED_DATAPOINTS = """
+query HasAggregatedDatapoints($schemaVersion: String!) {
+  hasAggregatedDatapoints(schemaVersion: $schemaVersion)
+}
+"""
+
 
 def _execute(
     query: str,
@@ -157,6 +183,91 @@ def resolve_location(
         {"pcode": pcode, "name": name, "adminLevel": admin_level},
     )
     return data.get("resolveKnowledgebaseLocation")
+
+
+def upsert_report_datapoints(
+    *,
+    report_id: str,
+    report_title: str,
+    source_url: str,
+    published_at: str,
+    reporting_period_start: str | None,
+    reporting_period_end: str | None,
+    location_ids: list[str],
+    location_pcodes: list[str],
+    event_types: list[str],
+    total_affected: int | None,
+    total_displaced: int | None,
+    total_killed: int | None,
+    data: dict[str, Any],
+    schema_version: str,
+    extracted_by_model: str,
+) -> dict[str, Any]:
+    """Replace the ``report_datapoints`` row for ``report_id``.
+
+    The `data` blob follows the Pydantic sub-schema layout defined in
+    ``datapoints_schemas.py`` — one top-level key per domain, each
+    holding the domain's dumped model (or None if that domain's
+    extraction failed and the operator wants to re-run it later).
+
+    Timestamps are ISO-8601 strings; clear-api's DateTime scalar
+    parses either date or datetime forms.
+    """
+    payload = {
+        "reportId": report_id,
+        "reportTitle": report_title,
+        "sourceUrl": source_url,
+        "publishedAt": published_at,
+        "reportingPeriodStart": reporting_period_start,
+        "reportingPeriodEnd": reporting_period_end,
+        "locationIds": location_ids,
+        "locationPcodes": location_pcodes,
+        "eventTypes": event_types,
+        "totalAffected": total_affected,
+        "totalDisplaced": total_displaced,
+        "totalKilled": total_killed,
+        "data": data,
+        "schemaVersion": schema_version,
+        "extractedByModel": extracted_by_model,
+    }
+    result = _execute(_UPSERT_REPORT_DATAPOINTS, {"input": payload})
+    return result["upsertReportDatapoints"]
+
+
+def has_aggregated_datapoints(schema_version: str) -> bool:
+    """Cheap existence check — is there at least one current
+    aggregated_datapoints row for this schema version?
+
+    Used by the aggregation asset to distinguish first-run backfill
+    (needs a wide lookback window to catch existing history) from
+    routine weekly refreshes (narrow window is enough).
+    """
+    data = _execute(
+        _HAS_AGGREGATED_DATAPOINTS, {"schemaVersion": schema_version},
+    )
+    return bool(data.get("hasAggregatedDatapoints"))
+
+
+def refresh_aggregated_datapoints(
+    *,
+    from_iso: str,
+    to_iso: str,
+    schema_version: str,
+) -> dict[str, Any]:
+    """Trigger clear-api's four-tier aggregation refresh for every
+    report whose ``reportingPeriodEnd`` falls in ``[from_iso, to_iso]``.
+
+    Returns the server-side summary: ``{ computedBuckets,
+    supersededBuckets, schemaVersion }``. clear-api walks the
+    hierarchy (A2 → A1 → A0) internally so a single call refreshes
+    weekly-A2, monthly-A1, yearly-country, and all-time-country
+    tiers atomically per bucket.
+    """
+    data = _execute(
+        _REFRESH_AGGREGATED_DATAPOINTS,
+        {"from": from_iso, "to": to_iso, "schemaVersion": schema_version},
+    )
+    return data["refreshAggregatedDatapoints"]
 
 
 def upsert_knowledgebase_chunks(
