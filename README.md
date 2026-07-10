@@ -1,9 +1,24 @@
 # clear-context-pipeline
 
+> ⚠️ **Status: POC — experimentation phase.**
+> This project is a proof-of-concept exploring structured humanitarian
+> datapoint extraction, vector RAG, and pre-computed aggregations for
+> the situation-analysis dashboard. APIs, schemas, prompts, and
+> aggregation rules are all expected to change as we learn from real
+> data. Not production-ready — do not build durable integrations
+> against its outputs yet, and expect breaking changes between
+> iterations. Schemas are versioned (`schemaVersion` on
+> `report_datapoints` / `aggregated_datapoints`) so future stable
+> releases can migrate cleanly.
+
 Dagster project that builds the CLEAR knowledge base from ReliefWeb
 PDFs (weekly cron) and one-off manual document uploads. Ingest chain:
 PDF → text → chunks → LLM contextualization + parameter extraction →
-embeddings → clear-api `upsertKnowledgebaseChunks`.
+embeddings → clear-api `upsertKnowledgebaseChunks`. In parallel, a
+domain-partitioned datapoint extraction pipeline writes structured
+`report_datapoints` and rolls them up into `aggregated_datapoints` at
+four tiers (weekly × A2, monthly × A1, yearly × country, all-time ×
+country) — see [docs/humanitarian-datapoint-extraction.md](docs/humanitarian-datapoint-extraction.md).
 
 
 ## Getting started
