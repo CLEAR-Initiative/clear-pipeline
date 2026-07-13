@@ -1,9 +1,9 @@
 name: Build & deploy (dev / staging)
 
-# Push to dev → build → deploy to dev Dagster VM.
-# Same shape as clear-api / clear-pipeline; the only difference is that
-# the target VM is dev-dagster (its host + SSH key live in the matching
-# GitHub Environment as DAGSTER_VM_HOST / DAGSTER_VM_SSH_KEY).
+# Push to dev → build → deploy to dev-app (Dagster is co-located with
+# clear-api / clear-mvp / clear-pipeline in the same compose stack).
+# Reuses the APP_VM_HOST / APP_VM_SSH_KEY environment secrets already
+# configured for the sibling repos — one target, one set of credentials.
 
 on:
   push:
@@ -63,10 +63,13 @@ jobs:
       - name: SSH and roll the deployment
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.DAGSTER_VM_HOST }}
+          host: ${{ secrets.APP_VM_HOST }}
           username: ubuntu
-          key: ${{ secrets.DAGSTER_VM_SSH_KEY }}
-          script_stop: true
+          key: ${{ secrets.APP_VM_SSH_KEY }}
+          # Note: `script_stop` is no longer accepted by @v1 — the same
+          # halt-on-error behaviour is provided by `set -e` at the top
+          # of the script below, which is the maintainer's recommended
+          # replacement.
           # Restart the three Dagster services in a specific order so the
           # webserver + daemon always come up against a fresh code server:
           #   1. Pull the new image (all three services share it).

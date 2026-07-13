@@ -4,6 +4,16 @@ requires-python = ">=3.10,<3.15"
 version = "0.1.0"
 dependencies = [
     "dagster==1.13.11",
+    # dagster-webserver + dagster-postgres MUST live in main deps (not
+    # the dev group) because the deployed image runs `dagster-webserver`
+    # and needs `dagster_postgres.run_storage.PostgresRunStorage` at
+    # instance boot for the postgres-backed run / event-log / schedule
+    # storage. `uv pip install .` in the Dockerfile installs main deps
+    # only — putting these in the dev group would fail the container
+    # on start with either "webserver: command not found" or
+    # "Couldn't import module dagster_postgres.run_storage".
+    "dagster-webserver",
+    "dagster-postgres",
     "requests>=2.32",
     "boto3>=1.35",
     "python-dotenv>=1.0",
@@ -21,9 +31,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Truly-local-only tooling. `dagster-dg-cli` is used by the `dg dev`
+# workflow when iterating on the pipeline on a laptop; it is NOT needed
+# in the deployed image. `pytest` speaks for itself.
 dev = [
     "dagster-dg-cli",
-    "dagster-webserver",
     "pytest>=8.0",
 ]
 
