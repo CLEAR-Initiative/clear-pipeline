@@ -47,7 +47,14 @@ pythonpath = ["src"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# `src/` layout — hatchling's default wheel discovery looks for a
+# top-level directory matching `project.name` (i.e. `./clear_context_pipeline`),
+# which doesn't exist here (source lives under `./src/clear_context_pipeline`).
+# Without this, `uv pip install .` produces a wheel with no Python code
+# and the deployed image fails with "No module named 'clear_context_pipeline'"
+# when Dagster's gRPC server tries `-m clear_context_pipeline.definitions`.
 [tool.hatch.build.targets.wheel]
+packages = ["src/clear_context_pipeline"]
 force-include = { "pyproject.toml" = "pyproject.toml" }
 
 [tool.dg]
