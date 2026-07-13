@@ -1,0 +1,88 @@
+name: Build & deploy (dev / staging)
+
+# Push to dev → build → deploy to dev Dagster VM.
+# Same shape as clear-api / clear-pipeline; the only difference is that
+# the target VM is dev-dagster (its host + SSH key live in the matching
+# GitHub Environment as DAGSTER_VM_HOST / DAGSTER_VM_SSH_KEY).
+
+on:
+  push:
+    branches: [dev, staging]
+  workflow_dispatch: # manual re-deploy without a code change
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: Build & push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha_tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name + tags
+        id: meta
+        run: |
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image_name=${OWNER_LC}/clear-context-pipeline" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${GITHUB_REF_NAME}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ steps.meta.outputs.image_name }}:${{ steps.meta.outputs.sha_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to ${{ github.ref_name }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name }}
+    steps:
+      - name: SSH and roll the deployment
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DAGSTER_VM_HOST }}
+          username: ubuntu
+          key: ${{ secrets.DAGSTER_VM_SSH_KEY }}
+          script_stop: true
+          # Restart the three Dagster services in a specific order so the
+          # webserver + daemon always come up against a fresh code server:
+          #   1. Pull the new image (all three services share it).
+          #   2. Recreate `dagster-code` first — this is the gRPC user-code
+          #      server that both other services talk to.
+          #   3. Recreate the daemon so its cached schedule/sensor pointers
+          #      re-resolve against the new code server.
+          #   4. Recreate the webserver last so UI hits the new gRPC target.
+          # `--force-recreate` because compose sometimes skips recreation
+          # when only the image SHA changed under a moving tag.
+          script: |
+            set -e
+            cd /srv/app
+            docker compose pull dagster-code dagster-daemon dagster-webserver
+            docker compose up -d --force-recreate dagster-code
+            docker compose up -d --force-recreate dagster-daemon
+            docker compose up -d --force-recreate dagster-webserver
+            docker image prune -a -f
+            docker compose ps | grep -E 'dagster-'
