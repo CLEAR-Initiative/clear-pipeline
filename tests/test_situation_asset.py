@@ -157,6 +157,49 @@ class TestGenerateAndUpsertForCountryYear:
         payload = mock_upsert.call_args.kwargs["data"]
         assert payload["datapoints"]["population_displaced"] is None
 
+    def test_upsert_sends_window_kind_and_a_matchable_window_start(self):
+        # REGRESSION GUARD. clear-api keys the bucket on
+        # (country, window_kind, window_start, schema_version) and REJECTS
+        # a missing window_kind — a row written without it is a row no
+        # reader can find.
+        #
+        # window_start must be exactly midnight Jan 1 UTC: clear-api's
+        # `calendarYearStart` derives the same instant independently, and
+        # the read matches on equality. window_end is deliberately NOT
+        # matched on — this side sends 23:59:59.000 and the TS side used
+        # to look for 23:59:59.999, which silently found nothing.
+        patches = _patch_narrative_generators()
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                return_value="sudan-a0",
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                return_value=None,
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                return_value={},
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+            ),
+            patches["generate_ai_summary"],
+            patches["generate_context_risks"],
+            patches["generate_hazards_and_vulnerabilities"],
+            patches["generate_displacement_narrative"],
+            patches["generate_all_sectors"],
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+            ) as mock_upsert,
+        ):
+            generate_and_upsert_for_country_year(country_name="Sudan", year=2026)
+
+        kwargs = mock_upsert.call_args.kwargs
+        assert kwargs["window_kind"] == "yearly"
+        assert kwargs["window_start"] == "2026-01-01T00:00:00+00:00"
+
     def test_skip_narrative_kill_switch_ships_deterministic_only(self):
         # SITUATION_SKIP_NARRATIVE=1 → no LLM calls, no narrative
         # components. `generated_by_model` marks the row as

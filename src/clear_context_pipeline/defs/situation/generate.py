@@ -90,8 +90,22 @@ _LABEL_FUNDING_RECEIVED = "funding_received_usd"
 _LABEL_POPULATION_IN_NEED = "overall_pin"
 
 
+# Granularity of the analysis window, sent on every upsert. Part of the
+# bucket key on the clear-api side — (country, window_kind, window_start,
+# schema_version) — mirroring `aggregated_datapoints.window_kind`.
+_WINDOW_KIND = "yearly"
+
+
 def _calendar_year_window(year: int) -> tuple[str, str]:
-    """Jan 1 → Dec 31 of `year` in UTC, ISO-serialised."""
+    """Jan 1 → Dec 31 of `year` in UTC, ISO-serialised.
+
+    `window_start` is load-bearing: it keys the bucket. `window_end` is
+    stored for display and range work but is never matched on — this
+    helper and clear-api's `calendarYearStart` are two independent
+    implementations of the same calendar, and an end-of-day that differs
+    by a millisecond (23:59:59.000 here vs 23:59:59.999 there) is exactly
+    the kind of drift that writes rows no reader can find.
+    """
     start = datetime(year, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
     return start.isoformat(), end.isoformat()
@@ -327,6 +341,7 @@ def generate_and_upsert_for_country_year(
             country_location_id=country_id,
             window_start=window_start,
             window_end=window_end,
+            window_kind=_WINDOW_KIND,
             data=payload.model_dump(mode="json"),
             source_report_ids=all_source_ids,
             aggregated_datapoint_id=(aggregated or {}).get("id"),

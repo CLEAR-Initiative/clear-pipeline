@@ -459,6 +459,7 @@ def upsert_situation_analysis(
     country_location_id: str,
     window_start: str,
     window_end: str,
+    window_kind: str,
     data: dict[str, Any],
     source_report_ids: list[str],
     aggregated_datapoint_id: str | None,
@@ -467,14 +468,21 @@ def upsert_situation_analysis(
     schema_version: str,
 ) -> dict[str, Any]:
     """Insert a new situation-analysis snapshot and supersede the
-    previous "current" row for the same (country, window). One
+    previous "current" row for the same
+    (country, window_kind, window_start, schema_version). One
     transaction on the clear-api side — no half-written state on
     partial failure.
+
+    `window_kind` ("yearly") is part of the bucket key; `window_end` is
+    stored but never matched on. The two sides build the calendar window
+    independently, in different languages, so an end-of-day that differs
+    by a millisecond would otherwise write rows no reader could find.
     """
     payload = {
         "countryLocationId": country_location_id,
         "windowStart": window_start,
         "windowEnd": window_end,
+        "windowKind": window_kind,
         "data": data,
         "sourceReportIds": source_report_ids,
         "aggregatedDatapointId": aggregated_datapoint_id,
