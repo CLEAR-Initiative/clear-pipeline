@@ -229,6 +229,154 @@ def _num_or_none(obj: Any) -> int | None:
         return None
 
 
+class _NothingExtracted(RuntimeError):
+    """Raised by :func:`extract_datapoints_for_one_report` when every
+    domain call failed — the caller decides whether to skip or bubble
+    the failure (weekly asset skips the row, manual op raises `dg.Failure`)."""
+
+
+def extract_datapoints_for_one_report(
+    *,
+    report_id: str,
+    report_title: str,
+    source_url: str,
+    published_at: str,
+    doc_text: str,
+    llm,
+    s3=None,
+    s3_bucket: str | None = None,
+    log_context=None,
+) -> dict:
+    """Run the six domain LLM extractions for one report, resolve
+    locations, hoist hot totals, snapshot a debug artefact to S3, and
+    upsert into clear-api.
+
+    Extracted from the weekly asset so the manual-document job can
+    reuse the same code path — a report that arrives via
+    `uploadKnowledgebaseDocument` should get exactly the same
+    structured datapoints treatment as a ReliefWeb one.
+
+    Args:
+      report_id / report_title / source_url / published_at: report
+        identity + provenance passed straight to
+        `upsertReportDatapoints`.
+      doc_text: concatenated page text with `[page N]` markers.
+        Caller is responsible for extraction (from S3 in the weekly
+        path, from the manual op's earlier text-extraction in the
+        manual path).
+      llm: shared LLM provider — the caller pins the model.
+      s3, s3_bucket: optional; when both are supplied the function
+        writes a debug snapshot to
+        `reliefweb/kb/datapoints/<iso3>/<format>/<report_id>.json`.
+      log_context: optional Dagster / Python logger. Any object
+        exposing `.warning` / `.error`. Falls back to the module
+        logger when None.
+
+    Returns:
+      Summary dict identical in shape to the weekly asset's per-report
+      summary — the caller uses it to log or aggregate.
+
+    Raises:
+      _NothingExtracted: all six domains failed. Caller decides UX.
+      clear_api.ClearApiError: upsert rejected as non-retryable
+        (bad payload, missing FK). Caller must not retry.
+    """
+    log = log_context or logger
+
+    # ── Domain-partitioned extraction ─────────────────────────────
+    merged: dict[str, dict | None] = {}
+    domains_ok: list[str] = []
+    domains_failed: list[str] = []
+    for domain_name, schema in DOMAINS:
+        try:
+            model_out = _run_domain(
+                llm, doc_text, domain_name, schema, cache_key=report_id,
+            )
+            merged[domain_name] = model_out.model_dump(mode="json")
+            domains_ok.append(domain_name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "[%s] domain=%s extraction failed: %s",
+                report_id, domain_name, exc,
+            )
+            merged[domain_name] = None
+            domains_failed.append(domain_name)
+
+    if not domains_ok:
+        raise _NothingExtracted(f"every domain failed extraction for {report_id}")
+
+    # ── Post-process: locations, event types, hot totals ──────────
+    refs: list[LocationRef] = []
+    _collect_location_refs(merged, refs)
+    resolved_ids, unresolved_pcodes = _resolve_all_locations(refs)
+
+    timing = merged.get("timing_and_scope") or {}
+    event_types = list(dict.fromkeys(timing.get("event_types") or []))
+
+    total_killed = _num_or_none(_dig(merged, "casualties", "killed", "total"))
+    total_displaced = _num_or_none(_dig(merged, "displacement", "idp_stock"))
+    total_affected = _num_or_none(_dig(merged, "needs_and_funding", "overall_pin"))
+
+    # ── Debug snapshot — replay-friendly ──────────────────────────
+    debug_key: str | None = None
+    if s3 is not None and s3_bucket:
+        debug_key = _debug_key(report_id)
+        debug_payload = {
+            "report_id": report_id,
+            "schema_version": SCHEMA_VERSION,
+            "model": llm.model,
+            "domains_ok": domains_ok,
+            "domains_failed": domains_failed,
+            "data": merged,
+            "location_ids": resolved_ids,
+            "location_pcodes": unresolved_pcodes,
+        }
+        try:
+            s3.put_object(
+                Bucket=s3_bucket, Key=debug_key,
+                Body=json.dumps(debug_payload, ensure_ascii=False).encode("utf-8"),
+                ContentType="application/json",
+            )
+        except Exception as exc:  # noqa: BLE001 — snapshot is non-fatal
+            log.warning(
+                "[%s] debug snapshot upload failed (continuing): %s",
+                report_id, exc,
+            )
+            debug_key = None
+
+    # ── Upsert into clear-api ─────────────────────────────────────
+    result = clear_api.upsert_report_datapoints(
+        report_id=report_id,
+        report_title=report_title,
+        source_url=source_url,
+        published_at=published_at,
+        reporting_period_start=timing.get("reporting_period_start"),
+        reporting_period_end=timing.get("reporting_period_end"),
+        location_ids=resolved_ids,
+        location_pcodes=unresolved_pcodes,
+        event_types=event_types,
+        total_affected=total_affected,
+        total_displaced=total_displaced,
+        total_killed=total_killed,
+        data=merged,
+        schema_version=SCHEMA_VERSION,
+        extracted_by_model=llm.model,
+    )
+
+    return {
+        "report_id": report_id,
+        "schema_version": SCHEMA_VERSION,
+        "domains_ok": domains_ok,
+        "domains_failed": domains_failed,
+        "resolved_locations": len(resolved_ids),
+        "unresolved_pcodes": len(unresolved_pcodes),
+        "s3_debug_key": debug_key,
+        "upsert_result": result,
+        "reporting_period_start": timing.get("reporting_period_start"),
+        "reporting_period_end": timing.get("reporting_period_end"),
+    }
+
+
 @dg.asset(group_name="reliefweb_kb")
 def reliefweb_weekly_datapoints(
     context: AssetExecutionContext,
@@ -268,92 +416,24 @@ def reliefweb_weekly_datapoints(
             )
             continue
 
-        # ── Domain-partitioned extraction ─────────────────────────
-        merged: dict[str, dict | None] = {}
-        domains_ok: list[str] = []
-        domains_failed: list[str] = []
-        for domain_name, schema in DOMAINS:
-            try:
-                model_out = _run_domain(
-                    llm, doc_text, domain_name, schema, cache_key=report_id,
-                )
-                merged[domain_name] = model_out.model_dump(mode="json")
-                domains_ok.append(domain_name)
-            except Exception as exc:  # noqa: BLE001
-                context.log.warning(
-                    "[%s] domain=%s extraction failed: %s",
-                    report_id, domain_name, exc,
-                )
-                merged[domain_name] = None
-                domains_failed.append(domain_name)
-
-        if not domains_ok:
+        try:
+            summary = extract_datapoints_for_one_report(
+                report_id=report_id,
+                report_title=report["report_title"],
+                source_url=report["source_url"],
+                published_at=report["published_at"],
+                doc_text=doc_text,
+                llm=llm,
+                s3=s3,
+                s3_bucket=bucket,
+                log_context=context.log,
+            )
+        except _NothingExtracted:
             context.log.error(
                 "[%s] every domain failed extraction — skipping upsert",
                 report_id,
             )
             continue
-
-        # ── Post-process: locations, event types, hot totals ──────
-        refs: list[LocationRef] = []
-        _collect_location_refs(merged, refs)
-        resolved_ids, unresolved_pcodes = _resolve_all_locations(refs)
-
-        timing = merged.get("timing_and_scope") or {}
-        event_types = list(dict.fromkeys(timing.get("event_types") or []))
-
-        # Hot totals — hoisted from the merged blob for cheap dashboard
-        # filter/sort. Left as None when the report doesn't headline
-        # them; do NOT paper over that with zeroes.
-        total_killed = _num_or_none(_dig(merged, "casualties", "killed", "total"))
-        total_displaced = _num_or_none(_dig(merged, "displacement", "idp_stock"))
-        total_affected = _num_or_none(
-            _dig(merged, "needs_and_funding", "overall_pin"),
-        )
-
-        # ── Debug snapshot — replay-friendly ──────────────────────
-        debug_key = _debug_key(report_id)
-        debug_payload = {
-            "report_id": report_id,
-            "schema_version": SCHEMA_VERSION,
-            "model": llm.model,
-            "domains_ok": domains_ok,
-            "domains_failed": domains_failed,
-            "data": merged,
-            "location_ids": resolved_ids,
-            "location_pcodes": unresolved_pcodes,
-        }
-        try:
-            s3.put_object(
-                Bucket=bucket, Key=debug_key,
-                Body=json.dumps(debug_payload, ensure_ascii=False).encode("utf-8"),
-                ContentType="application/json",
-            )
-        except Exception as exc:  # noqa: BLE001 — non-fatal for the upsert
-            context.log.warning(
-                "[%s] debug snapshot upload failed (continuing): %s",
-                report_id, exc,
-            )
-
-        # ── Upsert into clear-api ─────────────────────────────────
-        try:
-            result = clear_api.upsert_report_datapoints(
-                report_id=report_id,
-                report_title=report["report_title"],
-                source_url=report["source_url"],
-                published_at=report["published_at"],
-                reporting_period_start=timing.get("reporting_period_start"),
-                reporting_period_end=timing.get("reporting_period_end"),
-                location_ids=resolved_ids,
-                location_pcodes=unresolved_pcodes,
-                event_types=event_types,
-                total_affected=total_affected,
-                total_displaced=total_displaced,
-                total_killed=total_killed,
-                data=merged,
-                schema_version=SCHEMA_VERSION,
-                extracted_by_model=llm.model,
-            )
         except clear_api.ClearApiError as exc:
             context.log.error(
                 "[%s] clear-api rejected datapoint upsert (non-retryable): %s",
@@ -368,19 +448,22 @@ def reliefweb_weekly_datapoints(
             continue
 
         summaries.append({
-            "report_id": report_id,
-            "schema_version": SCHEMA_VERSION,
-            "domains_ok": domains_ok,
-            "domains_failed": domains_failed,
-            "resolved_locations": len(resolved_ids),
-            "unresolved_pcodes": len(unresolved_pcodes),
-            "s3_debug_key": debug_key,
-            "upsert_result": result,
+            # Rebuild the flat summary shape the weekly asset used to
+            # emit — some fields moved names in the helper (e.g. the
+            # helper returns list counts, we surface them as-is).
+            "report_id": summary["report_id"],
+            "schema_version": summary["schema_version"],
+            "domains_ok": summary["domains_ok"],
+            "domains_failed": summary["domains_failed"],
+            "resolved_locations": summary["resolved_locations"],
+            "unresolved_pcodes": summary["unresolved_pcodes"],
+            "s3_debug_key": summary["s3_debug_key"],
+            "upsert_result": summary["upsert_result"],
         })
         context.log.info(
             "[%s] extracted %d/%d domains, %d locations resolved (%s)",
-            report_id, len(domains_ok), len(DOMAINS),
-            len(resolved_ids), llm.model,
+            report_id, len(summary["domains_ok"]), len(DOMAINS),
+            summary["resolved_locations"], llm.model,
         )
 
     context.add_output_metadata({

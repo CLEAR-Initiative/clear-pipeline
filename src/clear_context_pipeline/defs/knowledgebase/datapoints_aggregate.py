@@ -139,13 +139,19 @@ def reliefweb_weekly_datapoint_aggregations(
             description=f"clear-api rejected refresh: {exc}",
         ) from exc
 
+    # `situationAnalysesInvalidated` — cascade count from the yearly-
+    # country bucket writes. Non-zero means the situation-analysis
+    # asset (which runs downstream in the same job) has stale rows
+    # waiting to be regenerated.
+    situation_invalidated = int(result.get("situationAnalysesInvalidated") or 0)
     context.log.info(
-        "aggregation refresh complete: computed=%d superseded=%d",
-        result["computedBuckets"], result["supersededBuckets"],
+        "aggregation refresh complete: computed=%d superseded=%d situation_analyses_invalidated=%d",
+        result["computedBuckets"], result["supersededBuckets"], situation_invalidated,
     )
     context.add_output_metadata({
         "computed_buckets": dg.MetadataValue.int(result["computedBuckets"]),
         "superseded_buckets": dg.MetadataValue.int(result["supersededBuckets"]),
+        "situation_analyses_invalidated": dg.MetadataValue.int(situation_invalidated),
         "schema_version": dg.MetadataValue.text(result["schemaVersion"]),
         "lookback_days": dg.MetadataValue.int(lookback_days),
         "mode": dg.MetadataValue.text(window_label),
@@ -153,5 +159,6 @@ def reliefweb_weekly_datapoint_aggregations(
     return {
         "computed_buckets": result["computedBuckets"],
         "superseded_buckets": result["supersededBuckets"],
+        "situation_analyses_invalidated": situation_invalidated,
         "schema_version": result["schemaVersion"],
     }
