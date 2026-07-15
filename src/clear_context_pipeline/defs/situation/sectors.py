@@ -1,4 +1,4 @@
-"""Per-sector analysis generator — Phase D.
+"""Per-sector analysis generator — component 6.
 
 Six SAF sectors, one LLM call each. Every call:
   1. Sector-scoped RAG search (filters knowledgebase hits by
@@ -323,7 +323,7 @@ def generate_all_sectors(
     # Same aggregated-context format helper the narrative module uses.
     # Duplicated inline to avoid the circular import — a shared
     # `_format_aggregated_for_prompt` in a future `common.py` module
-    # would be the cleanup path if we grow more Phase C+ modules.
+    # would be the cleanup path if we grow more narrative modules.
     aggregated_context = _format_aggregated(aggregated)
 
     outputs: dict[str, SectorAnalysis] = {}

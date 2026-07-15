@@ -5,14 +5,17 @@ package produces one pre-computed snapshot per (country × year)
 covering:
 
   1. datapoints                  (deterministic, from aggregated_datapoints)
-  2. ai_summary                  (LLM — Phase C)
-  3. context_risks               (LLM — Phase C)
-  4. hazards_and_vulnerabilities (LLM — Phase C)
-  5. displacement                (LLM — Phase C)
-  6. sectors                     (LLM — Phase D)
+  2. ai_summary                  (LLM, RAG-grounded)
+  3. context_risks               (LLM, RAG-grounded)
+  4. hazards_and_vulnerabilities (LLM, RAG-grounded)
+  5. displacement                (LLM, RAG-grounded)
+  6. sectors                     (LLM, RAG-grounded, one call per SAF sector)
   7. sources                     (deterministic, from contributing_report_ids)
 
-Phase B (this initial cut) ships only the deterministic components 1
-and 7; the LLM-heavy components are stubbed out so the dashboard can
-render an empty state for them while the write path proves out.
+All seven components are generated. The LLM-backed ones (2–6) each run
+their own RAG search over ``knowledgebase`` and isolate their failures:
+one generator erroring leaves the rest of the row intact and ships that
+component empty. ``SITUATION_SKIP_NARRATIVE`` skips 2–6 wholesale,
+producing a deterministic-only row when the provider is down or the
+budget is spent.
 """

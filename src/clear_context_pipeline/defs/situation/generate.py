@@ -1,22 +1,27 @@
 """Weekly situation-analysis generator.
 
-Phase B scope — deterministic components only. This asset:
+Builds one situation-analysis row per pipeline country for the current
+calendar year. This asset:
 
   1. Fetches this year's yearly × country aggregated_datapoint bucket
      for every pipeline country (currently: Sudan only).
-  2. Hoists the six headline numbers + envelope into `Datapoints`.
+  2. Hoists the headline numbers + envelope into `Datapoints`.
   3. Collects the contributing report ids, fetches their titles /
      source_url / published_at via `report_datapoints` lookups, sorts
      chronologically, and packs into `Sources`.
-  4. Stubs every LLM-generated component (ai_summary, context_risks,
-     hazards_and_vulnerabilities, displacement, sectors) so the JSON
-     shape is stable — Phase C / D fill these in.
+  4. Generates the LLM-backed components — ai_summary, context_risks,
+     hazards_and_vulnerabilities, displacement, sectors — each grounded
+     in its own RAG search over `knowledgebase`. Set
+     `SITUATION_SKIP_NARRATIVE` to ship a deterministic-only row when
+     the provider is down or the budget is spent.
   5. Upserts one row per country via `upsertSituationAnalysis`
      (bitemporal supersede + insert on the clear-api side).
 
-Cost: zero LLM calls today. Runs downstream of
-`reliefweb_weekly_datapoint_aggregations` so the numbers reflect
-this week's freshly-recomputed aggregates.
+Cost: ~10 LLM calls per country-year (4 narrative + 6 sector). Runs
+downstream of `reliefweb_weekly_datapoint_aggregations` so the numbers
+reflect this week's freshly-recomputed aggregates, and of
+`reliefweb_weekly_knowledgebase_upsert` so the narrative is grounded in
+this week's chunks rather than last week's.
 """
 
 import logging
@@ -117,10 +122,14 @@ def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
         return Datapoints()
     data = aggregated.get("data") or {}
 
-    # "number of events" is derived from the count of contributing
-    # reports — Phase C+ will refine this by counting distinct events
-    # from the `events` table for the same window; for Phase B this
-    # per-report proxy is close enough for the dashboard's headline.
+    # KNOWN WRONG: this is the count of contributing reports, not of
+    # events — it duplicates `envelope.report_count` exactly, and more
+    # reporting on one flood reads as more floods. Ticket #274 replaces
+    # it with a count of distinct incident groups from the aggregator,
+    # which is blocked on the incident key gaining its Event Type
+    # dimension (#270). Not sourced from the `events` table: that is
+    # event-driven data over event types that need not correspond to a
+    # report's — see docs/adr/0001-affected-extracted-not-sourced-from-events.md.
     number_of_events = int(aggregated.get("reportCount") or 0)
 
     return Datapoints(

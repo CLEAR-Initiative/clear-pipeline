@@ -1,13 +1,17 @@
 """LLM-generated narrative components for the situation analysis.
 
-Phase C scope — four components:
+Four components:
   2. AI summary                  (2–4 paragraph prose)
   3. context_risks               (8 sub-domains × bullets)
   4. hazards_and_vulnerabilities (bullets each)
   5. displacement                (push_factors + return_intention)
 
-Component 6 (per-sector analysis) is Phase D — larger, needs its own
-prompt discipline per sector.
+Component 6 (per-sector analysis) lives in `sectors.py` — it needs its
+own prompt discipline per sector.
+
+Each generator runs one RAG search and stamps that search's
+`contributing_report_ids` onto every bullet or sub-domain it produces,
+so a component's bullets always share one source set.
 
 Prompt-cache strategy: every generator's system prompt is identical
 across a single country-year generation cycle. The shared prefix

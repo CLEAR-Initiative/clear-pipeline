@@ -4,12 +4,11 @@ Blob shape mirrors the design proposal — seven top-level components,
 each carrying its own ``source_report_ids`` so the dashboard's
 sources tab is a JSON walk, not a second query.
 
-Phase B (this cut) has typed models for the deterministic components
-(Datapoints + Sources) and the *shape* of every other component so
-the JSON writer doesn't emit keys that a future Phase C reader
-wouldn't recognise. LLM-generated components ship as empty defaults
-for now — dashboard renders an empty state until Phase C wires the
-generators.
+Every component is typed and every component is generated. Defaults are
+empty rather than absent so a component whose generator failed — or that
+was skipped via ``SITUATION_SKIP_NARRATIVE`` — still emits its key with
+a well-formed empty value, and the dashboard renders an empty state off
+a stable JSON path instead of null-guarding every read.
 
 Schema version is the load-bearing versioning field. Rows with
 different versions never mix on trend views; bumping this triggers
@@ -77,19 +76,20 @@ class Datapoints(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 2 — AI summary (LLM, Phase C — stub)
+# Component 2 — AI summary (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
 class AISummary(BaseModel):
-    """2–4 paragraph narrative synthesis. Empty string means Phase C
-    hasn't populated it yet; the dashboard renders an empty state."""
+    """2–4 paragraph narrative synthesis. Empty string means the
+    generator failed or was skipped; the dashboard renders an empty
+    state rather than a missing key."""
     text: str = ""
     source_report_ids: list[str] = Field(default_factory=list)
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 3 — Context risks (LLM, Phase C — stub)
+# Component 3 — Context risks (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -99,7 +99,8 @@ class RiskDomain(BaseModel):
 
 
 class ContextRisks(BaseModel):
-    """Eight fixed sub-domains. All start empty in Phase B."""
+    """Eight fixed sub-domains, all populated by one generator call and
+    therefore sharing one `source_report_ids` set."""
     demographics: RiskDomain = Field(default_factory=RiskDomain)
     political: RiskDomain = Field(default_factory=RiskDomain)
     economy: RiskDomain = Field(default_factory=RiskDomain)
@@ -111,7 +112,7 @@ class ContextRisks(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 4 — Hazards & pre-crisis vulnerabilities (LLM, Phase C — stub)
+# Component 4 — Hazards & pre-crisis vulnerabilities (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -121,7 +122,7 @@ class HazardsAndVulnerabilities(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 5 — Displacement narrative (LLM, Phase C — stub)
+# Component 5 — Displacement narrative (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -131,7 +132,7 @@ class DisplacementNarrative(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 6 — Sector analyses (LLM, Phase D — stub)
+# Component 6 — Sector analyses (LLM, one call per SAF sector)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -146,8 +147,9 @@ class InformationCoverageArea(BaseModel):
 
 
 class SectorAnalysis(BaseModel):
-    """Per-SAF-sector analysis block. Empty defaults let Phase B ship
-    the shape without the LLM-heavy generation."""
+    """Per-SAF-sector analysis block. Empty defaults keep the shape
+    stable when a sector's generator fails — failure is isolated per
+    sector, so one erroring leaves the other five intact."""
     severity: Optional[Severity] = None
     impact: list[str] = Field(default_factory=list)
     humanitarian_conditions: list[str] = Field(default_factory=list)
