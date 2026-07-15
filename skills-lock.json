@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "skills": {
+    "grill-with-docs": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/grill-with-docs/SKILL.md",
+      "computedHash": "e7ef25bbee50cda2eb7b3a8ef541db0a0396dad7d369f7d14fb610671dd1864b"
+    },
+    "pr-fix-all": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/in-progress/pr-fix-all/SKILL.md",
+      "computedHash": "ebf434ea775b6724bdc8e4b6bb296435aaec3b3387df65e5a8af790f048c1314"
+    },
+    "pr-review": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/in-progress/pr-review/SKILL.md",
+      "computedHash": "3a4c792c4d15594e46e07a28198fa802089e7dcc7c986f644594fa0c45983535"
+    },
+    "review": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/in-progress/review/SKILL.md",
+      "computedHash": "8f98a68bf07ef9b80d5302d863efe896fbf7beb488f01904ad65c76fac394e82"
+    },
+    "setup-git-flow": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/setup-git-flow/SKILL.md",
+      "computedHash": "5242679dfdfc9e3d6c1c2f5d7ec8a56e0204b3ce3cfb37fe7d2eeaef0478fe7e"
+    },
+    "setup-matt-pocock-skills": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/setup-matt-pocock-skills/SKILL.md",
+      "computedHash": "663eab6627801b7ea2795c003788cf07c13971464447ae09b341da1a5b46c81f"
+    },
+    "setup-merge-hook": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/setup-merge-hook/SKILL.md",
+      "computedHash": "6490849f6305e2adb4804a2190df2c535651dc54123048a8e6ec245e763e0790"
+    },
+    "ship-ticket": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/ship-ticket/SKILL.md",
+      "computedHash": "a19d12fcef0fd70bb3a7e12fafdf6ed7fa5dc9fac562a77fdbdbdfb99e53d532"
+    },
+    "start-ticket": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/start-ticket/SKILL.md",
+      "computedHash": "221084dd77da34aed7f6e6c618d7eac95178ad9179f2af25647cd716d4870a5c"
+    },
+    "to-expo": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/to-expo/SKILL.md",
+      "computedHash": "c8fdc440aaa86a3c13698a2ad3f1d242b5255d25f4cbe3ad1c228673539fe178"
+    },
+    "to-prd": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/to-prd/SKILL.md",
+      "computedHash": "e1be55b4ccb4c04c782f5adb8ae766bbceeace4f617b96d9681c83f9ff07422c"
+    },
+    "triage": {
+      "source": "positonic/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/triage/SKILL.md",
+      "computedHash": "b77ea99c2e6e97815b373cc476ad4cc1835d3e736867b764602147be71f6c131"
+    }
+  }
+}
