@@ -80,6 +80,7 @@ mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVe
   refreshAggregatedDatapoints(from: $from, to: $to, schemaVersion: $schemaVersion) {
     computedBuckets
     supersededBuckets
+    situationAnalysesInvalidated
     schemaVersion
   }
 }
@@ -88,6 +89,85 @@ mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVe
 _HAS_AGGREGATED_DATAPOINTS = """
 query HasAggregatedDatapoints($schemaVersion: String!) {
   hasAggregatedDatapoints(schemaVersion: $schemaVersion)
+}
+"""
+
+# ── Situation analysis ─────────────────────────────────────────────
+
+_GET_AGGREGATED_DATAPOINT = """
+query AggregatedDatapoint(
+  $locationId: String,
+  $windowStart: DateTime!,
+  $windowEnd: DateTime!,
+  $windowKind: String!,
+  $schemaVersion: String,
+) {
+  aggregatedDatapoint(
+    locationId: $locationId,
+    windowStart: $windowStart,
+    windowEnd: $windowEnd,
+    windowKind: $windowKind,
+    schemaVersion: $schemaVersion,
+  ) {
+    id
+    windowStart
+    windowEnd
+    windowKind
+    locationId
+    data
+    contributingReportIds
+    newestSourceAt
+    oldestSourceAt
+    dataQualityScore
+    reportCount
+    validFrom
+    validTo
+    schemaVersion
+    onDemand
+  }
+}
+"""
+
+_GET_PIPELINE_COUNTRIES = """
+query PipelineCountriesForSituation {
+  pipelineCountries { name bbox }
+}
+"""
+
+# We already have `resolveKnowledgebaseLocation` for pcode/name → id
+# lookups. Situation-analysis needs the reverse — a specific country
+# location by name — so we reuse that resolver by passing name only.
+
+_UPSERT_SITUATION_ANALYSIS = """
+mutation UpsertSituationAnalysis($input: UpsertSituationAnalysisInput!) {
+  upsertSituationAnalysis(input: $input) {
+    situationAnalysisId
+    countryLocationId
+    supersededPrevious
+  }
+}
+"""
+
+_SEARCH_KNOWLEDGEBASE = """
+query SearchKnowledgebaseForSituation(
+  $query: String!,
+  $filters: KnowledgebaseFilters,
+  $limit: Int,
+) {
+  searchKnowledgebase(query: $query, filters: $filters, limit: $limit) {
+    id
+    reportId
+    reportTitle
+    sourceUrl
+    publishedAt
+    pageStart
+    pageEnd
+    chunkText
+    score
+    locationIds
+    eventTypes
+    needSectors
+  }
 }
 """
 
@@ -305,6 +385,105 @@ def upsert_knowledgebase_chunks(
         "chunksDeleted": int(result["chunksDeleted"]),
         "chunksInserted": int(result["chunksInserted"]),
     }
+
+
+def get_aggregated_datapoint(
+    *,
+    location_id: str | None,
+    window_start: str,
+    window_end: str,
+    window_kind: str,
+    schema_version: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch a single aggregated-datapoints bucket. Returns None when
+    no snapshot exists (cache miss AND no contributing reports).
+
+    Used by the situation-analysis generator to hoist the deterministic
+    Datapoints component out of the pre-computed cache."""
+    data = _execute(
+        _GET_AGGREGATED_DATAPOINT,
+        {
+            "locationId": location_id,
+            "windowStart": window_start,
+            "windowEnd": window_end,
+            "windowKind": window_kind,
+            "schemaVersion": schema_version,
+        },
+    )
+    return data.get("aggregatedDatapoint")
+
+
+def get_pipeline_countries() -> list[dict[str, Any]]:
+    """List of countries the pipeline currently publishes analysis
+    for. Currently: Sudan (POC scope)."""
+    data = _execute(_GET_PIPELINE_COUNTRIES)
+    return data.get("pipelineCountries") or []
+
+
+def resolve_country_location_id(country_name: str) -> str | None:
+    """Reverse-lookup a country's `locations.id` from its name.
+    Reuses the knowledgebase location resolver with admin_level=0.
+
+    Kept as a wrapper so future callers (dashboards, exports) can
+    hit one function even if the underlying resolver evolves."""
+    return resolve_location(name=country_name, admin_level=0)
+
+
+def search_knowledgebase(
+    *,
+    query: str,
+    filters: dict[str, Any] | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Hybrid dense + BM25 retrieval over the knowledgebase.
+
+    Returns a list of hits ordered by RRF score, each carrying its
+    source report metadata + page range so the narrative generator
+    can attribute bullets back to reports without a second lookup.
+
+    Filters mirror `KnowledgebaseFilters` on the GraphQL side —
+    passing None applies no filter (semantic ranking only). For the
+    situation-analysis path we skip location filtering because
+    knowledgebase rows are tagged at admin-2 level but our scope is
+    the country (A0); semantic relevance handles the geo scoping.
+    """
+    data = _execute(
+        _SEARCH_KNOWLEDGEBASE,
+        {"query": query, "filters": filters, "limit": limit},
+    )
+    return data.get("searchKnowledgebase") or []
+
+
+def upsert_situation_analysis(
+    *,
+    country_location_id: str,
+    window_start: str,
+    window_end: str,
+    data: dict[str, Any],
+    source_report_ids: list[str],
+    aggregated_datapoint_id: str | None,
+    generated_by_model: str,
+    generation_cost_usd: float | None,
+    schema_version: str,
+) -> dict[str, Any]:
+    """Insert a new situation-analysis snapshot and supersede the
+    previous "current" row for the same (country, window). One
+    transaction on the clear-api side — no half-written state on
+    partial failure.
+    """
+    payload = {
+        "countryLocationId": country_location_id,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+        "data": data,
+        "sourceReportIds": source_report_ids,
+        "aggregatedDatapointId": aggregated_datapoint_id,
+        "generatedByModel": generated_by_model,
+        "generationCostUsd": generation_cost_usd,
+        "schemaVersion": schema_version,
+    }
+    result = _execute(_UPSERT_SITUATION_ANALYSIS, {"input": payload})
+    return result["upsertSituationAnalysis"]
 
 
 def _require_env(name: str) -> str:

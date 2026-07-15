@@ -18,9 +18,33 @@ of the design doc).
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+import json
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 
 SCHEMA_VERSION = "v1"
+
+
+def _tolerate_stringified_json(v: Any) -> Any:
+    """`mode="before"` validator body — Claude's tool_use path
+    occasionally returns a JSON-encoded string where the schema
+    expects a list or dict (typically on richly-nested fields like
+    `access_by_location`). We defensively `json.loads()` a leading
+    ``[`` / ``{`` before Pydantic's type check so the whole domain
+    doesn't fail validation over a single serialisation quirk.
+
+    Non-string inputs pass through unchanged. Malformed JSON strings
+    ALSO pass through — Pydantic then rejects with its normal type
+    error rather than swallowing garbage silently."""
+    if isinstance(v, str):
+        stripped = v.strip()
+        if stripped.startswith(("[", "{")):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+    return v
 
 # Confidence tiers — soft enum. The prompt names these values but the
 # LLM may emit close variants (e.g. "verified-un" or "reported-dtm");
@@ -152,6 +176,13 @@ class TimingAndScope(BaseModel):
         ),
     )
 
+    # Nested-model list — Claude's tool_use occasionally returns a
+    # JSON-encoded string here. Defensively decode before Pydantic
+    # runs the type check so the whole domain doesn't fail.
+    _tolerate_locations = field_validator("locations", mode="before")(
+        _tolerate_stringified_json,
+    )
+
 
 # ────────────────────────────────────────────────────────────────────
 # Domain 2 — Casualties
@@ -226,6 +257,8 @@ class Displacement(BaseModel):
         default_factory=list,
         description="Origin→destination pairs when the report names both endpoints.",
     )
+
+    _tolerate_flows = field_validator("flows", mode="before")(_tolerate_stringified_json)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -325,6 +358,16 @@ class AccessAndIncidents(BaseModel):
     water_facilities: Optional[InfrastructureDamage] = None
     markets_disrupted: Optional[NumericField] = None
 
+    # This is the domain where we saw the JSON-string-as-list failure
+    # in the wild — verified with report 4221396. Both the nested list
+    # and the nested dict get the tolerance treatment.
+    _tolerate_access_by_location = field_validator("access_by_location", mode="before")(
+        _tolerate_stringified_json,
+    )
+    _tolerate_incidents_by_type = field_validator("incidents_by_type", mode="before")(
+        _tolerate_stringified_json,
+    )
+
 
 # ────────────────────────────────────────────────────────────────────
 # Domain 6 — Narrative and Confidence
@@ -378,6 +421,10 @@ class NarrativeAndConfidence(BaseModel):
             "water-access percentages, latrine coverage — whichever the report "
             "actually cites."
         ),
+    )
+
+    _tolerate_sector_indicators = field_validator("sector_indicators", mode="before")(
+        _tolerate_stringified_json,
     )
 
 
