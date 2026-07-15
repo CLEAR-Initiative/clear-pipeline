@@ -90,7 +90,7 @@ class TestBuildDatapoints:
         # + empty envelope. Dashboard renders "no data yet".
         dp = _build_datapoints(None)
         assert dp.population_displaced is None
-        assert dp.population_affected is None
+        assert dp.population_in_need is None
         assert dp.returnees is None
         assert dp.number_of_events == 0
         assert dp.funding_required_usd is None
@@ -113,7 +113,7 @@ class TestBuildDatapoints:
         }
         dp = _build_datapoints(aggregated)
         assert dp.population_displaced == 6_500_000.0
-        assert dp.population_affected == 25_000_000.0  # from overall_pin
+        assert dp.population_in_need == 25_000_000.0  # from overall_pin
         assert dp.returnees == 200_000.0
         assert dp.funding_required_usd == 2_500_000_000.0
         assert dp.funding_received_usd == 1_100_000_000.0
@@ -132,7 +132,7 @@ class TestBuildDatapoints:
         }
         dp = _build_datapoints(aggregated)
         assert dp.population_displaced == 100000.0
-        assert dp.population_affected is None
+        assert dp.population_in_need is None
         assert dp.returnees is None
         assert dp.funding_required_usd is None
 

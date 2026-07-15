@@ -73,11 +73,16 @@ _LABEL_POPULATION_DISPLACED = "idp_stock"
 _LABEL_RETURNEES = "returnees"
 _LABEL_FUNDING_REQUIRED = "funding_required_usd"
 _LABEL_FUNDING_RECEIVED = "funding_received_usd"
-# "Population affected" doesn't have a dedicated field in the
-# aggregation registry today — the closest proxy is `overall_pin`
-# (people in need). If the taxonomy grows a distinct "affected"
-# field later, only this constant needs to change.
-_LABEL_POPULATION_AFFECTED = "overall_pin"
+# People in Need. Note `overall_pin` only populates when a report
+# headlines a country/appeal-wide figure, so this is driven by HNO /
+# HRP / appeal documents and is null for most field reports.
+#
+# This is deliberately NOT Population Affected — that is the wider
+# circle (everyone the crisis touched), nothing extracts it today, and
+# it aggregates `Max` rather than `latest_state`. It was previously
+# hoisted into a `population_affected` field, which understated it and
+# mislabelled it. See docs/adr/0001-affected-extracted-not-sourced-from-events.md.
+_LABEL_POPULATION_IN_NEED = "overall_pin"
 
 
 def _calendar_year_window(year: int) -> tuple[str, str]:
@@ -120,7 +125,7 @@ def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
 
     return Datapoints(
         population_displaced=_field_value(data, _LABEL_POPULATION_DISPLACED),
-        population_affected=_field_value(data, _LABEL_POPULATION_AFFECTED),
+        population_in_need=_field_value(data, _LABEL_POPULATION_IN_NEED),
         returnees=_field_value(data, _LABEL_RETURNEES),
         number_of_events=number_of_events,
         funding_required_usd=_field_value(data, _LABEL_FUNDING_REQUIRED),

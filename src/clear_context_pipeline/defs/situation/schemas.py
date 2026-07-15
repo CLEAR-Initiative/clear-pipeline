@@ -64,7 +64,11 @@ class Datapoints(BaseModel):
     year with no ingested reports has all-null values but the
     envelope still records the fact of zero contributing sources."""
     population_displaced: Optional[float] = None
-    population_affected: Optional[float] = None
+    # People in Need — the assessed subset requiring humanitarian
+    # assistance. NOT Population Affected (the wider circle of everyone
+    # the crisis touched), which nothing extracts today. See CONTEXT.md
+    # and docs/adr/0001-affected-extracted-not-sourced-from-events.md.
+    population_in_need: Optional[float] = None
     returnees: Optional[float] = None
     number_of_events: int = 0
     funding_required_usd: Optional[float] = None
