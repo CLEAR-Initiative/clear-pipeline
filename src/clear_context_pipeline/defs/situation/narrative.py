@@ -28,7 +28,7 @@ import json
 import logging
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from clear_context_pipeline.defs.situation.rag_helper import (
     RAGContext,
@@ -91,6 +91,29 @@ class _RiskDomainLLM(BaseModel):
 class _ContextRisksLLM(BaseModel):
     """Eight OCHA-style context-risk domains. Fixed order so the
     dashboard's tab layout stays stable."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_stringified_domains(cls, data: Any) -> Any:
+        """Tolerate a structured-output glitch where the model returns a
+        nested domain as a JSON-encoded string (e.g. `'{"bullets": [...]}'`)
+        instead of an object. Without this, one stringified domain fails
+        validation for the whole model and the caller falls back to an
+        empty component — blanking all eight domains over a transient
+        serialisation quirk. Non-JSON strings pass through unchanged so
+        genuinely malformed output still surfaces as a validation error."""
+        if not isinstance(data, dict):
+            return data
+        coerced = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError):
+                    pass  # leave as-is; normal validation reports it
+            coerced[key] = value
+        return coerced
+
     demographics: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
     political: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
     economy: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)

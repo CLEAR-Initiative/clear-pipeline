@@ -12,9 +12,11 @@ Focus is on:
     than crashing the whole situation analysis.
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from clear_context_pipeline.defs.situation.narrative import (
     _AISummaryLLM,
@@ -164,6 +166,29 @@ class TestGenerateContextRisks:
                 aggregated=None, cache_key="k",
             )
         assert result.demographics.bullets == []
+
+    def test_stringified_domains_are_coerced(self):
+        # Structured-output glitch: the model returns nested domains as
+        # JSON strings instead of objects. The before-validator parses
+        # them so one flaky serialisation doesn't blank the whole
+        # component. Mixed string / object input is handled, and absent
+        # domains keep their empty default.
+        glitched = {
+            "demographics": json.dumps({"bullets": ["Inverted age pyramid"]}),
+            "security": json.dumps({"bullets": ["Weekly clashes", "New front"]}),
+            "political": {"bullets": ["Power struggle"]},  # already an object
+        }
+        model = _ContextRisksLLM.model_validate(glitched)
+        assert model.demographics.bullets == ["Inverted age pyramid"]
+        assert model.security.bullets == ["Weekly clashes", "New front"]
+        assert model.political.bullets == ["Power struggle"]
+        assert model.economy.bullets == []  # absent domain -> empty default
+
+    def test_non_json_string_domain_still_errors(self):
+        # A string that isn't JSON is genuinely malformed output — it
+        # must still surface as a validation error, not be swallowed.
+        with pytest.raises(ValidationError):
+            _ContextRisksLLM.model_validate({"demographics": "not json at all"})
 
 
 # ────────────────────────────────────────────────────────────────────
