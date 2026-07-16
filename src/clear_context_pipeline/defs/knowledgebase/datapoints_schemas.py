@@ -11,8 +11,8 @@ Every numeric value is wrapped in :class:`NumericField` so provenance
 travels with the number. That's what enables the "click the figure to
 see the source paragraph" affordance in the situation-analysis dashboard.
 
-Schema version: **v1**. Bumping this variable + the corresponding
-constant in the extract asset triggers targeted re-extraction (see §7
+Schema version is the ``SCHEMA_VERSION`` constant below (do not hardcode
+it here — it drifts). Bumping it triggers targeted re-extraction (see §7
 of the design doc).
 """
 
@@ -23,7 +23,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-SCHEMA_VERSION = "v1"
+# v2 adds Figure Scope to NumericField (scope_location_name +
+# scope_location_id). Additive change — v1 rows are still valid, they
+# simply carry no scope. Bumping this triggers regeneration of aggregated
+# buckets for the affected fields (#274) and keeps v1/v2 rows from mixing
+# on trend views.
+SCHEMA_VERSION = "v2"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -93,6 +98,31 @@ class NumericField(BaseModel):
     page_number: Optional[int] = Field(
         default=None,
         description="1-indexed PDF page number; the primary citation handle.",
+    )
+    # ── Figure Scope (schema v2) ──────────────────────────────────────
+    # The ONE place this figure is a total FOR — not every place the
+    # report mentions. "1,000 affected in Kordofan" -> "Kordofan", even
+    # if the report is framed nationally and names other states. This is
+    # what lets the aggregator bucket the figure to the right location
+    # instead of fanning it across every mentioned place. See
+    # docs/adr/0002-deduplicate-at-figure-scope.md.
+    scope_location_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The single place this figure is a total for — the area the "
+            "number covers, NOT every place the report mentions. Null if "
+            "the figure can't be pinned to one place (do NOT default to the "
+            "country or the first place named). Emit the PLACE NAME only; do "
+            "not emit an admin level."
+        ),
+    )
+    # Resolved from scope_location_name post-extraction to a `locations`
+    # id. NOT emitted by the LLM — always overwritten by the resolve step.
+    # Null means the figure is unscoped (LLM abstained, or the name did
+    # not resolve) and must be excluded from cross-report roll-up.
+    scope_location_id: Optional[str] = Field(
+        default=None,
+        description="Resolved post-extraction. Leave null; do not emit.",
     )
 
 

@@ -12,11 +12,18 @@ import pytest
 
 from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
     _collect_location_refs,
+    _collect_numeric_fields,
     _dig,
     _num_or_none,
     _resolve_all_locations,
+    _resolve_figure_scopes,
 )
-from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import LocationRef
+from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+    Casualties,
+    CasualtyDisaggregation,
+    LocationRef,
+    NumericField,
+)
 
 
 class TestDig:
@@ -181,6 +188,128 @@ class TestResolveAllLocations:
         assert resolved == ["loc-sd01"]
         # SD02 falls through to unresolved via the exception handler.
         assert unresolved == ["SD02"]
+
+
+RESOLVE = "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location"
+
+
+def _nf(value, scope=None):
+    """A NumericField dict as it appears in the merged blob (post
+    model_dump), optionally with an LLM-emitted scope name."""
+    return NumericField(
+        value=value, unit="people", confidence="reported",
+        source_quote="…", scope_location_name=scope,
+    ).model_dump(mode="json")
+
+
+class TestCollectNumericFields:
+    """The scope resolver keys off finding every NumericField in the
+    nested blob. Missing one means that figure never gets a scope id and
+    silently drops out of location roll-ups."""
+
+    def test_finds_fields_nested_in_domains(self):
+        blob = {
+            "casualties": {"killed": {"total": _nf(10, "El Fasher")}},
+            "displacement": {"idp_stock": _nf(5000, "Kordofan")},
+        }
+        out: list[dict] = []
+        _collect_numeric_fields(blob, out)
+        assert len(out) == 2
+
+    def test_finds_fields_inside_lists(self):
+        blob = {"access": [{"incidents": _nf(3, "Nyala")}, {"incidents": _nf(4)}]}
+        out: list[dict] = []
+        _collect_numeric_fields(blob, out)
+        assert len(out) == 2
+
+    def test_ignores_non_numeric_dicts(self):
+        # A TextField has no scope_location_name key, so it isn't picked up.
+        blob = {"note": {"value": "some text", "confidence": "reported"}}
+        out: list[dict] = []
+        _collect_numeric_fields(blob, out)
+        assert out == []
+
+
+class TestResolveFigureScopes:
+    """Figure Scope (schema v2): map each figure's scope_location_name to
+    a locations id, in place. A wrong or missing id sends the figure to
+    the wrong bucket or drops it — the exact failures ADR-0002 exists to
+    prevent, so the resolution contract is worth pinning."""
+
+    def test_resolves_name_to_id_in_place(self):
+        blob = {"casualties": {"killed": {"total": _nf(10, "El Fasher")}}}
+        with patch(RESOLVE, return_value="loc-elfasher") as m:
+            figures, named, resolved = _resolve_figure_scopes(blob)
+        assert blob["casualties"]["killed"]["total"]["scope_location_id"] == "loc-elfasher"
+        assert (figures, named, resolved) == (1, 1, 1)
+        m.assert_called_once_with(name="El Fasher")
+
+    def test_null_name_stays_unscoped(self):
+        # LLM abstained (no place) → id null, resolver never called.
+        blob = {"casualties": {"killed": {"total": _nf(10, None)}}}
+        with patch(RESOLVE) as m:
+            figures, named, resolved = _resolve_figure_scopes(blob)
+        assert blob["casualties"]["killed"]["total"]["scope_location_id"] is None
+        assert (figures, named, resolved) == (1, 0, 0)
+        m.assert_not_called()
+
+    def test_unmatched_name_leaves_null_id(self):
+        # Resolver can't match the name → id null, but it WAS named (so the
+        # resolver-match-rate metric separates this from abstention).
+        blob = {"displacement": {"idp_stock": _nf(5000, "Nowhereville")}}
+        with patch(RESOLVE, return_value=None):
+            figures, named, resolved = _resolve_figure_scopes(blob)
+        assert blob["displacement"]["idp_stock"]["scope_location_id"] is None
+        assert (figures, named, resolved) == (1, 1, 0)
+
+    def test_llm_supplied_id_is_overwritten(self):
+        # The LLM must not supply scope_location_id — a hallucinated one is
+        # unconditionally replaced by the resolver's answer.
+        f = _nf(10, "Kordofan")
+        f["scope_location_id"] = "hallucinated-id"
+        blob = {"casualties": {"killed": {"total": f}}}
+        with patch(RESOLVE, return_value="loc-kordofan"):
+            _resolve_figure_scopes(blob)
+        assert blob["casualties"]["killed"]["total"]["scope_location_id"] == "loc-kordofan"
+
+    def test_repeated_name_resolved_once(self):
+        # Two figures scoped to the same place → one clear-api hit.
+        blob = {
+            "a": {"x": _nf(1, "Kassala")},
+            "b": {"y": _nf(2, "Kassala")},
+        }
+        with patch(RESOLVE, return_value="loc-kassala") as m:
+            figures, named, resolved = _resolve_figure_scopes(blob)
+        assert (figures, named, resolved) == (2, 2, 2)
+        assert m.call_count == 1  # deduped
+
+    def test_resolver_error_treated_as_unscoped(self):
+        blob = {"casualties": {"killed": {"total": _nf(10, "El Fasher")}}}
+        with patch(RESOLVE, side_effect=RuntimeError("network blip")):
+            figures, named, resolved = _resolve_figure_scopes(blob)
+        assert blob["casualties"]["killed"]["total"]["scope_location_id"] is None
+        assert (figures, named, resolved) == (1, 1, 0)
+
+    def test_real_schema_shape_round_trips(self):
+        # Guards against the collector missing a genuinely-constructed
+        # NumericField (not a hand-built dict) after model_dump.
+        cas = Casualties(killed=CasualtyDisaggregation(
+            total=NumericField(value=8, unit="people", confidence="verified",
+                               source_quote="…", scope_location_name="Zalingei"),
+        )).model_dump(mode="json")
+        blob = {"casualties": cas}
+        with patch(RESOLVE, return_value="loc-zalingei"):
+            figures, named, resolved = _resolve_figure_scopes(blob)
+        assert (figures, named, resolved) == (1, 1, 1)
+        assert blob["casualties"]["killed"]["total"]["scope_location_id"] == "loc-zalingei"
+
+
+class TestNumericFieldScopeSchema:
+    def test_scope_fields_default_null_and_are_present(self):
+        d = NumericField(value=1, unit="people", confidence="reported",
+                         source_quote="…").model_dump()
+        assert d["scope_location_name"] is None
+        assert d["scope_location_id"] is None
 
 
 if __name__ == "__main__":
