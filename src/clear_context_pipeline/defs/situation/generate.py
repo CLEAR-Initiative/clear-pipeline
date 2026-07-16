@@ -40,6 +40,9 @@ from clear_context_pipeline.defs.situation.narrative import (
     generate_displacement_narrative,
     generate_hazards_and_vulnerabilities,
 )
+from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+    SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
+)
 from clear_context_pipeline.defs.situation.sectors import generate_all_sectors
 from clear_context_pipeline.defs.situation.schemas import (
     SCHEMA_VERSION,
@@ -253,6 +256,10 @@ def generate_and_upsert_for_country_year(
             window_start=window_start,
             window_end=window_end,
             window_kind="yearly",
+            # Read the aggregation schema the knowledgebase pipeline
+            # writes (v2), not the situation-analysis output schema —
+            # otherwise this reads stale buckets of the wrong version.
+            schema_version=AGGREGATION_SCHEMA_VERSION,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning(
