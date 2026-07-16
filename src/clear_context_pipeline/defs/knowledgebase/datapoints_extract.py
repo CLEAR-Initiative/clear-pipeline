@@ -70,8 +70,17 @@ SYSTEM_PROMPT_TEMPLATE = (
     "  something is missing, leave the field null.\n"
     "- Every numeric value must be wrapped in the provenance envelope: "
     "  {{ value, unit, confidence, source_quote, chunk_index (may be null), "
-    "  page_number }}. `source_quote` must be a verbatim sentence from the "
-    "  report — a substring, not a paraphrase.\n"
+    "  page_number, scope_location_name }}. `source_quote` must be a verbatim "
+    "  sentence from the report — a substring, not a paraphrase.\n"
+    "- FIGURE SCOPE: for every numeric value, set `scope_location_name` to "
+    "  the ONE place that number is a total FOR — the area it counts, NOT "
+    "  every place the report mentions. A report framed nationally may state "
+    "  a figure for a single state or town; the scope is that state or town. "
+    "  If a figure is explicitly a combined total across several named areas, "
+    "  use their common parent (e.g. three Darfur states -> \"Darfur\"). If "
+    "  the figure cannot be tied to one place, set it null — do NOT default "
+    "  to the country or the first place named. Emit the place NAME only; "
+    "  never an admin level, and never the resolved id.\n"
     "- `confidence` is a tier: verified > reported > estimated > media > "
     "  unverified. Use `verified` only when the report explicitly attributes "
     "  the figure to a UN or government mission verification. `reported` "
@@ -201,6 +210,74 @@ def _resolve_all_locations(
     return (sorted(set(resolved_ids)), sorted(set(unresolved_pcodes)))
 
 
+def _collect_numeric_fields(obj: Any, out: list[dict]) -> None:
+    """Walk the merged blob collecting NumericField dicts — identified by
+    the `scope_location_name` key, which only NumericField carries. A
+    NumericField is a leaf (no nested NumericFields), so we don't recurse
+    into one once found."""
+    if isinstance(obj, dict):
+        if "scope_location_name" in obj and "value" in obj:
+            out.append(obj)
+            return
+        for v in obj.values():
+            _collect_numeric_fields(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _collect_numeric_fields(v, out)
+
+
+def _resolve_figure_scopes(merged: Any) -> tuple[int, int, int]:
+    """Resolve each numeric figure's `scope_location_name` to a
+    `locations` id, writing it into `scope_location_id` in place.
+
+    Figure Scope (schema v2, ADR-0002): the LLM emits the place name per
+    figure; here we map name -> id via the same resolver the report-level
+    locations use — name-only, since the LLM does not emit an admin level
+    (level/ancestors are intrinsic to the id and looked up by the
+    aggregator, #273). `scope_location_id` is overwritten unconditionally;
+    the LLM must not supply it.
+
+    A null id — because the LLM abstained (no name) or the name didn't
+    resolve — marks the figure unscoped, so the aggregator excludes it
+    from cross-report roll-up (matching the rule for unresolved locations).
+
+    Returns (figures, figures_with_name, figures_resolved) so the caller
+    can log the resolver-match rate.
+    """
+    fields: list[dict] = []
+    _collect_numeric_fields(merged, fields)
+
+    # Resolve each distinct name once — a report re-states the same scope
+    # across many figures; one clear-api hit per unique name.
+    cache: dict[str, str | None] = {}
+    for f in fields:
+        name = f.get("scope_location_name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        key = name.strip()
+        if key not in cache:
+            try:
+                cache[key] = clear_api.resolve_location(name=key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[DATAPOINTS] scope resolve hiccup name=%s: %s", key, exc,
+                )
+                cache[key] = None
+
+    figures = with_name = resolved = 0
+    for f in fields:
+        figures += 1
+        name = f.get("scope_location_name")
+        rid: str | None = None
+        if isinstance(name, str) and name.strip():
+            with_name += 1
+            rid = cache.get(name.strip())
+        f["scope_location_id"] = rid  # unconditional — never trust an LLM id
+        if rid:
+            resolved += 1
+    return figures, with_name, resolved
+
+
 def _dig(obj: Any, *path: str) -> Any:
     """Walk nested dicts safely — returns None the moment any step
     is missing / null. Used to pull hot totals out of the merged blob
@@ -305,10 +382,23 @@ def extract_datapoints_for_one_report(
     if not domains_ok:
         raise _NothingExtracted(f"every domain failed extraction for {report_id}")
 
-    # ── Post-process: locations, event types, hot totals ──────────
+    # ── Post-process: locations, figure scopes, event types, totals ─
     refs: list[LocationRef] = []
     _collect_location_refs(merged, refs)
     resolved_ids, unresolved_pcodes = _resolve_all_locations(refs)
+
+    # Figure Scope (schema v2): resolve each numeric figure's
+    # scope_location_name to a locations id, in place on `merged`. Done
+    # before both the debug snapshot and the upsert so the stored blob
+    # carries the ids.
+    scope_figures, scope_named, scope_resolved = _resolve_figure_scopes(merged)
+    log.info(
+        "[%s] figure scope: %d figures, %d named, %d resolved "
+        "(name rate %.0f%%, resolve rate %.0f%%)",
+        report_id, scope_figures, scope_named, scope_resolved,
+        (100 * scope_named / scope_figures) if scope_figures else 0,
+        (100 * scope_resolved / scope_named) if scope_named else 0,
+    )
 
     timing = merged.get("timing_and_scope") or {}
     event_types = list(dict.fromkeys(timing.get("event_types") or []))
