@@ -49,6 +49,8 @@ Concretely, the extraction schema carries `location_name` + `unresolvable` per f
 
 **Residual risk to watch in #272:** the load-bearing step is now the resolver matching the LLM's free-text name to a `locations` row. An unmatched name fails safe (treated as unresolvable, no silent wrong bucket), but its frequency on the real corpus is the thing to measure next — that's the resolver-match rate, not an LLM-accuracy question. A real-corpus validation pass (needs clear-api/S3 up) would quantify it; the controlled eval can't.
 
+**Ambiguous names (PR review, addressed):** a name that exists at more than one admin level — "Kassala" is a state *and* a locality; also Gedaref, Zalingei — did NOT fail safe. Because the LLM emits no admin-level hint (by design), `resolveKnowledgebaseLocation` was called name-only, and it used to return the *deepest* match — silently bucketing a state-level total to the same-named locality. Fixed on the clear-api side (`fix/location-resolver-ambiguity`): an unlevelled name matching more than one level now resolves to null, i.e. unscoped, consistent with the unmatched-name fail-safe. So both "no match" and "ambiguous match" now fail safe rather than land on the wrong tier. This must be merged before #273 keys aggregation on `scope_location_id`.
+
 ## Not done / out of scope
 
 - No real-corpus run (needs local services + data). Harness is ready for it.

@@ -11,8 +11,8 @@ Every numeric value is wrapped in :class:`NumericField` so provenance
 travels with the number. That's what enables the "click the figure to
 see the source paragraph" affordance in the situation-analysis dashboard.
 
-Schema version: **v1**. Bumping this variable + the corresponding
-constant in the extract asset triggers targeted re-extraction (see §7
+Schema version is the ``SCHEMA_VERSION`` constant below (do not hardcode
+it here — it drifts). Bumping it triggers targeted re-extraction (see §7
 of the design doc).
 """
 

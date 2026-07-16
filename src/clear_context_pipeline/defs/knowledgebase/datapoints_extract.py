@@ -346,8 +346,8 @@ def extract_datapoints_for_one_report(
         writes a debug snapshot to
         `reliefweb/kb/datapoints/<iso3>/<format>/<report_id>.json`.
       log_context: optional Dagster / Python logger. Any object
-        exposing `.warning` / `.error`. Falls back to the module
-        logger when None.
+        exposing `.info` / `.warning` / `.error`. Falls back to the
+        module logger when None.
 
     Returns:
       Summary dict identical in shape to the weekly asset's per-report
