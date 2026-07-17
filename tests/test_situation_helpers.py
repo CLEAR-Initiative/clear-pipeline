@@ -91,6 +91,7 @@ class TestBuildDatapoints:
         dp = _build_datapoints(None)
         assert dp.population_displaced is None
         assert dp.population_in_need is None
+        assert dp.population_affected is None
         assert dp.returnees is None
         assert dp.number_of_events == 0
         assert dp.funding_required_usd is None
@@ -109,11 +110,14 @@ class TestBuildDatapoints:
                 "funding_required_usd": {"value": 2_500_000_000, "unit": "USD"},
                 "funding_received_usd": {"value": 1_100_000_000, "unit": "USD"},
                 "overall_pin":          {"value": 25_000_000,     "unit": "people"},
+                "overall_affected":     {"value": 30_000_000,     "unit": "people"},
             },
         }
         dp = _build_datapoints(aggregated)
         assert dp.population_displaced == 6_500_000.0
         assert dp.population_in_need == 25_000_000.0  # from overall_pin
+        # Population Affected is a distinct, wider figure than PIN.
+        assert dp.population_affected == 30_000_000.0  # from overall_affected
         assert dp.returnees == 200_000.0
         assert dp.funding_required_usd == 2_500_000_000.0
         assert dp.funding_received_usd == 1_100_000_000.0
@@ -133,6 +137,7 @@ class TestBuildDatapoints:
         dp = _build_datapoints(aggregated)
         assert dp.population_displaced == 100000.0
         assert dp.population_in_need is None
+        assert dp.population_affected is None
         assert dp.returnees is None
         assert dp.funding_required_usd is None
 

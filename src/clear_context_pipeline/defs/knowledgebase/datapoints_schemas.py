@@ -23,12 +23,18 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-# v2 adds Figure Scope to NumericField (scope_location_name +
-# scope_location_id). Additive change — v1 rows are still valid, they
-# simply carry no scope. Bumping this triggers regeneration of aggregated
-# buckets for the affected fields (#274) and keeps v1/v2 rows from mixing
-# on trend views.
-SCHEMA_VERSION = "v2"
+# Single pre-launch schema. Includes Figure Scope on NumericField
+# (scope_location_name + scope_location_id) and
+# needs_and_funding.overall_affected — Population Affected, the widest
+# circle of crisis impact, extracted from reports (never sourced from
+# event-driven `events`; see clear-context-pipeline ADR-0001).
+#
+# We deliberately do NOT bump this version as the schema evolves
+# pre-launch: the corpus is a handful of test reports we wipe and
+# re-extract on every change, so version-gating and migration ceremony
+# buy nothing. Start bumping (and keeping old rows from mixing) only once
+# there's real data to preserve — i.e. at/after launch.
+SCHEMA_VERSION = "v1"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -336,6 +342,19 @@ class NeedsAndFunding(BaseModel):
     overall_pin: Optional[NumericField] = Field(
         default=None,
         description="Total PIN across all sectors when the report headlines a country/appeal-wide figure.",
+    )
+    overall_affected: Optional[NumericField] = Field(
+        default=None,
+        description=(
+            "Population Affected — the widest circle of crisis impact: "
+            "everyone touched by the crisis, a superset of People in Need. "
+            "Populate ONLY from a figure the report explicitly states as "
+            "'affected' / 'impacted' by the crisis. Do NOT infer it from, "
+            "or conflate it with, People in Need (overall_pin), the "
+            "displaced (displacement.*), or casualties (casualties.*) — "
+            "those are narrower, different populations. Leave null when the "
+            "report states no explicit affected figure."
+        ),
     )
 
 

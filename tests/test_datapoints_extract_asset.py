@@ -75,7 +75,13 @@ def _canned_domain_output(domain_name: str):
     if domain_name == "displacement":
         return Displacement(idp_stock=nf, new_displacements=nf)
     if domain_name == "needs_and_funding":
-        return NeedsAndFunding(overall_pin=nf)
+        # Affected (widest circle) is a distinct, wider figure than PIN.
+        affected = NumericField(
+            value=100000, unit="people", confidence="reported",
+            source_quote="100,000 people affected in Kordofan.",
+            chunk_index=0, page_number=2,
+        )
+        return NeedsAndFunding(overall_pin=nf, overall_affected=affected)
     if domain_name == "access_and_incidents":
         return AccessAndIncidents(security_incidents_count=nf)
     if domain_name == "narrative_and_confidence":
@@ -194,7 +200,9 @@ class TestExtractionAsset:
         # Hot totals hoisted from the merged blob.
         assert upsert_kwargs["total_killed"] == 15
         assert upsert_kwargs["total_displaced"] == 42000
-        assert upsert_kwargs["total_affected"] == 42000
+        # total_affected now hoists overall_affected (Population Affected),
+        # NOT overall_pin — they are different populations (ADR-0001).
+        assert upsert_kwargs["total_affected"] == 100000
         # Locations resolved (dedup'd across the many refs).
         assert upsert_kwargs["location_ids"] == ["loc-kordofan"]
         # Event types + reporting period passed through from timing.

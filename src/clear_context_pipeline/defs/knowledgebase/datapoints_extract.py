@@ -405,7 +405,11 @@ def extract_datapoints_for_one_report(
 
     total_killed = _num_or_none(_dig(merged, "casualties", "killed", "total"))
     total_displaced = _num_or_none(_dig(merged, "displacement", "idp_stock"))
-    total_affected = _num_or_none(_dig(merged, "needs_and_funding", "overall_pin"))
+    # Population Affected (widest circle), not PIN — the two are different
+    # populations (clear-context-pipeline ADR-0001). Was overall_pin, which
+    # conflated the hot total with People in Need; overall_affected is the
+    # real affected figure now that v3 extracts it. Null for most reports.
+    total_affected = _num_or_none(_dig(merged, "needs_and_funding", "overall_affected"))
 
     # ── Debug snapshot — replay-friendly ──────────────────────────
     debug_key: str | None = None
