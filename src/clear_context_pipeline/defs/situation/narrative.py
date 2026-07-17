@@ -28,7 +28,7 @@ import json
 import logging
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from clear_context_pipeline.defs.situation.rag_helper import (
     RAGContext,
@@ -76,8 +76,9 @@ class _AISummaryLLM(BaseModel):
     )
 
 
-class _RiskDomainLLM(BaseModel):
-    bullets: list[str] = Field(
+def _risk_domain_field() -> Any:
+    """Fresh Field for one context-risk domain — a flat list of bullets."""
+    return Field(
         default_factory=list,
         description=(
             "Concise bulleted risks / observations for this domain. "
@@ -89,39 +90,24 @@ class _RiskDomainLLM(BaseModel):
 
 
 class _ContextRisksLLM(BaseModel):
-    """Eight OCHA-style context-risk domains. Fixed order so the
-    dashboard's tab layout stays stable."""
+    """Eight OCHA-style context-risk domains, each a FLAT list of bullet
+    strings. Fixed order so the dashboard's tab layout stays stable.
 
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_stringified_domains(cls, data: Any) -> Any:
-        """Tolerate a structured-output glitch where the model returns a
-        nested domain as a JSON-encoded string (e.g. `'{"bullets": [...]}'`)
-        instead of an object. Without this, one stringified domain fails
-        validation for the whole model and the caller falls back to an
-        empty component — blanking all eight domains over a transient
-        serialisation quirk. Non-JSON strings pass through unchanged so
-        genuinely malformed output still surfaces as a validation error."""
-        if not isinstance(data, dict):
-            return data
-        coerced = {}
-        for key, value in data.items():
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except (ValueError, TypeError):
-                    pass  # leave as-is; normal validation reports it
-            coerced[key] = value
-        return coerced
-
-    demographics: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    political: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    economy: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    socio_culture: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    security: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    legal_policy: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    infrastructure: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
-    environment: _RiskDomainLLM = Field(default_factory=_RiskDomainLLM)
+    Flat on purpose: an earlier nested-object shape (one sub-model per
+    domain) made the model intermittently return a domain as a
+    JSON-encoded string instead of an object, which failed validation and
+    blanked the whole component. The narrative components that never
+    glitch — hazards, displacement — are all `list[str]`; this matches
+    them. `source_report_ids` is attached later from the RAG set, not
+    asked of the LLM."""
+    demographics: list[str] = _risk_domain_field()
+    political: list[str] = _risk_domain_field()
+    economy: list[str] = _risk_domain_field()
+    socio_culture: list[str] = _risk_domain_field()
+    security: list[str] = _risk_domain_field()
+    legal_policy: list[str] = _risk_domain_field()
+    infrastructure: list[str] = _risk_domain_field()
+    environment: list[str] = _risk_domain_field()
 
 
 class _HazardsVulnerabilitiesLLM(BaseModel):
@@ -343,14 +329,14 @@ def generate_context_risks(
     # POC; per-domain search + attribution can layer on later.
     src_ids = rag.contributing_report_ids
     return ContextRisks(
-        demographics=RiskDomain(bullets=result.demographics.bullets, source_report_ids=src_ids),
-        political=RiskDomain(bullets=result.political.bullets, source_report_ids=src_ids),
-        economy=RiskDomain(bullets=result.economy.bullets, source_report_ids=src_ids),
-        socio_culture=RiskDomain(bullets=result.socio_culture.bullets, source_report_ids=src_ids),
-        security=RiskDomain(bullets=result.security.bullets, source_report_ids=src_ids),
-        legal_policy=RiskDomain(bullets=result.legal_policy.bullets, source_report_ids=src_ids),
-        infrastructure=RiskDomain(bullets=result.infrastructure.bullets, source_report_ids=src_ids),
-        environment=RiskDomain(bullets=result.environment.bullets, source_report_ids=src_ids),
+        demographics=RiskDomain(bullets=result.demographics, source_report_ids=src_ids),
+        political=RiskDomain(bullets=result.political, source_report_ids=src_ids),
+        economy=RiskDomain(bullets=result.economy, source_report_ids=src_ids),
+        socio_culture=RiskDomain(bullets=result.socio_culture, source_report_ids=src_ids),
+        security=RiskDomain(bullets=result.security, source_report_ids=src_ids),
+        legal_policy=RiskDomain(bullets=result.legal_policy, source_report_ids=src_ids),
+        infrastructure=RiskDomain(bullets=result.infrastructure, source_report_ids=src_ids),
+        environment=RiskDomain(bullets=result.environment, source_report_ids=src_ids),
     )
 
 
