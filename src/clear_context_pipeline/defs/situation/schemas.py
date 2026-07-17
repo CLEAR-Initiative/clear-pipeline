@@ -69,8 +69,8 @@ class Datapoints(BaseModel):
     # docs/adr/0001-affected-extracted-not-sourced-from-events.md.
     population_in_need: Optional[float] = None
     # Population Affected — the wider circle of everyone the crisis
-    # touched, a superset of People in Need. Extracted from reports
-    # (v3+), Max-aggregated, and sparse. Distinct from population_in_need.
+    # touched, a superset of People in Need. Extracted from reports,
+    # Max-aggregated, and sparse. Distinct from population_in_need.
     population_affected: Optional[float] = None
     returnees: Optional[float] = None
     number_of_events: int = 0

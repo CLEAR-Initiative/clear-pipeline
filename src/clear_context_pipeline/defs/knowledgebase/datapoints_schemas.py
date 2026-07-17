@@ -105,7 +105,7 @@ class NumericField(BaseModel):
         default=None,
         description="1-indexed PDF page number; the primary citation handle.",
     )
-    # ── Figure Scope (schema v2) ──────────────────────────────────────
+    # ── Figure Scope ──────────────────────────────────────────────────
     # The ONE place this figure is a total FOR — not every place the
     # report mentions. "1,000 affected in Kordofan" -> "Kordofan", even
     # if the report is framed nationally and names other states. This is

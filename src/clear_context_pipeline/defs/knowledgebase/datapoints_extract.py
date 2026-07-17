@@ -230,7 +230,7 @@ def _resolve_figure_scopes(merged: Any) -> tuple[int, int, int]:
     """Resolve each numeric figure's `scope_location_name` to a
     `locations` id, writing it into `scope_location_id` in place.
 
-    Figure Scope (schema v2, ADR-0002): the LLM emits the place name per
+    Figure Scope (ADR-0002): the LLM emits the place name per
     figure; here we map name -> id via the same resolver the report-level
     locations use — name-only, since the LLM does not emit an admin level
     (level/ancestors are intrinsic to the id and looked up by the
@@ -387,7 +387,7 @@ def extract_datapoints_for_one_report(
     _collect_location_refs(merged, refs)
     resolved_ids, unresolved_pcodes = _resolve_all_locations(refs)
 
-    # Figure Scope (schema v2): resolve each numeric figure's
+    # Figure Scope: resolve each numeric figure's
     # scope_location_name to a locations id, in place on `merged`. Done
     # before both the debug snapshot and the upsert so the stored blob
     # carries the ids.
@@ -408,7 +408,7 @@ def extract_datapoints_for_one_report(
     # Population Affected (widest circle), not PIN — the two are different
     # populations (clear-context-pipeline ADR-0001). Was overall_pin, which
     # conflated the hot total with People in Need; overall_affected is the
-    # real affected figure now that v3 extracts it. Null for most reports.
+    # real affected figure the extractor now records. Null for most reports.
     total_affected = _num_or_none(_dig(merged, "needs_and_funding", "overall_affected"))
 
     # ── Debug snapshot — replay-friendly ──────────────────────────

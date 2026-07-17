@@ -90,9 +90,9 @@ _LABEL_FUNDING_RECEIVED = "funding_received_usd"
 # than `latest_state`. The two are extracted and surfaced side by side;
 # do not conflate them. See docs/adr/0001-affected-extracted-not-sourced-from-events.md.
 _LABEL_POPULATION_IN_NEED = "overall_pin"
-# Population Affected — widest circle of crisis impact (extraction v3+).
-# `Max`-aggregated and, like PIN, sparse: only populated when a report
-# states an explicit affected figure. Distinct from `population_in_need`.
+# Population Affected — widest circle of crisis impact. `Max`-aggregated
+# and, like PIN, sparse: only populated when a report states an explicit
+# affected figure. Distinct from `population_in_need`.
 _LABEL_POPULATION_AFFECTED = "overall_affected"
 
 
@@ -261,7 +261,7 @@ def generate_and_upsert_for_country_year(
             window_end=window_end,
             window_kind="yearly",
             # Read the aggregation schema the knowledgebase pipeline
-            # writes (v2), not the situation-analysis output schema —
+            # writes, not the situation-analysis output schema —
             # otherwise this reads stale buckets of the wrong version.
             schema_version=AGGREGATION_SCHEMA_VERSION,
         )
