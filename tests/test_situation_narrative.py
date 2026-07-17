@@ -12,18 +12,15 @@ Focus is on:
     than crashing the whole situation analysis.
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
 
 from clear_context_pipeline.defs.situation.narrative import (
     _AISummaryLLM,
     _ContextRisksLLM,
     _DisplacementLLM,
     _HazardsVulnerabilitiesLLM,
-    _RiskDomainLLM,
     generate_ai_summary,
     generate_context_risks,
     generate_displacement_narrative,
@@ -132,14 +129,14 @@ class TestGenerateContextRisks:
         ):
             llm = MagicMock()
             llm.complete_structured.return_value = _ContextRisksLLM(
-                demographics=_RiskDomainLLM(bullets=["Population aged pyramid inverted"]),
-                political=_RiskDomainLLM(bullets=["Ongoing power struggle"]),
-                economy=_RiskDomainLLM(bullets=["Inflation at 200%"]),
-                socio_culture=_RiskDomainLLM(bullets=["Ethnic tensions in the east"]),
-                security=_RiskDomainLLM(bullets=["Armed clashes weekly"]),
-                legal_policy=_RiskDomainLLM(bullets=["Border controls tightened"]),
-                infrastructure=_RiskDomainLLM(bullets=["Power grid at 30%"]),
-                environment=_RiskDomainLLM(bullets=["Drought since 2024"]),
+                demographics=["Population aged pyramid inverted"],
+                political=["Ongoing power struggle"],
+                economy=["Inflation at 200%"],
+                socio_culture=["Ethnic tensions in the east"],
+                security=["Armed clashes weekly"],
+                legal_policy=["Border controls tightened"],
+                infrastructure=["Power grid at 30%"],
+                environment=["Drought since 2024"],
             )
             result = generate_context_risks(
                 llm, country_name="Sudan", year=2026,
@@ -167,28 +164,17 @@ class TestGenerateContextRisks:
             )
         assert result.demographics.bullets == []
 
-    def test_stringified_domains_are_coerced(self):
-        # Structured-output glitch: the model returns nested domains as
-        # JSON strings instead of objects. The before-validator parses
-        # them so one flaky serialisation doesn't blank the whole
-        # component. Mixed string / object input is handled, and absent
-        # domains keep their empty default.
-        glitched = {
-            "demographics": json.dumps({"bullets": ["Inverted age pyramid"]}),
-            "security": json.dumps({"bullets": ["Weekly clashes", "New front"]}),
-            "political": {"bullets": ["Power struggle"]},  # already an object
-        }
-        model = _ContextRisksLLM.model_validate(glitched)
-        assert model.demographics.bullets == ["Inverted age pyramid"]
-        assert model.security.bullets == ["Weekly clashes", "New front"]
-        assert model.political.bullets == ["Power struggle"]
-        assert model.economy.bullets == []  # absent domain -> empty default
-
-    def test_non_json_string_domain_still_errors(self):
-        # A string that isn't JSON is genuinely malformed output — it
-        # must still surface as a validation error, not be swallowed.
-        with pytest.raises(ValidationError):
-            _ContextRisksLLM.model_validate({"demographics": "not json at all"})
+    def test_flat_list_shape_validates(self):
+        # Domains are flat list[str] (not nested objects) precisely so the
+        # model can't intermittently stringify a nested domain. A plain
+        # dict of lists validates; absent domains default to empty.
+        model = _ContextRisksLLM.model_validate({
+            "demographics": ["Inverted age pyramid"],
+            "security": ["Weekly clashes", "New front"],
+        })
+        assert model.demographics == ["Inverted age pyramid"]
+        assert model.security == ["Weekly clashes", "New front"]
+        assert model.economy == []  # absent domain -> empty default
 
 
 # ────────────────────────────────────────────────────────────────────
