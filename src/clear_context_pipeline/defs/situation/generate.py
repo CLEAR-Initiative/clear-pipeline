@@ -86,11 +86,14 @@ _LABEL_FUNDING_RECEIVED = "funding_received_usd"
 # HRP / appeal documents and is null for most field reports.
 #
 # This is deliberately NOT Population Affected — that is the wider
-# circle (everyone the crisis touched), nothing extracts it today, and
-# it aggregates `Max` rather than `latest_state`. It was previously
-# hoisted into a `population_affected` field, which understated it and
-# mislabelled it. See docs/adr/0001-affected-extracted-not-sourced-from-events.md.
+# circle (everyone the crisis touched) and it aggregates `Max` rather
+# than `latest_state`. The two are extracted and surfaced side by side;
+# do not conflate them. See docs/adr/0001-affected-extracted-not-sourced-from-events.md.
 _LABEL_POPULATION_IN_NEED = "overall_pin"
+# Population Affected — widest circle of crisis impact. `Max`-aggregated
+# and, like PIN, sparse: only populated when a report states an explicit
+# affected figure. Distinct from `population_in_need`.
+_LABEL_POPULATION_AFFECTED = "overall_affected"
 
 
 # Granularity of the analysis window, sent on every upsert. Part of the
@@ -152,6 +155,7 @@ def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
     return Datapoints(
         population_displaced=_field_value(data, _LABEL_POPULATION_DISPLACED),
         population_in_need=_field_value(data, _LABEL_POPULATION_IN_NEED),
+        population_affected=_field_value(data, _LABEL_POPULATION_AFFECTED),
         returnees=_field_value(data, _LABEL_RETURNEES),
         number_of_events=number_of_events,
         funding_required_usd=_field_value(data, _LABEL_FUNDING_REQUIRED),
@@ -257,7 +261,7 @@ def generate_and_upsert_for_country_year(
             window_end=window_end,
             window_kind="yearly",
             # Read the aggregation schema the knowledgebase pipeline
-            # writes (v2), not the situation-analysis output schema —
+            # writes, not the situation-analysis output schema —
             # otherwise this reads stale buckets of the wrong version.
             schema_version=AGGREGATION_SCHEMA_VERSION,
         )
