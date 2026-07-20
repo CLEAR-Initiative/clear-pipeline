@@ -43,7 +43,6 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import boto3
 import botocore.exceptions
 import dagster as dg
 import requests
@@ -93,15 +92,9 @@ def _require_env(name: str) -> str:
 
 
 def _s3_client():
-    """Build an S3 client from the env. Centralised so the three assets
-    don't drift on auth / endpoint config."""
-    return boto3.client(
-        "s3",
-        endpoint_url=_require_env("S3_ENDPOINT"),
-        region_name=_require_env("S3_REGION"),
-        aws_access_key_id=_require_env("S3_ACCESS_KEY_ID"),
-        aws_secret_access_key=_require_env("S3_SECRET_ACCESS_KEY"),
-    )
+    from clear_context_pipeline.providers.s3 import s3_client
+
+    return s3_client()
 
 
 def _iso_seconds(dt: datetime) -> str:

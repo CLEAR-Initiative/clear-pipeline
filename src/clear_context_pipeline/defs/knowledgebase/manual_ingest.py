@@ -34,7 +34,6 @@ import logging
 import os
 from pathlib import Path
 
-import boto3
 import dagster as dg
 from dagster import OpExecutionContext
 from dotenv import load_dotenv
@@ -96,13 +95,9 @@ class ManualDocumentConfig(dg.Config):
 
 
 def _s3_client():
-    return boto3.client(
-        "s3",
-        endpoint_url=os.environ["S3_ENDPOINT"],
-        region_name=os.environ["S3_REGION"],
-        aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
-    )
+    from clear_context_pipeline.providers.s3 import s3_client
+
+    return s3_client()
 
 
 @dg.op(
