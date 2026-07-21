@@ -33,3 +33,24 @@ def extract_pages(pdf_bytes: bytes) -> list[dict]:
             # extraction. Flush per page to cap peak memory.
             page.flush_cache()
     return pages
+
+
+def extract_pages_pypdf(pdf_bytes: bytes) -> list[dict]:
+    """Lighter fallback for when pdfplumber OOMs on a graphics-dense PDF.
+
+    pypdf reads the content stream's text operators without building
+    pdfplumber's per-object model (a Python object per char/line/rect/curve),
+    so it survives pages whose vector-graphics density exhausts pdfplumber —
+    at some cost to layout fidelity, an acceptable trade when the alternative
+    is no text for the report at all. pypdf is imported lazily so the
+    pdfplumber worker doesn't pay for it.
+    """
+    from pypdf import PdfReader
+
+    pages: list[dict] = []
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    for i, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append({"page_num": i, "text": text})
+    return pages
