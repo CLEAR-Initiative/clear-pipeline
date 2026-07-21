@@ -48,7 +48,7 @@ from clear_context_pipeline.defs.knowledgebase.enrich import (
     _run_context,
     _run_extraction,
 )
-from clear_context_pipeline.defs.knowledgebase.pdf_text import _extract_pages
+from clear_context_pipeline.defs.knowledgebase.pdf_text import _extract_pages_isolated
 from clear_context_pipeline.providers import (
     clear_api,
     load_guardrails,
@@ -142,7 +142,7 @@ def process_manual_document(
         ) from exc
 
     try:
-        pages = _extract_pages(pdf_bytes)
+        pages = _extract_pages_isolated(pdf_bytes)
     except Exception as exc:
         raise dg.Failure(
             description=f"pdfplumber failed on {config.s3_key}: {exc}",
