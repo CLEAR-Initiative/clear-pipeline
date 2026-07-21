@@ -19,15 +19,16 @@ dependencies = [
     "python-dotenv>=1.0",
     # Knowledge-base pipeline dependencies. Kept minimal + provider-agnostic
     # so the OSS swap (Voyage → BGE-M3, Claude → Llama) is a config change.
-    "anthropic>=0.40",       # native SDK — used for prompt caching in the contextualization step
-    "openai>=1.55",          # OpenAI-compatible client — reused for Together / Fireworks / vLLM / TEI
-    "voyageai>=0.3",         # Voyage embeddings SDK (v1 default)
-    "pydantic>=2.9",         # structured-output validation shared across providers
-    "tenacity>=9.0",         # retry with exponential backoff on transient provider errors
-    "pdfplumber>=0.11",      # pure-Python PDF text extraction (better layout preservation than pypdf)
-    "tiktoken>=0.8",         # chunk-size proxy tokenizer — approximate but stable across providers
-    "httpx>=0.27",            # GraphQL client for clear-api — all DB access routes through the API,
-                              # matching clear-pipeline's pattern (no direct psycopg writes from Dagster)
+    "anthropic>=0.40", # native SDK — used for prompt caching in the contextualization step
+    "openai>=1.55", # OpenAI-compatible client — reused for Together / Fireworks / vLLM / TEI
+    "voyageai>=0.3", # Voyage embeddings SDK (v1 default)
+    "pydantic>=2.9", # structured-output validation shared across providers
+    "tenacity>=9.0", # retry with exponential backoff on transient provider errors
+    "pdfplumber>=0.11", # pure-Python PDF text extraction (better layout preservation than pypdf)
+    "tiktoken>=0.8", # chunk-size proxy tokenizer — approximate but stable across providers
+    "httpx>=0.27", # GraphQL client for clear-api — all DB access routes through the API,
+    # matching clear-pipeline's pattern (no direct psycopg writes from Dagster)
+    "pypdf>=4", # lighter fallback extractor when pdfplumber OOMs on graphics-dense PDFs
 ]
 
 [dependency-groups]
