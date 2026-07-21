@@ -13,18 +13,26 @@ Each line is::
     {"report_id": str, "page_num": int (1-indexed), "text": str}
 """
 
-import io
 import json
+import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import dagster as dg
-import pdfplumber
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
+from clear_context_pipeline.defs.knowledgebase._pdf_extract import extract_pages
+
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
+
+# Spawn context so each extraction worker starts from a clean interpreter
+# (only io + pdfplumber via _pdf_extract), NOT a fork of this Dagster process
+# with all of Dagster/boto3 resident. That lean baseline is what lets the
+# heavier weekly sitreps parse within the container's per-process memory
+# instead of OOM-killing the worker.
+_MP_SPAWN = multiprocessing.get_context("spawn")
 
 # Match the country / format scope used by reliefweb_to_s3 so the S3
 # paths stay parallel to the existing tree — a future switch to another
@@ -45,25 +53,18 @@ def _text_key(report_id: str) -> str:
     return f"{S3_TEXT_PREFIX}/{report_id}.jsonl"
 
 
-def _extract_pages(pdf_bytes: bytes) -> list[dict]:
-    """Return one dict per page. Page-level granularity is what the
-    chunker + citation UI both need — chunk boundaries then respect page
-    breaks so a search hit can cite an exact page span.
+def _extract_pages_isolated(pdf_bytes: bytes) -> list[dict]:
+    """Parse one PDF in its own short-lived worker process.
 
-    Pages that yield only whitespace (scanned images with no OCR, blank
-    separators) are silently dropped — otherwise they'd bloat the chunk
-    set without contributing retrievable text."""
-    pages: list[dict] = []
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for i, page in enumerate(pdf.pages, start=1):
-            text = (page.extract_text() or "").strip()
-            if text:
-                pages.append({"page_num": i, "text": text})
-            # pdfplumber caches every parsed object for each Page's lifetime;
-            # on a large PDF that grows unbounded and OOM-kills the step (the
-            # 90-day backlog makes big PDFs far more likely). Flush per page.
-            page.flush_cache()
-    return pages
+    A fresh single-worker executor PER PDF: a pdfplumber crash or OOM on one
+    pathological file kills only that child (the OS reclaims its memory) and
+    raises here for the caller to skip. Crucially it can't leave a broken pool
+    that cascades into skipping every *subsequent* PDF — which is exactly what
+    a single long-lived pool did when one heavy sitrep near the top of the
+    batch OOM-killed its worker and took the rest of the week down with it.
+    """
+    with ProcessPoolExecutor(max_workers=1, mp_context=_MP_SPAWN) as pool:
+        return pool.submit(extract_pages, pdf_bytes).result()
 
 
 @dg.asset(
@@ -109,14 +110,6 @@ def reliefweb_weekly_pdf_text(
             reports_by_id[report_id] = report
 
     summaries: list[dict] = []
-    # Extract each PDF in a worker process recycled after every task
-    # (max_tasks_per_child=1). pdfplumber/pdfminer accumulate native memory
-    # across many documents in one long-lived process — enough to OOM-kill
-    # the step on the 90-day backlog even though every report is small (a
-    # 2.3 MB PDF was the final straw, not the cause). Doing the parse in a
-    # short-lived child lets the OS reclaim that memory per PDF, so this
-    # process stays lean; pdfplumber's layout quality is preserved.
-    pool = ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1)
     for report_id, entries in by_report.items():
         # A report's PDFs are extracted in manifest order and their
         # pages concatenated. `page_num` is 1-indexed within the
@@ -143,7 +136,7 @@ def reliefweb_weekly_pdf_text(
                 continue
 
             try:
-                pages = pool.submit(_extract_pages, pdf_bytes).result()
+                pages = _extract_pages_isolated(pdf_bytes)
             except Exception as exc:  # noqa: BLE001
                 context.log.warning(
                     "pdf extraction failed for %s (%s) — skipping: %s",
@@ -203,7 +196,6 @@ def reliefweb_weekly_pdf_text(
             len(all_pages), report_id, bucket, text_key,
         )
 
-    pool.shutdown()
     context.add_output_metadata({
         "reports_processed": dg.MetadataValue.int(len(summaries)),
         "reports_skipped": dg.MetadataValue.int(len(by_report) - len(summaries)),
