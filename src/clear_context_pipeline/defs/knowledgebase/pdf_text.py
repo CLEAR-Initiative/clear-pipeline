@@ -13,10 +13,10 @@ Each line is::
     {"report_id": str, "page_num": int (1-indexed), "text": str}
 """
 
-import gc
 import io
 import json
 import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import dagster as dg
@@ -109,6 +109,14 @@ def reliefweb_weekly_pdf_text(
             reports_by_id[report_id] = report
 
     summaries: list[dict] = []
+    # Extract each PDF in a worker process recycled after every task
+    # (max_tasks_per_child=1). pdfplumber/pdfminer accumulate native memory
+    # across many documents in one long-lived process — enough to OOM-kill
+    # the step on the 90-day backlog even though every report is small (a
+    # 2.3 MB PDF was the final straw, not the cause). Doing the parse in a
+    # short-lived child lets the OS reclaim that memory per PDF, so this
+    # process stays lean; pdfplumber's layout quality is preserved.
+    pool = ProcessPoolExecutor(max_workers=1, max_tasks_per_child=1)
     for report_id, entries in by_report.items():
         # A report's PDFs are extracted in manifest order and their
         # pages concatenated. `page_num` is 1-indexed within the
@@ -135,7 +143,7 @@ def reliefweb_weekly_pdf_text(
                 continue
 
             try:
-                pages = _extract_pages(pdf_bytes)
+                pages = pool.submit(_extract_pages, pdf_bytes).result()
             except Exception as exc:  # noqa: BLE001
                 context.log.warning(
                     "pdf extraction failed for %s (%s) — skipping: %s",
@@ -194,11 +202,8 @@ def reliefweb_weekly_pdf_text(
             "extracted %d pages for report %s → s3://%s/%s",
             len(all_pages), report_id, bucket, text_key,
         )
-        # Reclaim pdfminer/pdfplumber cyclic residuals before the next
-        # report — across the large 90-day batch they accumulate and, with
-        # a big PDF's peak on top, OOM-kill the step (SIGKILL).
-        gc.collect()
 
+    pool.shutdown()
     context.add_output_metadata({
         "reports_processed": dg.MetadataValue.int(len(summaries)),
         "reports_skipped": dg.MetadataValue.int(len(by_report) - len(summaries)),
