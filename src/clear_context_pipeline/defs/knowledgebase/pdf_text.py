@@ -61,7 +61,15 @@ def _extract_pages(pdf_bytes: bytes) -> list[dict]:
     return pages
 
 
-@dg.asset(group_name="reliefweb_kb")
+@dg.asset(
+    group_name="reliefweb_kb",
+    # Ordering-only dep: this asset reads each PDF back from S3 (by key from
+    # the manifest), so the upload MUST finish first. Without it, pdf_text and
+    # reliefweb_weekly_pdfs_in_s3 both depend only on the manifest and run in
+    # parallel — text extraction then races ahead of the upload and hits
+    # NoSuchKey. Invisible at 7-day volume; exposed by the 90-day initial run.
+    deps=["reliefweb_weekly_pdfs_in_s3"],
+)
 def reliefweb_weekly_pdf_text(
     context: AssetExecutionContext,
     reliefweb_weekly_pdf_manifest: list[dict],
