@@ -77,6 +77,13 @@ COUNTRY_ISO3 = "sdn"
 FORMAT_NAME = "Situation Report"
 FORMAT_SLUG = "situation-report"
 
+# Rolling ingest window. On the first run (no report window in S3 yet) the
+# fetch reaches back the wider initial lookback, matching what the datapoint
+# aggregation backfills (KB_AGGREGATION_INITIAL_LOOKBACK_DAYS); routine runs
+# use the weekly delta. Overridable via env.
+_DEFAULT_LOOKBACK_DAYS = 7
+_DEFAULT_INITIAL_LOOKBACK_DAYS = 90
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Shared helpers
@@ -109,6 +116,19 @@ def _week_tag(at: datetime) -> str:
     """ISO ``YYYY-WWW`` tag used in every weekly S3 key."""
     iso_year, iso_week, _ = at.isocalendar()
     return f"{iso_year}-W{iso_week:02d}"
+
+
+def _reports_prefix() -> str:
+    return f"reliefweb/reports/{COUNTRY_ISO3}/{FORMAT_SLUG}/"
+
+
+def _is_first_ingest(s3, bucket: str) -> bool:
+    """True when no report window has been written yet — this ingest's own
+    first run. Self-contained (keys off the fetch's S3 output, not any
+    downstream DB), so it's correct whether the run is KB-only or the full
+    datapoints pipeline."""
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=_reports_prefix(), MaxKeys=1)
+    return int(resp.get("KeyCount", 0)) == 0
 
 
 def _pdf_key(report_id: str, filename: str) -> str:
@@ -193,16 +213,38 @@ def _fetch_window(
 def reliefweb_weekly_reports_in_s3(
     context: dg.AssetExecutionContext,
 ) -> list[dict]:
-    """Fetch the last 7 days of ReliefWeb report metadata for the
-    configured country and write them to S3 as JSONL.
+    """Fetch a rolling window of ReliefWeb report metadata for the
+    configured country and write it to S3 as JSONL. Routine runs take the
+    7-day weekly delta; the first run (no report window in S3 yet) reaches
+    back the wider initial lookback (90d) so the datapoint aggregation has a
+    full window to backfill over.
 
     Returns the report list so the downstream PDF-manifest asset can
     consume it without a round-trip back to S3."""
     appname = _require_env("RELIEFWEB_APPNAME")
     bucket = _require_env("S3_BUCKET")
+    s3 = _s3_client()
+
+    # First run (no report window in S3 yet) reaches back the wider initial
+    # lookback so the pipeline seeds the window the aggregation backfills;
+    # routine runs use the weekly delta.
+    if _is_first_ingest(s3, bucket):
+        lookback_days = int(
+            os.environ.get("KB_INGEST_INITIAL_LOOKBACK_DAYS", str(_DEFAULT_INITIAL_LOOKBACK_DAYS)),
+        )
+        window_label = "initial-backfill"
+    else:
+        lookback_days = int(
+            os.environ.get("KB_INGEST_LOOKBACK_DAYS", str(_DEFAULT_LOOKBACK_DAYS)),
+        )
+        window_label = "weekly"
 
     end = datetime.now(timezone.utc)
-    start = end - timedelta(days=7)
+    start = end - timedelta(days=lookback_days)
+    context.log.info(
+        "reliefweb ingest: mode=%s window=[%s, %s]",
+        window_label, start.isoformat(), end.isoformat(),
+    )
     reports = _fetch_window(context, appname, start, end)
 
     key = f"reliefweb/reports/{COUNTRY_ISO3}/{FORMAT_SLUG}/{_week_tag(end)}.jsonl"
@@ -211,7 +253,7 @@ def reliefweb_weekly_reports_in_s3(
     )
     if body:
         body += b"\n"
-    _s3_client().put_object(
+    s3.put_object(
         Bucket=bucket, Key=key, Body=body, ContentType="application/x-ndjson",
     )
     context.log.info(
@@ -223,6 +265,7 @@ def reliefweb_weekly_reports_in_s3(
         {
             "country": dg.MetadataValue.text(COUNTRY_ISO3),
             "format": dg.MetadataValue.text(FORMAT_NAME),
+            "mode": dg.MetadataValue.text(window_label),
             "window_from": dg.MetadataValue.text(start.isoformat()),
             "window_to": dg.MetadataValue.text(end.isoformat()),
             "report_count": dg.MetadataValue.int(len(reports)),
