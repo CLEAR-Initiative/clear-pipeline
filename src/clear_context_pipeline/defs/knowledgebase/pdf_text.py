@@ -13,6 +13,7 @@ Each line is::
     {"report_id": str, "page_num": int (1-indexed), "text": str}
 """
 
+import gc
 import io
 import json
 import os
@@ -58,6 +59,10 @@ def _extract_pages(pdf_bytes: bytes) -> list[dict]:
             text = (page.extract_text() or "").strip()
             if text:
                 pages.append({"page_num": i, "text": text})
+            # pdfplumber caches every parsed object for each Page's lifetime;
+            # on a large PDF that grows unbounded and OOM-kills the step (the
+            # 90-day backlog makes big PDFs far more likely). Flush per page.
+            page.flush_cache()
     return pages
 
 
@@ -189,6 +194,10 @@ def reliefweb_weekly_pdf_text(
             "extracted %d pages for report %s → s3://%s/%s",
             len(all_pages), report_id, bucket, text_key,
         )
+        # Reclaim pdfminer/pdfplumber cyclic residuals before the next
+        # report — across the large 90-day batch they accumulate and, with
+        # a big PDF's peak on top, OOM-kill the step (SIGKILL).
+        gc.collect()
 
     context.add_output_metadata({
         "reports_processed": dg.MetadataValue.int(len(summaries)),
