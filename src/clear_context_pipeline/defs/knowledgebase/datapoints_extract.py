@@ -493,8 +493,29 @@ def reliefweb_weekly_datapoints(
     llm = make_llm_provider("extraction")
 
     summaries: list[dict] = []
+    reused = 0
     for report in reliefweb_weekly_pdf_text:
         report_id = report["report_id"]
+
+        # Idempotency: skip reports whose datapoints a prior run already
+        # extracted + upserted. Each report otherwise costs 6 LLM extraction
+        # calls, so a backfill re-run or a resume after a later-stage failure
+        # shouldn't re-pay for them. clear-api's report_datapoints row is the
+        # source of truth — the S3 debug snapshot is written BEFORE the upsert
+        # and so can't confirm the write landed.
+        try:
+            already_done = clear_api.report_datapoints_exist(report_id)
+        except Exception as exc:  # noqa: BLE001 — treat as not-done and extract
+            context.log.warning(
+                "[%s] datapoint existence check failed (%s) — extracting anyway",
+                report_id, exc,
+            )
+            already_done = False
+        if already_done:
+            reused += 1
+            summaries.append({"report_id": report_id, "reused": True})
+            context.log.info("[%s] datapoints already extracted — skipping", report_id)
+            continue
 
         try:
             doc_text = _read_doc_text(s3, bucket, report["s3_text_key"])
@@ -557,6 +578,7 @@ def reliefweb_weekly_datapoints(
 
     context.add_output_metadata({
         "reports_processed": dg.MetadataValue.int(len(summaries)),
+        "reports_reused": dg.MetadataValue.int(reused),
         "schema_version": dg.MetadataValue.text(SCHEMA_VERSION),
         "extraction_model": dg.MetadataValue.text(llm.model),
         "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{S3_DATAPOINTS_PREFIX}/"),

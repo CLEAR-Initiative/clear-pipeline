@@ -92,6 +92,14 @@ query HasAggregatedDatapoints($schemaVersion: String!) {
 }
 """
 
+_REPORT_DATAPOINT_EXISTS = """
+query ReportDatapointExists($reportId: String!) {
+  reportDatapoint(reportId: $reportId) {
+    id
+  }
+}
+"""
+
 # ── Situation analysis ─────────────────────────────────────────────
 
 _GET_AGGREGATED_DATAPOINT = """
@@ -326,6 +334,19 @@ def has_aggregated_datapoints(schema_version: str) -> bool:
         _HAS_AGGREGATED_DATAPOINTS, {"schemaVersion": schema_version},
     )
     return bool(data.get("hasAggregatedDatapoints"))
+
+
+def report_datapoints_exist(report_id: str) -> bool:
+    """True when this report's datapoints have already been extracted and
+    upserted (a ``report_datapoints`` row exists for it).
+
+    Lets the datapoint asset skip the 6 LLM extraction calls for a report a
+    prior run already finished. The DB is the source of truth on purpose — the
+    S3 debug snapshot is written BEFORE the upsert, so it can't confirm the
+    write actually landed.
+    """
+    data = _execute(_REPORT_DATAPOINT_EXISTS, {"reportId": report_id})
+    return data.get("reportDatapoint") is not None
 
 
 def refresh_aggregated_datapoints(
