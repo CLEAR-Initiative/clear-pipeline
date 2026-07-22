@@ -175,7 +175,7 @@ _BASE_INSTRUCTIONS = (
 
 def _build_system_prompt(
     country_name: str,
-    year: int,
+    period_label: str,
     sector_display_name: str,
     aggregated_context: str,
 ) -> str:
@@ -187,7 +187,7 @@ def _build_system_prompt(
         f"{_BASE_INSTRUCTIONS}\n"
         f"---\n"
         f"COUNTRY: {country_name}\n"
-        f"YEAR: {year}\n"
+        f"PERIOD: {period_label}\n"
         f"SECTOR: {sector_display_name}\n"
         f"---\n"
         f"AGGREGATED HEADLINE FIGURES (cached; do not repeat back):\n"
@@ -207,7 +207,7 @@ def _generate_one_sector(
     sector_key: SafSector,
     sector_display_name: str,
     country_name: str,
-    year: int,
+    period_label: str,
     aggregated_context: str,
     cache_key: str,
 ) -> SectorAnalysis:
@@ -248,10 +248,10 @@ def _generate_one_sector(
         )
         return SectorAnalysis()
 
-    system = _build_system_prompt(country_name, year, sector_display_name, aggregated_context)
+    system = _build_system_prompt(country_name, period_label, sector_display_name, aggregated_context)
     user = (
         f"Produce the {sector_display_name} sector analysis for "
-        f"{country_name}, {year}. Populate every field the evidence "
+        f"{country_name}, {period_label}. Populate every field the evidence "
         "supports; skip fields (empty list) when the evidence is too "
         "thin to make a claim.\n"
         "\n"
@@ -308,7 +308,7 @@ def generate_all_sectors(
     llm: LLMProvider,
     *,
     country_name: str,
-    year: int,
+    period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
 ) -> Sectors:
@@ -333,7 +333,7 @@ def generate_all_sectors(
             sector_key=sector_key,
             sector_display_name=sector_display,
             country_name=country_name,
-            year=year,
+            period_label=period_label,
             aggregated_context=aggregated_context,
             cache_key=cache_key,
         )
@@ -347,7 +347,7 @@ def _format_aggregated(aggregated: dict[str, Any] | None) -> str:
     avoid a circular import between the two modules."""
     import json
     if not aggregated:
-        return "(no aggregated figures available for this year)"
+        return "(no aggregated figures available for this period)"
     payload = {
         "reportCount": aggregated.get("reportCount"),
         "dataQualityScore": aggregated.get("dataQualityScore"),
