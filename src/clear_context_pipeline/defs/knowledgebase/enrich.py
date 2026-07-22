@@ -171,6 +171,24 @@ def _read_chunks(s3, bucket: str, key: str) -> list[dict]:
     return [json.loads(line) for line in body.splitlines() if line]
 
 
+def _existing_enriched_count(s3, bucket: str, key: str) -> int | None:
+    """Line count of a report's already-enriched JSONL in S3, or None if it
+    hasn't been enriched yet (or can't be read).
+
+    Contextualization + extraction are the pipeline's most expensive step
+    (an LLM call per chunk). Reusing a prior run's output instead of re-paying
+    for it is what makes a resume after a mid-pipeline failure cheap. A read
+    failure returns None so we fall back to re-enriching rather than dropping
+    the report.
+    """
+    try:
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    except Exception:  # noqa: BLE001 — not cached / unreadable → re-enrich
+        return None
+    count = sum(1 for line in body.splitlines() if line.strip())
+    return count or None
+
+
 def _read_pages_concat(s3, bucket: str, key: str) -> str:
     """Full report text used as the cached prefix in contextualization."""
     body = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
@@ -241,8 +259,27 @@ def reliefweb_weekly_enriched_chunks(
     summaries: list[dict] = []
     total_enriched = 0
     total_skipped = 0
+    reused = 0
     for report in reliefweb_weekly_chunks:
         report_id = report["report_id"]
+        enriched_key = _enriched_key(report_id)
+
+        # Idempotency: reuse a report already enriched by a prior run rather
+        # than re-running the LLM contextualization + extraction (the
+        # pipeline's most expensive step). The enriched JSONL in S3 is the
+        # source of truth; re-running only rebuilds the summary the upsert
+        # consumes. This is what lets a resume after a later-stage failure
+        # (e.g. the embedding step) skip the costly work and still complete.
+        cached = _existing_enriched_count(s3, bucket, enriched_key)
+        if cached is not None:
+            summaries.append({**report, "s3_enriched_key": enriched_key, "num_enriched": cached})
+            reused += 1
+            context.log.info(
+                "report %s already enriched (%d chunks) — reusing s3://%s/%s",
+                report_id, cached, bucket, enriched_key,
+            )
+            continue
+
         chunks = _read_chunks(s3, bucket, report["s3_chunks_key"])
 
         if len(chunks) > guardrails.max_chunks_per_report:
@@ -308,7 +345,6 @@ def reliefweb_weekly_enriched_chunks(
             context.log.warning("no enriched chunks for report %s", report_id)
             continue
 
-        enriched_key = _enriched_key(report_id)
         body = b"\n".join(
             json.dumps(e, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             for e in enriched
@@ -330,6 +366,7 @@ def reliefweb_weekly_enriched_chunks(
 
     context.add_output_metadata({
         "reports_enriched": dg.MetadataValue.int(len(summaries)),
+        "reports_reused": dg.MetadataValue.int(reused),
         "chunks_enriched": dg.MetadataValue.int(total_enriched),
         "chunks_skipped": dg.MetadataValue.int(total_skipped),
         "contextualization_skipped": dg.MetadataValue.bool(guardrails.skip_contextualization),

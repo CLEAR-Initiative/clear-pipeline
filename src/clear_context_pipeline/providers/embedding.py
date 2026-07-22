@@ -105,6 +105,11 @@ class VoyageProvider:
 
     provider_name = "voyage"
     _BATCH_LIMIT = 128
+    # Voyage also rejects any single embed call whose inputs sum to more than
+    # this many tokens, INDEPENDENT of the 128-input count cap. A fixed
+    # 128-slice trips this on large backfills where chunks are big; callers
+    # size batches against it via `count_tokens`.
+    MAX_TOKENS_PER_BATCH = 120_000
 
     def __init__(
         self,
@@ -148,6 +153,13 @@ class VoyageProvider:
                     time.sleep(wait_s)
                     now = time.monotonic()
             self._last_request_time = now
+
+    def count_tokens(self, texts: list[str]) -> int:
+        """Total Voyage tokens across ``texts`` for this model — the exact
+        count Voyage's per-batch token limit is enforced against. Local
+        (tokenizer only, no API call), so it's cheap to call per candidate
+        chunk when sizing batches."""
+        return self._client.count_tokens(texts, model=self.model)
 
     @retry(
         # voyageai raises requests-style exceptions; we filter on the

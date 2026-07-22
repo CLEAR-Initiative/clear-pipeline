@@ -47,6 +47,37 @@ def _read_enriched(s3, bucket: str, key: str) -> list[dict]:
     return [json.loads(line) for line in body.splitlines() if line]
 
 
+def _embedding_batches(enriched: list[dict], embedder):
+    """Slice enriched chunks into embedding batches that stay under the
+    provider's per-call input-count limit AND, where the provider enforces
+    one, its per-batch TOKEN limit.
+
+    Voyage rejects any single call whose inputs sum to more than
+    ``MAX_TOKENS_PER_BATCH`` (120k) regardless of the 128-input count cap, so
+    a fixed 128-slice fails on large backfills where chunks are big. Providers
+    that don't expose a token limit (e.g. Together/TEI) fall back to
+    count-only batching. A small margin is left under the hard limit for the
+    provider's own per-text truncation accounting.
+    """
+    max_tokens = getattr(embedder, "MAX_TOKENS_PER_BATCH", None)
+    count_tokens = getattr(embedder, "count_tokens", None)
+    token_budget = int(max_tokens * 0.95) if (max_tokens and count_tokens) else None
+
+    batch: list[dict] = []
+    batch_tokens = 0
+    for e in enriched:
+        n = count_tokens([e["embedded_text"]]) if token_budget is not None else 0
+        over_count = len(batch) >= EMBED_BATCH_SIZE
+        over_tokens = token_budget is not None and batch_tokens + n > token_budget
+        if batch and (over_count or over_tokens):
+            yield batch
+            batch, batch_tokens = [], 0
+        batch.append(e)
+        batch_tokens += n
+    if batch:
+        yield batch
+
+
 @dg.asset(group_name="reliefweb_kb")
 def reliefweb_weekly_knowledgebase_upsert(
     context: AssetExecutionContext,
@@ -65,14 +96,13 @@ def reliefweb_weekly_knowledgebase_upsert(
         if not enriched:
             continue
 
-        # Batched embedding. Voyage takes up to 128 at a time; larger
-        # batches don't reduce latency once you're inside the SDK's
-        # HTTP round-trip.
+        # Batched embedding, bounded by BOTH the provider's input-count cap
+        # and its per-batch token limit (Voyage: 120k tokens/call, which a
+        # naive 128-slice exceeds on large backfills).
         embeddings: list[list[float]] = []
         provider_name = embedder.provider_name
         model_name = embedder.model
-        for i in range(0, len(enriched), EMBED_BATCH_SIZE):
-            batch = enriched[i : i + EMBED_BATCH_SIZE]
+        for batch in _embedding_batches(enriched, embedder):
             results = embedder.embed(
                 [e["embedded_text"] for e in batch],
                 input_type="document",
