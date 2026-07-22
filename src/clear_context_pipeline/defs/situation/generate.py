@@ -26,7 +26,7 @@ this week's chunks rather than last week's.
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,10 +96,14 @@ _LABEL_POPULATION_IN_NEED = "overall_pin"
 _LABEL_POPULATION_AFFECTED = "overall_affected"
 
 
-# Granularity of the analysis window, sent on every upsert. Part of the
-# bucket key on the clear-api side — (country, window_kind, window_start,
-# schema_version) — mirroring `aggregated_datapoints.window_kind`.
-_WINDOW_KIND = "yearly"
+# window_kind + window_start form the clear-api bucket key — (country,
+# window_kind, window_start, schema_version) — mirroring
+# `aggregated_datapoints`. Month names build the monthly period label
+# ("July 2026") the LLM prompts and cache key key off.
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
 
 
 def _calendar_year_window(year: int) -> tuple[str, str]:
@@ -114,6 +118,24 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
     """
     start = datetime(year, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    return start.isoformat(), end.isoformat()
+
+
+def _calendar_month_window(year: int, month: int) -> tuple[str, str]:
+    """1st 00:00:00 → last-day 23:59:59 of (year, month) in UTC, ISO.
+
+    Same load-bearing rule as `_calendar_year_window`: `window_start` keys
+    the bucket and is midnight-aligned so it matches clear-api's `monthOf`
+    start exactly. `window_end` is display-only (never matched on) — the
+    aggregation cascade keys on windowKind + windowStart, not the end.
+    """
+    start = datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
+    next_month = (
+        datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        if month == 12
+        else datetime(year, month + 1, 1, tzinfo=timezone.utc)
+    )
+    end = next_month - timedelta(seconds=1)
     return start.isoformat(), end.isoformat()
 
 
@@ -223,27 +245,27 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
     return meta
 
 
-def generate_and_upsert_for_country_year(
+def generate_and_upsert_for_country_window(
     *,
     country_name: str,
-    year: int,
+    window_start: str,
+    window_end: str,
+    window_kind: str,
+    period_label: str,
     log_context=None,
 ) -> dict | None:
     """Generate and upsert one situation-analysis snapshot for
-    (country_name, year). Extracted from the weekly asset so the
-    manual-document job can trigger the same regen without cloning
-    the asset code path.
+    (country_name, window_kind, window_start). The wrappers below
+    (`generate_and_upsert_for_country_year` / `_month`) supply the calendar
+    window + a human `period_label` ("2026" / "July 2026") used in the LLM
+    prompts and prompt-cache key.
 
-    Returns the summary dict the asset historically appended, or
-    ``None`` when the country's A0 location can't be resolved (fresh
-    env / locations not backfilled yet). Cascades every failure it
-    can catch to a returned-None so a caller iterating multiple
-    countries doesn't crash on one bad row — direct callers that
-    want tight error semantics should wrap.
+    Returns the summary dict the asset appends, or ``None`` when the
+    country's A0 location can't be resolved (fresh env / locations not
+    backfilled yet). Cascades every failure it can catch to a returned-None
+    so a caller iterating multiple countries doesn't crash on one bad row.
     """
     log = log_context or logger
-
-    window_start, window_end = _calendar_year_window(year)
 
     country_id = clear_api.resolve_country_location_id(country_name)
     if not country_id:
@@ -259,7 +281,7 @@ def generate_and_upsert_for_country_year(
             location_id=country_id,
             window_start=window_start,
             window_end=window_end,
-            window_kind="yearly",
+            window_kind=window_kind,
             # Read the aggregation schema the knowledgebase pipeline
             # writes, not the situation-analysis output schema —
             # otherwise this reads stale buckets of the wrong version.
@@ -290,25 +312,25 @@ def generate_and_upsert_for_country_year(
         generated_by_model = f"deterministic:{SCHEMA_VERSION}"
     else:
         llm = make_llm_provider("extraction")
-        cache_key = f"situation:{country_id}:{year}:{SCHEMA_VERSION}"
+        cache_key = f"situation:{country_id}:{window_kind}:{period_label}:{SCHEMA_VERSION}"
         ai_summary_component = generate_ai_summary(
-            llm, country_name=country_name, year=year,
+            llm, country_name=country_name, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key,
         )
         context_risks_component = generate_context_risks(
-            llm, country_name=country_name, year=year,
+            llm, country_name=country_name, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key,
         )
         hazards_component = generate_hazards_and_vulnerabilities(
-            llm, country_name=country_name, year=year,
+            llm, country_name=country_name, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key,
         )
         displacement_component = generate_displacement_narrative(
-            llm, country_name=country_name, year=year,
+            llm, country_name=country_name, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key,
         )
         sectors_component = generate_all_sectors(
-            llm, country_name=country_name, year=year,
+            llm, country_name=country_name, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key,
         )
         generated_by_model = llm.model
@@ -352,7 +374,7 @@ def generate_and_upsert_for_country_year(
             country_location_id=country_id,
             window_start=window_start,
             window_end=window_end,
-            window_kind=_WINDOW_KIND,
+            window_kind=window_kind,
             data=payload.model_dump(mode="json"),
             source_report_ids=all_source_ids,
             aggregated_datapoint_id=(aggregated or {}).get("id"),
@@ -374,21 +396,56 @@ def generate_and_upsert_for_country_year(
         return None
 
     log.info(
-        "[situation] %s (%d): wrote analysis %s (superseded=%s, %d deterministic sources, %d total, model=%s)",
-        country_name, year, result["situationAnalysisId"],
+        "[situation] %s (%s): wrote analysis %s (superseded=%s, %d deterministic sources, %d total, model=%s)",
+        country_name, period_label, result["situationAnalysisId"],
         result["supersededPrevious"],
         len(deterministic_source_ids), len(all_source_ids), generated_by_model,
     )
     return {
         "country_name": country_name,
         "country_location_id": country_id,
-        "year": year,
+        "window_kind": window_kind,
+        "period": period_label,
         "situation_analysis_id": result["situationAnalysisId"],
         "superseded_previous": result["supersededPrevious"],
         "report_count": len(deterministic_source_ids),
         "total_source_count": len(all_source_ids),
         "generated_by_model": generated_by_model,
     }
+
+
+def generate_and_upsert_for_country_year(
+    *, country_name: str, year: int, log_context=None,
+) -> dict | None:
+    """Yearly (Jan 1 .. Dec 31) situation snapshot — the original behaviour,
+    now a thin wrapper over the window-based core. Kept as a named entry
+    point so the manual-document job can trigger a yearly regen."""
+    window_start, window_end = _calendar_year_window(year)
+    return generate_and_upsert_for_country_window(
+        country_name=country_name,
+        window_start=window_start,
+        window_end=window_end,
+        window_kind="yearly",
+        period_label=str(year),
+        log_context=log_context,
+    )
+
+
+def generate_and_upsert_for_country_month(
+    *, country_name: str, year: int, month: int, log_context=None,
+) -> dict | None:
+    """Monthly (1st .. last day) situation snapshot. Reads the monthly ×
+    country aggregated_datapoint bucket (emitted by clear-api's A0 tier) for
+    the same window; narrative prompts are framed on the month."""
+    window_start, window_end = _calendar_month_window(year, month)
+    return generate_and_upsert_for_country_window(
+        country_name=country_name,
+        window_start=window_start,
+        window_end=window_end,
+        window_kind="monthly",
+        period_label=f"{_MONTH_NAMES[month - 1]} {year}",
+        log_context=log_context,
+    )
 
 
 @dg.asset(
@@ -427,20 +484,30 @@ def weekly_situation_analyses(
 
     now = datetime.now(timezone.utc)
     year = now.year
+    month = now.month
 
     summaries: list[dict] = []
     for country_name in _POC_COUNTRIES:
-        summary = generate_and_upsert_for_country_year(
-            country_name=country_name,
-            year=year,
-            log_context=context.log,
-        )
-        if summary is not None:
-            summaries.append(summary)
+        # Two snapshots per country: the calendar-year-to-date view and the
+        # current month. Each reads its own country-scoped aggregated bucket
+        # (yearly-A0 and monthly-A0) for the matching window.
+        for summary in (
+            generate_and_upsert_for_country_year(
+                country_name=country_name, year=year, log_context=context.log,
+            ),
+            generate_and_upsert_for_country_month(
+                country_name=country_name, year=year, month=month,
+                log_context=context.log,
+            ),
+        ):
+            if summary is not None:
+                summaries.append(summary)
 
     context.add_output_metadata({
-        "countries_processed": dg.MetadataValue.int(len(summaries)),
+        "countries_processed": dg.MetadataValue.int(len(_POC_COUNTRIES)),
+        "snapshots_written": dg.MetadataValue.int(len(summaries)),
         "year": dg.MetadataValue.int(year),
+        "month": dg.MetadataValue.int(month),
         "schema_version": dg.MetadataValue.text(SCHEMA_VERSION),
     })
     return summaries

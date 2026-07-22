@@ -19,6 +19,7 @@ import dagster as dg
 import pytest
 
 from clear_context_pipeline.defs.situation.generate import (
+    generate_and_upsert_for_country_month,
     generate_and_upsert_for_country_year,
     weekly_situation_analyses,
 )
@@ -200,6 +201,49 @@ class TestGenerateAndUpsertForCountryYear:
         assert kwargs["window_kind"] == "yearly"
         assert kwargs["window_start"] == "2026-01-01T00:00:00+00:00"
 
+    def test_month_wrapper_sends_monthly_window_kind_and_first_of_month(self):
+        # The monthly wrapper reads/writes the monthly-A0 bucket. window_kind
+        # must be "monthly" and window_start exactly midnight on the 1st —
+        # matching clear-api's `monthOf` start (the equality the read + the
+        # invalidation cascade both key on).
+        patches = _patch_narrative_generators()
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                return_value="sudan-a0",
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                return_value=None,
+            ) as mock_agg,
+            patch(
+                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                return_value={},
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+            ),
+            patches["generate_ai_summary"],
+            patches["generate_context_risks"],
+            patches["generate_hazards_and_vulnerabilities"],
+            patches["generate_displacement_narrative"],
+            patches["generate_all_sectors"],
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+            ) as mock_upsert,
+        ):
+            generate_and_upsert_for_country_month(
+                country_name="Sudan", year=2026, month=7,
+            )
+
+        # Reads the monthly bucket for the same window.
+        assert mock_agg.call_args.kwargs["window_kind"] == "monthly"
+        assert mock_agg.call_args.kwargs["window_start"] == "2026-07-01T00:00:00+00:00"
+        # Writes it back with the monthly window_kind + start.
+        kwargs = mock_upsert.call_args.kwargs
+        assert kwargs["window_kind"] == "monthly"
+        assert kwargs["window_start"] == "2026-07-01T00:00:00+00:00"
+
     def test_skip_narrative_kill_switch_ships_deterministic_only(self):
         # SITUATION_SKIP_NARRATIVE=1 → no LLM calls, no narrative
         # components. `generated_by_model` marks the row as
@@ -367,41 +411,47 @@ class TestWeeklySituationAnalysesAsset:
     helper has its own class above)."""
 
     def test_iterates_all_poc_countries(self):
-        # Today POC scope is Sudan only. If we widen `_POC_COUNTRIES`
-        # this test still passes without change — good defensive
-        # spec. When someone adds Afghanistan, they need to update
-        # the mock arguments here.
-        with patch(
-            "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
-        ) as mock_helper:
-            mock_helper.return_value = {
-                "country_name": "Sudan",
-                "country_location_id": "sudan-a0",
-                "year": 2026,
-                "situation_analysis_id": "sit-abc",
-                "superseded_previous": False,
-                "report_count": 5,
-                "total_source_count": 5,
-                "generated_by_model": "claude-sonnet-4-6",
+        # POC scope is Sudan only. The asset now writes TWO snapshots per
+        # country — yearly + current-month — so Sudan yields two calls.
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
+            ) as mock_year,
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_month",
+            ) as mock_month,
+        ):
+            mock_year.return_value = {
+                "country_name": "Sudan", "window_kind": "yearly",
+                "situation_analysis_id": "sit-year",
+            }
+            mock_month.return_value = {
+                "country_name": "Sudan", "window_kind": "monthly",
+                "situation_analysis_id": "sit-month",
             }
             ctx = dg.build_asset_context()
             result = weekly_situation_analyses(
                 ctx, reliefweb_weekly_datapoint_aggregations={},
             )
-        # Sudan-only for POC → one call.
-        assert mock_helper.call_count == 1
-        call_kwargs = mock_helper.call_args.kwargs
-        assert call_kwargs["country_name"] == "Sudan"
-        assert len(result) == 1
-        assert result[0]["situation_analysis_id"] == "sit-abc"
+        # Sudan-only for POC → one yearly + one monthly call.
+        assert mock_year.call_count == 1
+        assert mock_month.call_count == 1
+        assert mock_year.call_args.kwargs["country_name"] == "Sudan"
+        assert mock_month.call_args.kwargs["country_name"] == "Sudan"
+        assert {r["situation_analysis_id"] for r in result} == {"sit-year", "sit-month"}
 
     def test_helper_returning_none_is_dropped_from_summaries(self):
-        # Country resolver failed → helper returned None. The asset
-        # keeps going (doesn't fail the whole asset materialisation)
-        # and just omits that country from the summary list.
-        with patch(
-            "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
-            return_value=None,
+        # Both helpers return None (e.g. country resolver failed). The asset
+        # keeps going and omits the country from the summary list.
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
+                return_value=None,
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_month",
+                return_value=None,
+            ),
         ):
             ctx = dg.build_asset_context()
             result = weekly_situation_analyses(

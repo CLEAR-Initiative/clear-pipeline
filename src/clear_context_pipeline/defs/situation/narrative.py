@@ -170,7 +170,7 @@ _BASE_INSTRUCTIONS = (
 )
 
 
-def _build_system_prompt(country_name: str, year: int, agg_context: str) -> str:
+def _build_system_prompt(country_name: str, period_label: str, agg_context: str) -> str:
     """One prompt reused across all four component calls in a run.
 
     Static prefix + country context: this is what Anthropic's prompt
@@ -181,7 +181,7 @@ def _build_system_prompt(country_name: str, year: int, agg_context: str) -> str:
         f"{_BASE_INSTRUCTIONS}\n"
         f"---\n"
         f"COUNTRY: {country_name}\n"
-        f"YEAR: {year}\n"
+        f"PERIOD: {period_label}\n"
         f"---\n"
         f"AGGREGATED HEADLINE FIGURES (cached; do not repeat back):\n"
         f"{agg_context}\n"
@@ -195,7 +195,7 @@ def _format_aggregated_for_prompt(aggregated: dict[str, Any] | None) -> str:
     the model may want to cross-reference sector PIN figures against
     narrative claims about needs."""
     if not aggregated:
-        return "(no aggregated figures available for this year)"
+        return "(no aggregated figures available for this period)"
     payload = {
         "reportCount": aggregated.get("reportCount"),
         "dataQualityScore": aggregated.get("dataQualityScore"),
@@ -236,14 +236,14 @@ def generate_ai_summary(
     llm: LLMProvider,
     *,
     country_name: str,
-    year: int,
+    period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
 ) -> AISummary:
     """2–4 paragraph narrative synthesis grounded in a broad RAG search."""
     rag = fetch_rag_context(
         query=(
-            f"humanitarian situation overview {country_name} {year} "
+            f"humanitarian situation overview {country_name} {period_label} "
             "conflict displacement needs response funding"
         ),
         limit=12,
@@ -252,9 +252,9 @@ def generate_ai_summary(
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
         return AISummary()
 
-    system = _build_system_prompt(country_name, year, _format_aggregated_for_prompt(aggregated))
+    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
-        f"Produce the AI Summary component for {country_name}, {year}. "
+        f"Produce the AI Summary component for {country_name}, {period_label}. "
         "Two to four paragraphs of narrative prose. Weave the headline "
         "figures and the retrieved evidence into a briefing that a "
         "humanitarian program manager could read in under a minute.\n"
@@ -285,7 +285,7 @@ def generate_context_risks(
     llm: LLMProvider,
     *,
     country_name: str,
-    year: int,
+    period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
 ) -> ContextRisks:
@@ -302,9 +302,9 @@ def generate_context_risks(
     if rag.is_empty:
         return ContextRisks()
 
-    system = _build_system_prompt(country_name, year, _format_aggregated_for_prompt(aggregated))
+    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
-        f"Produce the Context Risks component for {country_name}, {year}. "
+        f"Produce the Context Risks component for {country_name}, {period_label}. "
         "For each of the eight domains (demographics, political, economy, "
         "socio_culture, security, legal_policy, infrastructure, "
         "environment), emit 3–6 bulleted risks or observations. Skip a "
@@ -349,7 +349,7 @@ def generate_hazards_and_vulnerabilities(
     llm: LLMProvider,
     *,
     country_name: str,
-    year: int,
+    period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
 ) -> HazardsAndVulnerabilities:
@@ -363,10 +363,10 @@ def generate_hazards_and_vulnerabilities(
     if rag.is_empty:
         return HazardsAndVulnerabilities()
 
-    system = _build_system_prompt(country_name, year, _format_aggregated_for_prompt(aggregated))
+    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
         f"Produce the Hazards & Pre-Crisis Vulnerabilities component for "
-        f"{country_name}, {year}. Emit two lists: `hazards` (natural + "
+        f"{country_name}, {period_label}. Emit two lists: `hazards` (natural + "
         "man-made shocks) and `vulnerabilities` (structural conditions "
         "that make populations susceptible). One sentence per bullet.\n"
         "\n"
@@ -397,7 +397,7 @@ def generate_displacement_narrative(
     llm: LLMProvider,
     *,
     country_name: str,
-    year: int,
+    period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
 ) -> DisplacementNarrative:
@@ -411,10 +411,10 @@ def generate_displacement_narrative(
     if rag.is_empty:
         return DisplacementNarrative()
 
-    system = _build_system_prompt(country_name, year, _format_aggregated_for_prompt(aggregated))
+    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
         f"Produce the Displacement Narrative component for {country_name}, "
-        f"{year}. Emit two lists: `push_factors` (what's driving people to "
+        f"{period_label}. Emit two lists: `push_factors` (what's driving people to "
         "displace) and `return_intention` (signals about their intent to "
         "return, blockers, or conditions). One sentence per bullet.\n"
         "\n"

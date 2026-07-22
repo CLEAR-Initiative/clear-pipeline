@@ -54,7 +54,7 @@ class TestGenerateAISummary:
         ):
             llm = MagicMock()
             result = generate_ai_summary(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         assert result.text == ""
@@ -71,7 +71,7 @@ class TestGenerateAISummary:
                 text="A concise briefing paragraph.",
             )
             result = generate_ai_summary(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated={"reportCount": 5}, cache_key="k",
             )
         assert result.text == "A concise briefing paragraph."
@@ -91,7 +91,7 @@ class TestGenerateAISummary:
             llm = MagicMock()
             llm.complete_structured.side_effect = RuntimeError("provider down")
             result = generate_ai_summary(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         assert result.text == ""
@@ -111,7 +111,7 @@ class TestGenerateContextRisks:
         ):
             llm = MagicMock()
             result = generate_context_risks(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         # Every domain sub-object exists but has empty bullets.
@@ -139,7 +139,7 @@ class TestGenerateContextRisks:
                 environment=["Drought since 2024"],
             )
             result = generate_context_risks(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
         # Every domain carries the same shared source list.
@@ -159,7 +159,7 @@ class TestGenerateContextRisks:
             llm = MagicMock()
             llm.complete_structured.side_effect = RuntimeError("provider down")
             result = generate_context_risks(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         assert result.demographics.bullets == []
@@ -190,7 +190,7 @@ class TestGenerateHazardsAndVulnerabilities:
         ):
             llm = MagicMock()
             result = generate_hazards_and_vulnerabilities(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         assert result.hazards == []
@@ -210,7 +210,7 @@ class TestGenerateHazardsAndVulnerabilities:
                 vulnerabilities=["Weak health system", "High poverty rate"],
             )
             result = generate_hazards_and_vulnerabilities(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
         assert [h.description for h in result.hazards] == ["Drought", "Armed clashes"]
@@ -234,7 +234,7 @@ class TestGenerateDisplacementNarrative:
         ):
             llm = MagicMock()
             result = generate_displacement_narrative(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         assert result.push_factors == []
@@ -255,7 +255,7 @@ class TestGenerateDisplacementNarrative:
                 return_intention=["Wait until security stabilises"],
             )
             result = generate_displacement_narrative(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
         assert len(result.push_factors) == 1
@@ -273,7 +273,7 @@ class TestGenerateDisplacementNarrative:
             llm = MagicMock()
             llm.complete_structured.side_effect = RuntimeError("provider down")
             result = generate_displacement_narrative(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated=None, cache_key="k",
             )
         assert result.push_factors == []

@@ -70,7 +70,7 @@ class TestGenerateOneSector:
                 sector_key="health",
                 sector_display_name="Health",
                 country_name="Sudan",
-                year=2026,
+                period_label="2026",
                 aggregated_context="{}",
                 cache_key="k",
             )
@@ -103,7 +103,7 @@ class TestGenerateOneSector:
                 sector_key="food_security",
                 sector_display_name="Food Security",
                 country_name="Sudan",
-                year=2026,
+                period_label="2026",
                 aggregated_context="{}",
                 cache_key="k",
             )
@@ -134,7 +134,7 @@ class TestGenerateOneSector:
                 sector_key="wash",
                 sector_display_name="WASH",
                 country_name="Sudan",
-                year=2026,
+                period_label="2026",
                 aggregated_context="{}",
                 cache_key="k",
             )
@@ -156,7 +156,7 @@ class TestGenerateOneSector:
                 sector_key="education",
                 sector_display_name="Education",
                 country_name="Sudan",
-                year=2026,
+                period_label="2026",
                 aggregated_context="{}",
                 cache_key="k",
             )
@@ -177,7 +177,7 @@ class TestGenerateOneSector:
                 sector_key="protection",
                 sector_display_name="Protection",
                 country_name="Sudan",
-                year=2026,
+                period_label="2026",
                 aggregated_context="{}",
                 cache_key="k",
             )
@@ -200,7 +200,7 @@ class TestGenerateAllSectors:
             llm = MagicMock()
             llm.complete_structured.return_value = _fake_sector_llm_output()
             result = generate_all_sectors(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
         assert isinstance(result, Sectors)
@@ -238,7 +238,7 @@ class TestGenerateAllSectors:
             llm = MagicMock()
             llm.complete_structured.side_effect = llm_side
             result = generate_all_sectors(
-                llm, country_name="Sudan", year=2026,
+                llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
         # Health is the empty default; the other five have the fake output.
