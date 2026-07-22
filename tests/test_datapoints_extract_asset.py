@@ -153,6 +153,16 @@ def _configure_llm_mock(mock_make_llm):
     mock_make_llm.return_value.complete_structured.side_effect = _fake_complete_structured
 
 
+@pytest.fixture(autouse=True)
+def _datapoints_not_already_extracted(monkeypatch):
+    """Default the idempotency check to 'not extracted' so the extraction
+    tests exercise the full path. The skip test overrides it to True."""
+    monkeypatch.setattr(
+        "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
+        lambda report_id: False,
+    )
+
+
 class TestExtractionAsset:
     def test_happy_path_all_six_domains_upserted(self):
         # 6 domains each emit a canned Pydantic model → asset merges
@@ -212,6 +222,35 @@ class TestExtractionAsset:
         assert len(result) == 1
         assert result[0]["domains_ok"] == list(merged_data.keys())
         assert result[0]["domains_failed"] == []
+
+    def test_skips_report_with_existing_datapoints(self):
+        # A report whose datapoints already exist in clear-api is skipped:
+        # no LLM extraction, no upsert, and the summary marks it reused.
+        with (
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                return_value=_mock_s3_client(_canned_doc_text_body()),
+            ),
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+            ) as mock_make_llm,
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
+                return_value=True,
+            ),
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+            ) as mock_upsert,
+        ):
+            _configure_llm_mock(mock_make_llm)
+            result = reliefweb_weekly_datapoints(
+                _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+            )
+
+        # No domain extraction, no upsert — the report was reused.
+        assert mock_make_llm.return_value.complete_structured.call_count == 0
+        assert mock_upsert.call_count == 0
+        assert result == [{"report_id": PDF_TEXT_SUMMARY["report_id"], "reused": True}]
 
     def test_partial_domain_failure_writes_null_and_continues(self):
         # `Casualties` raises → merged.data.casualties = None,
