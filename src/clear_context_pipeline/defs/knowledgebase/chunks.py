@@ -50,10 +50,20 @@ CHUNK_OVERLAP_TOKENS = 100
 
 S3_CHUNKS_PREFIX = f"reliefweb/kb/chunks/{COUNTRY_ISO3}/{FORMAT_SLUG}"
 
-# Module-level so we amortise the load across many chunks in one run
-# — tiktoken's encoding load is ~30ms which adds up across a batch of
-# a few thousand chunks.
-_ENCODING = tiktoken.get_encoding("cl100k_base")
+# Lazily-loaded tiktoken encoding — deliberately NOT loaded at import.
+# `get_encoding` downloads the BPE vocab over the network on a cold cache,
+# and this module is imported by every Dagster step worker when the code
+# location reloads. Loading it at import would turn a cold cache or blocked
+# egress into a hang at *step startup* — for every step, not just chunking.
+# Load on first use (in the op body); it's then amortised across the run.
+_ENCODING = None
+
+
+def _encoding():
+    global _ENCODING
+    if _ENCODING is None:
+        _ENCODING = tiktoken.get_encoding("cl100k_base")
+    return _ENCODING
 
 
 def _s3_client():
@@ -85,15 +95,16 @@ def _slice_into_chunks(
     # the encoded page appends a small delimiter's worth so successive
     # pages don't get glued into a single word by the tokenizer's
     # boundary handling — using "\n\n" between pages is enough.
+    enc = _encoding()
     token_ids: list[int] = []
     token_to_page: list[int] = []
     for page in pages:
-        page_tokens = _ENCODING.encode(page["text"])
+        page_tokens = enc.encode(page["text"])
         token_ids.extend(page_tokens)
         token_to_page.extend([page["page_num"]] * len(page_tokens))
         # Separator tokens; count against the page they follow so they
         # don't distort chunk boundaries.
-        sep_tokens = _ENCODING.encode("\n\n")
+        sep_tokens = enc.encode("\n\n")
         token_ids.extend(sep_tokens)
         token_to_page.extend([page["page_num"]] * len(sep_tokens))
 
@@ -113,7 +124,7 @@ def _slice_into_chunks(
         window = token_ids[start:end]
         if not window:
             break
-        text = _ENCODING.decode(window).strip()
+        text = enc.decode(window).strip()
         if not text:
             continue
         page_start = token_to_page[start]

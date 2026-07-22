@@ -15,7 +15,7 @@ import pytest
 
 from clear_context_pipeline.defs.knowledgebase.chunks import (
     _slice_into_chunks,
-    _ENCODING,
+    _encoding,
 )
 
 
@@ -63,8 +63,8 @@ class TestSliceIntoChunks:
         # last/first token windows. This catches an off-by-one on
         # `step = chunk_tokens - overlap_tokens` that would silently
         # halve retrieval recall on split-across-boundary passages.
-        first_ids = _ENCODING.encode(chunks[0]["text"])
-        second_ids = _ENCODING.encode(chunks[1]["text"])
+        first_ids = _encoding().encode(chunks[0]["text"])
+        second_ids = _encoding().encode(chunks[1]["text"])
         # The tail of chunk 0 should share a prefix with the head of
         # chunk 1 (allowing some tokenizer-boundary jitter, so we
         # check for a non-trivial overlap).
@@ -93,7 +93,7 @@ class TestSliceIntoChunks:
         text = "word " * 300
         pages = _pages(text)
         chunks = _slice_into_chunks(pages, chunk_tokens=100, overlap_tokens=20)
-        last_text_ids = _ENCODING.encode(chunks[-1]["text"])
+        last_text_ids = _encoding().encode(chunks[-1]["text"])
         assert len(last_text_ids) <= 100
 
     def test_overlap_larger_than_chunk_is_rejected(self):
