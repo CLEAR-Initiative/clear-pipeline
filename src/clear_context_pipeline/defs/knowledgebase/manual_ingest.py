@@ -372,7 +372,7 @@ def manual_document_extract_datapoints(
         )
         return {**kb_result, "datapoints_extracted": False}
 
-    llm = make_llm_provider("extraction")
+    llm = make_llm_provider("datapoints")
     s3 = _s3_client()
     bucket = os.environ["S3_BUCKET"]
 

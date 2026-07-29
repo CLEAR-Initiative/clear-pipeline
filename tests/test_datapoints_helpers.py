@@ -11,9 +11,11 @@ from unittest.mock import patch
 import pytest
 
 from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
+    _backfill_chunk_indices,
     _collect_location_refs,
     _collect_numeric_fields,
     _dig,
+    _match_chunk_index,
     _num_or_none,
     _resolve_all_locations,
     _resolve_figure_scopes,
@@ -314,3 +316,94 @@ class TestNumericFieldScopeSchema:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── chunk_index backfill ──────────────────────────────────────────────
+
+_CHUNKS = [
+    {"chunk_index": 0, "page_start": 1, "page_end": 2, "text": "Cover page and table of contents. NRC situation report."},
+    {"chunk_index": 1, "page_start": 2, "page_end": 3, "text": "In North Kordofan, 42,000 people were newly displaced during the reporting period."},
+    {"chunk_index": 2, "page_start": 3, "page_end": 4, "text": "Health facilities in El Fasher were damaged; 3 people were killed in the attack."},
+]
+
+
+def test_match_chunk_index_exact_substring():
+    idx = _match_chunk_index(
+        "42,000 people were newly displaced", page_number=2, chunks=_CHUNKS,
+    )
+    assert idx == 1
+
+
+def test_match_chunk_index_page_narrows_ambiguity():
+    # The quote text also loosely resembles chunk 2, but page_number=3 keeps
+    # both 1 and 2 in range; exact substring still resolves to chunk 2.
+    idx = _match_chunk_index(
+        "3 people were killed in the attack", page_number=4, chunks=_CHUNKS,
+    )
+    assert idx == 2
+
+
+def test_match_chunk_index_fuzzy_when_no_exact():
+    # Slightly paraphrased/whitespace-mangled quote → fuzzy longest-block match.
+    idx = _match_chunk_index(
+        "42,000  people   were newly   displaced during", page_number=None, chunks=_CHUNKS,
+    )
+    assert idx == 1
+
+
+def test_match_chunk_index_no_match_returns_none():
+    assert _match_chunk_index(
+        "completely unrelated sentence about funding appeals", page_number=9, chunks=_CHUNKS,
+    ) is None
+    assert _match_chunk_index("", page_number=1, chunks=_CHUNKS) is None
+
+
+def test_backfill_chunk_indices_walks_and_overwrites():
+    merged = {
+        "displacement": {
+            "new_displacements": {
+                "value": 42000, "unit": "people", "confidence": "reported",
+                "source_quote": "42,000 people were newly displaced",
+                "page_number": 2, "chunk_index": 99,  # LLM guess — must be overwritten
+                "scope_location_name": "North Kordofan",
+            },
+        },
+        "casualties": {
+            "killed": {
+                "total": {
+                    "value": 3, "unit": "people", "confidence": "verified",
+                    "source_quote": "3 people were killed in the attack",
+                    "page_number": 4, "chunk_index": None,
+                    "scope_location_name": "El Fasher",
+                },
+            },
+        },
+    }
+    with_quote, matched = _backfill_chunk_indices(merged, _CHUNKS)
+    assert (with_quote, matched) == (2, 2)
+    assert merged["displacement"]["new_displacements"]["chunk_index"] == 1
+    assert merged["casualties"]["killed"]["total"]["chunk_index"] == 2
+
+
+def test_backfill_chunk_indices_nulls_unmatched_and_quoteless():
+    merged = {
+        "needs_and_funding": {
+            "overall_affected": {
+                "value": 1, "unit": "people", "confidence": "media",
+                "source_quote": "a sentence that appears in no chunk at all",
+                "page_number": 1, "chunk_index": 7,
+                "scope_location_name": "Sudan",
+            },
+        },
+        "displacement": {
+            "idp_stock": {
+                "value": 5, "unit": "people", "confidence": "reported",
+                "source_quote": "", "page_number": None, "chunk_index": 4,
+                "scope_location_name": None,
+            },
+        },
+    }
+    with_quote, matched = _backfill_chunk_indices(merged, _CHUNKS)
+    assert (with_quote, matched) == (1, 0)  # only the affected figure had a quote; it didn't match
+    assert merged["needs_and_funding"]["overall_affected"]["chunk_index"] is None
+    assert merged["displacement"]["idp_stock"]["chunk_index"] is None

@@ -376,21 +376,28 @@ def reliefweb_weekly_enriched_chunks(
 
 
 def _run_context(llm, doc_text: str, chunk_text: str, *, cache_key: str) -> str:
-    """One contextualization call. Doc goes in `system` so prompt
-    caching keys off it; the chunk-specific tail lives in `user`."""
+    """One contextualization call. Doc goes in `system` so prompt caching
+    keys off it; the chunk-specific tail lives in `user`.
+
+    The output is a single free-text prefix, so we use ``complete_text`` — no
+    JSON schema. The prior ``ChunkContext`` wrapper added nothing but a parse
+    step that models fond of ```json fences or empty bodies failed on, and it
+    needlessly required structured-output support for the pipeline's cheapest,
+    highest-volume step. An empty/whitespace return means "no prefix" (short
+    or boilerplate chunk); the caller falls back to the raw chunk text.
+    """
     system = (
         f"{CONTEXT_SYSTEM}\n\n"
         f"---\nFULL REPORT (cached; do not repeat):\n{doc_text}\n---"
     )
     user = f"Chunk to contextualize:\n\n{chunk_text}"
-    result = llm.complete_structured(
+    text = llm.complete_text(
         system=system,
         user=user,
-        schema=ChunkContext,
         max_tokens=200,
         cache_key=cache_key,
     )
-    return result.context.strip()
+    return text.strip()
 
 
 def _run_extraction(llm, embedded_text: str) -> ExtractedParameters:
