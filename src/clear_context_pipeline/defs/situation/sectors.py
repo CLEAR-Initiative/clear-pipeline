@@ -103,7 +103,7 @@ class _SectorLLM(BaseModel):
         default_factory=list,
         description=(
             "Bulleted list of concrete impacts on affected populations. "
-            "One sentence per bullet. 3–6 bullets ideal."
+            "Terse fragment per bullet (max 15 words). 3–6 bullets ideal."
         ),
     )
     humanitarian_conditions: list[str] = Field(
@@ -111,7 +111,7 @@ class _SectorLLM(BaseModel):
         description=(
             "Bulleted description of current humanitarian conditions "
             "(access to services, coverage rates, service quality). "
-            "One sentence per bullet."
+            "Terse fragment per bullet."
         ),
     )
     vulnerable_sections: list[str] = Field(
@@ -119,22 +119,22 @@ class _SectorLLM(BaseModel):
         description=(
             "Bulleted population groups whose vulnerability the "
             "evidence highlights (e.g. children under 5, pregnant "
-            "women, IDPs, elderly). One sentence per bullet."
+            "women, IDPs, elderly). Terse fragment per bullet."
         ),
     )
     top_needs: list[str] = Field(
         default_factory=list,
         description=(
             "Bulleted top unmet needs the evidence identifies. Ordered "
-            "roughly by scale / urgency. One sentence per bullet."
+            "roughly by scale / urgency. Terse fragment per bullet."
         ),
     )
     priority_interventions: list[str] = Field(
         default_factory=list,
         description=(
             "Bulleted interventions the evidence prioritises "
-            "(what programs / activities should scale up). One "
-            "sentence per bullet."
+            "(what programs / activities should scale up). Terse "
+            "fragment per bullet."
         ),
     )
     information_coverage: list[_InformationCoverageAreaLLM] = Field(
@@ -169,7 +169,7 @@ _BASE_INSTRUCTIONS = (
     "- Preserve number formats and units exactly as the source cites.\n"
     "- Use the local admin names as they appear in the sources.\n"
     "- Neutral factual tone. No editorialising, no calls to action.\n"
-    "- Bullets are single sentences, not paragraphs.\n"
+    "- Bullets are terse fragments (max 15 words), not sentences. Lead with the figure or fact; drop filler.\n"
 )
 
 
