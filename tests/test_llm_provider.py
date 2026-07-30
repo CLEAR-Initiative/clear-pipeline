@@ -52,24 +52,30 @@ class TestStripCodeFence:
 
 # ── FallbackProvider + circuit breaker ────────────────────────────────
 
-from clear_context_pipeline.providers.llm import FallbackProvider
+from clear_context_pipeline.providers.llm import (
+    EmptyResponseError,
+    FallbackProvider,
+)
 
 
 class _FakeProvider:
-    """Minimal LLMProvider double. `fail_first` calls raise, then it succeeds."""
+    """Minimal LLMProvider double. The first `fail_times` calls raise a provider
+    error (EmptyResponseError ∈ _FALLBACK_ERRORS), then it succeeds. `raises`
+    overrides the exception type (e.g. TypeError for a programming error)."""
 
-    def __init__(self, name, *, fail_times=0, tag="ok"):
+    def __init__(self, name, *, fail_times=0, tag="ok", raises=EmptyResponseError):
         self.role = "context"
         self.model = name
         self.provider_name = name
         self._fail_times = fail_times
         self._tag = tag
+        self._raises = raises
         self.calls = 0
 
     def complete_text(self, **kw):
         self.calls += 1
         if self.calls <= self._fail_times:
-            raise RuntimeError(f"{self.model} boom {self.calls}")
+            raise self._raises(f"{self.model} boom {self.calls}")
         return self._tag
 
     complete_structured = complete_text
@@ -109,3 +115,25 @@ class TestFallbackProvider:
         assert fb.complete_text(system="", user="") == "F"  # 1st fails → fallback
         assert fb.complete_text(system="", user="") == "P"  # recovers
         assert fb.complete_text(system="", user="") == "P"  # stays on primary
+
+    def test_programming_error_propagates_not_falls_back(self):
+        # A TypeError from our own code is NOT a provider failure — it must
+        # propagate, not silently trip the breaker and double spend on Claude.
+        p = _FakeProvider("p", fail_times=1, raises=TypeError)
+        f = _FakeProvider("f", tag="F")
+        fb = FallbackProvider(p, f)
+        with pytest.raises(TypeError):
+            fb.complete_text(system="", user="")
+        assert f.calls == 0  # fallback never reached
+
+    def test_model_reports_the_serving_provider(self):
+        # `llm.model` is persisted as provenance AFTER the call, so it must name
+        # who actually served it — primary when healthy, fallback once it fails.
+        p = _FakeProvider("cheap", fail_times=1, tag="P")
+        f = _FakeProvider("claude", tag="F")
+        fb = FallbackProvider(p, f, open_after=2)
+        assert fb.model == "cheap"                 # before any call, defaults to primary
+        fb.complete_text(system="", user="")       # primary fails → fallback serves
+        assert fb.model == "claude"                # provenance = the model that produced it
+        fb.complete_text(system="", user="")       # primary recovers
+        assert fb.model == "cheap"

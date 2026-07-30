@@ -351,6 +351,17 @@ def test_match_chunk_index_fuzzy_when_no_exact():
     assert idx == 1
 
 
+def test_match_chunk_index_off_by_one_page_falls_back_to_all():
+    # The quote lives in chunk 1 (pages 2-3). page_number=4 scopes to chunk 2
+    # (pages 3-4), which does NOT contain it. Page range is a preference, so the
+    # search widens to all chunks and still finds chunk 1 — before, an off-by-one
+    # page returned None despite an exact substring hit elsewhere.
+    idx = _match_chunk_index(
+        "42,000 people were newly displaced", page_number=4, chunks=_CHUNKS,
+    )
+    assert idx == 1
+
+
 def test_match_chunk_index_no_match_returns_none():
     assert _match_chunk_index(
         "completely unrelated sentence about funding appeals", page_number=9, chunks=_CHUNKS,

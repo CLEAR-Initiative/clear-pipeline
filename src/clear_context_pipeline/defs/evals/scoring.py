@@ -117,10 +117,10 @@ def _loc_key(ref: dict) -> str:
 
 def score_extraction(reference: dict, candidate: dict) -> dict[str, Any]:
     keys = set(reference) & set(candidate)
-    events, sectors, locs, time_hits = [], [], [], []
+    event_type_f1s, sectors, locs, time_hits = [], [], [], []
     for k in keys:
         r, c = reference[k], candidate[k]
-        events.append(_prf(set(r.get("event_types") or []), set(c.get("event_types") or []))["f1"])
+        event_type_f1s.append(_prf(set(r.get("event_types") or []), set(c.get("event_types") or []))["f1"])
         sectors.append(_prf(set(r.get("need_sectors") or []), set(c.get("need_sectors") or []))["f1"])
         locs.append(_prf(
             {_loc_key(x) for x in (r.get("locations") or [])} - {""},
@@ -131,7 +131,7 @@ def score_extraction(reference: dict, candidate: dict) -> dict[str, Any]:
             and r.get("time_range_end") == c.get("time_range_end")
         ) else 0.0)
     fields = {
-        "event_types_f1": _mean(events),
+        "event_types_f1": _mean(event_type_f1s),
         "need_sectors_f1": _mean(sectors),
         "locations_f1": _mean(locs),
         "time_range_exact": _mean(time_hits),

@@ -219,7 +219,10 @@ __marimo__/
 .exponential/
 evals/figure_scope/results.json
 
-# Model-replacement eval run artefacts (keep evals/reports/ + code tracked)
+# Model-replacement eval artefacts — regenerable, kept out of the repo. The
+# decision's evidence lives inline in docs/adr/0003-*.md (a results table), not
+# in these files. Input PDFs (evals/reports/) are large; operators supply their
+# own per evals/README.md. (Eval CODE under src/.../defs/evals/ IS tracked.)
 evals/cache/
 evals/results/
 evals/reports/

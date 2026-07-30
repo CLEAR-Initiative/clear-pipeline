@@ -101,27 +101,8 @@ class ExtractedParameters(BaseModel):
     )
 
 
-class ChunkContext(BaseModel):
-    """50-100 token contextual prefix positioning a chunk within its doc.
-
-    `context` defaults to empty string — Claude's tool_use path
-    occasionally returns `{}` for chunks the model decides don't
-    warrant a prefix (very short excerpts, boilerplate / ToC-like
-    text). Without the default the whole chunk gets dropped from
-    the knowledgebase; with the default, we fall through to
-    embedding the raw chunk text (no contextual prefix), which is
-    still better than losing the chunk.
-    """
-    context: str = Field(
-        default="",
-        description=(
-            "50–100 tokens describing what part of the report this chunk "
-            "comes from and what topic it covers. Used as a retrieval-time "
-            "hint prepended to the chunk before embedding. Return an "
-            "empty string only when the chunk is short enough that "
-            "context would be uninformative (footers, boilerplate)."
-        ),
-    )
+# (The former `ChunkContext` schema is gone — the context step now returns a
+# plain-text prefix via `complete_text`, so there is no JSON wrapper to model.)
 
 
 CONTEXT_SYSTEM = (

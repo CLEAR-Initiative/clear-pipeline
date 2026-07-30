@@ -39,9 +39,29 @@ from clear_context_pipeline.providers.llm import LLMProvider, OpenAICompatiblePr
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Repo root is five parents up: evals/ → defs/ → clear_context_pipeline/ →
-# src/ → <repo root>. The eval PDFs and outputs live under <repo root>/evals.
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+# The eval PDFs and outputs live under <repo root>/evals. In a source checkout
+# the repo root is five parents up (evals/ → defs/ → clear_context_pipeline/ →
+# src/ → <root>), but that assumption breaks when the package is installed as a
+# wheel (no evals/ dir beside site-packages). Resolve robustly: an explicit
+# EVAL_DATA_DIR override wins; else walk up looking for an evals/ dir; else fall
+# back to the parents[4] guess. This harness is a dev/offline tool, so a missing
+# corpus surfaces as build_corpus() → dg.Failure, never a silent wrong path.
+def _eval_data_root() -> Path:
+    override = os.environ.get("EVAL_DATA_DIR")
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve()
+    # Look for the DATA dir (repo-root `evals/`, marked by its tracked README or a
+    # populated reports/), NOT any `evals/` — `defs/evals/` is this code package
+    # and would otherwise match one level up and win.
+    for parent in here.parents:
+        evals = parent / "evals"
+        if (evals / "README.md").is_file() or (evals / "reports").is_dir():
+            return parent
+    return here.parents[4]
+
+
+_REPO_ROOT = _eval_data_root()
 REPORTS_DIR = _REPO_ROOT / "evals" / "reports"
 CACHE_DIR = _REPO_ROOT / "evals" / "cache"
 RESULTS_DIR = _REPO_ROOT / "evals" / "results"

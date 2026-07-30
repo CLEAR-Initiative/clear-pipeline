@@ -349,32 +349,10 @@ def _read_report_chunks(s3, bucket: str, report_id: str) -> list[dict] | None:
     return chunks or None
 
 
-def _match_chunk_index(
-    source_quote: Any, page_number: Any, chunks: list[dict],
-) -> int | None:
-    """Find the chunk_index of the chunk that contains `source_quote`.
-
-    Narrows to chunks whose `[page_start, page_end]` range covers the
-    figure's `page_number` (same 1-indexed page space as the `[page N]`
-    markers) before matching — this disambiguates the token-overlap case
-    where one sentence lives in two adjacent chunks. Tries exact substring
-    first (lowest chunk_index wins for determinism), then a longest-common-
-    block fuzzy match above `_CHUNK_MATCH_MIN_RATIO`."""
-    quote = _norm_text(source_quote)
-    if not quote:
-        return None
-
-    candidates = chunks
-    if isinstance(page_number, int):
-        page_scoped = [
-            c for c in chunks
-            if isinstance(c.get("page_start"), int)
-            and isinstance(c.get("page_end"), int)
-            and c["page_start"] <= page_number <= c["page_end"]
-        ]
-        if page_scoped:
-            candidates = page_scoped
-
+def _match_in(quote: str, candidates: list[dict]) -> int | None:
+    """Match `quote` against `candidates`: exact substring first (lowest
+    chunk_index wins for determinism), then a longest-common-block fuzzy match
+    above `_CHUNK_MATCH_MIN_RATIO`."""
     substring_hits = [
         int(c["chunk_index"])
         for c in candidates
@@ -398,6 +376,37 @@ def _match_chunk_index(
         if ratio > best_ratio:
             best_ratio, best_idx = ratio, int(c["chunk_index"])
     return best_idx if best_ratio >= _CHUNK_MATCH_MIN_RATIO else None
+
+
+def _match_chunk_index(
+    source_quote: Any, page_number: Any, chunks: list[dict],
+) -> int | None:
+    """Find the chunk_index of the chunk that contains `source_quote`.
+
+    The figure's `page_number` (same 1-indexed page space as the `[page N]`
+    markers) is a **preference, not a hard filter**: chunks whose
+    `[page_start, page_end]` range covers it are searched first — which
+    disambiguates the token-overlap case where one sentence spans two adjacent
+    chunks — but if that finds nothing we widen to ALL chunks. Otherwise an
+    off-by-one `page_number`, or a quote on a page boundary, would null the
+    result even when an exact substring hit exists elsewhere."""
+    quote = _norm_text(source_quote)
+    if not quote:
+        return None
+
+    if isinstance(page_number, int):
+        page_scoped = [
+            c for c in chunks
+            if isinstance(c.get("page_start"), int)
+            and isinstance(c.get("page_end"), int)
+            and c["page_start"] <= page_number <= c["page_end"]
+        ]
+        if page_scoped:
+            idx = _match_in(quote, page_scoped)
+            if idx is not None:
+                return idx
+
+    return _match_in(quote, chunks)
 
 
 def _backfill_chunk_indices(merged: Any, chunks: list[dict]) -> tuple[int, int]:

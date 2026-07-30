@@ -76,11 +76,31 @@ LLMRole = Literal["context", "extraction", "datapoints", "narrative"]
 # Tune with LLM_TIMEOUT_SECONDS.
 DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "90"))
 
+
+class EmptyResponseError(RuntimeError):
+    """A provider returned an empty/whitespace body (or no choices). Treated as
+    a failure — not a successful empty string — so a configured fallback
+    re-serves the call and the breaker counts it, rather than the context step
+    silently embedding a blank prefix and poisoning that chunk."""
+
+
+# Exceptions that mean "the provider/transport failed" and should trigger the
+# fallback + count against the circuit breaker. Deliberately EXCLUDES our own
+# programming errors (TypeError / ValueError / KeyError / AttributeError) so a
+# bug in this code fails loudly instead of silently doubling spend on Claude.
+_FALLBACK_ERRORS: tuple[type[BaseException], ...] = (
+    openai.APIError,
+    anthropic.APIError,
+    ValidationError,
+    json.JSONDecodeError,
+    EmptyResponseError,
+)
+
 # New roles fall back to `extraction`'s env vars when their own aren't set.
 # Keeps a code deploy safe if it lands before the infra apply that adds the
 # per-role vars: pre-apply, `extraction` is still Sonnet, so datapoints /
 # narrative correctly stay on Sonnet via this fallback.
-_ROLE_ENV_FALLBACK: dict[str, str] = {
+_ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     "datapoints": "extraction",
     "narrative": "extraction",
 }
@@ -285,7 +305,10 @@ class AnthropicProvider:
             system=system_blocks,
             messages=[{"role": "user", "content": user}],
         )
-        return "".join(getattr(b, "text", "") for b in response.content).strip()
+        text = _strip_code_fence("".join(getattr(b, "text", "") for b in response.content))
+        if not text:
+            raise EmptyResponseError(f"empty text response from {self.model}")
+        return text
 
 
 def _pydantic_to_anthropic_tool(schema: type[BaseModel]) -> dict[str, Any]:
@@ -386,6 +409,8 @@ class OpenAICompatibleProvider:
             ],
             response_format=response_format,  # type: ignore[arg-type]
         )
+        if not raw.choices:
+            raise EmptyResponseError(f"no choices from {self.model}")
         text = _strip_code_fence(raw.choices[0].message.content or "")
         try:
             return schema.model_validate_json(text)
@@ -448,7 +473,16 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
         )
-        return (raw.choices[0].message.content or "").strip()
+        if not raw.choices:
+            raise EmptyResponseError(f"no choices from {self.model}")
+        # Cheap OSS models wrap free text in ```fences``` (the same reason
+        # complete_structured strips them). And an empty/whitespace body is a
+        # FAILURE, not a successful "" — returning it would silently poison this
+        # chunk's context embedding, so raise to trigger the fallback + breaker.
+        text = _strip_code_fence(raw.choices[0].message.content or "")
+        if not text:
+            raise EmptyResponseError(f"empty text response from {self.model}")
+        return text
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -460,9 +494,10 @@ class FallbackProvider:
     """Primary model with a reliable fallback, so a flaky/hung primary can
     never stall the pipeline or drop a unit of work.
 
-    On any exception from the primary (timeout after retries, empty response,
-    unparseable JSON), the same call is transparently re-served by the
-    ``fallback`` provider (typically Claude). A per-provider **circuit
+    On a primary **provider failure** (timeout after retries, empty response,
+    unparseable JSON — the ``_FALLBACK_ERRORS`` set; our own programming errors
+    deliberately propagate instead), the same call is transparently re-served by
+    the ``fallback`` provider (typically Claude). A per-provider **circuit
     breaker** trips after ``open_after`` consecutive primary failures and
     routes straight to the fallback for ``cooldown_seconds`` — so once a model
     is clearly down we stop paying its timeout on every call, and the batch
@@ -487,8 +522,22 @@ class FallbackProvider:
         self._open_until = 0.0
         self._lock = threading.Lock()
         self.role = primary.role
-        self.model = primary.model
+        # The model that ACTUALLY served the most recent call, guarded by the
+        # same lock as the breaker state.
+        self._served_model = primary.model
         self.provider_name = f"{primary.provider_name}->fallback:{fallback.provider_name}"
+
+    @property
+    def model(self) -> str:
+        """Model that served the most recent call. Call sites persist `llm.model`
+        as provenance (`extracted_by_model`, the debug snapshot, `generated_by_
+        model`) AFTER the call, so returning the last-served model keeps that
+        honest: primary healthy → primary; breaker open → the fallback that
+        actually produced the row. Reflects whichever call finished last under a
+        provider shared across concurrent calls — fine for the sequential
+        per-report extraction path this runs on."""
+        with self._lock:
+            return self._served_model
 
     def _breaker_open(self) -> bool:
         with self._lock:
@@ -513,14 +562,22 @@ class FallbackProvider:
             try:
                 result = getattr(self._primary, method)(**kwargs)
                 self._record(ok=True)
+                with self._lock:
+                    self._served_model = self._primary.model
                 return result
-            except Exception as exc:  # noqa: BLE001 — any failure → fall back, never propagate
+            except _FALLBACK_ERRORS as exc:
+                # Only provider/transport/parse/empty failures fall back. A
+                # TypeError/ValueError from our own code propagates instead of
+                # silently tripping the breaker and doubling spend on Claude.
                 self._record(ok=False)
                 logger.warning(
                     "[LLM] primary %s failed (%s) — falling back to %s",
                     self._primary.model, exc, self._fallback.model,
                 )
-        return getattr(self._fallback, method)(**kwargs)
+        result = getattr(self._fallback, method)(**kwargs)
+        with self._lock:
+            self._served_model = self._fallback.model
+        return result
 
     def complete_structured(self, **kwargs: Any) -> Any:
         return self._call("complete_structured", kwargs)
@@ -592,6 +649,16 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     # Configure with LLM_<ROLE>_FALLBACK_{PROVIDER,MODEL,API_KEY,BASE_URL}.
     fb_model = _env("FALLBACK_MODEL", required=False)
     fb_key = _env("FALLBACK_API_KEY", required=False)
+    if bool(fb_model) != bool(fb_key):
+        # A half-set fallback (e.g. a typo'd key var) would otherwise silently
+        # run a bare cheap primary with NO fallback and NO breaker — the exact
+        # opposite of what ADR-0003 makes mandatory for a non-Claude backfill.
+        logger.warning(
+            "[LLM] role=%s has a PARTIAL fallback config (FALLBACK_MODEL=%s, "
+            "FALLBACK_API_KEY set=%s) — fallback + circuit breaker are DISABLED. "
+            "Set both, or neither.",
+            role, fb_model or "(unset)", bool(fb_key),
+        )
     if fb_model and fb_key:
         fb_provider = (_env("FALLBACK_PROVIDER", required=False) or "anthropic").strip().lower()
         fallback = _construct(

@@ -47,7 +47,7 @@ Chosen on the eval's Claude-parity scores, gated on `validity`:
 |---|---|---|---|
 | **context** | `nvidia/nemotron-3-nano-30b-a3b:free` (free) or `qwen/qwen3-next-80b-a3b-instruct` (paid) | semantic cosine to Claude **0.824 / 0.911**, 100% valid | context is 78% of cost and the easy task; a free model this close makes it ~$0 |
 | **extraction** | `qwen/qwen3-235b-a22b-2507` | F1 **0.542**, 92% valid, $0.09/$0.55 | best value; extraction is only ~$15/1k reports so the choice is low-stakes |
-| **datapoints** | Claude Haiku 4.5 (default) or `moonshotai/kimi-k2-0905` | kimi figF1 **0.580**, value-agree **0.790** | numbers feed the dashboard — wrong figures are the costly error; keep on Claude unless a spot-check clears a cheap model |
+| **datapoints** | Claude Sonnet 4.6 (default) or `moonshotai/kimi-k2-0905` | kimi figF1 **0.580**, value-agree **0.790** | numbers feed the dashboard — wrong figures are the costly error, so the default is the *strong* Claude tier (Sonnet, not Haiku); only move to a cheap model after a spot-check clears it |
 
 **Explicitly rejected: `qwen3-235b` for context.** Under the old *lexical* context
 metric it looked average (0.120) like everything else. The *semantic* re-score
@@ -108,6 +108,38 @@ Claude's mistakes scores well; pair datapoints with a human spot-check). Per ste
 Read `validity` (fraction of calls that succeeded) first — a high similarity over
 few valid calls is noise.
 
+## Eval results (latest run)
+
+The scored comparison the per-step choices above draw on. Inputs: 5 Sudan
+ReliefWeb reports (`evals/reports/`), Claude as the oracle, ~25 chunks/report.
+The full artefacts (`evals/results/`) are regenerable and gitignored — this table
+is the tracked evidence.
+
+**Read `validity` first** (fraction of calls that succeeded, ctx/ext/dp): a high
+similarity over few valid calls is noise. `—` = the metric had no informative
+reports (a free plain-text-only candidate produces no extraction/datapoints).
+
+| model | params(B) | active(B) | $/M in→out | context sim | extraction F1 | datapoints figF1 | dp value-agree | validity (ctx/ext/dp) |
+|---|--:|--:|--|--:|--:|--:|--:|--|
+| nvidia/nemotron-3-nano-30b-a3b:free | 30 | 3 | free | 0.824 | — | — | — | 1.0/—/— |
+| nvidia/nemotron-3-nano-30b-a3b | 30 | 3 | $0.05→$0.2 | 0.104 | 0.649 | 0.046 | 0.620 | 0.008/0.695/0.800 |
+| qwen/qwen3-30b-a3b-instruct-2507 | 30 | 3 | $0.05→$0.19 | 0.243 | 0.334 | 0.192 | 0.526 | 0.453/0.617/0.967 |
+| qwen/qwen3-next-80b-a3b-instruct | 80 | 3 | $0.1→$1.1 | **0.911** | 0.496 | 0.237 | 0.742 | 1.0/0.992/1.0 |
+| deepseek/deepseek-v4-flash | 100 | — | $0.14→$0.28 | 0.615 | 0.332 | 0.073 | 0.300 | 0.617/0.938/0.867 |
+| inclusionai/ling-3.0-flash:free | 100 | 6 | free | 0.220 | — | — | — | 1.0/—/— |
+| qwen/qwen3-235b-a22b-2507 | 235 | 22 | $0.09→$0.55 | 0.438 | **0.542** | 0.354 | 0.686 | 0.984/0.922/1.0 |
+| z-ai/glm-4.6 | 355 | 32 | $0.5→$2 | 0.061 | 0.546 | 0.015 | 0.100 | 0.484/0.359/0.833 |
+| z-ai/glm-4.7 | 355 | 32 | $0.4→$1.75 | 0.185 | 0.496 | 0.050 | 0.175 | 0.008/0.133/0.233 |
+| nvidia/nemotron-3-ultra-550b-a55b:free | 550 | 55 | free | 0.819 | — | — | — | 0.945/—/— |
+| deepseek/deepseek-v3.2 | 671 | 37 | $0.27→$0.4 | 0.906 | 0.407 | 0.331 | 0.512 | 1.0/1.0/1.0 |
+| moonshotai/kimi-k2-0905 | 1000 | 32 | $0.6→$2.5 | 0.617 | 0.620 | **0.580** | **0.790** | 0.992/0.969/1.0 |
+
+Reading it against the §2 picks: **context** — `qwen3-next-80b` (0.911) leads the
+paid routes and free `nemotron-3-nano:free` (0.824) is within reach at ~$0;
+**extraction** — `qwen3-235b` (F1 0.542) is the best value; **datapoints** — only
+`kimi-k2` (figF1 0.580 / value-agree 0.790) approaches usable, and even it stays
+behind a spot-check, which is why the default remains Claude Sonnet.
+
 ## Consequences
 
 - **Cost expectations.** Weekly ≈ $1. Backfill (1,000 reports): cheap tier
@@ -135,7 +167,8 @@ few valid calls is noise.
 
 ## Related
 
-- `evals/results/leaderboard.md` — the scored comparison this ADR draws on.
+- **Eval results (latest run)** above — the scored comparison this ADR draws on,
+  embedded inline (the `evals/results/` artefacts it's generated from are gitignored).
 - `evals/results/COST_STRATEGY.md` — the token/cost model and per-step breakdown.
 - `src/clear_context_pipeline/defs/evals/candidates.py` — the candidate set +
   drop reasons.

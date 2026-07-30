@@ -348,12 +348,12 @@ Deduplication is the load-bearing part of aggregation: it's what turns "sum of e
 
 #### 6.4.1 The incident key
 
-An incident key is a tuple `(event, location, time_bucket)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one incident; the aggregator picks one and discards the rest.
+An incident key is a tuple `(figure_scope_location, time_bucket, event_type_set)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one figure; the aggregator picks one and discards the rest. (This is the canonical key per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md); the *shipped* key today is only `(location, time_bucket)` — the `event_type_set` dimension is specified here but not yet built, which silently collapses co-located distinct events. See ADR-0002 Consequences.)
 
 | Dimension | Canonicalisation rule |
 |---|---|
-| **Event** | Map the extractor's raw `event_type` string through the `disaster_types` taxonomy already in clear-api. "Armed clash", "battle", "armed confrontation" all fold to a single glide code. Unmapped strings retain their raw value but are logged for taxonomy expansion. |
-| **Location** | Prefer the resolved `locations.id`. Fall back to a normalised pcode (uppercase, no punctuation) when the ID resolver returned null. When both are missing, the row is excluded from cross-report dedup and counted only under its own report — never rolled up. |
+| **Figure scope (location)** | The location a *figure* is scoped to — the place the number covers — **not** every place the report mentions (ADR-0002). "1,000 affected in Kordofan" is scoped to Kordofan even if Sudan and El Obeid also appear. Prefer the resolved `locations.id`; fall back to a normalised pcode (uppercase, no punctuation) when the resolver returned null. When both are missing, the row is excluded from cross-report dedup and counted only under its own report — never rolled up. |
+| **Event-type set** | The report's `event_types` mapped through the `disaster_types` taxonomy in clear-api ("armed clash", "battle", "armed confrontation" → one glide code), then treated **atomically**: a figure totalling across `{conflict, flood}` is one set and is never split between them (ADR-0002). Unmapped strings retain their raw value but are logged for taxonomy expansion. |
 | **Time bucket** | Granularity depends on the field kind — see the table below. |
 
 #### 6.4.2 Grouping window — how close two reports must be to count as the same figure
@@ -362,8 +362,9 @@ Our source reports are **analytical and weekly**, and a figure is already a tota
 
 | Kind of figure | Window | Rationale |
 |---|---|---|
-| **Summed** figures (killed, injured, new displacements, returnees, security incidents, aid workers killed, funding received) | **Week** | Two reports covering the same week + location + event are the same weekly total → deduped. Different weeks are genuinely different → summed. A *day* window would never group two weekly reports (dedup effectively off → same-week restatements double-count); a *month* window would merge four distinct weeks (→ undercount). |
-| **State snapshots** (people displaced / in need, refugees, funding required) | **Month** | These change slowly and are latest-wins, so a month groups a period's reports and takes the most recent. |
+| **Summed** figures (killed, injured, new displacements, returnees, security incidents, aid workers killed, funding received) | **Week** | Two reports covering the same week + figure scope + event-type set are the same weekly total → deduped. Different weeks (or a different event-type set) are genuinely different → summed. A *day* window would never group two weekly reports (dedup effectively off → same-week restatements double-count); a *month* window would merge four distinct weeks (→ undercount). |
+| **Max** figures (population affected) | **Month** | The widest-reach figure over a period; a month groups a period's restatements and keeps the largest (§6.4.3 `max_within_report_then_latest`), so a later, narrower report can't shrink it. |
+| **State snapshots** (people displaced / in need, refugees, funding required, IPC phase) | **Month** | These change slowly and are latest-wins, so a month groups a period's reports and takes the most recent. |
 | **Set-union** labels (event types, clusters) | — | No window; every report's values are merged into one list. |
 
 **Known limitation — overlapping periods.** Sitreps often cover **2–6 week windows**, and those windows overlap. A calendar week can't express that: two reports whose periods overlap but *end* in different weeks land in different weeks and both count. The correct fix compares the reports' period **ranges** (`reporting_period_start`..`end`) for overlap rather than bucketing a single date — a planned refinement, not yet built. A weekly window is the best single-date approximation short of it.
@@ -400,9 +401,9 @@ Rule: **collapse same-report duplicates before cross-report dedup.** Within one 
 - `quality_score` for the bucket reflects the DTM row's confidence weight; media row is recorded in `confidence_mix` for transparency but doesn't contribute value.
 
 **C) Two weekly reports of the same week's toll (El Fasher)**
-- Report A (period ending 2026-07-02): `{ event: "attack-on-health", location: SD0201, killed: 3 }`
-- Report B (period ending 2026-07-04, same ISO week): `{ event: "attack-on-health", location: SD0201, killed: 5 }`
-- Same week + location + event → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a `verified` figure within 3 days would override — §6.4.3). Reports from *different* weeks are different figures and sum.
+- Report A (period ending 2026-07-02): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 3 }` — a weekly **total** for the scope, not a single-incident record (per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md) the source reports totals, not incident logs).
+- Report B (period ending 2026-07-04, same ISO week): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 5 }`
+- Same week + same figure scope + same event-type set → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a `verified` figure within 3 days would override — §6.4.3). Reports from a *different* week — or a *different* event-type set (e.g. a co-located flood, `{flood}`) — are different figures and sum (ADR-0002).
 
 **D) Same report re-quotes displacement figure in 4 places**
 - Same-report multi-mention collapse (§6.4.4): pick one mention (highest confidence, earliest chunk).

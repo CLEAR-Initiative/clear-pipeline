@@ -241,12 +241,23 @@ def eval_scores(
             seconds += cand_stats["seconds"]
 
         # Average each numeric metric across reports.
-        agg: dict[str, float] = {}
+        agg: dict[str, Any] = {}
         if per_report_scores:
             for metric in per_report_scores[0]:
                 vals = [s[metric] for s in per_report_scores if isinstance(s.get(metric), (int, float))]
                 if vals:
                     agg[metric] = round(_mean(vals), 4)
+            # Carry through non-numeric provenance the numeric loop drops — chiefly
+            # the context scorer's `similarity_method`. A lexical-fallback score
+            # (no embedding key) systematically under-scores paraphrase and is NOT
+            # comparable to a semantic-cosine one, so the leaderboard must be able
+            # to flag which was used rather than silently mixing the two.
+            methods = sorted({
+                s["similarity_method"] for s in per_report_scores
+                if isinstance(s.get("similarity_method"), str)
+            })
+            if methods:
+                agg["similarity_method"] = methods[0] if len(methods) == 1 else "mixed:" + ",".join(methods)
         agg["calls_ok"] = ok
         agg["calls_failed"] = failed
         agg["validity"] = round(ok / (ok + failed), 4) if (ok + failed) else 0.0
@@ -306,9 +317,18 @@ def eval_leaderboard(context: AssetExecutionContext) -> dg.MaterializeResult:
         "| model | params(B) | active(B) | $/M in→out | context sim | extraction F1 | datapoints figF1 | dp value-agree | validity (ctx/ext/dp) |",
         "|---|--:|--:|--|--:|--:|--:|--:|--|",
     ]
+    lexical_seen = False  # any context score scored lexically, not semantically?
     for r in rows:
         s = r["steps"]
-        ctx_sim = s.get("context", {}).get("mean_similarity")
+        ctx = s.get("context", {})
+        ctx_sim = ctx.get("mean_similarity")
+        # Flag a lexical(-fallback) context score — it under-scores paraphrase and
+        # isn't comparable to a semantic-cosine one (see similarity_method).
+        ctx_method = ctx.get("similarity_method")
+        ctx_cell = _fmt(ctx_sim)
+        if ctx_sim is not None and isinstance(ctx_method, str) and ctx_method != "embedding_cosine":
+            ctx_cell += " †"
+            lexical_seen = True
         ext_f1 = s.get("extraction", {}).get("overall")
         dp_f1 = s.get("datapoints", {}).get("figure_f1")
         dp_val = s.get("datapoints", {}).get("value_agreement")
@@ -321,9 +341,16 @@ def eval_leaderboard(context: AssetExecutionContext) -> dg.MaterializeResult:
             f"${r['in_price']:g}→${r['out_price']:g}"
         )
         lines.append(
-            f"| {r['model']} | {r['params_b']:g} | {active} | {price} | {_fmt(ctx_sim)} | {_fmt(ext_f1)} "
+            f"| {r['model']} | {r['params_b']:g} | {active} | {price} | {ctx_cell} | {_fmt(ext_f1)} "
             f"| {_fmt(dp_f1)} | {_fmt(dp_val)} | {val} |",
         )
+    if lexical_seen:
+        lines += [
+            "",
+            "† context sim scored by **lexical** difflib, not semantic cosine (no "
+            "embedding key at score time). Lexical under-scores paraphrase — not "
+            "comparable to the semantic rows; re-score with an embedding key set.",
+        ]
     md = "\n".join(lines) + "\n"
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

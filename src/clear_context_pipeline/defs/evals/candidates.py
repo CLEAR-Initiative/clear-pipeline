@@ -230,10 +230,14 @@ CANDIDATES: list[Candidate] = [
 ]
 
 # Excluded after verification (do NOT re-add without checking structured_outputs):
-#  - inclusionai/ling-3.0-flash:free, nvidia/nemotron-3-*-super/ultra,
-#    nvidia/nemotron-3-nano-omni-*:free, z-ai/glm-4.5-air, base qwen3-235b-a22b,
-#    base moonshotai/kimi-k2 — each either lacks structured-outputs support or
-#    leaked reasoning into the answer. gemma-4-31b:free = upstream-rate-limited.
+#  - nvidia/nemotron-3-*-super, nvidia/nemotron-3-nano-omni-*:free,
+#    z-ai/glm-4.5-air, base qwen3-235b-a22b, base moonshotai/kimi-k2 — each either
+#    lacks structured-outputs support or leaked reasoning into the answer.
+#    gemma-4-31b:free = upstream-rate-limited.
+#  NOTE: inclusionai/ling-3.0-flash:free and the nemotron-3-nano-30b / -ultra-550b
+#    :free routes ALSO lack structured outputs, but they are NOT excluded — they
+#    run as CONTEXT-ONLY candidates above (`structured_ok=False`), competing for
+#    the plain-text context step while skipping extraction + datapoints.
 #  - moonshotai/kimi-k2.5 — advertises json_schema_mode but emits empty/fenced
 #    JSON at runtime; 91 parse failures in the 2026-07-28 run (see block above).
 #  - qwen/qwen3.5-35b-a3b — same failure as kimi-k2.5: advertises json_schema_mode
