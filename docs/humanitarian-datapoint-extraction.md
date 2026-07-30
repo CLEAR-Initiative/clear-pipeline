@@ -196,7 +196,7 @@ A single LLM call emitting all ~50 datapoints in one shot is fragile: any schema
 | 1 | `TimingAndScope` | reporting_period_from/to, locations, event_types, active_clusters |
 | 2 | `Casualties` | killed / injured / missing, each disaggregated by men/women/children/unknown |
 | 3 | `Displacement` | IDP stock, new displacements, returnees, refugees, origin→destination flows |
-| 4 | `NeedsAndFunding` | PIN / operational presence / demographics / severity / funding per SAF sector (Shelter, WASH, Protection, Health, Food Security, Education); overall funding required/received |
+| 4 | `NeedsAndFunding` | PIN / operational presence / demographics / severity / funding per SAF sector (Shelter, WASH, Protection, Health, Food Security, Education); overall PIN; **overall population affected** (widest crisis reach — see §5.5); overall funding required/received |
 | 5 | `AccessAndIncidents` | access status per admin, security incidents, aid workers affected, infrastructure damage (schools, health facilities, water points, markets) |
 | 6 | `NarrativeAndConfidence` | brief summary, overall confidence, sector indicators (IPC phase, GAM/SAM, disease outbreaks, GBV cases, out-of-school children, water access, latrine coverage) |
 
@@ -214,7 +214,15 @@ class NumericField(BaseModel):
     source_quote: str             # the sentence the number came from
     chunk_index: int              # which chunk of the report
     page_number: int              # for the "cite the source" UX
+    # ── Figure Scope ────────────────────────────────────────────
+    # The ONE place this number is a total FOR — not every place the
+    # report mentions. "1,000 affected in Kordofan" → "Kordofan", even
+    # if the report is framed nationally and names other states.
+    scope_location_name: str      # LLM-emitted place name; null if unpinnable
+    scope_location_id: str        # resolved to locations.id post-extraction
 ```
+
+**Figure Scope (`scope_location_name` / `scope_location_id`).** ReliefWeb reports are analytical — a figure is *already a total* over some area (e.g. "1,000 affected in Kordofan"), and the report typically names many other places as context. The extractor emits `scope_location_name` = the single place the number is a total for (null if it can't be pinned — the LLM must **not** default to the country or the first place named). A resolver then fills `scope_location_id` from `locations`. This is what lets aggregation bucket a figure to the right location instead of fanning it across every mentioned place; a figure with no resolved scope is excluded from cross-report roll-up. See [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md).
 
 This ~4× the LLM output volume per call. Combined with domain partitioning, the total structured-output volume per report is:
 
@@ -233,6 +241,17 @@ Time strings ("last week", "since April") are resolved against `publishedAt`. If
 ### 5.4 Failure isolation
 
 Each sub-schema call runs with its own retry loop. A parse failure in `Casualties` doesn't drop `Displacement`. If any single sub-schema exhausts retries, its slot in the `data` blob is written as `null` with a `failure_reason` marker so the aggregator can skip the field cleanly and the operator can re-run just that domain.
+
+### 5.5 Population Affected
+
+**Population Affected** — the widest circle of crisis impact (everyone "affected" / "impacted" by the crisis) — is extracted here as `needs_and_funding.overall_affected` (a `NumericField`). It is **extracted from reports, not sourced from `events.populationAffected`**, and the extractor is instructed to take only an explicit affected/impacted figure — never to infer it from displacement, PIN, or casualty numbers, and to leave it `null` when the report states none.
+
+Two deliberate properties:
+
+- **Always evidenced, null when unknown.** Like every datapoint it carries the full Quality Envelope (`value`, `unit`, `confidence`, `source_quote`, `chunk_index`, `page_number`) plus Figure Scope. A country-window with no reported affected figure renders as "no data", never a default. This is the opposite contract to `events.populationAffected`, which may be imputed from a distribution or a 5-year mean for alert-ranking — the two describe different populations and are intentionally **not** reconciled.
+- **Aggregated with `Max`** (see §6.2), not sum or latest: the largest evidenced affected figure across the window is the best estimate of total reach, and a later, narrower report shouldn't shrink it.
+
+Rationale and the `events` comparison in full: [ADR-0001](./adr/0001-affected-extracted-not-sourced-from-events.md). (`overall_affected` is distinct from `overall_pin` = People in Need — a narrower, appeal-driven figure that is `latest_state`-aggregated and typically sparse.)
 
 ---
 
@@ -263,6 +282,35 @@ The aggregator is a switch table over field kind. Every field in the exhaustive 
 | **Set union** | union of contributing values | locations_affected, event_types, active_clusters |
 | **Max** | pick the largest quality-adjusted value | population_affected (upper-bound reporting) |
 | **Non-aggregatable** | narrative synthesis at read time | brief_summary, needs_description |
+
+#### 6.2.1 How each datapoint is combined
+
+§6.2 lists four ways figures from many reports are merged into one. This is the **per-datapoint reference**: which rule each datapoint uses, and how close together two reports must be to count as the *same* figure (so nothing is double-counted). §6.4 (Deduplication) explains the mechanics behind this table.
+
+The four rules, and which report "wins" when two describe the same thing:
+
+- **Summed** — figures are added across reports. Two reports of the *same* event are first de-duplicated — the most recent report wins, though a UN/government-**verified** figure can override a slightly newer unverified one — then the distinct figures are added.
+- **Latest wins** — the most recent report's figure is used; earlier ones are never added on top.
+- **Highest** — the largest figure wins (the largest within each report first, then the most recent across reports).
+- **Combined list** — every report contributes; all values merge into one de-duplicated list.
+
+| Datapoint | How it's combined | Same figure if reported within |
+|---|---|---|
+| People killed · people injured | Summed | the same week |
+| Security incidents · aid workers killed | Summed | the same week |
+| New displacements · returnees | Summed | the same week |
+| Funding received | Summed | the same week |
+| People displaced (current total) · refugees | Latest wins | the same month |
+| People in Need — each sector (Shelter, WASH, Protection, Health, Food Security, Education) and the overall total | Latest wins | the same month |
+| Funding required | Latest wins | the same month |
+| Population Affected (§5.5) | Highest | the same month |
+| Event types · active clusters | Combined list | — |
+
+**Why the combine rule differs:** counts of *things that happened* (deaths, new displacements, incidents, money received) are **summed** — each report adds new events. Point-in-time *states* (how many people are currently displaced or in need, how much funding is still required) are **latest-wins** — a newer report replaces the old figure rather than adding to it. Population Affected takes the **highest** figure because it describes the widest reach of the crisis, which a later, narrower report shouldn't shrink.
+
+**Why the window is a week:** reports arrive weekly and each figure is already a total over the report's period ("600 affected between two dates"), so a *summed* figure counts as the same measurement when two reports cover the same **week** — different weeks are genuinely different and add up. Slow-moving *states* (people in need, currently displaced) use a **month**. The full grouping rule is in §6.4.2 and the tie-break rules (which report wins) in §6.4.3. *Limitation:* sitreps often cover 2–6 week, overlapping windows, so a weekly window isn't exact — matching by overlapping date ranges is a planned refinement (§6.4.2).
+
+Any datapoint not in this list (e.g. the narrative summary) is kept as text and not merged into a number.
 
 ### 6.3 Quality-weighted aggregation
 
@@ -300,24 +348,26 @@ Deduplication is the load-bearing part of aggregation: it's what turns "sum of e
 
 #### 6.4.1 The incident key
 
-An incident key is a tuple `(event, location, time_bucket)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one incident; the aggregator picks one and discards the rest.
+An incident key is a tuple `(figure_scope_location, time_bucket, event_type_set)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one figure; the aggregator picks one and discards the rest. (This is the canonical key per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md); the *shipped* key today is only `(location, time_bucket)` — the `event_type_set` dimension is specified here but not yet built, which silently collapses co-located distinct events. See ADR-0002 Consequences.)
 
 | Dimension | Canonicalisation rule |
 |---|---|
-| **Event** | Map the extractor's raw `event_type` string through the `disaster_types` taxonomy already in clear-api. "Armed clash", "battle", "armed confrontation" all fold to a single glide code. Unmapped strings retain their raw value but are logged for taxonomy expansion. |
-| **Location** | Prefer the resolved `locations.id`. Fall back to a normalised pcode (uppercase, no punctuation) when the ID resolver returned null. When both are missing, the row is excluded from cross-report dedup and counted only under its own report — never rolled up. |
+| **Figure scope (location)** | The location a *figure* is scoped to — the place the number covers — **not** every place the report mentions (ADR-0002). "1,000 affected in Kordofan" is scoped to Kordofan even if Sudan and El Obeid also appear. Prefer the resolved `locations.id`; fall back to a normalised pcode (uppercase, no punctuation) when the resolver returned null. When both are missing, the row is excluded from cross-report dedup and counted only under its own report — never rolled up. |
+| **Event-type set** | The report's `event_types` mapped through the `disaster_types` taxonomy in clear-api ("armed clash", "battle", "armed confrontation" → one glide code), then treated **atomically**: a figure totalling across `{conflict, flood}` is one set and is never split between them (ADR-0002). Unmapped strings retain their raw value but are logged for taxonomy expansion. |
 | **Time bucket** | Granularity depends on the field kind — see the table below. |
 
-#### 6.4.2 Time-bucket granularity per field kind
+#### 6.4.2 Grouping window — how close two reports must be to count as the same figure
 
-Different classes of humanitarian data have different natural cadences. A single `date_bucket = 1 day` rule under-groups displacement (which is reported weekly by DTM) and over-groups discrete attacks (which happen on specific days). Each field carries a `bucket_size` in its schema:
+Our source reports are **analytical and weekly**, and a figure is already a total over the report's **reporting period** ("600 affected between X and Y") — not an event on a specific day (see [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md)). So the grouping window is the **reporting week**, applied to the report's period-end date:
 
-| Field kind | Bucket size | Rationale |
+| Kind of figure | Window | Rationale |
 |---|---|---|
-| Discrete-event counts (attacks, security incidents, GBV cases) | **Day** | Different days = different incidents by definition. |
-| Displacement flows (new displacements, returnees) | **Week** | Matches DTM reporting cadence. Two DTM rows for the same week and pcode are the same measurement. |
-| State snapshots (IDP stock, IPC phase, PIN) | **Month** | State fields change slowly; two March reports of the same stock figure are the same snapshot. |
-| Funding totals (received, required) | **Reporting period** | Deduped against the appeal / plan's own period, not calendar bucket. |
+| **Summed** figures (killed, injured, new displacements, returnees, security incidents, aid workers killed, funding received) | **Week** | Two reports covering the same week + figure scope + event-type set are the same weekly total → deduped. Different weeks (or a different event-type set) are genuinely different → summed. A *day* window would never group two weekly reports (dedup effectively off → same-week restatements double-count); a *month* window would merge four distinct weeks (→ undercount). |
+| **Max** figures (population affected) | **Month** | The widest-reach figure over a period; a month groups a period's restatements and keeps the largest (§6.4.3 `max_within_report_then_latest`), so a later, narrower report can't shrink it. |
+| **State snapshots** (people displaced / in need, refugees, funding required, IPC phase) | **Month** | These change slowly and are latest-wins, so a month groups a period's reports and takes the most recent. |
+| **Set-union** labels (event types, clusters) | — | No window; every report's values are merged into one list. |
+
+**Known limitation — overlapping periods.** Sitreps often cover **2–6 week windows**, and those windows overlap. A calendar week can't express that: two reports whose periods overlap but *end* in different weeks land in different weeks and both count. The correct fix compares the reports' period **ranges** (`reporting_period_start`..`end`) for overlap rather than bucketing a single date — a planned refinement, not yet built. A weekly window is the best single-date approximation short of it.
 
 #### 6.4.3 Within-group winner selection
 
@@ -350,11 +400,10 @@ Rule: **collapse same-report duplicates before cross-report dedup.** Within one 
 - `latest_wins_with_confidence_override`: verified row is within the 3-day window → verified wins with value `40k`.
 - `quality_score` for the bucket reflects the DTM row's confidence weight; media row is recorded in `confidence_mix` for transparency but doesn't contribute value.
 
-**C) Attack on hospital, El Fasher, same week, different days**
-- Report A: `{ event: "attack-on-health", location: SD0201, date: 2026-07-02, killed: 3 }`
-- Report B: `{ event: "attack-on-health", location: SD0201, date: 2026-07-04, killed: 5 }`
-- Discrete-event kind → **day** bucket → different keys → both counted.
-- Aggregate `killed = 8`.
+**C) Two weekly reports of the same week's toll (El Fasher)**
+- Report A (period ending 2026-07-02): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 3 }` — a weekly **total** for the scope, not a single-incident record (per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md) the source reports totals, not incident logs).
+- Report B (period ending 2026-07-04, same ISO week): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 5 }`
+- Same week + same figure scope + same event-type set → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a `verified` figure within 3 days would override — §6.4.3). Reports from a *different* week — or a *different* event-type set (e.g. a co-located flood, `{flood}`) — are different figures and sum (ADR-0002).
 
 **D) Same report re-quotes displacement figure in 4 places**
 - Same-report multi-mention collapse (§6.4.4): pick one mention (highest confidence, earliest chunk).

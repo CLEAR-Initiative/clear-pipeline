@@ -101,27 +101,8 @@ class ExtractedParameters(BaseModel):
     )
 
 
-class ChunkContext(BaseModel):
-    """50-100 token contextual prefix positioning a chunk within its doc.
-
-    `context` defaults to empty string — Claude's tool_use path
-    occasionally returns `{}` for chunks the model decides don't
-    warrant a prefix (very short excerpts, boilerplate / ToC-like
-    text). Without the default the whole chunk gets dropped from
-    the knowledgebase; with the default, we fall through to
-    embedding the raw chunk text (no contextual prefix), which is
-    still better than losing the chunk.
-    """
-    context: str = Field(
-        default="",
-        description=(
-            "50–100 tokens describing what part of the report this chunk "
-            "comes from and what topic it covers. Used as a retrieval-time "
-            "hint prepended to the chunk before embedding. Return an "
-            "empty string only when the chunk is short enough that "
-            "context would be uninformative (footers, boilerplate)."
-        ),
-    )
+# (The former `ChunkContext` schema is gone — the context step now returns a
+# plain-text prefix via `complete_text`, so there is no JSON wrapper to model.)
 
 
 CONTEXT_SYSTEM = (
@@ -376,21 +357,28 @@ def reliefweb_weekly_enriched_chunks(
 
 
 def _run_context(llm, doc_text: str, chunk_text: str, *, cache_key: str) -> str:
-    """One contextualization call. Doc goes in `system` so prompt
-    caching keys off it; the chunk-specific tail lives in `user`."""
+    """One contextualization call. Doc goes in `system` so prompt caching
+    keys off it; the chunk-specific tail lives in `user`.
+
+    The output is a single free-text prefix, so we use ``complete_text`` — no
+    JSON schema. The prior ``ChunkContext`` wrapper added nothing but a parse
+    step that models fond of ```json fences or empty bodies failed on, and it
+    needlessly required structured-output support for the pipeline's cheapest,
+    highest-volume step. An empty/whitespace return means "no prefix" (short
+    or boilerplate chunk); the caller falls back to the raw chunk text.
+    """
     system = (
         f"{CONTEXT_SYSTEM}\n\n"
         f"---\nFULL REPORT (cached; do not repeat):\n{doc_text}\n---"
     )
     user = f"Chunk to contextualize:\n\n{chunk_text}"
-    result = llm.complete_structured(
+    text = llm.complete_text(
         system=system,
         user=user,
-        schema=ChunkContext,
         max_tokens=200,
         cache_key=cache_key,
     )
-    return result.context.strip()
+    return text.strip()
 
 
 def _run_extraction(llm, embedded_text: str) -> ExtractedParameters:

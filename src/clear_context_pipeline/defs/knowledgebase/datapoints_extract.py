@@ -24,6 +24,7 @@ Failure isolation:
 import json
 import logging
 import os
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -68,9 +69,12 @@ SYSTEM_PROMPT_TEMPLATE = (
     "  numbers, dates, or locations that aren't in the text. When "
     "  something is missing, leave the field null.\n"
     "- Every numeric value must be wrapped in the provenance envelope: "
-    "  {{ value, unit, confidence, source_quote, chunk_index (may be null), "
+    "  {{ value, unit, confidence, source_quote, chunk_index, "
     "  page_number, scope_location_name }}. `source_quote` must be a verbatim "
-    "  sentence from the report — a substring, not a paraphrase.\n"
+    "  sentence from the report — a substring, not a paraphrase. Always set "
+    "  `chunk_index` to null: it is filled automatically after extraction by "
+    "  matching your `source_quote` to the report's chunks — do not guess it. "
+    "  `page_number` (1-indexed) comes from the nearest `[page N]` marker.\n"
     "- FIGURE SCOPE: for every numeric value, set `scope_location_name` to "
     "  the ONE place that number is a total FOR — the area it counts, NOT "
     "  every place the report mentions. A report framed nationally may state "
@@ -301,6 +305,131 @@ def _num_or_none(obj: Any) -> int | None:
         return None
 
 
+# ── chunk_index backfill ──────────────────────────────────────────────
+# The LLM only sees whole-document text with `[page N]` markers — never the
+# chunk boundaries the vector store uses — so it cannot emit a reliable
+# `chunk_index` (it's prompted to leave it null). We fill it deterministically
+# after extraction by matching each figure's `source_quote` back to the
+# report's authoritative chunk artifact. This keeps chunk_index aligned with
+# the vector store (its whole purpose: Layer-3 drill-down), where an LLM guess
+# would not. page_number stays the durable citation that survives re-chunking.
+_CHUNK_MATCH_MIN_RATIO = 0.6  # min longest-common-block / quote-length for a fuzzy hit
+
+
+def _norm_text(s: Any) -> str:
+    """Whitespace-collapsed, lowercased text for tolerant substring/fuzzy match."""
+    return " ".join(str(s or "").split()).lower()
+
+
+def _read_report_chunks(s3, bucket: str, report_id: str) -> list[dict] | None:
+    """Fetch the report's authoritative chunks (the vector-store artifact,
+    `{chunk_index, page_start, page_end, text}` per line) from S3. Returns
+    None when absent — the chunks asset is a sibling of this one (both fan
+    out from pdf_text), and a manual doc may skip chunking — so the caller
+    degrades to a null chunk_index rather than failing extraction."""
+    from clear_context_pipeline.defs.knowledgebase.chunks import _chunks_key
+
+    try:
+        body = s3.get_object(Bucket=bucket, Key=_chunks_key(report_id))["Body"].read()
+    except Exception as exc:  # noqa: BLE001 — missing/unreadable → degrade gracefully
+        logger.info(
+            "[DATAPOINTS] no chunk artifact for %s (%s) — chunk_index stays null",
+            report_id, exc,
+        )
+        return None
+    chunks: list[dict] = []
+    for line in body.decode("utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            chunks.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return chunks or None
+
+
+def _match_in(quote: str, candidates: list[dict]) -> int | None:
+    """Match `quote` against `candidates`: exact substring first (lowest
+    chunk_index wins for determinism), then a longest-common-block fuzzy match
+    above `_CHUNK_MATCH_MIN_RATIO`."""
+    substring_hits = [
+        int(c["chunk_index"])
+        for c in candidates
+        if c.get("chunk_index") is not None and quote in _norm_text(c.get("text"))
+    ]
+    if substring_hits:
+        return min(substring_hits)
+
+    best_idx: int | None = None
+    best_ratio = 0.0
+    for c in candidates:
+        if c.get("chunk_index") is None:
+            continue
+        text = _norm_text(c.get("text"))
+        if not text:
+            continue
+        match = SequenceMatcher(None, quote, text).find_longest_match(
+            0, len(quote), 0, len(text),
+        )
+        ratio = match.size / len(quote)
+        if ratio > best_ratio:
+            best_ratio, best_idx = ratio, int(c["chunk_index"])
+    return best_idx if best_ratio >= _CHUNK_MATCH_MIN_RATIO else None
+
+
+def _match_chunk_index(
+    source_quote: Any, page_number: Any, chunks: list[dict],
+) -> int | None:
+    """Find the chunk_index of the chunk that contains `source_quote`.
+
+    The figure's `page_number` (same 1-indexed page space as the `[page N]`
+    markers) is a **preference, not a hard filter**: chunks whose
+    `[page_start, page_end]` range covers it are searched first — which
+    disambiguates the token-overlap case where one sentence spans two adjacent
+    chunks — but if that finds nothing we widen to ALL chunks. Otherwise an
+    off-by-one `page_number`, or a quote on a page boundary, would null the
+    result even when an exact substring hit exists elsewhere."""
+    quote = _norm_text(source_quote)
+    if not quote:
+        return None
+
+    if isinstance(page_number, int):
+        page_scoped = [
+            c for c in chunks
+            if isinstance(c.get("page_start"), int)
+            and isinstance(c.get("page_end"), int)
+            and c["page_start"] <= page_number <= c["page_end"]
+        ]
+        if page_scoped:
+            idx = _match_in(quote, page_scoped)
+            if idx is not None:
+                return idx
+
+    return _match_in(quote, chunks)
+
+
+def _backfill_chunk_indices(merged: Any, chunks: list[dict]) -> tuple[int, int]:
+    """Set `chunk_index` on every extracted NumericField by matching its
+    `source_quote` to `chunks`. Overwrites any value the LLM emitted (it is
+    never authoritative). Returns (figures_with_quote, figures_matched)."""
+    fields: list[dict] = []
+    _collect_numeric_fields(merged, fields)
+    with_quote = 0
+    matched = 0
+    for f in fields:
+        quote = f.get("source_quote")
+        if not isinstance(quote, str) or not quote.strip():
+            f["chunk_index"] = None
+            continue
+        with_quote += 1
+        idx = _match_chunk_index(quote, f.get("page_number"), chunks)
+        f["chunk_index"] = idx
+        if idx is not None:
+            matched += 1
+    return with_quote, matched
+
+
 class _NothingExtracted(RuntimeError):
     """Raised by :func:`extract_datapoints_for_one_report` when every
     domain call failed — the caller decides whether to skip or bubble
@@ -395,6 +524,19 @@ def extract_datapoints_for_one_report(
         (100 * scope_resolved / scope_named) if scope_named else 0,
     )
 
+    # chunk_index backfill: match each figure's source_quote to the report's
+    # authoritative chunks (see helpers above). Runs before the debug snapshot
+    # and the upsert so both carry the filled indices. Skipped (chunk_index
+    # left null) when the chunk artifact isn't in S3 yet.
+    if s3 is not None and s3_bucket:
+        chunks = _read_report_chunks(s3, s3_bucket, report_id)
+        if chunks:
+            cq_total, cq_matched = _backfill_chunk_indices(merged, chunks)
+            log.info(
+                "[%s] chunk_index backfill: %d/%d figures matched (%d chunks)",
+                report_id, cq_matched, cq_total, len(chunks),
+            )
+
     timing = merged.get("timing_and_scope") or {}
     event_types = list(dict.fromkeys(timing.get("event_types") or []))
 
@@ -466,7 +608,17 @@ def extract_datapoints_for_one_report(
     }
 
 
-@dg.asset(group_name="reliefweb_kb")
+@dg.asset(
+    group_name="reliefweb_kb",
+    # Ordering dep on chunks (not a parameter): extraction backfills each
+    # figure's `chunk_index` by reading the report's chunk artifact from S3
+    # (see `_backfill_chunk_indices`). Both assets fan out from
+    # `reliefweb_weekly_pdf_text`; without this edge they'd race and the
+    # chunk file could be absent when extraction runs, leaving chunk_index
+    # null. We read the artifact by report_id, so we need the ordering, not
+    # the chunks value passed in.
+    deps=["reliefweb_weekly_chunks"],
+)
 def reliefweb_weekly_datapoints(
     context: AssetExecutionContext,
     reliefweb_weekly_pdf_text: list[dict],
@@ -477,6 +629,9 @@ def reliefweb_weekly_datapoints(
     resolved_locations, s3_debug_key}]`` — the aggregation asset
     (Phase 2) will consume clear-api directly rather than piping
     through Dagster IO, so the summary is for observability only.
+
+    Runs after ``reliefweb_weekly_chunks`` so the chunk artifact exists
+    when we backfill ``chunk_index`` (see the decorator's `deps`).
     """
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
@@ -490,7 +645,7 @@ def reliefweb_weekly_datapoints(
         )
         return []
 
-    llm = make_llm_provider("extraction")
+    llm = make_llm_provider("datapoints")
 
     summaries: list[dict] = []
     reused = 0

@@ -311,7 +311,7 @@ def generate_and_upsert_for_country_window(
         sectors_component = None
         generated_by_model = f"deterministic:{SCHEMA_VERSION}"
     else:
-        llm = make_llm_provider("extraction")
+        llm = make_llm_provider("narrative")
         cache_key = f"situation:{country_id}:{window_kind}:{period_label}:{SCHEMA_VERSION}"
         ai_summary_component = generate_ai_summary(
             llm, country_name=country_name, period_label=period_label,
