@@ -199,6 +199,17 @@ class Sources(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
+class SituationChanges(BaseModel):
+    """Per-section "what changed vs the prior snapshot" notes, generated in
+    one LLM call over the before/after payloads (see situation/changes.py).
+    Empty on the first generation (no prior) or where nothing material
+    changed. Keys are the section paths the dashboard renders strips under:
+    "summary", "context_risks.<domain>", "hazards", "displacement",
+    "sectors.<sector>"."""
+    compared_to: Optional[str] = None
+    notes: dict[str, str] = Field(default_factory=dict)
+
+
 class SituationAnalysisPayload(BaseModel):
     """The full ``data`` blob written to
     ``situation_analyses.data``. Every component is always present so
@@ -213,3 +224,4 @@ class SituationAnalysisPayload(BaseModel):
     displacement: DisplacementNarrative = Field(default_factory=DisplacementNarrative)
     sectors: Sectors = Field(default_factory=Sectors)
     sources: Sources = Field(default_factory=Sources)
+    changes: SituationChanges = Field(default_factory=SituationChanges)

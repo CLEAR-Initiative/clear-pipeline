@@ -103,6 +103,16 @@ query ReportDatapointExists($reportId: String!) {
 
 # ── Situation analysis ─────────────────────────────────────────────
 
+_GET_SITUATION_ANALYSIS = """
+query SituationAnalysis($countryLocationId: String!, $year: Int, $schemaVersion: String) {
+  situationAnalysis(countryLocationId: $countryLocationId, year: $year, schemaVersion: $schemaVersion) {
+    data
+    generatedAt
+  }
+}
+"""
+
+
 _GET_AGGREGATED_DATAPOINT = """
 query AggregatedDatapoint(
   $locationId: String,
@@ -429,6 +439,27 @@ def upsert_knowledgebase_chunks(
         "chunksDeleted": int(result["chunksDeleted"]),
         "chunksInserted": int(result["chunksInserted"]),
     }
+
+
+def get_situation_analysis(
+    *,
+    country_location_id: str,
+    year: int,
+    schema_version: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch the current (yearly) situation-analysis snapshot for a country.
+    Used by the generator to read the PRIOR snapshot before it upserts the
+    new one, so it can diff them for the "what changed" notes. Returns None
+    when no snapshot exists yet."""
+    data = _execute(
+        _GET_SITUATION_ANALYSIS,
+        {
+            "countryLocationId": country_location_id,
+            "year": year,
+            "schemaVersion": schema_version,
+        },
+    )
+    return data.get("situationAnalysis")
 
 
 def get_aggregated_datapoint(

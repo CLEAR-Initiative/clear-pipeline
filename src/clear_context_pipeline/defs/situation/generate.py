@@ -43,6 +43,7 @@ from clear_context_pipeline.defs.situation.narrative import (
 from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
+from clear_context_pipeline.defs.situation.changes import generate_changes
 from clear_context_pipeline.defs.situation.sectors import generate_all_sectors
 from clear_context_pipeline.defs.situation.schemas import (
     SCHEMA_VERSION,
@@ -350,6 +351,31 @@ def generate_and_upsert_for_country_window(
     if sectors_component is not None:
         payload_kwargs["sectors"] = sectors_component
     payload = SituationAnalysisPayload(**payload_kwargs)
+
+    # "What changed" notes: diff this snapshot against the prior current one
+    # for the same yearly bucket (the tier the dashboard reads). Only when the
+    # narrative ran (needs the LLM) and a prior snapshot exists; best-effort,
+    # never blocks the upsert.
+    if not skip and window_kind == "yearly":
+        try:
+            prior = clear_api.get_situation_analysis(
+                country_location_id=country_id,
+                year=int(window_start[:4]),
+                schema_version=SCHEMA_VERSION,
+            )
+            if prior and prior.get("data"):
+                payload.changes = generate_changes(
+                    llm,
+                    prior_payload=prior["data"],
+                    new_payload=payload.model_dump(mode="json"),
+                    prior_generated_at=prior.get("generatedAt") or "",
+                    cache_key=cache_key,
+                )
+        except Exception as exc:  # noqa: BLE001 - change notes never block the upsert
+            log.warning(
+                "[situation] %s: change-note generation failed (%s); shipping without",
+                country_name, exc,
+            )
 
     sector_source_ids: list[str] = []
     if sectors_component is not None:
