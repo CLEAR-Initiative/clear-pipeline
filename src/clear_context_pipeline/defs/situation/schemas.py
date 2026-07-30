@@ -162,6 +162,11 @@ class SectorAnalysis(BaseModel):
     priority_interventions: list[str] = Field(default_factory=list)
     information_coverage: list[InformationCoverageArea] = Field(default_factory=list)
     source_report_ids: list[str] = Field(default_factory=list)
+    # Provenance of the analysis. 'sector' = built from sector-tagged
+    # evidence; 'fallback' = the sector-scoped search was empty and an
+    # unfiltered search supplied off-sector evidence, so the grade is an
+    # inference rather than sector reporting; None = no analysis produced.
+    evidence_scope: Optional[Literal["sector", "fallback"]] = None
 
 
 class Sectors(BaseModel):
