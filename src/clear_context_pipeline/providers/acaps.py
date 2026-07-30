@@ -1,9 +1,9 @@
 """ACAPS Seasonal Events Calendar client + blob builder.
 
-See ``docs/data-source-specs/ACAPS-season.md``. The calendar is a paginated list
-of *recurring* events per country (rainy/lean seasons, harvests, disease-outbreak
-seasons, elections) — the seasonal backdrop against which new signals are read.
-It is background context, not observed incidents.
+The calendar is a paginated list of *recurring* events per country (rainy/lean
+seasons, harvests, disease-outbreak seasons, elections) — the seasonal backdrop
+against which new signals are read. It is background context, not observed
+incidents.
 
 Pure fetch + transform (no Dagster, no clear-api). The Dagster asset in
 ``defs/location_metadata/`` fetches once, filters to each pipeline country, and

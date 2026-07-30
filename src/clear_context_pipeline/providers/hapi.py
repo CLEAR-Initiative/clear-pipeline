@@ -2,8 +2,8 @@
 
 HAPI is OCHA's standardized API layer over HDX data grids — quantitative
 humanitarian context down to admin 2, p-coded and joinable to the locations
-tree. See ``docs/data-source-specs/hapi.md`` for the endpoint catalogue and the
-target blob shapes.
+tree. The endpoint catalogue and target blob shapes are captured in
+``HAPI_ENDPOINTS`` below.
 
 This module is pure fetch + transform (no Dagster, no clear-api). The Dagster
 assets in ``defs/location_metadata/`` fetch rows here, resolve admin pcodes to
@@ -116,7 +116,7 @@ class EndpointSpec:
 
     type_: locationMetadata.type written (e.g. "hapi_funding").
     path: HAPI endpoint path under the v2 base.
-    source: the `source` tag stamped on each blob (hapi.md convention).
+    source: the `source` tag stamped on each blob (e.g. "unhcr_hapi_v2").
     key_level: admin level whose pcode keys the location join — 0 (location_code),
         1 (admin1_code), or 2 (admin2_code). Rows missing that pcode are skipped.
     series_key: dimension fields that identify one parallel *series* at a
@@ -149,8 +149,8 @@ class EndpointSpec:
 # and period are intentionally NOT in it, so the latest observation per series is
 # what survives the collapse.
 HAPI_ENDPOINTS: tuple[EndpointSpec, ...] = (
-    # Refugees/returnees are keyed on country of ORIGIN (hapi.md decision 1) and
-    # use origin_/asylum_location_code, not the generic location_code — so scope,
+    # Refugees/returnees are keyed on country of ORIGIN and use
+    # origin_/asylum_location_code, not the generic location_code — so scope,
     # key, and name all come from the origin fields; asylum stays in the record.
     EndpointSpec("hapi_refugees", "affected-people/refugees-persons-of-concern",
                  "unhcr_hapi_v2", 0,
@@ -209,7 +209,7 @@ def build_blobs(rows: list[dict], spec: EndpointSpec) -> dict[str, dict]:
     """Group ``rows`` by the keying admin pcode and build one blob per location.
 
     Returns ``{key_pcode: blob}`` where the blob carries the common admin
-    identity + reference window (hapi.md conventions) and a ``records`` list.
+    identity + reference window and a ``records`` list.
     Time-series endpoints (``spec.series_key`` set) collapse each location to the
     latest observation per series so blobs stay a current snapshot; others keep
     every row. Rows without the keying pcode are dropped (logged).

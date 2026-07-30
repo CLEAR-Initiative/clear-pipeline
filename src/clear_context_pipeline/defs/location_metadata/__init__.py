@@ -11,7 +11,7 @@ the locations tree. Two Dagster jobs:
 
 Both iterate ``pipelineCountries`` (Sudan / Afghanistan / Venezuela today) and
 write through clear-api's ``upsertLocationMetadataBatch``. See ``assets.py`` for
-the graph and ``docs/data-source-specs/hapi.md`` for the endpoint catalogue.
+the graph and ``providers/hapi.py`` (``HAPI_ENDPOINTS``) for the endpoint catalogue.
 
 Overlap note: OCHA 3W IS a HAPI endpoint (operational-presence), so it lives on
 the HAPI daily job. HAPI here covers UNHCR/OCHA baseline only — IDP displacement
