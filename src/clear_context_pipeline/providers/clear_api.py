@@ -19,6 +19,7 @@ Env vars:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -138,7 +139,29 @@ query AggregatedDatapoint(
 
 _GET_PIPELINE_COUNTRIES = """
 query PipelineCountriesForSituation {
-  pipelineCountries { name bbox }
+  pipelineCountries { name iso3 bbox }
+}
+"""
+
+# Location-metadata ingests (HAPI, IOM DTM) fetch external rows keyed by admin
+# pcode and need to map them onto clear-api location ids. `locations(level:)`
+# returns the whole admin layer at once so a caller can build a pcode→id map in
+# one round-trip instead of N single resolves.
+_GET_LOCATIONS_BY_LEVEL = """
+query LocationsByLevel($level: Int!) {
+  locations(level: $level) {
+    id
+    name
+    level
+    pCode
+    population
+  }
+}
+"""
+
+_UPSERT_LOCATION_METADATA_BATCH = """
+mutation UpsertLocationMetadataBatch($inputs: [UpsertLocationMetadataInput!]!) {
+  upsertLocationMetadataBatch(inputs: $inputs) { id type }
 }
 """
 
@@ -435,10 +458,107 @@ def get_aggregated_datapoint(
 
 
 def get_pipeline_countries() -> list[dict[str, Any]]:
-    """List of countries the pipeline currently publishes analysis
-    for. Currently: Sudan (POC scope)."""
+    """Countries the pipeline currently publishes analysis / ingests context
+    for. Each row is ``{name, iso3, bbox}`` — ``iso3`` scopes external-API
+    ingests (HAPI ``location_code``, IOM DTM ``Admin0Pcode``)."""
     data = _execute(_GET_PIPELINE_COUNTRIES)
     return data.get("pipelineCountries") or []
+
+
+def get_locations_by_level(level: int) -> list[dict[str, Any]]:
+    """Every clear-api location at one admin level (``{id, name, level, pCode,
+    population}``). Location-metadata ingests use this to build a pcode→id map
+    for the level they're writing, rather than resolving pcodes one at a time."""
+    data = _execute(_GET_LOCATIONS_BY_LEVEL, {"level": level})
+    return data.get("locations") or []
+
+
+# Upsert chunking. Each chunk is one clear-api DB transaction, and clear-api's
+# Postgres is reached over an SSH tunnel — so the cost is dominated by BYTES
+# moved (payload in + the unchanged-guard reading open rows + reading the result
+# back), not row count. A fixed row count is wrong: 50 humanitarian-needs blobs
+# (~100 KB each, finely disaggregated PIN) is ~5 MB/chunk and times out, while 50
+# tiny funding blobs is nothing. So chunk by cumulative payload BYTES, with a row
+# cap as a backstop. Tune with LOCATION_METADATA_UPSERT_MAX_BYTES /
+# LOCATION_METADATA_UPSERT_CHUNK.
+#
+# Read lazily (not at import): every defs/ module calls load_dotenv AFTER
+# importing this provider, so import-time os.environ.get would miss .env — the
+# documented knobs would silently never apply. Parsing is defensive: a bad value
+# logs and falls back rather than raising at import and taking down the whole
+# Dagster code location.
+_DEFAULT_UPSERT_MAX_BYTES = 400_000
+_DEFAULT_UPSERT_MAX_ROWS = 50
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+    except ValueError:
+        logger.warning("%s=%r is not a positive integer — using default %d", name, raw, default)
+        return default
+
+
+def _upsert_max_bytes() -> int:
+    return _int_env("LOCATION_METADATA_UPSERT_MAX_BYTES", _DEFAULT_UPSERT_MAX_BYTES)
+
+
+def _upsert_max_rows() -> int:
+    return _int_env("LOCATION_METADATA_UPSERT_CHUNK", _DEFAULT_UPSERT_MAX_ROWS)
+
+
+def _size_chunks(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split rows into chunks bounded by cumulative byte size (and a row cap). A
+    single row larger than the byte cap still goes in its own chunk — we never
+    split one blob. The whole row is measured (locationId + type + the JSON
+    envelope, not just ``data``), since bytes over the DB tunnel are the cost."""
+    max_bytes = _upsert_max_bytes()
+    max_rows = _upsert_max_rows()
+    chunks: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    cur_bytes = 0
+    for row in rows:
+        row_bytes = len(json.dumps(row, default=str))
+        if cur and (cur_bytes + row_bytes > max_bytes or len(cur) >= max_rows):
+            chunks.append(cur)
+            cur, cur_bytes = [], 0
+        cur.append(row)
+        cur_bytes += row_bytes
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def upsert_location_metadata_batch(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bulk-upsert location-metadata rows. Each row is ``{locationId, type,
+    data}``; clear-api closes the currently-open row for each (locationId, type)
+    and inserts the new one in a single transaction (bitemporal), skipping rows
+    whose blob is unchanged. Rows whose ``locationId`` doesn't exist are skipped
+    server-side. Requires the pipeline API key to carry the admin/pipeline role.
+
+    Sent in payload-size-bounded chunks so a large batch (many locations, or big
+    blobs) can't blow the request/transaction timeout over the DB tunnel. Returns
+    every current row clear-api reported across the chunks."""
+    if not rows:
+        return []
+    out: list[dict[str, Any]] = []
+    chunks = _size_chunks(rows)
+    logger.info(
+        "[location_metadata] upserting %d rows in %d size-bounded chunk(s)",
+        len(rows), len(chunks),
+    )
+    for chunk in chunks:
+        data = _execute(_UPSERT_LOCATION_METADATA_BATCH, {"inputs": chunk})
+        out.extend(data.get("upsertLocationMetadataBatch") or [])
+    return out
 
 
 def resolve_country_location_id(country_name: str) -> str | None:
