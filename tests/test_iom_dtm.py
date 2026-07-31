@@ -47,7 +47,22 @@ def test_aggregate_latest_round_wins():
     ]
     out = iom_dtm.aggregate_displacement_by_destination(records, admin_level=2, assessment_type_filter="BA")
     assert out["SD0101"]["round_number"] == 8
-    assert out["SD0101"]["population_displaced"] == 42  # round 6 ignored, not summed
+    assert out["SD0101"]["population_displaced"] == 42  # headline = latest round
+
+
+def test_aggregate_keeps_recent_rounds_history():
+    # The monthly DTM job must not lose intermediate rounds: every round's total
+    # is retained in recent_rounds (newest first), with the latest as the head.
+    records = [
+        _rec("SD0101", 6, 999, origin="SD01"),
+        _rec("SD0101", 8, 42, origin="SD01"),
+        _rec("SD0101", 7, 300, origin="SD01"),
+    ]
+    out = iom_dtm.aggregate_displacement_by_destination(records, admin_level=2, assessment_type_filter="BA")
+    rounds = out["SD0101"]["recent_rounds"]
+    assert [r["round_number"] for r in rounds] == [8, 7, 6]  # newest first, none lost
+    assert rounds[0]["population_displaced"] == 42
+    assert {r["round_number"]: r["population_displaced"] for r in rounds} == {8: 42, 7: 300, 6: 999}
 
 
 def test_aggregate_assessment_priority_fills_gaps_only():

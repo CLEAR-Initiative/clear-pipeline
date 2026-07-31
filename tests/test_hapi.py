@@ -1,6 +1,18 @@
 """Unit tests for the HAPI blob builders (no network)."""
 
+import pytest
+
 from clear_context_pipeline.providers import hapi
+
+
+def test_app_identifier_required_and_trimmed(monkeypatch):
+    # No committed default: empty/whitespace must fail clearly, not send an
+    # empty auth header. A real value is stripped.
+    monkeypatch.setenv("HAPI_APP_IDENTIFIER", "")
+    with pytest.raises(RuntimeError):
+        hapi._app_identifier()
+    monkeypatch.setenv("HAPI_APP_IDENTIFIER", "  token123  ")
+    assert hapi._app_identifier() == "token123"
 
 
 def test_build_blobs_groups_by_key_pcode_and_keeps_records():
@@ -57,6 +69,32 @@ def test_build_blobs_origin_keyed_refugees():
     # Two asylum series preserved; origin key stripped from records, asylum kept.
     assert {r["asylum_location_code"] for r in b["records"]} == {"TCD", "EGY"}
     assert all("origin_location_code" not in r for r in b["records"])
+
+
+def test_build_blobs_per_level_captures_national_and_avoids_bleed():
+    # HAPI returns admin0/1/2 rows in one response, each carrying its parent
+    # pcodes. Building per level must route each row to its FINEST level only —
+    # so the national row is captured (not discarded) and admin2 rows don't fold
+    # into the national blob.
+    spec = hapi.EndpointSpec(
+        "hapi_humanitarian_needs", "affected-people/humanitarian-needs",
+        "ocha_hpc_hapi_v2", 2, series_key=(),
+    )
+    rows = [
+        {"location_code": "SDN", "location_name": "Sudan", "population": 100,
+         "reference_period_end": "2026-12-31"},
+        {"location_code": "SDN", "admin1_code": "SD05", "admin1_name": "South Darfur",
+         "population": 50, "reference_period_end": "2026-12-31"},
+        {"location_code": "SDN", "admin1_code": "SD05", "admin2_code": "SD05002",
+         "admin2_name": "Nyala", "population": 20, "reference_period_end": "2026-12-31"},
+    ]
+    l0 = hapi.build_blobs(rows, spec, level=0)
+    l1 = hapi.build_blobs(rows, spec, level=1)
+    l2 = hapi.build_blobs(rows, spec, level=2)
+    assert set(l0) == {"SDN"} and l0["SDN"]["admin_level"] == 0
+    assert l0["SDN"]["record_count"] == 1  # only the national row, not all 3
+    assert set(l1) == {"SD05"} and l1["SD05"]["admin_level"] == 1
+    assert set(l2) == {"SD05002"} and l2["SD05002"]["admin_level"] == 2
 
 
 def test_build_blobs_admin0_keying():

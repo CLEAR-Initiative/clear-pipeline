@@ -181,8 +181,12 @@ class AggregatedDisplacement(TypedDict):
     # Which assessmentType produced this row (e.g. "BA", "FM"). None when the
     # caller passed assessment_type_filter=None (no filter applied).
     assessment_type: str | None
-    population_displaced: int  # total IDPs at the destination, summed across all origins
+    population_displaced: int  # total IDPs at the destination (latest round), summed across origins
     origin_breakdown: list[dict[str, Any]]  # [{origin_admin1_pcode, origin_admin1_name, count}, ...]
+    # Every round's total for this destination, newest first — so a monthly run
+    # doesn't lose rounds superseded between runs. [{round_number, reporting_date,
+    # population_displaced}, ...]. The headline fields above are recent_rounds[0].
+    recent_rounds: list[dict[str, Any]]
 
 
 def _aggregate_for_type(
@@ -254,30 +258,44 @@ def _aggregate_for_type(
                 if existing["name"] is None and origin_name is not None:
                     existing["name"] = origin_name
 
-    # Stage 2 — collapse to one bucket per pcode (latest round wins).
+    # Stage 2 — per pcode, the latest round is the headline, but keep EVERY
+    # round's total in `recent_rounds`. The DTM asset runs monthly while rounds
+    # publish roughly monthly, so a plain latest-wins would silently drop a round
+    # that landed and was superseded between two runs — and this is the sole
+    # source for population_displaced. recent_rounds makes that history
+    # recoverable from the current blob without changing the headline figure.
+    by_pcode: dict[str, list[dict]] = {}
+    for (_pcode, _rn), bucket in buckets.items():
+        origins = bucket.pop("_origins")
+        bucket["origin_breakdown"] = sorted(
+            (
+                {
+                    "origin_admin1_pcode": op,
+                    "origin_admin1_name": v["name"],
+                    "count": v["count"],
+                }
+                for op, v in origins.items()
+            ),
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+        by_pcode.setdefault(bucket["admin_pcode"], []).append(bucket)
+
     latest: dict[str, AggregatedDisplacement] = {}
-    for (pcode, rn), bucket in buckets.items():
-        cur = latest.get(pcode)
-        if cur is None or rn > cur["round_number"] or (
-            rn == cur["round_number"]
-            and (bucket["reporting_date"] or "") > (cur["reporting_date"] or "")
-        ):
-            # Materialise the origin breakdown, sorted descending by count.
-            origins = bucket.pop("_origins")
-            origin_list = sorted(
-                (
-                    {
-                        "origin_admin1_pcode": op,
-                        "origin_admin1_name": v["name"],
-                        "count": v["count"],
-                    }
-                    for op, v in origins.items()
-                ),
-                key=lambda x: x["count"],
-                reverse=True,
-            )
-            bucket["origin_breakdown"] = origin_list
-            latest[pcode] = bucket  # type: ignore[assignment]
+    for pcode, round_buckets in by_pcode.items():
+        round_buckets.sort(
+            key=lambda b: (b["round_number"], b["reporting_date"] or ""), reverse=True,
+        )
+        winner = round_buckets[0]
+        winner["recent_rounds"] = [
+            {
+                "round_number": b["round_number"],
+                "reporting_date": b["reporting_date"],
+                "population_displaced": b["population_displaced"],
+            }
+            for b in round_buckets
+        ]
+        latest[pcode] = winner  # type: ignore[assignment]
 
     return latest
 

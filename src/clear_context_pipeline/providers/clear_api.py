@@ -481,20 +481,51 @@ def get_locations_by_level(level: int) -> list[dict[str, Any]]:
 # tiny funding blobs is nothing. So chunk by cumulative payload BYTES, with a row
 # cap as a backstop. Tune with LOCATION_METADATA_UPSERT_MAX_BYTES /
 # LOCATION_METADATA_UPSERT_CHUNK.
-_UPSERT_MAX_BYTES = int(os.environ.get("LOCATION_METADATA_UPSERT_MAX_BYTES", "400000"))
-_UPSERT_MAX_ROWS = int(os.environ.get("LOCATION_METADATA_UPSERT_CHUNK", "50"))
+#
+# Read lazily (not at import): every defs/ module calls load_dotenv AFTER
+# importing this provider, so import-time os.environ.get would miss .env — the
+# documented knobs would silently never apply. Parsing is defensive: a bad value
+# logs and falls back rather than raising at import and taking down the whole
+# Dagster code location.
+_DEFAULT_UPSERT_MAX_BYTES = 400_000
+_DEFAULT_UPSERT_MAX_ROWS = 50
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+        if value <= 0:
+            raise ValueError("must be positive")
+        return value
+    except ValueError:
+        logger.warning("%s=%r is not a positive integer — using default %d", name, raw, default)
+        return default
+
+
+def _upsert_max_bytes() -> int:
+    return _int_env("LOCATION_METADATA_UPSERT_MAX_BYTES", _DEFAULT_UPSERT_MAX_BYTES)
+
+
+def _upsert_max_rows() -> int:
+    return _int_env("LOCATION_METADATA_UPSERT_CHUNK", _DEFAULT_UPSERT_MAX_ROWS)
 
 
 def _size_chunks(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Split rows into chunks bounded by cumulative ``data`` bytes (and a row
-    cap). A single row larger than the byte cap still goes in its own chunk —
-    we never split one blob."""
+    """Split rows into chunks bounded by cumulative byte size (and a row cap). A
+    single row larger than the byte cap still goes in its own chunk — we never
+    split one blob. The whole row is measured (locationId + type + the JSON
+    envelope, not just ``data``), since bytes over the DB tunnel are the cost."""
+    max_bytes = _upsert_max_bytes()
+    max_rows = _upsert_max_rows()
     chunks: list[list[dict[str, Any]]] = []
     cur: list[dict[str, Any]] = []
     cur_bytes = 0
     for row in rows:
-        row_bytes = len(json.dumps(row.get("data") or {}))
-        if cur and (cur_bytes + row_bytes > _UPSERT_MAX_BYTES or len(cur) >= _UPSERT_MAX_ROWS):
+        row_bytes = len(json.dumps(row, default=str))
+        if cur and (cur_bytes + row_bytes > max_bytes or len(cur) >= max_rows):
             chunks.append(cur)
             cur, cur_bytes = [], 0
         cur.append(row)

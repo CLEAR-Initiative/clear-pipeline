@@ -21,12 +21,32 @@ and builds the pcode→id maps every ingest reuses; each ingest asset then loops
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 import dagster as dg
 from dagster import AssetExecutionContext
+from dotenv import load_dotenv
 
 from clear_context_pipeline.providers import acaps, clear_api, hapi, iom_dtm
+
+# Load .env at import so env read at import time (the job's concurrency config
+# below) and at asset-run time both see it. Matches every other defs/ module.
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
+
+
+def _int_env(name: str, default: int) -> int:
+    """Positive-int env read that falls back on a bad value instead of raising
+    at import (which would take down the whole Dagster code location)."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
 
 # ────────────────────────────────────────────────────────────────────
 # pcode → location-id resolution (shared index)
@@ -44,37 +64,67 @@ def _normalise_name(name: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
+# clear-api stores admin0 pCodes as ISO2; HAPI/DTM scope by ISO3. Prefix
+# truncation (pcode[:2]) is NOT a safe ISO3→ISO2 conversion — IRQ→IR is Iran,
+# CHN→CH is Switzerland — so use an explicit map for the countries in scope and
+# treat anything else as unmatched rather than guessing onto another country.
+# Long-term this belongs in clear-api alongside PipelineCountry.iso3 so it can't
+# drift from the locations tree.
+_ISO3_TO_ISO2 = {"SDN": "SD", "AFG": "AF", "VEN": "VE"}
+
+
+def _iso2_for(iso3: str | None) -> str | None:
+    return _ISO3_TO_ISO2.get((iso3 or "").upper())
+
+
 @dg.asset(group_name="location_metadata")
 def location_pcode_index(context: AssetExecutionContext) -> dict[str, Any]:
-    """Build pcode→id / iso2→id / name→id maps per admin level from clear-api.
+    """Build the pcode→id / iso2→id / name→id maps per admin level from clear-api.
 
     One fetch of the whole locations tree (levels 0/1/2) that every ingest asset
-    downstream reuses, instead of resolving pcodes one at a time. The iso2 map
-    (level 0 only) absorbs the ISO2/ISO3 drift between sources — clear-api stores
-    Sudan as "SD" while HAPI/DTM return "SDN".
+    downstream reuses. `get_locations_by_level` returns EVERY country's locations,
+    and names are not unique (admin2 names repeat within a country; admin1 names
+    like "Northern" collide across countries), so the name map is keyed by the
+    location's ISO2 (its pCode prefix) as well as level — a name lookup can only
+    resolve within the country being ingested. Exact pcodes are globally unique,
+    so that map stays flat; iso2→id (level 0) absorbs the clear-api "SD" vs
+    HAPI/DTM "SDN" drift.
     """
     pcode_to_id: dict[int, dict[str, str]] = {}
-    name_to_id: dict[int, dict[str, str]] = {}
+    name_to_id: dict[int, dict[str, dict[str, str]]] = {}  # level -> iso2 -> name -> id
     iso2_to_id: dict[str, str] = {}
     counts: dict[str, int] = {}
+    collisions = 0
 
     for level in (0, 1, 2):
         rows = clear_api.get_locations_by_level(level)
         counts[f"level_{level}"] = len(rows)
         p_map: dict[str, str] = {}
-        n_map: dict[str, str] = {}
+        n_map: dict[str, dict[str, str]] = {}  # iso2 -> {normalised_name: id}
         for loc in rows:
             pcode = loc.get("pCode")
+            iso2 = pcode[:2].upper() if pcode else None
             if pcode:
                 p_map[pcode] = loc["id"]
-                if level == 0:
-                    iso2_to_id[pcode[:2].upper()] = loc["id"]
-            if loc.get("name"):
-                n_map[_normalise_name(loc["name"])] = loc["id"]
+                if level == 0 and iso2:
+                    iso2_to_id[iso2] = loc["id"]
+            if loc.get("name") and iso2:
+                bucket = n_map.setdefault(iso2, {})
+                norm = _normalise_name(loc["name"])
+                if norm in bucket and bucket[norm] != loc["id"]:
+                    collisions += 1
+                    context.log.warning(
+                        "duplicate name %r at level %d in %s: %s vs %s (keeping first)",
+                        loc["name"], level, iso2, bucket[norm], loc["id"],
+                    )
+                else:
+                    bucket.setdefault(norm, loc["id"])
         pcode_to_id[level] = p_map
         name_to_id[level] = n_map
 
-    context.add_output_metadata({f"locations_{k}": dg.MetadataValue.int(v) for k, v in counts.items()})
+    meta = {f"locations_{k}": dg.MetadataValue.int(v) for k, v in counts.items()}
+    meta["name_collisions"] = dg.MetadataValue.int(collisions)
+    context.add_output_metadata(meta)
     # JSON-string the int-keyed dicts so the default (pickle) IO manager and any
     # JSON metadata stay happy; consumers go through _resolve() below.
     return {
@@ -84,18 +134,25 @@ def location_pcode_index(context: AssetExecutionContext) -> dict[str, Any]:
     }
 
 
-def _resolve(index: dict[str, Any], pcode: str, level: int, name: str | None) -> str | None:
-    """Resolve one admin pcode to a clear-api location id: exact pcode, then
-    (level 0 only) ISO2-prefix, then normalised name."""
+def _resolve(
+    index: dict[str, Any], pcode: str, level: int, name: str | None, country_iso2: str | None,
+) -> str | None:
+    """Resolve one admin pcode to a clear-api location id, scoped to the country
+    being ingested. Precedence: exact pcode → (level 0) admin0 by ISO2 → name
+    within the country. The ISO2 and name paths REQUIRE ``country_iso2``, so a
+    country outside ``_ISO3_TO_ISO2`` falls through to None (counted unmatched)
+    rather than binding to another country's location."""
     loc_id = index["pcode_to_id"].get(str(level), {}).get(pcode)
     if loc_id:
         return loc_id
-    if level == 0 and pcode:
-        loc_id = index["iso2_to_id"].get(pcode[:2].upper())
+    if not country_iso2:
+        return None
+    if level == 0:
+        loc_id = index["iso2_to_id"].get(country_iso2)
         if loc_id:
             return loc_id
     if name:
-        loc_id = index["name_to_id"].get(str(level), {}).get(_normalise_name(name))
+        loc_id = index["name_to_id"].get(str(level), {}).get(country_iso2, {}).get(_normalise_name(name))
     return loc_id
 
 
@@ -105,13 +162,14 @@ def _to_batch(
     type_: str,
     level: int,
     index: dict[str, Any],
+    country_iso2: str | None,
 ) -> tuple[list[dict], int]:
     """Turn ``{pcode: blob}`` into an upsert batch, resolving each pcode to a
-    location id. Returns ``(batch, unmatched_count)``."""
+    location id within ``country_iso2``. Returns ``(batch, unmatched_count)``."""
     batch: list[dict] = []
     unmatched = 0
     for pcode, blob in blobs.items():
-        loc_id = _resolve(index, pcode, level, blob.get("admin_name"))
+        loc_id = _resolve(index, pcode, level, blob.get("admin_name"), country_iso2)
         if not loc_id:
             unmatched += 1
             continue
@@ -132,25 +190,46 @@ def _run_hapi_endpoint(
     countries = clear_api.get_pipeline_countries()
     per_country: dict[str, Any] = {}
     total_upserted = 0
+    skipped_no_iso3 = 0
+    # Standard endpoints publish at admin 0/1/2 in one response; ingest each
+    # finest level to its own locations so the national figure (e.g. country PIN)
+    # isn't discarded. Custom-keyed endpoints (refugees/returnees on
+    # origin_location_code) are single-level.
+    levels = [spec.key_level] if spec.pcode_field else [0, 1, 2]
     for country in countries:
         iso3 = country.get("iso3")
         if not iso3:
+            context.log.warning("pipelineCountry %r has no iso3 — skipping", country.get("name"))
+            skipped_no_iso3 += 1
             continue
+        country_iso2 = _iso2_for(iso3)
         rows = hapi.fetch(spec.path, location_code=iso3, location_filter=spec.location_filter)
-        blobs = hapi.build_blobs(rows, spec)
-        batch, unmatched = _to_batch(blobs, type_=spec.type_, level=spec.key_level, index=index)
-        written = clear_api.upsert_location_metadata_batch(batch)
-        total_upserted += len(written)
+        by_level: dict[str, Any] = {}
+        matched = unmatched = upserted = 0
+        for level in levels:
+            blobs = hapi.build_blobs(rows, spec, level=level)
+            if not blobs:
+                continue
+            batch, un = _to_batch(
+                blobs, type_=spec.type_, level=level, index=index, country_iso2=country_iso2,
+            )
+            written = clear_api.upsert_location_metadata_batch(batch)
+            matched += len(batch)
+            unmatched += un
+            upserted += len(written)
+            by_level[f"admin{level}"] = {
+                "locations": len(blobs), "matched": len(batch),
+                "unmatched_pcode": un, "upserted": len(written),
+            }
+        total_upserted += upserted
         per_country[iso3] = {
-            "fetched_rows": len(rows),
-            "locations": len(blobs),
-            "matched": len(batch),
-            "unmatched_pcode": unmatched,
-            "upserted": len(written),
+            "fetched_rows": len(rows), "matched": matched,
+            "unmatched_pcode": unmatched, "upserted": upserted, "by_level": by_level,
         }
     context.add_output_metadata({
         "type": dg.MetadataValue.text(spec.type_),
         "total_upserted": dg.MetadataValue.int(total_upserted),
+        "skipped_no_iso3": dg.MetadataValue.int(skipped_no_iso3),
         **{iso3: dg.MetadataValue.json(v) for iso3, v in per_country.items()},
     })
     return {"type": spec.type_, "total_upserted": total_upserted, "countries": per_country}
@@ -203,6 +282,7 @@ def hapi_operational_presence(
         blobs = hapi.build_operational_presence_blobs(rows)
         batch, unmatched = _to_batch(
             blobs, type_=hapi.OCHA_3W_TYPE, level=2, index=location_pcode_index,
+            country_iso2=_iso2_for(iso3),
         )
         written = clear_api.upsert_location_metadata_batch(batch)
         total_upserted += len(written)
@@ -276,6 +356,7 @@ def iom_dtm_displacement(
         name = country.get("name")
         if not iso3:
             continue
+        country_iso2 = _iso2_for(iso3)
         operation = operations.get(iso3) or None
         per_level: dict[str, Any] = {}
         for level, fetch in _DTM_LEVEL_FETCH.items():
@@ -291,7 +372,7 @@ def iom_dtm_displacement(
                 if agg["population_displaced"] <= 0:
                     skipped += 1
                     continue
-                loc_id = _resolve(location_pcode_index, pcode, level, agg["admin_name"])
+                loc_id = _resolve(location_pcode_index, pcode, level, agg["admin_name"], country_iso2)
                 if not loc_id:
                     unmatched += 1
                     continue
@@ -303,6 +384,7 @@ def iom_dtm_displacement(
                         "origin_breakdown": agg["origin_breakdown"],
                         "round_number": agg["round_number"],
                         "reporting_date": agg["reporting_date"],
+                        "recent_rounds": agg["recent_rounds"],
                         "operation": agg["operation"],
                         "admin_level": level,
                         "admin_name": agg["admin_name"],
@@ -379,12 +461,13 @@ def acaps_seasonal_calendar(
         name = country.get("name")
         if not iso3:
             continue
+        country_iso2 = _iso2_for(iso3)
         split = acaps.build_blobs(entries, iso3)
         batch: list[dict] = []
         unmatched = 0
 
         if split["country"]:
-            loc_id = _resolve(location_pcode_index, iso3, 0, name)
+            loc_id = _resolve(location_pcode_index, iso3, 0, name, country_iso2)
             if loc_id:
                 batch.append({
                     "locationId": loc_id, "type": _ACAPS_TYPE,
@@ -395,7 +478,7 @@ def acaps_seasonal_calendar(
                 unmatched += 1
 
         for adm1_name, events in split["admin1"].items():
-            loc_id = _resolve(location_pcode_index, "", 1, adm1_name)
+            loc_id = _resolve(location_pcode_index, "", 1, adm1_name, country_iso2)
             if loc_id:
                 batch.append({
                     "locationId": loc_id, "type": _ACAPS_TYPE,
@@ -434,7 +517,7 @@ def acaps_seasonal_calendar(
 # retry 429s with backoff, so this is burst-reduction, not the sole guard).
 # Tune with LOCATION_METADATA_MAX_CONCURRENT (default 2). The dependency on
 # location_pcode_index already serialises the first hop.
-_MAX_CONCURRENT = int(os.environ.get("LOCATION_METADATA_MAX_CONCURRENT", "2"))
+_MAX_CONCURRENT = _int_env("LOCATION_METADATA_MAX_CONCURRENT", 2)
 _LIMITED_EXECUTION = {
     "execution": {"config": {"multiprocess": {"max_concurrent": _MAX_CONCURRENT}}},
 }

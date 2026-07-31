@@ -36,9 +36,6 @@ from clear_context_pipeline.providers import http_retry
 logger = logging.getLogger(__name__)
 
 HAPI_BASE = "https://hapi.humdata.org/api/v2"
-# Same identifier the clear-api ingest-sudan-3w.ts script shipped with; override
-# with HAPI_APP_IDENTIFIER. It is a low-privilege rate-limit token, not a secret.
-_DEFAULT_APP_IDENTIFIER = "Y2xlYXItbXZwOmRldkBzeW50cm8uZmk="
 
 # Location-identity columns lifted to the blob top-level and dropped from each
 # stored record. Time-series endpoints (``series_key`` set) drop only these and
@@ -57,7 +54,16 @@ OCHA_3W_TYPE = "ocha_3w"
 
 
 def _app_identifier() -> str:
-    return os.environ.get("HAPI_APP_IDENTIFIER", _DEFAULT_APP_IDENTIFIER)
+    # Required, like the DTM/ACAPS keys. `.env.example` ships an empty value, so
+    # treat empty/whitespace as absent and fail clearly rather than sending an
+    # empty auth header (which HAPI rejects with an opaque error).
+    identifier = os.environ.get("HAPI_APP_IDENTIFIER", "").strip()
+    if not identifier:
+        raise RuntimeError(
+            "HAPI_APP_IDENTIFIER is not set — cannot call HAPI. Generate one at "
+            "https://hapi.humdata.org/docs (Encode Identifier) and set it in .env."
+        )
+    return identifier
 
 
 def _headers() -> dict[str, str]:
@@ -205,21 +211,44 @@ def _latest_per_series(rows: list[dict], series_key: tuple[str, ...]) -> list[di
     return [v["_row"] for v in latest.values()]
 
 
-def build_blobs(rows: list[dict], spec: EndpointSpec) -> dict[str, dict]:
-    """Group ``rows`` by the keying admin pcode and build one blob per location.
+def _finest_admin_level(row: dict) -> int | None:
+    """The finest admin level this row is scoped to. HAPI rows carry the full
+    parent hierarchy (an admin2 row also has admin1_code + location_code), so the
+    finest populated pcode is what identifies the row's actual granularity."""
+    if row.get("admin2_code"):
+        return 2
+    if row.get("admin1_code"):
+        return 1
+    if row.get("location_code"):
+        return 0
+    return None
 
-    Returns ``{key_pcode: blob}`` where the blob carries the common admin
-    identity + reference window and a ``records`` list.
-    Time-series endpoints (``spec.series_key`` set) collapse each location to the
-    latest observation per series so blobs stay a current snapshot; others keep
-    every row. Rows without the keying pcode are dropped (logged).
+
+def build_blobs(rows: list[dict], spec: EndpointSpec, level: int | None = None) -> dict[str, dict]:
+    """Group ``rows`` by the keying admin pcode and build one blob per location,
+    at admin ``level`` (default ``spec.key_level``).
+
+    A HAPI response for an admin2 endpoint mixes admin0/admin1/admin2 rows, and
+    each carries its parent pcodes — so grouping strictly by a level's pcode field
+    would fold admin2 rows into the national blob. We therefore only take rows
+    whose FINEST level equals ``level``, letting the caller ingest each level to
+    its own locations (so the national PIN figure isn't discarded). Custom-keyed
+    endpoints (refugees/returnees on ``origin_location_code``) are single-level
+    and skip the finest filter.
+
+    Returns ``{key_pcode: blob}``. Time-series endpoints (``spec.series_key`` set)
+    collapse each location to the latest observation per series.
     """
-    pcode_field = spec.pcode_field or _LEVEL_PCODE_FIELD[spec.key_level]
-    name_field = spec.name_field or _LEVEL_NAME_FIELD[spec.key_level]
+    effective_level = spec.key_level if level is None else level
+    pcode_field = spec.pcode_field or _LEVEL_PCODE_FIELD[effective_level]
+    name_field = spec.name_field or _LEVEL_NAME_FIELD[effective_level]
+    finest_filter = spec.pcode_field is None
 
     grouped: dict[str, list[dict]] = {}
     dropped = 0
     for row in rows:
+        if finest_filter and _finest_admin_level(row) != effective_level:
+            continue
         pcode = row.get(pcode_field)
         if not pcode:
             dropped += 1
@@ -227,8 +256,8 @@ def build_blobs(rows: list[dict], spec: EndpointSpec) -> dict[str, dict]:
         grouped.setdefault(pcode, []).append(row)
     if dropped:
         logger.info(
-            "[HAPI] %s: dropped %d rows with no %s (not available at admin%d)",
-            spec.type_, dropped, pcode_field, spec.key_level,
+            "[HAPI] %s admin%d: dropped %d rows with no %s",
+            spec.type_, effective_level, dropped, pcode_field,
         )
 
     blobs: dict[str, dict] = {}
@@ -239,13 +268,15 @@ def build_blobs(rows: list[dict], spec: EndpointSpec) -> dict[str, dict]:
         # window on the blob (period columns dropped from the records).
         #
         # Why latest-only rather than the full history in the blob: the HAPI job
-        # runs DAILY (only IOM DTM + ACAPS are monthly), and clear-api's
-        # location_metadata is bitemporal — every run that brings a new latest
-        # value writes a new version, while the unchanged-guard skips a run whose
-        # data is identical. So the time series is already preserved across runs,
-        # in the row history, day by day. Duplicating that history inside each
-        # blob would just bloat the payload (the food-prices series is what blew
-        # the upsert timeout) and re-store the same old months every single day.
+        # runs DAILY, and clear-api's location_metadata is bitemporal — every run
+        # that brings a new latest value writes a new version, while the
+        # unchanged-guard skips a run whose data is identical. So the HAPI time
+        # series is preserved across runs, in the row history, day by day.
+        # Duplicating that history inside each blob would just bloat the payload
+        # (the food-prices series is what blew the upsert timeout) and re-store
+        # the same old months every single day. (This daily-cadence argument is
+        # HAPI-specific — the monthly IOM DTM ingest instead carries per-round
+        # history inside the blob via `recent_rounds`; see providers/iom_dtm.py.)
         # Always drop the keying pcode/name from the records — they're lifted to
         # the blob top-level (a no-op for standard endpoints whose key is already
         # in _LOCATION_COLUMNS; drops origin_location_code/name for refugees).
@@ -265,7 +296,7 @@ def build_blobs(rows: list[dict], spec: EndpointSpec) -> dict[str, dict]:
             "source": spec.source,
             "endpoint": spec.path,
             "admin_name": first.get(name_field),
-            "admin_level": spec.key_level,
+            "admin_level": effective_level,
             "admin_pcode": pcode,
             "admin1_pcode": first.get("admin1_code"),
             "reference_period_start": min(starts) if starts else None,
