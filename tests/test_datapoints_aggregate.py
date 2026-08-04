@@ -130,6 +130,36 @@ class TestAggregationAsset:
             to_dt = _parse_iso(call_kwargs["to_iso"])
             assert (to_dt - from_dt).days >= 89
 
+    def test_retrospective_widening_is_clamped_to_floor(self):
+        # #27: an ancient (hallucinated year) reporting_period_end must not drag
+        # the refresh back a decade — the widening is clamped to the retro floor
+        # (~400d), not ~3650d to 2016.
+        os.environ.pop("KB_AGGREGATION_LOOKBACK_DAYS", None)
+        os.environ.pop("KB_AGGREGATION_MAX_RETRO_DAYS", None)
+        with (
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                return_value=True,
+            ),
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+            ) as mock_refresh,
+        ):
+            mock_refresh.return_value = {
+                "computedBuckets": 0, "supersededBuckets": 0, "schemaVersion": "v1",
+            }
+            reliefweb_weekly_datapoint_aggregations(
+                _build_op_context(),
+                reliefweb_weekly_datapoints=[
+                    {"report_id": "r1", "reporting_period_end": "2016-06-30T00:00:00+00:00"},
+                ],
+            )
+            call_kwargs = mock_refresh.call_args.kwargs
+            from_dt = _parse_iso(call_kwargs["from_iso"])
+            to_dt = _parse_iso(call_kwargs["to_iso"])
+            days = (to_dt - from_dt).days
+            assert 395 <= days <= 405, f"expected clamp to ~400d, got {days}"
+
     def test_env_overrides_take_effect(self):
         # KB_AGGREGATION_LOOKBACK_DAYS overrides the compile-time
         # default. Verified by setting an atypical value and checking

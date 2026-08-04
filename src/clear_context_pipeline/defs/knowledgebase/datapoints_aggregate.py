@@ -65,6 +65,31 @@ _DEFAULT_LOOKBACK_DAYS = 7
 # Layer 1 was turned on get folded into the caches on the first pass.
 _DEFAULT_INITIAL_LOOKBACK_DAYS = 90
 
+# Floor on how far a retrospective report may widen the refresh window. Guards
+# against an LLM-emitted `reportingPeriodEnd` with a wrong year dragging the
+# refresh across a decade of buckets. Override via KB_AGGREGATION_MAX_RETRO_DAYS.
+_DEFAULT_MAX_RETRO_DAYS = 400
+
+
+def _earliest_reporting_period_end(summaries: list[dict]) -> datetime | None:
+    """Earliest ``reporting_period_end`` across a batch's per-report summaries,
+    as an aware UTC datetime, or None when none carry one (all reports reused,
+    or none stated a period). Tolerates date-only and datetime ISO forms."""
+    earliest: datetime | None = None
+    for s in summaries:
+        raw = s.get("reporting_period_end")
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if earliest is None or dt < earliest:
+            earliest = dt
+    return earliest
+
 
 @dg.asset(group_name="reliefweb_kb")
 def reliefweb_weekly_datapoint_aggregations(
@@ -119,6 +144,38 @@ def reliefweb_weekly_datapoint_aggregations(
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=lookback_days)
+
+    # Retrospective trigger (ADR-0005 §5): a report published now about an OLD
+    # period has a `reportingPeriodEnd` before the rolling window, so keying the
+    # refresh on the rolling window alone would never recompute its correct old
+    # bucket. Widen the start to also cover this batch's earliest period end —
+    # the union of the rolling window and the batch's [min…max] period span. The
+    # refresh is idempotent, so the buckets in between with no new reports are
+    # recomputed to an unchanged value.
+    batch_start = _earliest_reporting_period_end(reliefweb_weekly_datapoints)
+    if batch_start is not None and batch_start < window_start:
+        # Clamp the widening (#27): `batch_start` is an LLM-emitted
+        # `reportingPeriodEnd`, so one hallucinated/typo'd year ("2016" for
+        # "2026") would make clear-api recompute every weekly×A2 → yearly →
+        # all-time bucket across a decade, blow the 60s client timeout, and
+        # redden the asset until the offending report ages out. A genuine
+        # deep-retrospective bucket can be refreshed manually.
+        max_retro_days = int(
+            os.environ.get("KB_AGGREGATION_MAX_RETRO_DAYS", str(_DEFAULT_MAX_RETRO_DAYS)),
+        )
+        floor = now - timedelta(days=max_retro_days)
+        if batch_start < floor:
+            context.log.warning(
+                "batch period_end %s predates the %d-day retrospective floor — "
+                "clamping to %s; refresh that bucket manually if it is genuine",
+                batch_start.isoformat(), max_retro_days, floor.isoformat(),
+            )
+            batch_start = floor
+        context.log.info(
+            "retrospective report(s) in batch: widening refresh start %s → %s",
+            window_start.isoformat(), batch_start.isoformat(),
+        )
+        window_start = batch_start
 
     context.log.info(
         "refreshing aggregated datapoints: mode=%s window=[%s, %s] schema_version=%s",

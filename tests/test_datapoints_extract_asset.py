@@ -155,11 +155,16 @@ def _configure_llm_mock(mock_make_llm):
 
 @pytest.fixture(autouse=True)
 def _datapoints_not_already_extracted(monkeypatch):
-    """Default the idempotency check to 'not extracted' so the extraction
-    tests exercise the full path. The skip test overrides it to True."""
+    """Default the idempotency check to 'not extracted' and the clear-api
+    capability preflight to 'deployed', so the extraction tests exercise the
+    full path. Specific tests override these."""
     monkeypatch.setattr(
         "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
-        lambda report_id: False,
+        lambda report_id, *, schema_version: False,
+    )
+    monkeypatch.setattr(
+        "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
+        lambda: True,
     )
 
 
@@ -251,6 +256,53 @@ class TestExtractionAsset:
         assert mock_make_llm.return_value.complete_structured.call_count == 0
         assert mock_upsert.call_count == 0
         assert result == [{"report_id": PDF_TEXT_SUMMARY["report_id"], "reused": True}]
+
+    def test_undeployed_clear_api_fails_loud_before_any_llm_spend(self):
+        # #27-Critical: if clear-api lacks source attribution (PR #110 not
+        # deployed), the asset must fail LOUD up front — not silently 400 every
+        # report after paying for its 6 LLM calls and finish green with 0 data.
+        with (
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                return_value=_mock_s3_client(_canned_doc_text_body()),
+            ),
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+            ) as mock_make_llm,
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
+                return_value=False,
+            ),
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+            ) as mock_upsert,
+        ):
+            _configure_llm_mock(mock_make_llm)
+            with pytest.raises(dg.Failure, match="sourceId"):
+                reliefweb_weekly_datapoints(
+                    _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+                )
+        # Failed before spending anything.
+        assert mock_make_llm.return_value.complete_structured.call_count == 0
+        assert mock_upsert.call_count == 0
+
+    def test_empty_batch_skips_the_preflight(self):
+        # No reports → no clear-api dependency; the preflight probe must not run
+        # (and an empty week must not fail even if clear-api is down).
+        with (
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+            ) as mock_make_llm,
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
+                side_effect=AssertionError("preflight ran on an empty batch"),
+            ),
+        ):
+            mock_make_llm.return_value.model = "claude-sonnet-4-6"
+            result = reliefweb_weekly_datapoints(
+                _build_asset_context(), reliefweb_weekly_pdf_text=[],
+            )
+        assert result == []
 
     def test_partial_domain_failure_writes_null_and_continues(self):
         # `Casualties` raises → merged.data.casualties = None,

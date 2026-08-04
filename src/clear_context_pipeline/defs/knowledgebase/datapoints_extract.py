@@ -56,6 +56,78 @@ FORMAT_SLUG = "situation-report"
 S3_DATAPOINTS_PREFIX = f"reliefweb/kb/datapoints/{COUNTRY_ISO3}/{FORMAT_SLUG}"
 
 
+# ── Plausibility crisis briefs (ADR-0004 §4) ──────────────────────────
+# A compact, stable per-country baseline the extractor weighs a report's claims
+# against when rating the `plausibility_in_context` credibility criterion — so an
+# order-of-magnitude-off figure ("12 million displaced in a 2-million state") is
+# caught, instead of the model judging plausibility from the single document in
+# isolation. Keyed by ISO3 (the report's `primary_country`); a country without a
+# curated brief falls back to `_GENERIC_CRISIS_BRIEF`, so this works for every
+# supported country and new briefs can be added incrementally.
+#
+# NOTE: the magnitudes below are best-effort baselines and should be reviewed by
+# a domain expert (and refreshed periodically). Keep each to a few sentences of
+# well-established figures; it rides in the cached system prefix (paid once per
+# report). A future option is to derive these from the location_metadata layer
+# (WorldPop population + latest DTM/IPC/HNO totals) instead of hardcoding.
+_CRISIS_BRIEFS: dict[str, str] = {
+    "sdn": (
+        "Sudan (2023–2026 conflict): population ~48 million. The SAF–RSF war since "
+        "April 2023 is the world's largest displacement crisis — order of 10–11 "
+        "million IDPs and 2–3 million refugees to neighbouring countries (Chad, "
+        "Egypt, South Sudan, Ethiopia). ~24–25 million people in need; roughly half "
+        "the population acutely food insecure (IPC phase 3+), with famine (IPC 5) "
+        "confirmed in parts of Darfur. Worst-affected: Khartoum, the Darfur states, "
+        "the Kordofans, Gezira. National totals run to the millions; a single state "
+        "or locality is typically tens of thousands to low millions. Treat a "
+        "single-source figure far outside these magnitudes, with no explanation, as "
+        "implausible."
+    ),
+    "afg": (
+        "Afghanistan (post-2021): population ~41 million. Since the August 2021 "
+        "Taliban takeover and economic collapse, ~23 million people are in need and "
+        "roughly half the population is acutely food insecure (IPC phase 3+). "
+        "Protracted internal displacement of ~3–4 million, plus large-scale returnee "
+        "flows — millions returning/deported from Pakistan and Iran (2023–2025). "
+        "Compounded by drought and recurring earthquakes (e.g. Herat 2023). National "
+        "totals run to the millions; a single province is typically tens of thousands "
+        "to low millions. Treat figures far outside these magnitudes, unexplained, as "
+        "implausible."
+    ),
+    "ven": (
+        "Venezuela (protracted crisis): population ~28 million. Prolonged political / "
+        "economic collapse has driven the region's largest displacement — ~7.7 million "
+        "refugees and migrants OUTWARD (mainly Colombia, Peru, Ecuador, Chile, Brazil); "
+        "this crisis is defined by cross-border outflow more than internal displacement. "
+        "~7 million people in need inside the country amid health-system and service "
+        "collapse. National totals run to the millions; a state/municipality is "
+        "typically tens of thousands to low millions. Treat figures far outside these "
+        "magnitudes, unexplained, as implausible."
+    ),
+}
+
+# Fallback when no country baseline is on file — keeps the criterion meaningful
+# (internal-consistency-based) rather than defaulting everything to plausible.
+_GENERIC_CRISIS_BRIEF = (
+    "No country baseline is on file. Judge plausibility from internal consistency "
+    "and general humanitarian magnitudes; flag figures that contradict other "
+    "figures in the report or are orders of magnitude apart from related ones."
+)
+
+
+def _crisis_brief(country_iso3: str | None) -> str:
+    """The plausibility baseline for a country (ISO3), or a generic fallback.
+
+    An unknown OR absent country gets the GENERIC brief — never another
+    country's magnitudes. (#27: a None country previously fell through to the
+    Sudan default, so every country-less report — e.g. manual uploads — was
+    judged against Sudan's caseload, corrupting plausibility → data_quality.)
+    """
+    if not country_iso3:
+        return _GENERIC_CRISIS_BRIEF
+    return _CRISIS_BRIEFS.get(country_iso3.lower(), _GENERIC_CRISIS_BRIEF)
+
+
 # The system prompt is stable across all six domain calls — that's what
 # Anthropic's prompt cache keys off. Keep everything domain-specific in
 # the user message so the cache actually hits.
@@ -70,11 +142,25 @@ SYSTEM_PROMPT_TEMPLATE = (
     "  something is missing, leave the field null.\n"
     "- Every numeric value must be wrapped in the provenance envelope: "
     "  {{ value, unit, confidence, source_quote, chunk_index, "
-    "  page_number, scope_location_name }}. `source_quote` must be a verbatim "
-    "  sentence from the report — a substring, not a paraphrase. Always set "
-    "  `chunk_index` to null: it is filled automatically after extraction by "
-    "  matching your `source_quote` to the report's chunks — do not guess it. "
-    "  `page_number` (1-indexed) comes from the nearest `[page N]` marker.\n"
+    "  page_number, scope_location_name, source_name, credibility }}. "
+    "  `source_quote` must "
+    "  be a verbatim sentence from the report — a substring, not a paraphrase. "
+    "  Always set `chunk_index` to null: it is filled automatically after "
+    "  extraction by matching your `source_quote` to the report's chunks — do "
+    "  not guess it. `page_number` (1-indexed) comes from the nearest "
+    "  `[page N]` marker.\n"
+    "- SOURCE ATTRIBUTION: set `source_name` to the organisation the number is "
+    "  attributed to IN THE TEXT — 'according to IOM DTM', 'WHO reports', 'per "
+    "  OCHA figures' -> the org name ('IOM DTM', 'WHO', 'OCHA'). Emit the NAME "
+    "  only. Set it null when the figure names no distinct source; do NOT "
+    "  default to the report's own publisher. Never emit `source_id` — like "
+    "  the resolved location id, it is filled in after extraction.\n"
+    "- PER-FIGURE CREDIBILITY (`credibility`): leave null for a typical figure "
+    "  — it inherits the report-wide credibility you rate in "
+    "  `narrative_and_confidence.information_credibility`. Set a criterion "
+    "  (met/partial/unmet) ONLY where THIS figure differs from the document: a "
+    "  precisely-sourced, well-specified figure in an otherwise vague report, "
+    "  or a suspiciously round/unattributed number in a credible one.\n"
     "- FIGURE SCOPE: for every numeric value, set `scope_location_name` to "
     "  the ONE place that number is a total FOR — the area it counts, NOT "
     "  every place the report mentions. A report framed nationally may state "
@@ -93,7 +179,15 @@ SYSTEM_PROMPT_TEMPLATE = (
     "- Locations: prefer OCHA pcode when the report cites it; else give "
     "  the plain place name. Set `admin_level` (0..3) when you can tell.\n"
     "- Ignore boilerplate: cover pages, contact blocks, footers, ToCs.\n"
+    "- PLAUSIBILITY: when rating the `plausibility_in_context` credibility "
+    "  criterion (in `narrative_and_confidence`, or a per-figure `credibility` "
+    "  override), weigh the report's figures against the COUNTRY BASELINE below. "
+    "  A claim far outside those magnitudes with no explanation is `unmet` "
+    "  (or `partial`), not `met`; figures consistent with the baseline are `met`.\n"
     "\n"
+    "---\n"
+    "COUNTRY BASELINE (for plausibility only; cached):\n"
+    "{crisis_brief}\n"
     "---\n"
     "FULL REPORT (cached; do not repeat back to me):\n"
     "{doc_text}\n"
@@ -139,11 +233,16 @@ def _run_domain(
     schema: type[BaseModel],
     *,
     cache_key: str,
+    country_iso3: str | None = None,
 ) -> BaseModel:
     """One domain call. cache_key is the same across all six domains
-    for a given report so Anthropic's prompt cache is reused."""
+    for a given report so Anthropic's prompt cache is reused. `country_iso3`
+    selects the plausibility crisis brief; None/unknown → the GENERIC brief
+    (never another country's magnitudes — #27)."""
     return llm.complete_structured(
-        system=SYSTEM_PROMPT_TEMPLATE.format(doc_text=doc_text),
+        system=SYSTEM_PROMPT_TEMPLATE.format(
+            doc_text=doc_text, crisis_brief=_crisis_brief(country_iso3),
+        ),
         user=_domain_user_prompt(domain_name, schema),
         schema=schema,
         max_tokens=4096,
@@ -275,6 +374,76 @@ def _resolve_figure_scopes(merged: Any) -> tuple[int, int, int]:
         if rid:
             resolved += 1
     return figures, with_name, resolved
+
+
+# Bounds on LLM-emitted source names before they hit `resolveDataSource` (a
+# mutation that CREATES an ungraded row on miss). The names are lifted from
+# untrusted PDF body text, so cap length + per-report cardinality to stop a
+# garbled or adversarial document from seeding unbounded junk `data_sources`
+# rows — which would also split one org's figures across near-duplicate grades,
+# undercutting the credibility model. (#27)
+_MAX_SOURCE_NAME_LEN = 120
+_MAX_SOURCES_PER_REPORT = 25
+
+
+def _norm_source_name(name: Any) -> str | None:
+    """Normalise an LLM-emitted source name: None for non-strings / blanks,
+    internal whitespace collapsed, length-capped. Used in BOTH loops of
+    `_resolve_figure_sources` so the cache key and the write path can never
+    diverge — if only one collapsed whitespace, every figure needing collapse
+    would silently miss the cache and get `source_id = None`. (#27)"""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return " ".join(name.split())[:_MAX_SOURCE_NAME_LEN]
+
+
+def _resolve_figure_sources(merged: Any) -> tuple[int, int]:
+    """Resolve each numeric figure's `source_name` (the org the number is
+    attributed to in the text) to a `data_sources` id, writing it into
+    `source_id` in place. Mirrors `_resolve_figure_scopes` (ADR-0004).
+
+    Uncited figures (no `source_name`) keep `source_id = None`; the aggregator
+    then attributes them to the report's publisher. `source_id` is overwritten
+    unconditionally — the LLM must not supply it.
+
+    Returns (figures_with_source_name, figures_resolved) for logging.
+    """
+    fields: list[dict] = []
+    _collect_numeric_fields(merged, fields)
+
+    # One resolveDataSource call per distinct cited name — a report attributes
+    # many figures to the same org (e.g. "IOM DTM" across a displacement table).
+    cache: dict[str, str | None] = {}
+    for f in fields:
+        key = _norm_source_name(f.get("source_name"))
+        if key is None or key in cache:
+            continue
+        # Cap distinct names per report — see the module note above.
+        if len(cache) >= _MAX_SOURCES_PER_REPORT:
+            logger.warning(
+                "[DATAPOINTS] source-name cardinality cap hit (%d) — remaining "
+                "figures stay unattributed", _MAX_SOURCES_PER_REPORT,
+            )
+            break
+        try:
+            cache[key] = clear_api.resolve_data_source(name=key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[DATAPOINTS] source resolve hiccup name=%s: %s", key, exc,
+            )
+            cache[key] = None
+
+    with_name = resolved = 0
+    for f in fields:
+        key = _norm_source_name(f.get("source_name"))
+        sid: str | None = None
+        if key is not None:
+            with_name += 1
+            sid = cache.get(key)  # None when past the cardinality cap
+        f["source_id"] = sid  # unconditional — never trust an LLM id
+        if sid:
+            resolved += 1
+    return with_name, resolved
 
 
 def _dig(obj: Any, *path: str) -> Any:
@@ -447,6 +616,9 @@ def extract_datapoints_for_one_report(
     s3=None,
     s3_bucket: str | None = None,
     log_context=None,
+    publisher_name: str | None = None,
+    publisher_homepage: str | None = None,
+    country_iso3: str | None = None,
 ) -> dict:
     """Run the six domain LLM extractions for one report, resolve
     locations, hoist hot totals, snapshot a debug artefact to S3, and
@@ -472,6 +644,10 @@ def extract_datapoints_for_one_report(
       log_context: optional Dagster / Python logger. Any object
         exposing `.info` / `.warning` / `.error`. Falls back to the
         module logger when None.
+      publisher_name / publisher_homepage: the report's publisher
+        (ReliefWeb `report.source`, first entry). Resolved to the
+        report-level `sourceId` — the source fallback for any figure
+        that cites no distinct origin. None for manual documents.
 
     Returns:
       Summary dict identical in shape to the weekly asset's per-report
@@ -484,6 +660,11 @@ def extract_datapoints_for_one_report(
     """
     log = log_context or logger
 
+    # Record which plausibility baseline this report is judged against, so a run
+    # log tells you when a country-less report fell back to the generic brief
+    # rather than silently getting the wrong country's magnitudes (#27).
+    log.info("[%s] plausibility baseline: %s", report_id, country_iso3 or "generic")
+
     # ── Domain-partitioned extraction ─────────────────────────────
     merged: dict[str, dict | None] = {}
     domains_ok: list[str] = []
@@ -492,6 +673,7 @@ def extract_datapoints_for_one_report(
         try:
             model_out = _run_domain(
                 llm, doc_text, domain_name, schema, cache_key=report_id,
+                country_iso3=country_iso3,
             )
             merged[domain_name] = model_out.model_dump(mode="json")
             domains_ok.append(domain_name)
@@ -536,6 +718,27 @@ def extract_datapoints_for_one_report(
                 "[%s] chunk_index backfill: %d/%d figures matched (%d chunks)",
                 report_id, cq_matched, cq_total, len(chunks),
             )
+
+    # Source attribution: resolve each figure's cited source_name -> source_id
+    # in place, and the report's publisher -> the report-level sourceId (the
+    # fallback for any figure that cites no distinct source). See ADR-0004.
+    src_named, src_resolved = _resolve_figure_sources(merged)
+    publisher_source_id: str | None = None
+    if publisher_name:
+        try:
+            publisher_source_id = clear_api.resolve_data_source(
+                name=publisher_name, homepage=publisher_homepage,
+            )
+        except Exception as exc:  # noqa: BLE001 — publisher stays null on hiccup
+            log.warning(
+                "[%s] publisher resolve hiccup name=%s: %s",
+                report_id, publisher_name, exc,
+            )
+    log.info(
+        "[%s] source attribution: %d/%d figures cite a source resolved; "
+        "publisher=%s -> %s",
+        report_id, src_resolved, src_named, publisher_name, publisher_source_id,
+    )
 
     timing = merged.get("timing_and_scope") or {}
     event_types = list(dict.fromkeys(timing.get("event_types") or []))
@@ -592,6 +795,7 @@ def extract_datapoints_for_one_report(
         data=merged,
         schema_version=SCHEMA_VERSION,
         extracted_by_model=llm.model,
+        source_id=publisher_source_id,
     )
 
     return {
@@ -645,6 +849,29 @@ def reliefweb_weekly_datapoints(
         )
         return []
 
+    # Deploy-order preflight (fail loud, once, before any LLM spend): schema v2
+    # sends `sourceId` on every upsert, so an undeployed clear-api would 400 each
+    # report AFTER its 6 LLM calls, and the per-report `continue` below would let
+    # the run finish GREEN with zero data. Probe read-only; only when there's work.
+    if reliefweb_weekly_pdf_text:
+        try:
+            source_attribution_ready = clear_api.supports_source_attribution()
+        except Exception as exc:  # noqa: BLE001
+            raise dg.Failure(
+                description=(
+                    "clear-api capability preflight failed — cannot confirm source "
+                    f"attribution (schema {SCHEMA_VERSION}) is deployed: {exc}"
+                ),
+            ) from exc
+        if not source_attribution_ready:
+            raise dg.Failure(
+                description=(
+                    "clear-api does not expose UpsertReportDatapointsInput.sourceId "
+                    f"— deploy clear-api PR #110 before this pipeline (schema "
+                    f"{SCHEMA_VERSION} sends sourceId unconditionally)."
+                ),
+            )
+
     llm = make_llm_provider("datapoints")
 
     summaries: list[dict] = []
@@ -659,7 +886,9 @@ def reliefweb_weekly_datapoints(
         # source of truth — the S3 debug snapshot is written BEFORE the upsert
         # and so can't confirm the write landed.
         try:
-            already_done = clear_api.report_datapoints_exist(report_id)
+            already_done = clear_api.report_datapoints_exist(
+                report_id, schema_version=SCHEMA_VERSION
+            )
         except Exception as exc:  # noqa: BLE001 — treat as not-done and extract
             context.log.warning(
                 "[%s] datapoint existence check failed (%s) — extracting anyway",
@@ -692,6 +921,9 @@ def reliefweb_weekly_datapoints(
                 s3=s3,
                 s3_bucket=bucket,
                 log_context=context.log,
+                publisher_name=report.get("publisher_name"),
+                publisher_homepage=report.get("publisher_homepage"),
+                country_iso3=report.get("country_iso3"),
             )
         except _NothingExtracted:
             context.log.error(
@@ -724,6 +956,10 @@ def reliefweb_weekly_datapoints(
             "unresolved_pcodes": summary["unresolved_pcodes"],
             "s3_debug_key": summary["s3_debug_key"],
             "upsert_result": summary["upsert_result"],
+            # Carried so the aggregation asset can widen its refresh to cover a
+            # retrospective report's OLD bucket, not just the rolling recent
+            # window (ADR-0005 §5).
+            "reporting_period_end": summary["reporting_period_end"],
         })
         context.log.info(
             "[%s] extracted %d/%d domains, %d locations resolved (%s)",

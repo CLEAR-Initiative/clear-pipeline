@@ -61,7 +61,7 @@ A field where the largest quality-adjusted value across reports wins. Used where
 _Avoid_: Peak, highest
 
 **Quality Envelope**:
-The per-field provenance wrapper — `{ value, unit, confidence, source_quote, chunk_index, page_number }`. Every extracted numeric carries one.
+The per-field provenance wrapper on every extracted numeric — `{ value, unit, confidence, source_quote, chunk_index, page_number, scope_location_name/scope_location_id (Figure Scope), source_name/source_id (source attribution, ADR-0004), credibility (per-figure credibility overrides, ADR-0004 §4) }`. `confidence` is the Directness credibility criterion; the other credibility criteria + source reliability combine into the read-time **data_quality** score (ADR-0005).
 _Avoid_: Metadata, provenance blob
 
 ### Situation analysis

@@ -23,18 +23,23 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-# Single pre-launch schema. Includes Figure Scope on NumericField
-# (scope_location_name + scope_location_id) and
-# needs_and_funding.overall_affected — Population Affected, the widest
-# circle of crisis impact, extracted from reports (never sourced from
-# event-driven `events`; see clear-context-pipeline ADR-0001).
+# Schema versions:
+#   v1 — pre-launch baseline: Figure Scope on NumericField
+#        (scope_location_name + scope_location_id) and
+#        needs_and_funding.overall_affected (Population Affected, the widest
+#        circle of crisis impact; never sourced from event-driven `events`,
+#        see clear-context-pipeline ADR-0001).
+#   v2 — source attribution (NumericField.source_name/source_id), document-
+#        level information-credibility criteria (DocumentCredibility on
+#        narrative_and_confidence), and the returnee stock/flow split
+#        (returnee_stock + new_returns replace returnees). See the clear-
+#        context-pipeline ADR-0004 / ADR-0005.
 #
-# We deliberately do NOT bump this version as the schema evolves
-# pre-launch: the corpus is a handful of test reports we wipe and
-# re-extract on every change, so version-gating and migration ceremony
-# buy nothing. Start bumping (and keeping old rows from mixing) only once
-# there's real data to preserve — i.e. at/after launch.
-SCHEMA_VERSION = "v1"
+# Pre-launch the corpus is a handful of test reports we wipe and re-extract on
+# every change, so the version mainly documents the shape. Aggregation still
+# combines only same-version rows, so the bump keeps any remaining v1 rows from
+# mixing with the re-extracted v2 rows.
+SCHEMA_VERSION = "v2"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -63,6 +68,27 @@ def _tolerate_stringified_json(v: Any) -> Any:
 ConfidenceTier = Literal[
     "verified", "reported", "estimated", "media", "unverified",
 ]
+
+# Information-credibility rating for the credibility criteria (ADR-0004 §4).
+# Three-valued so the aggregator scores met = 1.0 / partial = 0.5 / unmet = 0.0
+# and weights each criterion into the 0–10 information_credibility score.
+CredibilityRating = Literal["met", "partial", "unmet"]
+
+
+class FigureCredibility(BaseModel):
+    """Per-figure information-credibility overrides (ADR-0004 §4). Each of the six
+    intrinsic criteria is optional; a null inherits the report's document-level
+    ``DocumentCredibility``. Rate a criterion here ONLY when THIS figure gives a
+    distinct signal — a precisely-sourced, well-specified figure inside an
+    otherwise vague report, or a suspiciously round media number in a credible
+    one. Directness is the figure's ``confidence`` tier and Recency is computed
+    at read time, so neither is assessed here."""
+    attribution_quality: Optional[CredibilityRating] = None
+    internal_consistency: Optional[CredibilityRating] = None
+    plausibility_in_context: Optional[CredibilityRating] = None
+    geographic_temporal_specificity: Optional[CredibilityRating] = None
+    methodology_transparency: Optional[CredibilityRating] = None
+    representativeness: Optional[CredibilityRating] = None
 
 # NRC SAF sectors — enforced as a Literal because the aggregation math
 # groups by sector. Off-taxonomy sectors would silently drop out.
@@ -129,6 +155,44 @@ class NumericField(BaseModel):
     scope_location_id: Optional[str] = Field(
         default=None,
         description="Resolved post-extraction. Leave null; do not emit.",
+    )
+    # ── Source attribution ────────────────────────────────────────────
+    # The organisation this specific number ORIGINATES from — "according
+    # to IOM DTM…" -> "IOM DTM" — not the report's publisher (that's the
+    # document-level fallback, applied at aggregation). Mirrors Figure
+    # Scope: the LLM emits the name; the resolve step maps it to an id.
+    # See docs/adr/0004-source-attribution-and-information-credibility.md.
+    source_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The organisation this specific number is attributed to in the "
+            "text (e.g. 'IOM DTM', 'WHO', 'OCHA', 'WFP'). Emit the org NAME "
+            "only. Null if the figure names no distinct source — do NOT "
+            "default to the report's own publisher."
+        ),
+    )
+    # Resolved from source_name post-extraction to a `data_sources` id via
+    # resolveDataSource. NOT emitted by the LLM — always overwritten by the
+    # resolve step. Null = no cited source; aggregation then attributes the
+    # figure to the report's publisher (report_datapoints.sourceId).
+    source_id: Optional[str] = Field(
+        default=None,
+        description="Resolved post-extraction. Leave null; do not emit.",
+    )
+    # ── Per-figure information credibility (ADR-0004 §4) ───────────────
+    # Optional overrides of the report's document-level credibility, for the
+    # criteria where THIS figure differs from the document as a whole. Null
+    # criteria inherit the document-level assessment at aggregation time.
+    credibility: Optional[FigureCredibility] = Field(
+        default=None,
+        description=(
+            "Per-figure credibility overrides — set a criterion (met/partial/"
+            "unmet) ONLY where this specific figure differs from the report "
+            "overall (e.g. a well-attributed, precisely-scoped figure in a "
+            "vague report). Leave the whole object null when the figure is "
+            "typical of the document; it then inherits the document-level "
+            "assessment. Do NOT restate directness/recency here."
+        ),
     )
 
 
@@ -268,10 +332,14 @@ class DisplacementFlow(BaseModel):
 class Displacement(BaseModel):
     """IDPs, refugees, returnees — carefully distinguished.
 
-    `stock` is a state-snapshot: total people currently displaced.
-    `new_displacements` is a flow: people newly displaced in the
-    reporting window. These aggregate DIFFERENTLY (latest-wins vs
-    sum-with-dedup), so the extractor must be strict about the split.
+    Every measure is either a STOCK (a state-snapshot: how many people are
+    in this state now) or a FLOW (how many entered it during the reporting
+    window). Stocks aggregate latest-wins; flows aggregate by sum across
+    non-overlapping periods — so the extractor must be strict about the split:
+      * IDPs:     `idp_stock` (stock)      + `new_displacements` (flow)
+      * Returns:  `returnee_stock` (stock) + `new_returns` (flow)
+    Conflating a running total with a per-period count over-counts (the exact
+    returnee bug ADR-0005 §4a fixes), so never put a cumulative total in a flow.
     """
     idp_stock: Optional[NumericField] = Field(
         default=None,
@@ -281,9 +349,21 @@ class Displacement(BaseModel):
         default=None,
         description="People newly displaced DURING the reporting period.",
     )
-    returnees: Optional[NumericField] = Field(
+    returnee_stock: Optional[NumericField] = Field(
         default=None,
-        description="People who returned to their origin during the reporting period.",
+        description=(
+            "Cumulative total of people who have returned to their area of "
+            "origin AS OF the end of the reporting period — a running total "
+            "(STOCK), not the period's new returns. Aggregates latest-wins."
+        ),
+    )
+    new_returns: Optional[NumericField] = Field(
+        default=None,
+        description=(
+            "People who returned to their area of origin DURING the reporting "
+            "period — a FLOW. Aggregates by sum across non-overlapping periods. "
+            "Do NOT put a cumulative return total here (that is returnee_stock)."
+        ),
     )
     refugees: Optional[NumericField] = Field(
         default=None,
@@ -439,6 +519,75 @@ class SectorIndicator(BaseModel):
     value: NumericField
 
 
+class DocumentCredibility(BaseModel):
+    """Document-level information-credibility criteria (ADR-0004 §4).
+
+    Six intrinsic criteria the LLM assesses ONCE for the whole report, each
+    rated met / partial / unmet. Together with the per-figure `confidence`
+    (Directness) and a Recency score computed at read time in clear-api, they
+    yield the 0–10 information_credibility that feeds the data-quality score.
+    Assessed at document level as the fallback for every figure in the report;
+    per-figure overrides are a later refinement (ADR-0004 §4).
+
+    Every criterion is Optional (default None). The prompt still instructs the
+    model to rate all six, but Anthropic tool-use is best-effort: a response that
+    fills only four of six must NOT raise a ValidationError that nulls the entire
+    `narrative_and_confidence` domain (losing brief_summary, overall_confidence
+    and every sector_indicator to gain nothing). clear-api treats a missing
+    criterion as the neutral 0.5 rating, so a partial assessment degrades
+    gracefully. Mirrors FigureCredibility, whose six fields are already Optional.
+    (#27)
+    """
+    attribution_quality: Optional[CredibilityRating] = Field(
+        default=None,
+        description=(
+            "Are the report's claims attributed to identifiable sources "
+            "(named agencies, dated assessments) rather than anonymous or "
+            "absent attribution? met = clearly attributed throughout."
+        ),
+    )
+    internal_consistency: Optional[CredibilityRating] = Field(
+        default=None,
+        description=(
+            "Do figures and claims within the report agree with each other "
+            "(totals match disaggregations, no contradictions)? "
+            "met = internally consistent."
+        ),
+    )
+    plausibility_in_context: Optional[CredibilityRating] = Field(
+        default=None,
+        description=(
+            "Are the claims plausible against the COUNTRY BASELINE provided in the "
+            "system prompt? met = magnitudes consistent with that baseline; unmet = "
+            "figures far outside it (order-of-magnitude off) with no explanation; "
+            "partial = somewhat high/low but arguable."
+        ),
+    )
+    geographic_temporal_specificity: Optional[CredibilityRating] = Field(
+        default=None,
+        description=(
+            "Are events located and dated precisely enough to act on "
+            "(specific admin areas + dates) rather than vague ('parts of the "
+            "country', 'recently')? met = precise."
+        ),
+    )
+    methodology_transparency: Optional[CredibilityRating] = Field(
+        default=None,
+        description=(
+            "Does the report state how figures were collected (assessment "
+            "method, sample, coverage) where applicable? "
+            "unmet = figures with no stated methodology."
+        ),
+    )
+    representativeness: Optional[CredibilityRating] = Field(
+        default=None,
+        description=(
+            "Does the stated scope match the claims (a 3-village assessment "
+            "NOT generalised to a governorate)? met = scope matches claims."
+        ),
+    )
+
+
 class NarrativeAndConfidence(BaseModel):
     """Prose summary + overall confidence + a bag of sector indicators.
 
@@ -460,6 +609,16 @@ class NarrativeAndConfidence(BaseModel):
             "verification. `reported` = DTM / cluster / partner. `estimated` "
             "= modeled projection. `media` = news coverage without direct "
             "verification. `unverified` = you couldn't tell."
+        ),
+    )
+    information_credibility: Optional[DocumentCredibility] = Field(
+        default=None,
+        description=(
+            "Document-level information-credibility — rate ALL six criteria "
+            "(met / partial / unmet) for the report as a whole. This is the "
+            "credibility fallback for every figure, so always fill it. "
+            "Directness is captured separately per figure (`confidence`); "
+            "Recency is computed later — do not assess either here."
         ),
     )
     sector_indicators: list[SectorIndicator] = Field(

@@ -47,8 +47,18 @@ from clear_context_pipeline.defs.evals.runner import (
     reference_provider,
 )
 from clear_context_pipeline.defs.evals.scoring import SCORERS, _mean
+from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+    SCHEMA_VERSION,
+)
 
 candidate_partitions = dg.StaticPartitionsDefinition(CANDIDATE_KEYS)
+
+# Steps whose cached output depends on the datapoint extraction schema: a
+# SCHEMA_VERSION bump makes an old cache entry stale (missing/renamed fields),
+# so it must be regenerated even without EVAL_FORCE. `context`/`extraction`
+# don't carry the datapoint schema, so a bump leaves their cache valid and
+# they aren't listed here. See ADR-0004 / ADR-0005.
+_STEP_SCHEMA_VERSION: dict[str, str] = {"datapoints": SCHEMA_VERSION}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -87,19 +97,33 @@ def _generate(
         ok = failed = reused = 0
         seconds = 0.0
         first_error: str | None = None
+        expected_sv = _STEP_SCHEMA_VERSION.get(step)
         for report in corpus:
             cache_file = step_dir / f"{report.report_id}.json"
             if cache_file.exists() and not force:
                 cached = json.loads(cache_file.read_text())
-                reused += 1
-                ok += cached["stats"]["ok"]
-                failed += cached["stats"]["failed"]
-                seconds += cached["stats"]["seconds"]
-                first_error = first_error or next(iter(cached["stats"].get("errors") or []), None)
-                continue
+                # Reuse only when the cache matches the current schema (steps
+                # without a schema version always reuse). A bump regenerates
+                # this step; a pre-versioning cache (no `schema_version` key)
+                # reads as None and so regenerates too.
+                if expected_sv is None or cached.get("schema_version") == expected_sv:
+                    reused += 1
+                    ok += cached["stats"]["ok"]
+                    failed += cached["stats"]["failed"]
+                    seconds += cached["stats"]["seconds"]
+                    first_error = first_error or next(iter(cached["stats"].get("errors") or []), None)
+                    continue
+                log.info(
+                    "%s / %s: cached schema_version=%s != %s — regenerating",
+                    step, report.report_id, cached.get("schema_version"), expected_sv,
+                )
             output, stats = runner(get_provider(role), report)
             cache_file.write_text(json.dumps(
-                {"output": output, "stats": dataclasses.asdict(stats)},
+                {
+                    "output": output,
+                    "stats": dataclasses.asdict(stats),
+                    "schema_version": expected_sv,
+                },
                 ensure_ascii=False,
             ))
             ok += stats.ok

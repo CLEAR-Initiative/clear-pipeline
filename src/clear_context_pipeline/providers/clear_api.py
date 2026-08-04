@@ -42,6 +42,12 @@ query ResolveKnowledgebaseLocation($pcode: String, $name: String, $adminLevel: I
 }
 """
 
+_RESOLVE_DATA_SOURCE = """
+mutation ResolveDataSource($name: String!, $homepage: String) {
+  resolveDataSource(name: $name, homepage: $homepage)
+}
+"""
+
 _UPSERT_KNOWLEDGEBASE = """
 mutation UpsertKnowledgebaseChunks(
   $reportId: String!,
@@ -97,6 +103,17 @@ _REPORT_DATAPOINT_EXISTS = """
 query ReportDatapointExists($reportId: String!) {
   reportDatapoint(reportId: $reportId) {
     id
+    schemaVersion
+  }
+}
+"""
+
+# Read-only introspection probe for the deploy-order preflight. Deliberately NOT
+# `resolveDataSource` (a mutation that seeds a junk data_sources row on miss).
+_PREFLIGHT_SOURCE_ATTRIBUTION = """
+query PreflightSourceAttribution {
+  __type(name: "UpsertReportDatapointsInput") {
+    inputFields { name }
   }
 }
 """
@@ -318,6 +335,24 @@ def resolve_location(
     return data.get("resolveKnowledgebaseLocation")
 
 
+def resolve_data_source(*, name: str, homepage: str | None = None) -> str | None:
+    """Resolve an organisation/source name to a ``data_sources`` id via
+    clear-api's ``resolveDataSource`` mutation, creating an ungraded
+    ``organisation`` row on miss.
+
+    Used for both a figure's cited source (``source_name`` -> ``source_id``)
+    and a report's publisher (ReliefWeb ``report.source`` -> the report's
+    ``sourceId``). Returns the id, or ``None`` on empty input. See ADR-0004.
+    """
+    if not name or not name.strip():
+        return None
+    data = _execute(
+        _RESOLVE_DATA_SOURCE,
+        {"name": name.strip(), "homepage": homepage},
+    )
+    return data.get("resolveDataSource")
+
+
 def upsert_report_datapoints(
     *,
     report_id: str,
@@ -335,6 +370,7 @@ def upsert_report_datapoints(
     data: dict[str, Any],
     schema_version: str,
     extracted_by_model: str,
+    source_id: str | None = None,
 ) -> dict[str, Any]:
     """Replace the ``report_datapoints`` row for ``report_id``.
 
@@ -362,6 +398,7 @@ def upsert_report_datapoints(
         "data": data,
         "schemaVersion": schema_version,
         "extractedByModel": extracted_by_model,
+        "sourceId": source_id,
     }
     result = _execute(_UPSERT_REPORT_DATAPOINTS, {"input": payload})
     return result["upsertReportDatapoints"]
@@ -381,17 +418,38 @@ def has_aggregated_datapoints(schema_version: str) -> bool:
     return bool(data.get("hasAggregatedDatapoints"))
 
 
-def report_datapoints_exist(report_id: str) -> bool:
-    """True when this report's datapoints have already been extracted and
-    upserted (a ``report_datapoints`` row exists for it).
+def report_datapoints_exist(report_id: str, *, schema_version: str) -> bool:
+    """True only when this report has an extracted ``report_datapoints`` row AT
+    ``schema_version``.
 
     Lets the datapoint asset skip the 6 LLM extraction calls for a report a
-    prior run already finished. The DB is the source of truth on purpose - the
-    S3 debug snapshot is written BEFORE the upsert, so it can't confirm the
-    write actually landed.
+    prior run already finished - but the version must match, or a schema bump
+    could never re-extract: a v1 row would count as "done" under v2 forever,
+    leaving the v2 aggregation buckets empty and the situation snapshots null.
+    (`evals/assets.py` already keys its cache on schema_version the same way.)
+
+    The DB is the source of truth on purpose - the S3 debug snapshot is written
+    BEFORE the upsert, so it can't confirm the write actually landed.
     """
     data = _execute(_REPORT_DATAPOINT_EXISTS, {"reportId": report_id})
-    return data.get("reportDatapoint") is not None
+    row = data.get("reportDatapoint")
+    return bool(row) and row.get("schemaVersion") == schema_version
+
+
+def supports_source_attribution() -> bool:
+    """True when the deployed clear-api understands source attribution — i.e. its
+    ``UpsertReportDatapointsInput`` exposes ``sourceId`` (clear-api PR #110).
+
+    A read-only introspection probe, NOT ``resolve_data_source`` (a mutation that
+    would seed a junk ``data_sources`` row on every check). Used as a deploy-order
+    preflight: schema v2 sends ``sourceId`` unconditionally, so running against an
+    undeployed clear-api would 400 every report AFTER paying for its 6 LLM calls
+    and finish the run green with zero data.
+    """
+    data = _execute(_PREFLIGHT_SOURCE_ATTRIBUTION)
+    type_ = data.get("__type") or {}
+    fields = type_.get("inputFields") or []
+    return any(f.get("name") == "sourceId" for f in fields)
 
 
 def refresh_aggregated_datapoints(

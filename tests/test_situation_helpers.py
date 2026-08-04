@@ -208,7 +208,7 @@ class TestBuildDatapoints:
             "reportCount": 42,
             "data": {
                 "idp_stock":            {"value": 6_500_000, "unit": "people"},
-                "returnees":            {"value": 200_000,   "unit": "people"},
+                "returnee_stock":       {"value": 200_000,   "unit": "people"},
                 "funding_required_usd": {"value": 2_500_000_000, "unit": "USD"},
                 "funding_received_usd": {"value": 1_100_000_000, "unit": "USD"},
                 "overall_pin":          {"value": 25_000_000,     "unit": "people"},

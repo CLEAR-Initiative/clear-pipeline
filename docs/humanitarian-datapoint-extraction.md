@@ -271,6 +271,15 @@ The extractor is prompted with this taxonomy but is allowed to emit close varian
 
 Weights live in a config table so future tuning doesn't require redeployment.
 
+> **Being superseded — data quality (source reliability × information credibility).**
+> This confidence tier captures only one dimension (directness of observation). It is
+> becoming the *Directness* criterion inside a full **data-quality** score that also
+> grades the **source** (a reliability registry on `data_sources`) and the document's
+> **information credibility** (8-criterion LLM assessment), combined as
+> `((reliability × 2.5) × credibility) / 10` and used for bias-aware winner selection.
+> The complete model — reliability seed grades, credibility weights, per-field quality
+> bias, and validity windows — lives in **[data-quality-scoring-design.md](./data-quality-scoring-design.md)** (decision records: ADR-0004, ADR-0005). The nitty-gritty is intentionally kept there, not duplicated here.
+
 ### 6.2 Aggregation math per field-kind
 
 The aggregator is a switch table over field kind. Every field in the exhaustive schema is tagged with its kind.
@@ -313,6 +322,19 @@ The four rules, and which report "wins" when two describe the same thing:
 Any datapoint not in this list (e.g. the narrative summary) is kept as text and not merged into a number.
 
 ### 6.3 Quality-weighted aggregation
+
+> **Note:** the confidence-weighted math below is being replaced by a composite
+> **data-quality** score. Per contributing figure:
+>
+> &nbsp;&nbsp;&nbsp;&nbsp;`data_quality = ((source_reliability × 2.5) × information_credibility) / 10`  → 0–10
+>
+> where `source_reliability` is a 1–4 registry grade (`null` → 1; the ×2.5 rescales 1–4
+> onto a 0–10 axis) and `information_credibility` is a 0–10 weighted 8-criterion score
+> (directness = the confidence tier above, plus recency, attribution, internal
+> consistency, plausibility, specificity, methodology, representativeness). This drives
+> **bias-aware** winner selection with **read-time recency**; `quality_score` becomes a
+> directness-only view while `data_quality` is the headline. Full model — weights,
+> reliability seed, per-field bias, and validity windows: [data-quality-scoring-design.md](./data-quality-scoring-design.md) (ADR-0004, ADR-0005).
 
 For an additive count field with confidence-weighted sum:
 

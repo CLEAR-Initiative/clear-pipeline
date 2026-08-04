@@ -10,19 +10,24 @@ from unittest.mock import patch
 
 import pytest
 
+from clear_context_pipeline.defs.knowledgebase import datapoints_extract as de
 from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
     _backfill_chunk_indices,
     _collect_location_refs,
     _collect_numeric_fields,
+    _crisis_brief,
     _dig,
     _match_chunk_index,
+    _norm_source_name,
     _num_or_none,
     _resolve_all_locations,
     _resolve_figure_scopes,
+    _resolve_figure_sources,
 )
 from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     Casualties,
     CasualtyDisaggregation,
+    DocumentCredibility,
     LocationRef,
     NumericField,
 )
@@ -418,3 +423,91 @@ def test_backfill_chunk_indices_nulls_unmatched_and_quoteless():
     assert (with_quote, matched) == (1, 0)  # only the affected figure had a quote; it didn't match
     assert merged["needs_and_funding"]["overall_affected"]["chunk_index"] is None
     assert merged["displacement"]["idp_stock"]["chunk_index"] is None
+
+
+def _nf_src(value, source_name):
+    """A NumericField dict carrying an LLM-emitted source_name."""
+    return NumericField(
+        value=value, unit="people", confidence="reported",
+        source_quote="…", source_name=source_name,
+    ).model_dump(mode="json")
+
+
+class TestCrisisBrief:
+    """#27: the plausibility baseline must never fall through to another
+    country's magnitudes for a country-less report."""
+
+    def test_known_country_case_insensitive(self):
+        assert _crisis_brief("SDN") == _crisis_brief("sdn")
+        assert _crisis_brief("sdn") != de._GENERIC_CRISIS_BRIEF
+
+    def test_none_country_is_generic_not_sudan(self):
+        assert _crisis_brief(None) == de._GENERIC_CRISIS_BRIEF
+        assert _crisis_brief(None) != _crisis_brief("sdn")
+
+    def test_unknown_country_is_generic(self):
+        assert _crisis_brief("xyz") == de._GENERIC_CRISIS_BRIEF
+
+
+class TestNormSourceName:
+    def test_none_blank_and_non_string(self):
+        assert _norm_source_name(None) is None
+        assert _norm_source_name("   ") is None
+        assert _norm_source_name(123) is None
+
+    def test_collapses_internal_whitespace(self):
+        assert _norm_source_name("  UN   OCHA \n Sudan ") == "UN OCHA Sudan"
+
+    def test_truncates_to_cap(self):
+        assert len(_norm_source_name("A" * 500)) == de._MAX_SOURCE_NAME_LEN
+
+
+class TestResolveFigureSources:
+    SRC = "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_data_source"
+
+    def test_llm_supplied_id_is_overwritten(self):
+        blob = {"d": {"f": {**_nf_src(1, None), "source_id": "hallucinated"}}}
+        with patch(self.SRC, return_value=None):
+            _resolve_figure_sources(blob)
+        assert blob["d"]["f"]["source_id"] is None
+
+    def test_repeated_name_resolved_once_after_whitespace_collapse(self):
+        calls = []
+        blob = {"d": {"a": _nf_src(1, "IOM DTM"), "b": _nf_src(2, "IOM   DTM")}}
+        with patch(self.SRC, side_effect=lambda *, name: calls.append(name) or "src-1"):
+            with_name, resolved = _resolve_figure_sources(blob)
+        assert calls == ["IOM DTM"]  # one resolver call despite the whitespace variant
+        assert (with_name, resolved) == (2, 2)
+        assert blob["d"]["a"]["source_id"] == "src-1"
+        assert blob["d"]["b"]["source_id"] == "src-1"
+
+    def test_resolver_exception_leaves_none_and_continues(self):
+        blob = {"d": {"f": _nf_src(1, "IOM DTM")}}
+        with patch(self.SRC, side_effect=RuntimeError("down")):
+            with_name, resolved = _resolve_figure_sources(blob)
+        assert blob["d"]["f"]["source_id"] is None
+        assert (with_name, resolved) == (1, 0)
+
+    def test_cardinality_cap_stops_further_resolves(self):
+        n = de._MAX_SOURCES_PER_REPORT + 5
+        blob = {"d": {f"f{i}": _nf_src(i, f"Org {i}") for i in range(n)}}
+        calls = []
+        with patch(self.SRC, side_effect=lambda *, name: calls.append(name) or f"src-{name}"):
+            _resolve_figure_sources(blob)
+        assert len(calls) == de._MAX_SOURCES_PER_REPORT
+        unattributed = [v["source_id"] for v in blob["d"].values() if v["source_id"] is None]
+        assert len(unattributed) == 5  # figures past the cap stay unattributed
+
+
+class TestDocumentCredibilityPartial:
+    def test_partial_criteria_do_not_raise(self):
+        # #27: 4 of 6 criteria present must validate (missing → None), not raise
+        # a ValidationError that nulls the whole narrative_and_confidence domain.
+        dc = DocumentCredibility(
+            attribution_quality="met",
+            internal_consistency="partial",
+            plausibility_in_context="met",
+            geographic_temporal_specificity="unmet",
+        )
+        assert dc.methodology_transparency is None
+        assert dc.representativeness is None
