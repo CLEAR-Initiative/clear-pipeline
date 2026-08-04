@@ -115,6 +115,11 @@ def _report_summary(
     # the datapoint extractor can resolve it to report_datapoints.sourceId.
     sources = fields.get("source") or []
     publisher = sources[0] if sources else {}
+    # Primary country ISO3 (the field the ReliefWeb fetch already filters on).
+    # Threaded through so the datapoint extractor picks the right per-country
+    # plausibility crisis brief (ADR-0004 §4) instead of a hardcoded one.
+    primary_country = fields.get("primary_country") or {}
+    country_iso3 = (primary_country.get("iso3") or "").lower() or None
     return {
         "report_id": report_id,
         "report_title": report_title,
@@ -125,6 +130,7 @@ def _report_summary(
         "num_pages": num_pages,
         "publisher_name": publisher.get("name") or publisher.get("shortname"),
         "publisher_homepage": publisher.get("homepage"),
+        "country_iso3": country_iso3,
     }
 
 

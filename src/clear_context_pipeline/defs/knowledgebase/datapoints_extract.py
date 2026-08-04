@@ -61,8 +61,15 @@ S3_DATAPOINTS_PREFIX = f"reliefweb/kb/datapoints/{COUNTRY_ISO3}/{FORMAT_SLUG}"
 # against when rating the `plausibility_in_context` credibility criterion — so an
 # order-of-magnitude-off figure ("12 million displaced in a 2-million state") is
 # caught, instead of the model judging plausibility from the single document in
-# isolation. Keep each brief to a few sentences of well-established magnitudes;
-# it rides in the cached system prefix, so it's paid for once per report.
+# isolation. Keyed by ISO3 (the report's `primary_country`); a country without a
+# curated brief falls back to `_GENERIC_CRISIS_BRIEF`, so this works for every
+# supported country and new briefs can be added incrementally.
+#
+# NOTE: the magnitudes below are best-effort baselines and should be reviewed by
+# a domain expert (and refreshed periodically). Keep each to a few sentences of
+# well-established figures; it rides in the cached system prefix (paid once per
+# report). A future option is to derive these from the location_metadata layer
+# (WorldPop population + latest DTM/IPC/HNO totals) instead of hardcoding.
 _CRISIS_BRIEFS: dict[str, str] = {
     "sdn": (
         "Sudan (2023–2026 conflict): population ~48 million. The SAF–RSF war since "
@@ -75,6 +82,27 @@ _CRISIS_BRIEFS: dict[str, str] = {
         "or locality is typically tens of thousands to low millions. Treat a "
         "single-source figure far outside these magnitudes, with no explanation, as "
         "implausible."
+    ),
+    "afg": (
+        "Afghanistan (post-2021): population ~41 million. Since the August 2021 "
+        "Taliban takeover and economic collapse, ~23 million people are in need and "
+        "roughly half the population is acutely food insecure (IPC phase 3+). "
+        "Protracted internal displacement of ~3–4 million, plus large-scale returnee "
+        "flows — millions returning/deported from Pakistan and Iran (2023–2025). "
+        "Compounded by drought and recurring earthquakes (e.g. Herat 2023). National "
+        "totals run to the millions; a single province is typically tens of thousands "
+        "to low millions. Treat figures far outside these magnitudes, unexplained, as "
+        "implausible."
+    ),
+    "ven": (
+        "Venezuela (protracted crisis): population ~28 million. Prolonged political / "
+        "economic collapse has driven the region's largest displacement — ~7.7 million "
+        "refugees and migrants OUTWARD (mainly Colombia, Peru, Ecuador, Chile, Brazil); "
+        "this crisis is defined by cross-border outflow more than internal displacement. "
+        "~7 million people in need inside the country amid health-system and service "
+        "collapse. National totals run to the millions; a state/municipality is "
+        "typically tens of thousands to low millions. Treat figures far outside these "
+        "magnitudes, unexplained, as implausible."
     ),
 }
 
@@ -197,12 +225,14 @@ def _run_domain(
     schema: type[BaseModel],
     *,
     cache_key: str,
+    country_iso3: str | None = None,
 ) -> BaseModel:
     """One domain call. cache_key is the same across all six domains
-    for a given report so Anthropic's prompt cache is reused."""
+    for a given report so Anthropic's prompt cache is reused. `country_iso3`
+    selects the plausibility crisis brief; None falls back to COUNTRY_ISO3."""
     return llm.complete_structured(
         system=SYSTEM_PROMPT_TEMPLATE.format(
-            doc_text=doc_text, crisis_brief=_crisis_brief(COUNTRY_ISO3),
+            doc_text=doc_text, crisis_brief=_crisis_brief(country_iso3 or COUNTRY_ISO3),
         ),
         user=_domain_user_prompt(domain_name, schema),
         schema=schema,
@@ -553,6 +583,7 @@ def extract_datapoints_for_one_report(
     log_context=None,
     publisher_name: str | None = None,
     publisher_homepage: str | None = None,
+    country_iso3: str | None = None,
 ) -> dict:
     """Run the six domain LLM extractions for one report, resolve
     locations, hoist hot totals, snapshot a debug artefact to S3, and
@@ -602,6 +633,7 @@ def extract_datapoints_for_one_report(
         try:
             model_out = _run_domain(
                 llm, doc_text, domain_name, schema, cache_key=report_id,
+                country_iso3=country_iso3,
             )
             merged[domain_name] = model_out.model_dump(mode="json")
             domains_ok.append(domain_name)
@@ -826,6 +858,7 @@ def reliefweb_weekly_datapoints(
                 log_context=context.log,
                 publisher_name=report.get("publisher_name"),
                 publisher_homepage=report.get("publisher_homepage"),
+                country_iso3=report.get("country_iso3"),
             )
         except _NothingExtracted:
             context.log.error(
