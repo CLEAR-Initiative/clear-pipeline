@@ -231,11 +231,13 @@ def _generate_one_sector(
     # unfiltered search — better a broad set of hits than no evidence
     # at all. The LLM prompt says to prefer fewer claims over
     # speculation, so it'll degrade gracefully.
+    used_fallback = False
     if rag.is_empty:
         logger.info(
             "[situation:sector:%s] no sector-scoped hits — falling back to unfiltered search",
             sector_key,
         )
+        used_fallback = True
         rag = fetch_rag_context(
             query=f"{country_name} {sector_display_name} humanitarian needs",
             limit=8,
@@ -296,6 +298,7 @@ def _generate_one_sector(
         priority_interventions=result.priority_interventions,
         information_coverage=info_coverage,
         source_report_ids=rag.contributing_report_ids,
+        evidence_scope="fallback" if used_fallback else "sector",
     )
 
 
