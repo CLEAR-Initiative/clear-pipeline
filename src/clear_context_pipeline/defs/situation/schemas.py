@@ -1,12 +1,12 @@
 """Pydantic schemas for the situation-analysis payload.
 
-Blob shape mirrors the design proposal — seven top-level components,
+Blob shape mirrors the design proposal - seven top-level components,
 each carrying its own ``source_report_ids`` so the dashboard's
 sources tab is a JSON walk, not a second query.
 
 Every component is typed and every component is generated. Defaults are
-empty rather than absent so a component whose generator failed — or that
-was skipped via ``SITUATION_SKIP_NARRATIVE`` — still emits its key with
+empty rather than absent so a component whose generator failed - or that
+was skipped via ``SITUATION_SKIP_NARRATIVE`` - still emits its key with
 a well-formed empty value, and the dashboard renders an empty state off
 a stable JSON path instead of null-guarding every read.
 
@@ -23,7 +23,7 @@ SCHEMA_VERSION = "v1"
 
 Severity = Literal["low", "medium", "high", "critical"]
 
-# NRC SAF sectors — same taxonomy the datapoint schema uses.
+# NRC SAF sectors - same taxonomy the datapoint schema uses.
 SafSector = Literal[
     "education", "food_security", "health", "shelter", "wash", "protection",
 ]
@@ -43,7 +43,7 @@ class SourcedBullet(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 1 — Datapoints (deterministic)
+# Component 1 - Datapoints (deterministic)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -59,16 +59,16 @@ class DatapointsEnvelope(BaseModel):
 
 class Datapoints(BaseModel):
     """Deterministic headline numbers hoisted from the yearly × A0
-    aggregated_datapoint bucket. Each field is nullable — a country-
+    aggregated_datapoint bucket. Each field is nullable - a country-
     year with no ingested reports has all-null values but the
     envelope still records the fact of zero contributing sources."""
     population_displaced: Optional[float] = None
-    # People in Need — the assessed subset requiring humanitarian
+    # People in Need - the assessed subset requiring humanitarian
     # assistance. NOT Population Affected: the two are extracted and
     # surfaced separately (population_affected below). See CONTEXT.md and
     # docs/adr/0001-affected-extracted-not-sourced-from-events.md.
     population_in_need: Optional[float] = None
-    # Population Affected — the wider circle of everyone the crisis
+    # Population Affected - the wider circle of everyone the crisis
     # touched, a superset of People in Need. Extracted from reports,
     # Max-aggregated, and sparse. Distinct from population_in_need.
     population_affected: Optional[float] = None
@@ -83,7 +83,7 @@ class Datapoints(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 2 — AI summary (LLM, RAG-grounded)
+# Component 2 - AI summary (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -96,7 +96,7 @@ class AISummary(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 3 — Context risks (LLM, RAG-grounded)
+# Component 3 - Context risks (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -119,7 +119,7 @@ class ContextRisks(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 4 — Hazards & pre-crisis vulnerabilities (LLM, RAG-grounded)
+# Component 4 - Hazards & pre-crisis vulnerabilities (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -129,7 +129,7 @@ class HazardsAndVulnerabilities(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 5 — Displacement narrative (LLM, RAG-grounded)
+# Component 5 - Displacement narrative (LLM, RAG-grounded)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -139,7 +139,7 @@ class DisplacementNarrative(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 6 — Sector analyses (LLM, one call per SAF sector)
+# Component 6 - Sector analyses (LLM, one call per SAF sector)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -155,7 +155,7 @@ class InformationCoverageArea(BaseModel):
 
 class SectorAnalysis(BaseModel):
     """Per-SAF-sector analysis block. Empty defaults keep the shape
-    stable when a sector's generator fails — failure is isolated per
+    stable when a sector's generator fails - failure is isolated per
     sector, so one erroring leaves the other five intact."""
     severity: Optional[Severity] = None
     impact: list[str] = Field(default_factory=list)
@@ -165,10 +165,15 @@ class SectorAnalysis(BaseModel):
     priority_interventions: list[str] = Field(default_factory=list)
     information_coverage: list[InformationCoverageArea] = Field(default_factory=list)
     source_report_ids: list[str] = Field(default_factory=list)
+    # Provenance of the analysis. 'sector' = built from sector-tagged
+    # evidence; 'fallback' = the sector-scoped search was empty and an
+    # unfiltered search supplied off-sector evidence, so the grade is an
+    # inference rather than sector reporting; None = no analysis produced.
+    evidence_scope: Optional[Literal["sector", "fallback"]] = None
 
 
 class Sectors(BaseModel):
-    """Fixed set of six SAF sectors — order preserved for the dashboard
+    """Fixed set of six SAF sectors - order preserved for the dashboard
     tab layout. Every sector's block is present even when empty so
     the UI doesn't need null-guards."""
     education: SectorAnalysis = Field(default_factory=SectorAnalysis)
@@ -180,12 +185,12 @@ class Sectors(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 7 — Sources (deterministic)
+# Component 7 - Sources (deterministic)
 # ────────────────────────────────────────────────────────────────────
 
 
 class Source(BaseModel):
-    """One contributing report — the dashboard's sources tab renders
+    """One contributing report - the dashboard's sources tab renders
     a chronological list of these, most recent publication first."""
     report_id: str
     report_title: str
@@ -202,6 +207,32 @@ class Sources(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
+class SituationChanges(BaseModel):
+    """Per-section "what changed" notes, generated in one LLM call over the
+    before/after payloads (see situation/changes.py). Empty when there is
+    nothing to compare against or nothing material changed. Keys are the
+    section paths the dashboard renders strips under: "summary",
+    "context_risks.<domain>", "hazards", "displacement",
+    "sectors.<sector>".
+
+    `basis` says what the notes actually mean, and the dashboard should
+    label them accordingly rather than assuming:
+
+    - "previous_period": diffed against the PRECEDING bucket of the same
+      kind (last month for a monthly window). The meaningful reading -
+      "what changed over the period".
+    - "previous_generation": diffed against the prior version of the SAME
+      bucket. The fallback when no preceding bucket exists yet; reads as
+      "what changed since we last looked", which is generation cadence,
+      not real-world change.
+    """
+    basis: Optional[str] = None
+    compared_to: Optional[str] = None
+    compared_to_window_start: Optional[str] = None
+    compared_to_label: Optional[str] = None
+    notes: dict[str, str] = Field(default_factory=dict)
+
+
 class SituationAnalysisPayload(BaseModel):
     """The full ``data`` blob written to
     ``situation_analyses.data``. Every component is always present so
@@ -216,3 +247,4 @@ class SituationAnalysisPayload(BaseModel):
     displacement: DisplacementNarrative = Field(default_factory=DisplacementNarrative)
     sectors: Sectors = Field(default_factory=Sectors)
     sources: Sources = Field(default_factory=Sources)
+    changes: SituationChanges = Field(default_factory=SituationChanges)

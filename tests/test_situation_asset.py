@@ -6,7 +6,7 @@ tests verify:
   - Country resolution failure → returns None cleanly (no upsert).
   - Aggregated fetch failure → continues with empty datapoints.
   - SITUATION_SKIP_NARRATIVE kill-switch → deterministic-only row.
-  - Full happy path → payload has all 7 components, upsert called
+  - Full happy path → payload has all 8 components, upsert called
     with the right shape.
   - Cascade behaviour on the Dagster asset: iterates all POC
     countries and returns per-country summaries.
@@ -95,7 +95,7 @@ def _patch_narrative_generators(stub_source_ids: list[str] | None = None):
 
 class TestGenerateAndUpsertForCountryYear:
     def test_country_resolution_failure_returns_none_without_upsert(self):
-        # Fresh env — no locations backfilled yet. The generator
+        # Fresh env - no locations backfilled yet. The generator
         # skips cleanly rather than upserting an orphan row.
         with (
             patch(
@@ -114,7 +114,7 @@ class TestGenerateAndUpsertForCountryYear:
 
     def test_aggregated_fetch_failure_still_ships_analysis(self):
         # A hiccup fetching the yearly bucket shouldn't fail the
-        # whole analysis — we ship datapoints as their all-null
+        # whole analysis - we ship datapoints as their all-null
         # defaults + populate whatever narrative components succeed.
         patches = _patch_narrative_generators()
         with (
@@ -153,7 +153,7 @@ class TestGenerateAndUpsertForCountryYear:
             )
         assert result is not None
         assert result["country_location_id"] == "sudan-a0"
-        # Upsert still happens — payload just has all-null datapoints.
+        # Upsert still happens - payload just has all-null datapoints.
         mock_upsert.assert_called_once()
         payload = mock_upsert.call_args.kwargs["data"]
         assert payload["datapoints"]["population_displaced"] is None
@@ -161,13 +161,13 @@ class TestGenerateAndUpsertForCountryYear:
     def test_upsert_sends_window_kind_and_a_matchable_window_start(self):
         # REGRESSION GUARD. clear-api keys the bucket on
         # (country, window_kind, window_start, schema_version) and REJECTS
-        # a missing window_kind — a row written without it is a row no
+        # a missing window_kind - a row written without it is a row no
         # reader can find.
         #
         # window_start must be exactly midnight Jan 1 UTC: clear-api's
         # `calendarYearStart` derives the same instant independently, and
         # the read matches on equality. window_end is deliberately NOT
-        # matched on — this side sends 23:59:59.000 and the TS side used
+        # matched on - this side sends 23:59:59.000 and the TS side used
         # to look for 23:59:59.999, which silently found nothing.
         patches = _patch_narrative_generators()
         with (
@@ -203,7 +203,7 @@ class TestGenerateAndUpsertForCountryYear:
 
     def test_month_wrapper_sends_monthly_window_kind_and_first_of_month(self):
         # The monthly wrapper reads/writes the monthly-A0 bucket. window_kind
-        # must be "monthly" and window_start exactly midnight on the 1st —
+        # must be "monthly" and window_start exactly midnight on the 1st -
         # matching clear-api's `monthOf` start (the equality the read + the
         # invalidation cascade both key on).
         patches = _patch_narrative_generators()
@@ -288,7 +288,7 @@ class TestGenerateAndUpsertForCountryYear:
         assert payload["ai_summary"]["text"] == ""
         assert payload["hazards_and_vulnerabilities"]["hazards"] == []
 
-    def test_happy_path_ships_all_seven_components_with_dedupe_source_ids(self):
+    def test_happy_path_ships_all_eight_components_with_dedupe_source_ids(self):
         # Full flow: datapoints from aggregated, narrative from stubs,
         # sources chronologically ordered, source_report_ids union'd
         # across everything without duplicates.
@@ -297,7 +297,7 @@ class TestGenerateAndUpsertForCountryYear:
             "r-2": {"reportTitle": "Report 2", "sourceUrl": "https://…/2", "publishedAt": "2026-07-01"},
             "r-3": {"reportTitle": "Report 3", "sourceUrl": "https://…/3", "publishedAt": "2026-04-20"},
         }
-        # AI summary reports r-4 (new source not in aggregated) —
+        # AI summary reports r-4 (new source not in aggregated) -
         # exercises the dedupe-preserving-order path.
         patches = _patch_narrative_generators(stub_source_ids=["r-2", "r-4"])
         with (
@@ -338,11 +338,14 @@ class TestGenerateAndUpsertForCountryYear:
         mock_upsert.assert_called_once()
         kwargs = mock_upsert.call_args.kwargs
 
-        # 1. All 7 component keys present in payload.
+        # 1. All 8 component keys present in payload. `changes` is always
+        # present but stays empty here: clear_api is mocked out, so the
+        # comparison lookup finds nothing to diff against.
         payload = kwargs["data"]
         assert set(payload.keys()) == {
             "datapoints", "ai_summary", "context_risks",
             "hazards_and_vulnerabilities", "displacement", "sectors", "sources",
+            "changes",
         }
 
         # 2. Datapoints hoisted correctly.
@@ -368,7 +371,7 @@ class TestGenerateAndUpsertForCountryYear:
         assert result["superseded_previous"] is False
 
     def test_upsert_clear_api_error_returns_none_without_crashing(self):
-        # 4xx from clear-api on the situation upsert — bad payload
+        # 4xx from clear-api on the situation upsert - bad payload
         # shape. Log, return None, don't retry.
         patches = _patch_narrative_generators()
         from clear_context_pipeline.providers.clear_api import ClearApiError
@@ -412,7 +415,7 @@ class TestWeeklySituationAnalysesAsset:
 
     def test_iterates_all_poc_countries(self):
         # POC scope is Sudan only. The asset now writes TWO snapshots per
-        # country — yearly + current-month — so Sudan yields two calls.
+        # country - yearly + current-month - so Sudan yields two calls.
         with (
             patch(
                 "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",

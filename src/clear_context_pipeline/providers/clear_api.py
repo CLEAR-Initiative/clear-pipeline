@@ -5,16 +5,16 @@ between the two codebases without re-learning:
   - httpx POST with ``Authorization: Bearer <api_key>``
   - 4xx are non-retryable (bug in caller); 5xx / connection errors
     retry with exponential backoff
-  - a small, typed public API — one function per operation
+  - a small, typed public API - one function per operation
 
 No direct DB access. All knowledgebase writes and location lookups
 route through clear-api so authz, schema validation, and pgvector
 casts live in exactly one place.
 
 Env vars:
-    CLEAR_API_URL   — full GraphQL endpoint, e.g.
+    CLEAR_API_URL   - full GraphQL endpoint, e.g.
                       "http://localhost:4000/graphql"
-    CLEAR_API_KEY   — pipeline-scoped API key (`sk_live_…`)
+    CLEAR_API_KEY   - pipeline-scoped API key (`sk_live_…`)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class ClearApiError(RuntimeError):
-    """Non-retryable clear-api failure — schema mismatch, auth error,
+    """Non-retryable clear-api failure - schema mismatch, auth error,
     validation reject, etc. Callers should surface + skip the batch
     rather than retrying and amplifying the bad request."""
 
@@ -120,6 +120,28 @@ query PreflightSourceAttribution {
 
 # ── Situation analysis ─────────────────────────────────────────────
 
+_GET_SITUATION_ANALYSIS = """
+query SituationAnalysis(
+  $countryLocationId: String!,
+  $windowKind: String,
+  $windowStart: DateTime,
+  $schemaVersion: String,
+) {
+  situationAnalysis(
+    countryLocationId: $countryLocationId,
+    windowKind: $windowKind,
+    windowStart: $windowStart,
+    schemaVersion: $schemaVersion,
+  ) {
+    data
+    generatedAt
+    windowKind
+    windowStart
+  }
+}
+"""
+
+
 _GET_AGGREGATED_DATAPOINT = """
 query AggregatedDatapoint(
   $locationId: String,
@@ -183,8 +205,8 @@ mutation UpsertLocationMetadataBatch($inputs: [UpsertLocationMetadataInput!]!) {
 """
 
 # We already have `resolveKnowledgebaseLocation` for pcode/name → id
-# lookups. Situation-analysis needs the reverse — a specific country
-# location by name — so we reuse that resolver by passing name only.
+# lookups. Situation-analysis needs the reverse - a specific country
+# location by name - so we reuse that resolver by passing name only.
 
 _UPSERT_SITUATION_ANALYSIS = """
 mutation UpsertSituationAnalysis($input: UpsertSituationAnalysisInput!) {
@@ -230,12 +252,12 @@ def _execute(
     clear-pipeline uses.
 
     - 4xx → raise ``ClearApiError`` immediately, no retry (broken
-      request; retrying just amplifies the damage — see
+      request; retrying just amplifies the damage - see
       clear-pipeline's populationDisplaced incident).
     - 5xx / connection errors → exponential backoff, up to
       ``retries`` attempts, then re-raise the last error.
     - ``errors`` in the JSON body → treated as a hard failure via
-      ``RuntimeError`` (retryable — sometimes reflects transient
+      ``RuntimeError`` (retryable - sometimes reflects transient
       server-side state like a lock conflict).
     """
     url = _require_env("CLEAR_API_URL")
@@ -287,7 +309,7 @@ def _execute(
 
 
 # ────────────────────────────────────────────────────────────────────
-# Public API — one function per operation
+# Public API - one function per operation
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -353,7 +375,7 @@ def upsert_report_datapoints(
     """Replace the ``report_datapoints`` row for ``report_id``.
 
     The `data` blob follows the Pydantic sub-schema layout defined in
-    ``datapoints_schemas.py`` — one top-level key per domain, each
+    ``datapoints_schemas.py`` - one top-level key per domain, each
     holding the domain's dumped model (or None if that domain's
     extraction failed and the operator wants to re-run it later).
 
@@ -383,7 +405,7 @@ def upsert_report_datapoints(
 
 
 def has_aggregated_datapoints(schema_version: str) -> bool:
-    """Cheap existence check — is there at least one current
+    """Cheap existence check - is there at least one current
     aggregated_datapoints row for this schema version?
 
     Used by the aggregation asset to distinguish first-run backfill
@@ -401,12 +423,12 @@ def report_datapoints_exist(report_id: str, *, schema_version: str) -> bool:
     ``schema_version``.
 
     Lets the datapoint asset skip the 6 LLM extraction calls for a report a
-    prior run already finished — but the version must match, or a schema bump
+    prior run already finished - but the version must match, or a schema bump
     could never re-extract: a v1 row would count as "done" under v2 forever,
     leaving the v2 aggregation buckets empty and the situation snapshots null.
     (`evals/assets.py` already keys its cache on schema_version the same way.)
 
-    The DB is the source of truth on purpose — the S3 debug snapshot is written
+    The DB is the source of truth on purpose - the S3 debug snapshot is written
     BEFORE the upsert, so it can't confirm the write actually landed.
     """
     data = _execute(_REPORT_DATAPOINT_EXISTS, {"reportId": report_id})
@@ -489,6 +511,33 @@ def upsert_knowledgebase_chunks(
     }
 
 
+def get_situation_analysis(
+    *,
+    country_location_id: str,
+    window_kind: str,
+    window_start: str,
+    schema_version: str | None = None,
+) -> dict[str, Any] | None:
+    """Fetch the current situation-analysis snapshot for one bucket.
+
+    Buckets are keyed (country, window_kind, window_start), so both are
+    required here - clear-api only derives a start for the yearly kind and
+    rejects a finer kind without one. Used by the generator to read the
+    PRECEDING period's snapshot so it can diff against it for the "what
+    changed" notes. Returns None when that bucket has no snapshot.
+    """
+    data = _execute(
+        _GET_SITUATION_ANALYSIS,
+        {
+            "countryLocationId": country_location_id,
+            "windowKind": window_kind,
+            "windowStart": window_start,
+            "schemaVersion": schema_version,
+        },
+    )
+    return data.get("situationAnalysis")
+
+
 def get_aggregated_datapoint(
     *,
     location_id: str | None,
@@ -517,7 +566,7 @@ def get_aggregated_datapoint(
 
 def get_pipeline_countries() -> list[dict[str, Any]]:
     """Countries the pipeline currently publishes analysis / ingests context
-    for. Each row is ``{name, iso3, bbox}`` — ``iso3`` scopes external-API
+    for. Each row is ``{name, iso3, bbox}`` - ``iso3`` scopes external-API
     ingests (HAPI ``location_code``, IOM DTM ``Admin0Pcode``)."""
     data = _execute(_GET_PIPELINE_COUNTRIES)
     return data.get("pipelineCountries") or []
@@ -532,7 +581,7 @@ def get_locations_by_level(level: int) -> list[dict[str, Any]]:
 
 
 # Upsert chunking. Each chunk is one clear-api DB transaction, and clear-api's
-# Postgres is reached over an SSH tunnel — so the cost is dominated by BYTES
+# Postgres is reached over an SSH tunnel - so the cost is dominated by BYTES
 # moved (payload in + the unchanged-guard reading open rows + reading the result
 # back), not row count. A fixed row count is wrong: 50 humanitarian-needs blobs
 # (~100 KB each, finely disaggregated PIN) is ~5 MB/chunk and times out, while 50
@@ -541,7 +590,7 @@ def get_locations_by_level(level: int) -> list[dict[str, Any]]:
 # LOCATION_METADATA_UPSERT_CHUNK.
 #
 # Read lazily (not at import): every defs/ module calls load_dotenv AFTER
-# importing this provider, so import-time os.environ.get would miss .env — the
+# importing this provider, so import-time os.environ.get would miss .env - the
 # documented knobs would silently never apply. Parsing is defensive: a bad value
 # logs and falls back rather than raising at import and taking down the whole
 # Dagster code location.
@@ -559,7 +608,7 @@ def _int_env(name: str, default: int) -> int:
             raise ValueError("must be positive")
         return value
     except ValueError:
-        logger.warning("%s=%r is not a positive integer — using default %d", name, raw, default)
+        logger.warning("%s=%r is not a positive integer - using default %d", name, raw, default)
         return default
 
 
@@ -573,7 +622,7 @@ def _upsert_max_rows() -> int:
 
 def _size_chunks(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """Split rows into chunks bounded by cumulative byte size (and a row cap). A
-    single row larger than the byte cap still goes in its own chunk — we never
+    single row larger than the byte cap still goes in its own chunk - we never
     split one blob. The whole row is measured (locationId + type + the JSON
     envelope, not just ``data``), since bytes over the DB tunnel are the cost."""
     max_bytes = _upsert_max_bytes()
@@ -640,7 +689,7 @@ def search_knowledgebase(
     source report metadata + page range so the narrative generator
     can attribute bullets back to reports without a second lookup.
 
-    Filters mirror `KnowledgebaseFilters` on the GraphQL side —
+    Filters mirror `KnowledgebaseFilters` on the GraphQL side -
     passing None applies no filter (semantic ranking only). For the
     situation-analysis path we skip location filtering because
     knowledgebase rows are tagged at admin-2 level but our scope is
@@ -669,7 +718,7 @@ def upsert_situation_analysis(
     """Insert a new situation-analysis snapshot and supersede the
     previous "current" row for the same
     (country, window_kind, window_start, schema_version). One
-    transaction on the clear-api side — no half-written state on
+    transaction on the clear-api side - no half-written state on
     partial failure.
 
     `window_kind` ("yearly") is part of the bucket key; `window_end` is
