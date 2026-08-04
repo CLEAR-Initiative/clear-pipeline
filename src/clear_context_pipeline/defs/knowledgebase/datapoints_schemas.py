@@ -545,9 +545,10 @@ class DocumentCredibility(BaseModel):
     )
     plausibility_in_context: CredibilityRating = Field(
         description=(
-            "Are the claims plausible given the known country / crisis "
-            "context? unmet = figures implausible or contradicting "
-            "well-established baselines."
+            "Are the claims plausible against the COUNTRY BASELINE provided in the "
+            "system prompt? met = magnitudes consistent with that baseline; unmet = "
+            "figures far outside it (order-of-magnitude off) with no explanation; "
+            "partial = somewhat high/low but arguable."
         ),
     )
     geographic_temporal_specificity: CredibilityRating = Field(

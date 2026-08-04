@@ -56,6 +56,42 @@ FORMAT_SLUG = "situation-report"
 S3_DATAPOINTS_PREFIX = f"reliefweb/kb/datapoints/{COUNTRY_ISO3}/{FORMAT_SLUG}"
 
 
+# ── Plausibility crisis briefs (ADR-0004 §4) ──────────────────────────
+# A compact, stable per-country baseline the extractor weighs a report's claims
+# against when rating the `plausibility_in_context` credibility criterion — so an
+# order-of-magnitude-off figure ("12 million displaced in a 2-million state") is
+# caught, instead of the model judging plausibility from the single document in
+# isolation. Keep each brief to a few sentences of well-established magnitudes;
+# it rides in the cached system prefix, so it's paid for once per report.
+_CRISIS_BRIEFS: dict[str, str] = {
+    "sdn": (
+        "Sudan (2023–2026 conflict): population ~48 million. The SAF–RSF war since "
+        "April 2023 is the world's largest displacement crisis — order of 10–11 "
+        "million IDPs and 2–3 million refugees to neighbouring countries (Chad, "
+        "Egypt, South Sudan, Ethiopia). ~24–25 million people in need; roughly half "
+        "the population acutely food insecure (IPC phase 3+), with famine (IPC 5) "
+        "confirmed in parts of Darfur. Worst-affected: Khartoum, the Darfur states, "
+        "the Kordofans, Gezira. National totals run to the millions; a single state "
+        "or locality is typically tens of thousands to low millions. Treat a "
+        "single-source figure far outside these magnitudes, with no explanation, as "
+        "implausible."
+    ),
+}
+
+# Fallback when no country baseline is on file — keeps the criterion meaningful
+# (internal-consistency-based) rather than defaulting everything to plausible.
+_GENERIC_CRISIS_BRIEF = (
+    "No country baseline is on file. Judge plausibility from internal consistency "
+    "and general humanitarian magnitudes; flag figures that contradict other "
+    "figures in the report or are orders of magnitude apart from related ones."
+)
+
+
+def _crisis_brief(country_iso3: str) -> str:
+    """The plausibility baseline for a country (ISO3), or a generic fallback."""
+    return _CRISIS_BRIEFS.get(country_iso3.lower(), _GENERIC_CRISIS_BRIEF)
+
+
 # The system prompt is stable across all six domain calls — that's what
 # Anthropic's prompt cache keys off. Keep everything domain-specific in
 # the user message so the cache actually hits.
@@ -107,7 +143,15 @@ SYSTEM_PROMPT_TEMPLATE = (
     "- Locations: prefer OCHA pcode when the report cites it; else give "
     "  the plain place name. Set `admin_level` (0..3) when you can tell.\n"
     "- Ignore boilerplate: cover pages, contact blocks, footers, ToCs.\n"
+    "- PLAUSIBILITY: when rating the `plausibility_in_context` credibility "
+    "  criterion (in `narrative_and_confidence`, or a per-figure `credibility` "
+    "  override), weigh the report's figures against the COUNTRY BASELINE below. "
+    "  A claim far outside those magnitudes with no explanation is `unmet` "
+    "  (or `partial`), not `met`; figures consistent with the baseline are `met`.\n"
     "\n"
+    "---\n"
+    "COUNTRY BASELINE (for plausibility only; cached):\n"
+    "{crisis_brief}\n"
     "---\n"
     "FULL REPORT (cached; do not repeat back to me):\n"
     "{doc_text}\n"
@@ -157,7 +201,9 @@ def _run_domain(
     """One domain call. cache_key is the same across all six domains
     for a given report so Anthropic's prompt cache is reused."""
     return llm.complete_structured(
-        system=SYSTEM_PROMPT_TEMPLATE.format(doc_text=doc_text),
+        system=SYSTEM_PROMPT_TEMPLATE.format(
+            doc_text=doc_text, crisis_brief=_crisis_brief(COUNTRY_ISO3),
+        ),
         user=_domain_user_prompt(domain_name, schema),
         schema=schema,
         max_tokens=4096,
