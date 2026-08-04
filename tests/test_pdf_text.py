@@ -59,6 +59,11 @@ class TestReportSummary:
                 "title": "Sudan Sitrep",
                 "url": "https://reliefweb.int/report/123",
                 "date": {"original": "2026-06-01", "created": "2026-06-02"},
+                # ReliefWeb `source` array — publisher is the first entry (ADR-0004).
+                "source": [
+                    {"name": "OCHA", "homepage": "https://www.unocha.org"},
+                    {"name": "UNICEF", "homepage": "https://www.unicef.org"},
+                ],
             }}
         }
         entries = [{"url": "https://pdf", "s3_key": "pdfs/123.pdf", "filename": "a.pdf"}]
@@ -70,7 +75,16 @@ class TestReportSummary:
             "published_at": "2026-06-01",  # prefers original over created
             "s3_text_key": "text/123.jsonl",
             "num_pages": 5,
+            "publisher_name": "OCHA",  # first source entry
+            "publisher_homepage": "https://www.unocha.org",
         }
+
+    def test_publisher_none_when_no_source(self):
+        reports_by_id = {"123": {"fields": {"title": "T", "url": "u"}}}
+        entries = [{"url": "https://pdf", "s3_key": "k", "filename": "a.pdf"}]
+        summary = pt._report_summary("123", entries, reports_by_id, "text/123.jsonl", 5)
+        assert summary["publisher_name"] is None
+        assert summary["publisher_homepage"] is None
 
     def test_falls_back_to_filename_and_entry_url_when_metadata_missing(self):
         entries = [{"url": "https://pdf", "s3_key": "pdfs/123.pdf", "filename": "a.pdf"}]

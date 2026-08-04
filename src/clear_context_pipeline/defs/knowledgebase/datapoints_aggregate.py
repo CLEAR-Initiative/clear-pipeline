@@ -66,6 +66,26 @@ _DEFAULT_LOOKBACK_DAYS = 7
 _DEFAULT_INITIAL_LOOKBACK_DAYS = 90
 
 
+def _earliest_reporting_period_end(summaries: list[dict]) -> datetime | None:
+    """Earliest ``reporting_period_end`` across a batch's per-report summaries,
+    as an aware UTC datetime, or None when none carry one (all reports reused,
+    or none stated a period). Tolerates date-only and datetime ISO forms."""
+    earliest: datetime | None = None
+    for s in summaries:
+        raw = s.get("reporting_period_end")
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw)
+        except (ValueError, TypeError):
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if earliest is None or dt < earliest:
+            earliest = dt
+    return earliest
+
+
 @dg.asset(group_name="reliefweb_kb")
 def reliefweb_weekly_datapoint_aggregations(
     context: AssetExecutionContext,
@@ -119,6 +139,21 @@ def reliefweb_weekly_datapoint_aggregations(
 
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=lookback_days)
+
+    # Retrospective trigger (ADR-0005 §5): a report published now about an OLD
+    # period has a `reportingPeriodEnd` before the rolling window, so keying the
+    # refresh on the rolling window alone would never recompute its correct old
+    # bucket. Widen the start to also cover this batch's earliest period end —
+    # the union of the rolling window and the batch's [min…max] period span. The
+    # refresh is idempotent, so the buckets in between with no new reports are
+    # recomputed to an unchanged value.
+    batch_start = _earliest_reporting_period_end(reliefweb_weekly_datapoints)
+    if batch_start is not None and batch_start < window_start:
+        context.log.info(
+            "retrospective report(s) in batch: widening refresh start %s → %s",
+            window_start.isoformat(), batch_start.isoformat(),
+        )
+        window_start = batch_start
 
     context.log.info(
         "refreshing aggregated datapoints: mode=%s window=[%s, %s] schema_version=%s",

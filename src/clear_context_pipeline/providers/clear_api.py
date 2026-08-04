@@ -42,6 +42,12 @@ query ResolveKnowledgebaseLocation($pcode: String, $name: String, $adminLevel: I
 }
 """
 
+_RESOLVE_DATA_SOURCE = """
+mutation ResolveDataSource($name: String!, $homepage: String) {
+  resolveDataSource(name: $name, homepage: $homepage)
+}
+"""
+
 _UPSERT_KNOWLEDGEBASE = """
 mutation UpsertKnowledgebaseChunks(
   $reportId: String!,
@@ -296,6 +302,24 @@ def resolve_location(
     return data.get("resolveKnowledgebaseLocation")
 
 
+def resolve_data_source(*, name: str, homepage: str | None = None) -> str | None:
+    """Resolve an organisation/source name to a ``data_sources`` id via
+    clear-api's ``resolveDataSource`` mutation, creating an ungraded
+    ``organisation`` row on miss.
+
+    Used for both a figure's cited source (``source_name`` -> ``source_id``)
+    and a report's publisher (ReliefWeb ``report.source`` -> the report's
+    ``sourceId``). Returns the id, or ``None`` on empty input. See ADR-0004.
+    """
+    if not name or not name.strip():
+        return None
+    data = _execute(
+        _RESOLVE_DATA_SOURCE,
+        {"name": name.strip(), "homepage": homepage},
+    )
+    return data.get("resolveDataSource")
+
+
 def upsert_report_datapoints(
     *,
     report_id: str,
@@ -313,6 +337,7 @@ def upsert_report_datapoints(
     data: dict[str, Any],
     schema_version: str,
     extracted_by_model: str,
+    source_id: str | None = None,
 ) -> dict[str, Any]:
     """Replace the ``report_datapoints`` row for ``report_id``.
 
@@ -340,6 +365,7 @@ def upsert_report_datapoints(
         "data": data,
         "schemaVersion": schema_version,
         "extractedByModel": extracted_by_model,
+        "sourceId": source_id,
     }
     result = _execute(_UPSERT_REPORT_DATAPOINTS, {"input": payload})
     return result["upsertReportDatapoints"]

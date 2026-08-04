@@ -70,11 +70,18 @@ SYSTEM_PROMPT_TEMPLATE = (
     "  something is missing, leave the field null.\n"
     "- Every numeric value must be wrapped in the provenance envelope: "
     "  {{ value, unit, confidence, source_quote, chunk_index, "
-    "  page_number, scope_location_name }}. `source_quote` must be a verbatim "
-    "  sentence from the report — a substring, not a paraphrase. Always set "
-    "  `chunk_index` to null: it is filled automatically after extraction by "
-    "  matching your `source_quote` to the report's chunks — do not guess it. "
-    "  `page_number` (1-indexed) comes from the nearest `[page N]` marker.\n"
+    "  page_number, scope_location_name, source_name }}. `source_quote` must "
+    "  be a verbatim sentence from the report — a substring, not a paraphrase. "
+    "  Always set `chunk_index` to null: it is filled automatically after "
+    "  extraction by matching your `source_quote` to the report's chunks — do "
+    "  not guess it. `page_number` (1-indexed) comes from the nearest "
+    "  `[page N]` marker.\n"
+    "- SOURCE ATTRIBUTION: set `source_name` to the organisation the number is "
+    "  attributed to IN THE TEXT — 'according to IOM DTM', 'WHO reports', 'per "
+    "  OCHA figures' -> the org name ('IOM DTM', 'WHO', 'OCHA'). Emit the NAME "
+    "  only. Set it null when the figure names no distinct source; do NOT "
+    "  default to the report's own publisher. Never emit `source_id` — like "
+    "  the resolved location id, it is filled in after extraction.\n"
     "- FIGURE SCOPE: for every numeric value, set `scope_location_name` to "
     "  the ONE place that number is a total FOR — the area it counts, NOT "
     "  every place the report mentions. A report framed nationally may state "
@@ -277,6 +284,50 @@ def _resolve_figure_scopes(merged: Any) -> tuple[int, int, int]:
     return figures, with_name, resolved
 
 
+def _resolve_figure_sources(merged: Any) -> tuple[int, int]:
+    """Resolve each numeric figure's `source_name` (the org the number is
+    attributed to in the text) to a `data_sources` id, writing it into
+    `source_id` in place. Mirrors `_resolve_figure_scopes` (ADR-0004).
+
+    Uncited figures (no `source_name`) keep `source_id = None`; the aggregator
+    then attributes them to the report's publisher. `source_id` is overwritten
+    unconditionally — the LLM must not supply it.
+
+    Returns (figures_with_source_name, figures_resolved) for logging.
+    """
+    fields: list[dict] = []
+    _collect_numeric_fields(merged, fields)
+
+    # One resolveDataSource call per distinct cited name — a report attributes
+    # many figures to the same org (e.g. "IOM DTM" across a displacement table).
+    cache: dict[str, str | None] = {}
+    for f in fields:
+        name = f.get("source_name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        key = name.strip()
+        if key not in cache:
+            try:
+                cache[key] = clear_api.resolve_data_source(name=key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[DATAPOINTS] source resolve hiccup name=%s: %s", key, exc,
+                )
+                cache[key] = None
+
+    with_name = resolved = 0
+    for f in fields:
+        name = f.get("source_name")
+        sid: str | None = None
+        if isinstance(name, str) and name.strip():
+            with_name += 1
+            sid = cache.get(name.strip())
+        f["source_id"] = sid  # unconditional — never trust an LLM id
+        if sid:
+            resolved += 1
+    return with_name, resolved
+
+
 def _dig(obj: Any, *path: str) -> Any:
     """Walk nested dicts safely — returns None the moment any step
     is missing / null. Used to pull hot totals out of the merged blob
@@ -447,6 +498,8 @@ def extract_datapoints_for_one_report(
     s3=None,
     s3_bucket: str | None = None,
     log_context=None,
+    publisher_name: str | None = None,
+    publisher_homepage: str | None = None,
 ) -> dict:
     """Run the six domain LLM extractions for one report, resolve
     locations, hoist hot totals, snapshot a debug artefact to S3, and
@@ -472,6 +525,10 @@ def extract_datapoints_for_one_report(
       log_context: optional Dagster / Python logger. Any object
         exposing `.info` / `.warning` / `.error`. Falls back to the
         module logger when None.
+      publisher_name / publisher_homepage: the report's publisher
+        (ReliefWeb `report.source`, first entry). Resolved to the
+        report-level `sourceId` — the source fallback for any figure
+        that cites no distinct origin. None for manual documents.
 
     Returns:
       Summary dict identical in shape to the weekly asset's per-report
@@ -537,6 +594,27 @@ def extract_datapoints_for_one_report(
                 report_id, cq_matched, cq_total, len(chunks),
             )
 
+    # Source attribution: resolve each figure's cited source_name -> source_id
+    # in place, and the report's publisher -> the report-level sourceId (the
+    # fallback for any figure that cites no distinct source). See ADR-0004.
+    src_named, src_resolved = _resolve_figure_sources(merged)
+    publisher_source_id: str | None = None
+    if publisher_name:
+        try:
+            publisher_source_id = clear_api.resolve_data_source(
+                name=publisher_name, homepage=publisher_homepage,
+            )
+        except Exception as exc:  # noqa: BLE001 — publisher stays null on hiccup
+            log.warning(
+                "[%s] publisher resolve hiccup name=%s: %s",
+                report_id, publisher_name, exc,
+            )
+    log.info(
+        "[%s] source attribution: %d/%d figures cite a source resolved; "
+        "publisher=%s -> %s",
+        report_id, src_resolved, src_named, publisher_name, publisher_source_id,
+    )
+
     timing = merged.get("timing_and_scope") or {}
     event_types = list(dict.fromkeys(timing.get("event_types") or []))
 
@@ -592,6 +670,7 @@ def extract_datapoints_for_one_report(
         data=merged,
         schema_version=SCHEMA_VERSION,
         extracted_by_model=llm.model,
+        source_id=publisher_source_id,
     )
 
     return {
@@ -692,6 +771,8 @@ def reliefweb_weekly_datapoints(
                 s3=s3,
                 s3_bucket=bucket,
                 log_context=context.log,
+                publisher_name=report.get("publisher_name"),
+                publisher_homepage=report.get("publisher_homepage"),
             )
         except _NothingExtracted:
             context.log.error(
@@ -724,6 +805,10 @@ def reliefweb_weekly_datapoints(
             "unresolved_pcodes": summary["unresolved_pcodes"],
             "s3_debug_key": summary["s3_debug_key"],
             "upsert_result": summary["upsert_result"],
+            # Carried so the aggregation asset can widen its refresh to cover a
+            # retrospective report's OLD bucket, not just the rolling recent
+            # window (ADR-0005 §5).
+            "reporting_period_end": summary["reporting_period_end"],
         })
         context.log.info(
             "[%s] extracted %d/%d domains, %d locations resolved (%s)",

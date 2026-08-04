@@ -78,7 +78,10 @@ def _skip_narrative() -> bool:
 # `clear-api/src/services/datapoint-aggregation.ts`. The aggregation
 # side owns these keys; the situation-analysis side just consumes.
 _LABEL_POPULATION_DISPLACED = "idp_stock"
-_LABEL_RETURNEES = "returnees"
+# The aggregated returnee STOCK (cumulative returned to date) — the meaningful
+# single figure for a situation snapshot, mirroring idp_stock. The former
+# `returnees` label was split into returnee_stock + new_returns (ADR-0006 §4).
+_LABEL_RETURNEES = "returnee_stock"
 _LABEL_FUNDING_REQUIRED = "funding_required_usd"
 _LABEL_FUNDING_RECEIVED = "funding_received_usd"
 # People in Need. Note `overall_pin` only populates when a report

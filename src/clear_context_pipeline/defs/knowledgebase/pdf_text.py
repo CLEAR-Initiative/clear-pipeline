@@ -108,6 +108,13 @@ def _report_summary(
     # publication date; fall back to created when publishers left it blank.
     report_dates = fields.get("date") or {}
     published_at = report_dates.get("original") or report_dates.get("created")
+    # Publisher: ReliefWeb `source` is an array of publishing orgs (OCHA,
+    # UNICEF, …). There's no "primary" flag in the API, so take the first.
+    # `homepage` lets resolveDataSource match the org by URL. This metadata
+    # was dropped before source attribution (ADR-0004 §1); now threaded on so
+    # the datapoint extractor can resolve it to report_datapoints.sourceId.
+    sources = fields.get("source") or []
+    publisher = sources[0] if sources else {}
     return {
         "report_id": report_id,
         "report_title": report_title,
@@ -116,6 +123,8 @@ def _report_summary(
         "published_at": published_at,
         "s3_text_key": text_key,
         "num_pages": num_pages,
+        "publisher_name": publisher.get("name") or publisher.get("shortname"),
+        "publisher_homepage": publisher.get("homepage"),
     }
 
 
