@@ -95,8 +95,13 @@ direction.
   low-quality outlier can't set the ceiling. (Ranking the collapsed winners rather than
   every raw figure keeps the drop aligned with the values that actually compete.)
 - `latest_wins` (pure) is kept for point-in-time **state** fields where freshness is
-  definitional (`idp_stock`, `refugees`, sector/overall PIN, funding required) — quality/
-  bias overrides apply to the additive + `max` fields.
+  definitional (`idp_stock`, `returnee_stock`, `refugees`, sector/overall PIN, funding
+  required) — quality/bias overrides apply only to the additive + `max` fields. A state
+  field may still carry a §3 bias *direction* (for documentation and for any future
+  policy change), but that bias is **inert** under pure latest-wins — never exercised —
+  exactly as it already is for `idp_stock` / `refugees`. So `returnee_stock` (latest-wins,
+  `underreport`) is consistent with the existing displacement state fields, not a new
+  exception.
 
 ### 4a. Returnee stock/flow field split
 

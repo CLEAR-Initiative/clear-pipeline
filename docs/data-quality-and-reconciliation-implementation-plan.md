@@ -7,6 +7,12 @@ bias-aware aggregation), and ADR-0006 (location-metadata reconciliation) across 
 (schema, aggregation, resolvers) and **clear-context-pipeline** (extraction, enrich,
 aggregate refresh).
 
+> **Note on ADR-0006:** it is **forthcoming** — it lands with the Location Metadata
+> workstream PR, not the data-quality PRs. The returnee stock/flow *field split* it
+> originally motivated ships with data quality and is documented in **ADR-0005 §4a**;
+> the remaining ADR-0006 references below (§4, §7, §8) describe the not-yet-shipped
+> reconciliation work and resolve once that PR merges.
+
 ---
 
 ## Two workstreams and how they depend

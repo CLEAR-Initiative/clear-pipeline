@@ -105,6 +105,17 @@ figure gives no signal for a criterion. Each criterion is rated **met (1) / part
   reliability grade" prior under credibility, but the ADR-0005 formula also multiplies
   by reliability — using it in both places double-penalises weak sources. It is kept
   only as the outer multiplier (ADR-0005).
+- **A missing rating scores `partial` (0.5) — neutral, not conservative.** When neither
+  the figure nor the document supplies a rating for a criterion (a malformed row, or a
+  pre-v2 row with no `information_credibility` block), that criterion contributes the
+  neutral 0.5, not 0. This differs *deliberately* from reliability's conservative
+  `null → 1`: an *ungraded source* is treated as untrusted, but an *unrated criterion*
+  only means "not assessed", for which neutral is fairer than assuming the worst — and it
+  keeps a graded source's reliability advantage meaningful when credibility carries no
+  signal (a 0 default would shrink every unrated figure's `data_quality` below the
+  override margin). Because the six document-level criteria are **required** on a v2 row,
+  this is a robustness fallback, not a scoring path for well-formed data. Domain-tunable:
+  flip to conservative `unmet` if sign-off prefers pessimism on unrated figures.
 
 ### 5. Reliability scale + seed
 
