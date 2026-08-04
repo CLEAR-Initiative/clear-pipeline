@@ -809,6 +809,29 @@ def reliefweb_weekly_datapoints(
         )
         return []
 
+    # Deploy-order preflight (fail loud, once, before any LLM spend): schema v2
+    # sends `sourceId` on every upsert, so an undeployed clear-api would 400 each
+    # report AFTER its 6 LLM calls, and the per-report `continue` below would let
+    # the run finish GREEN with zero data. Probe read-only; only when there's work.
+    if reliefweb_weekly_pdf_text:
+        try:
+            source_attribution_ready = clear_api.supports_source_attribution()
+        except Exception as exc:  # noqa: BLE001
+            raise dg.Failure(
+                description=(
+                    "clear-api capability preflight failed — cannot confirm source "
+                    f"attribution (schema {SCHEMA_VERSION}) is deployed: {exc}"
+                ),
+            ) from exc
+        if not source_attribution_ready:
+            raise dg.Failure(
+                description=(
+                    "clear-api does not expose UpsertReportDatapointsInput.sourceId "
+                    f"— deploy clear-api PR #110 before this pipeline (schema "
+                    f"{SCHEMA_VERSION} sends sourceId unconditionally)."
+                ),
+            )
+
     llm = make_llm_provider("datapoints")
 
     summaries: list[dict] = []
@@ -823,7 +846,9 @@ def reliefweb_weekly_datapoints(
         # source of truth — the S3 debug snapshot is written BEFORE the upsert
         # and so can't confirm the write landed.
         try:
-            already_done = clear_api.report_datapoints_exist(report_id)
+            already_done = clear_api.report_datapoints_exist(
+                report_id, schema_version=SCHEMA_VERSION
+            )
         except Exception as exc:  # noqa: BLE001 — treat as not-done and extract
             context.log.warning(
                 "[%s] datapoint existence check failed (%s) — extracting anyway",
