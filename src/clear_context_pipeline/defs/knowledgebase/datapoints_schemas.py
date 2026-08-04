@@ -528,22 +528,34 @@ class DocumentCredibility(BaseModel):
     yield the 0–10 information_credibility that feeds the data-quality score.
     Assessed at document level as the fallback for every figure in the report;
     per-figure overrides are a later refinement (ADR-0004 §4).
+
+    Every criterion is Optional (default None). The prompt still instructs the
+    model to rate all six, but Anthropic tool-use is best-effort: a response that
+    fills only four of six must NOT raise a ValidationError that nulls the entire
+    `narrative_and_confidence` domain (losing brief_summary, overall_confidence
+    and every sector_indicator to gain nothing). clear-api treats a missing
+    criterion as the neutral 0.5 rating, so a partial assessment degrades
+    gracefully. Mirrors FigureCredibility, whose six fields are already Optional.
+    (#27)
     """
-    attribution_quality: CredibilityRating = Field(
+    attribution_quality: Optional[CredibilityRating] = Field(
+        default=None,
         description=(
             "Are the report's claims attributed to identifiable sources "
             "(named agencies, dated assessments) rather than anonymous or "
             "absent attribution? met = clearly attributed throughout."
         ),
     )
-    internal_consistency: CredibilityRating = Field(
+    internal_consistency: Optional[CredibilityRating] = Field(
+        default=None,
         description=(
             "Do figures and claims within the report agree with each other "
             "(totals match disaggregations, no contradictions)? "
             "met = internally consistent."
         ),
     )
-    plausibility_in_context: CredibilityRating = Field(
+    plausibility_in_context: Optional[CredibilityRating] = Field(
+        default=None,
         description=(
             "Are the claims plausible against the COUNTRY BASELINE provided in the "
             "system prompt? met = magnitudes consistent with that baseline; unmet = "
@@ -551,21 +563,24 @@ class DocumentCredibility(BaseModel):
             "partial = somewhat high/low but arguable."
         ),
     )
-    geographic_temporal_specificity: CredibilityRating = Field(
+    geographic_temporal_specificity: Optional[CredibilityRating] = Field(
+        default=None,
         description=(
             "Are events located and dated precisely enough to act on "
             "(specific admin areas + dates) rather than vague ('parts of the "
             "country', 'recently')? met = precise."
         ),
     )
-    methodology_transparency: CredibilityRating = Field(
+    methodology_transparency: Optional[CredibilityRating] = Field(
+        default=None,
         description=(
             "Does the report state how figures were collected (assessment "
             "method, sample, coverage) where applicable? "
             "unmet = figures with no stated methodology."
         ),
     )
-    representativeness: CredibilityRating = Field(
+    representativeness: Optional[CredibilityRating] = Field(
+        default=None,
         description=(
             "Does the stated scope match the claims (a 3-village assessment "
             "NOT generalised to a governorate)? met = scope matches claims."

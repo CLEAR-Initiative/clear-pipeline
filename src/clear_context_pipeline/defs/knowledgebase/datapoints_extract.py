@@ -115,8 +115,16 @@ _GENERIC_CRISIS_BRIEF = (
 )
 
 
-def _crisis_brief(country_iso3: str) -> str:
-    """The plausibility baseline for a country (ISO3), or a generic fallback."""
+def _crisis_brief(country_iso3: str | None) -> str:
+    """The plausibility baseline for a country (ISO3), or a generic fallback.
+
+    An unknown OR absent country gets the GENERIC brief — never another
+    country's magnitudes. (#27: a None country previously fell through to the
+    Sudan default, so every country-less report — e.g. manual uploads — was
+    judged against Sudan's caseload, corrupting plausibility → data_quality.)
+    """
+    if not country_iso3:
+        return _GENERIC_CRISIS_BRIEF
     return _CRISIS_BRIEFS.get(country_iso3.lower(), _GENERIC_CRISIS_BRIEF)
 
 
@@ -229,10 +237,11 @@ def _run_domain(
 ) -> BaseModel:
     """One domain call. cache_key is the same across all six domains
     for a given report so Anthropic's prompt cache is reused. `country_iso3`
-    selects the plausibility crisis brief; None falls back to COUNTRY_ISO3."""
+    selects the plausibility crisis brief; None/unknown → the GENERIC brief
+    (never another country's magnitudes — #27)."""
     return llm.complete_structured(
         system=SYSTEM_PROMPT_TEMPLATE.format(
-            doc_text=doc_text, crisis_brief=_crisis_brief(country_iso3 or COUNTRY_ISO3),
+            doc_text=doc_text, crisis_brief=_crisis_brief(country_iso3),
         ),
         user=_domain_user_prompt(domain_name, schema),
         schema=schema,
@@ -367,6 +376,27 @@ def _resolve_figure_scopes(merged: Any) -> tuple[int, int, int]:
     return figures, with_name, resolved
 
 
+# Bounds on LLM-emitted source names before they hit `resolveDataSource` (a
+# mutation that CREATES an ungraded row on miss). The names are lifted from
+# untrusted PDF body text, so cap length + per-report cardinality to stop a
+# garbled or adversarial document from seeding unbounded junk `data_sources`
+# rows — which would also split one org's figures across near-duplicate grades,
+# undercutting the credibility model. (#27)
+_MAX_SOURCE_NAME_LEN = 120
+_MAX_SOURCES_PER_REPORT = 25
+
+
+def _norm_source_name(name: Any) -> str | None:
+    """Normalise an LLM-emitted source name: None for non-strings / blanks,
+    internal whitespace collapsed, length-capped. Used in BOTH loops of
+    `_resolve_figure_sources` so the cache key and the write path can never
+    diverge — if only one collapsed whitespace, every figure needing collapse
+    would silently miss the cache and get `source_id = None`. (#27)"""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return " ".join(name.split())[:_MAX_SOURCE_NAME_LEN]
+
+
 def _resolve_figure_sources(merged: Any) -> tuple[int, int]:
     """Resolve each numeric figure's `source_name` (the org the number is
     attributed to in the text) to a `data_sources` id, writing it into
@@ -385,26 +415,31 @@ def _resolve_figure_sources(merged: Any) -> tuple[int, int]:
     # many figures to the same org (e.g. "IOM DTM" across a displacement table).
     cache: dict[str, str | None] = {}
     for f in fields:
-        name = f.get("source_name")
-        if not isinstance(name, str) or not name.strip():
+        key = _norm_source_name(f.get("source_name"))
+        if key is None or key in cache:
             continue
-        key = name.strip()
-        if key not in cache:
-            try:
-                cache[key] = clear_api.resolve_data_source(name=key)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "[DATAPOINTS] source resolve hiccup name=%s: %s", key, exc,
-                )
-                cache[key] = None
+        # Cap distinct names per report — see the module note above.
+        if len(cache) >= _MAX_SOURCES_PER_REPORT:
+            logger.warning(
+                "[DATAPOINTS] source-name cardinality cap hit (%d) — remaining "
+                "figures stay unattributed", _MAX_SOURCES_PER_REPORT,
+            )
+            break
+        try:
+            cache[key] = clear_api.resolve_data_source(name=key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[DATAPOINTS] source resolve hiccup name=%s: %s", key, exc,
+            )
+            cache[key] = None
 
     with_name = resolved = 0
     for f in fields:
-        name = f.get("source_name")
+        key = _norm_source_name(f.get("source_name"))
         sid: str | None = None
-        if isinstance(name, str) and name.strip():
+        if key is not None:
             with_name += 1
-            sid = cache.get(name.strip())
+            sid = cache.get(key)  # None when past the cardinality cap
         f["source_id"] = sid  # unconditional — never trust an LLM id
         if sid:
             resolved += 1
@@ -624,6 +659,11 @@ def extract_datapoints_for_one_report(
         (bad payload, missing FK). Caller must not retry.
     """
     log = log_context or logger
+
+    # Record which plausibility baseline this report is judged against, so a run
+    # log tells you when a country-less report fell back to the generic brief
+    # rather than silently getting the wrong country's magnitudes (#27).
+    log.info("[%s] plausibility baseline: %s", report_id, country_iso3 or "generic")
 
     # ── Domain-partitioned extraction ─────────────────────────────
     merged: dict[str, dict | None] = {}
