@@ -80,7 +80,7 @@ def _skip_narrative() -> bool:
 _LABEL_POPULATION_DISPLACED = "idp_stock"
 # The aggregated returnee STOCK (cumulative returned to date) — the meaningful
 # single figure for a situation snapshot, mirroring idp_stock. The former
-# `returnees` label was split into returnee_stock + new_returns (ADR-0006 §4).
+# `returnees` label was split into returnee_stock + new_returns (ADR-0005 §4a).
 _LABEL_RETURNEES = "returnee_stock"
 _LABEL_FUNDING_REQUIRED = "funding_required_usd"
 _LABEL_FUNDING_RECEIVED = "funding_received_usd"

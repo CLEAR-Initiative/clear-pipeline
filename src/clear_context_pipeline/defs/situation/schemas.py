@@ -73,7 +73,7 @@ class Datapoints(BaseModel):
     # Max-aggregated, and sparse. Distinct from population_in_need.
     population_affected: Optional[float] = None
     # Cumulative returnee STOCK (returned to date) — sourced from the
-    # `returnee_stock` aggregate (ADR-0006 §4 split `returnees` into stock +
+    # `returnee_stock` aggregate (ADR-0005 §4a split `returnees` into stock +
     # flow); the field name is kept for downstream/narrative stability.
     returnees: Optional[float] = None
     number_of_events: int = 0

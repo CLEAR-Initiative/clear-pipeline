@@ -59,7 +59,8 @@ extraction:
 1. normalised exact match on `name` **or** any `synonyms` → id
 2. else, if a `homepage` is available, match on `infoUrl` → same org under a new name →
    **append the synonym**, return id
-3. else **fuzzy match** (`pg_trgm` similarity ≥ ~0.6) on `name` + `synonyms` → append
+3. else **fuzzy match** (`pg_trgm` similarity ≥ a threshold, caller-tunable via
+   `minSimilarity`, default 0.6, clamped to [0,1]) on `name` + `synonyms` → append
    synonym, return id
 4. else **create** a new row (`reliability = null`, `type = "organisation"`) → id
 

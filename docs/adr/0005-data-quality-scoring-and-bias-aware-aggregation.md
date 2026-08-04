@@ -46,10 +46,13 @@ because time passed. Therefore:
 - The **resolver computes Recency live** (`now` vs the field's validity window) and
   finalises `data_quality` on read — on both the cached and the on-demand rollup paths.
 
-Recency scoring: **met** if `now − reportingPeriodEnd ≤ window`, **partial** if `≤ 2×
-window`, **unmet** beyond (window per field, § table below). This rewards freshly
-*published* figures — including a fresh, reconciled report describing an *old* period —
-without penalising old *content* (content is placed by period into its bucket).
+Recency scoring: **met** if `now − newest_report_at ≤ window`, **partial** if `≤ 2×
+window`, **unmet** beyond (window per field, § table below), where `newest_report_at` is
+the newest contributing `publishedAt`. It keys on **publication** freshness, NOT the
+content/period date: this rewards a fresh, reconciled report describing an *old* period,
+and never penalises old *content* (content is placed by period into its bucket). (An
+earlier draft wrote `now − reportingPeriodEnd`; that contradicted this intent and is
+superseded — the implementation scores against `newest_report_at`.)
 
 This also makes the previously-documented `is_stale` flag (§6.5) redundant: "no fresh
 reports on the current bucket" now shows up as **low Recency → low `data_quality`**, which
@@ -68,7 +71,7 @@ direction.
 |---|---|---|
 | `needs_and_funding.overall_affected` (`max`) | overreport | widest-reach / round-up claims |
 | `casualties.killed` / `injured`, `access_and_incidents.aid_workers_killed` | overreport | media inflation of tolls |
-| `displacement.{idp_stock, new_displacements, returnees, refugees}` | underreport | incomplete movement capture |
+| `displacement.{idp_stock, new_displacements, returnee_stock, new_returns, refugees}` | underreport | incomplete movement capture |
 | `needs_and_funding.*.people_in_need`, `overall_pin` | underreport | access-limited undercount |
 | `access_and_incidents.security_incidents_count` | underreport | under-recorded incidents |
 | `needs_and_funding.overall_funding_{required,received}_usd` | neutral | reported precisely |
@@ -87,11 +90,25 @@ direction.
   truth per bias: **lower** value for `overreport`, **higher** for `underreport`
   (`neutral` → keep freshest).
 - For **`max` fields** (`overall_affected`): do not take the raw max — **drop the bottom
-  quartile** of contributing figures by `data_quality`, then take the max of the rest, so
-  a single low-quality outlier can't set the ceiling.
+  quartile** of the contributing **group-winners** (the per-incident winners left after
+  within-group dedup) by `data_quality`, then take the max of the rest, so a single
+  low-quality outlier can't set the ceiling. (Ranking the collapsed winners rather than
+  every raw figure keeps the drop aligned with the values that actually compete.)
 - `latest_wins` (pure) is kept for point-in-time **state** fields where freshness is
   definitional (`idp_stock`, `refugees`, sector/overall PIN, funding required) — quality/
   bias overrides apply to the additive + `max` fields.
+
+### 4a. Returnee stock/flow field split
+
+`displacement.returnees` conflated a **stock** (cumulative returned to date) with a
+**flow** (returns during the reporting period) and summed both, over-counting. It is split
+into `displacement.returnee_stock` (a `latest_state` field, latest-wins) and
+`displacement.new_returns` (an `additive_count` flow) — mirroring the existing
+`idp_stock` / `new_displacements` pair. Both inherit the displacement `underreport` bias
+and 30-day window above. This section is the canonical home for the field split; the full
+stock-and-flow *reconciliation* model (anchoring an authoritative stock and accruing
+forward flows across sources) belongs to the forthcoming location-metadata reconciliation
+ADR, and is out of scope here.
 
 ### 5. Retrospective updates: trigger the refresh on the batch's period span
 
@@ -122,7 +139,7 @@ normal periodic cadence.
 | Field(s) | Category | Window | `x` |
 |---|---|--:|--:|
 | `casualties.{killed,injured}`, `security_incidents_count`, `aid_workers_killed` | Conflict events | 7 d | 2 |
-| `displacement.{idp_stock, new_displacements, returnees, refugees}` | Displacement | 30 d | 3 |
+| `displacement.{idp_stock, new_displacements, returnee_stock, new_returns, refugees}` | Displacement | 30 d | 3 |
 | `overall_affected` | Operational updates | 30 d | 3 |
 | `overall_funding_{required,received}_usd` | Operational updates¹ | 30 d | 3 |
 | `*.people_in_need`, `overall_pin` | Needs assessments | 90 d | 3 |
@@ -152,8 +169,10 @@ normal periodic cadence.
 ## Related
 
 - ADR-0004 — the source registry + information-credibility rubric this consumes.
-- ADR-0006 — reconciles authoritative `location_metadata` into this aggregation (stock/flow
-  split, divergence guard, API-contributor credibility profile).
+- ADR-0006 (*forthcoming, location-metadata workstream — not yet in the repo*) — will
+  reconcile authoritative `location_metadata` into this aggregation (divergence guard,
+  API-contributor credibility profile). The returnee stock/flow **field split** it originally
+  motivated is now documented here in §4a, since that split ships with this data-quality work.
 - ADR-0001 / ADR-0002 — affected-from-reports and figure-scope dedup, the aggregation this
   extends.
 - `docs/humanitarian-datapoint-extraction.md` §6.1–6.5 — reworked by this ADR (confidence →

@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field, field_validator
 #        level information-credibility criteria (DocumentCredibility on
 #        narrative_and_confidence), and the returnee stock/flow split
 #        (returnee_stock + new_returns replace returnees). See the clear-
-#        context-pipeline ADR-0004 / ADR-0005 / ADR-0006.
+#        context-pipeline ADR-0004 / ADR-0005.
 #
 # Pre-launch the corpus is a handful of test reports we wipe and re-extract on
 # every change, so the version mainly documents the shape. Aggregation still
@@ -69,10 +69,26 @@ ConfidenceTier = Literal[
     "verified", "reported", "estimated", "media", "unverified",
 ]
 
-# Information-credibility rating for the document-level criteria (ADR-0004 §4).
+# Information-credibility rating for the credibility criteria (ADR-0004 §4).
 # Three-valued so the aggregator scores met = 1.0 / partial = 0.5 / unmet = 0.0
 # and weights each criterion into the 0–10 information_credibility score.
 CredibilityRating = Literal["met", "partial", "unmet"]
+
+
+class FigureCredibility(BaseModel):
+    """Per-figure information-credibility overrides (ADR-0004 §4). Each of the six
+    intrinsic criteria is optional; a null inherits the report's document-level
+    ``DocumentCredibility``. Rate a criterion here ONLY when THIS figure gives a
+    distinct signal — a precisely-sourced, well-specified figure inside an
+    otherwise vague report, or a suspiciously round media number in a credible
+    one. Directness is the figure's ``confidence`` tier and Recency is computed
+    at read time, so neither is assessed here."""
+    attribution_quality: Optional[CredibilityRating] = None
+    internal_consistency: Optional[CredibilityRating] = None
+    plausibility_in_context: Optional[CredibilityRating] = None
+    geographic_temporal_specificity: Optional[CredibilityRating] = None
+    methodology_transparency: Optional[CredibilityRating] = None
+    representativeness: Optional[CredibilityRating] = None
 
 # NRC SAF sectors — enforced as a Literal because the aggregation math
 # groups by sector. Off-taxonomy sectors would silently drop out.
@@ -162,6 +178,21 @@ class NumericField(BaseModel):
     source_id: Optional[str] = Field(
         default=None,
         description="Resolved post-extraction. Leave null; do not emit.",
+    )
+    # ── Per-figure information credibility (ADR-0004 §4) ───────────────
+    # Optional overrides of the report's document-level credibility, for the
+    # criteria where THIS figure differs from the document as a whole. Null
+    # criteria inherit the document-level assessment at aggregation time.
+    credibility: Optional[FigureCredibility] = Field(
+        default=None,
+        description=(
+            "Per-figure credibility overrides — set a criterion (met/partial/"
+            "unmet) ONLY where this specific figure differs from the report "
+            "overall (e.g. a well-attributed, precisely-scoped figure in a "
+            "vague report). Leave the whole object null when the figure is "
+            "typical of the document; it then inherits the document-level "
+            "assessment. Do NOT restate directness/recency here."
+        ),
     )
 
 
@@ -308,7 +339,7 @@ class Displacement(BaseModel):
       * IDPs:     `idp_stock` (stock)      + `new_displacements` (flow)
       * Returns:  `returnee_stock` (stock) + `new_returns` (flow)
     Conflating a running total with a per-period count over-counts (the exact
-    returnee bug ADR-0006 fixes), so never put a cumulative total in a flow.
+    returnee bug ADR-0005 §4a fixes), so never put a cumulative total in a flow.
     """
     idp_stock: Optional[NumericField] = Field(
         default=None,
