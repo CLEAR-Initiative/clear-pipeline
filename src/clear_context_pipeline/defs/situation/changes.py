@@ -1,11 +1,13 @@
-"""'What changed' generation - a per-section diff note vs the prior snapshot.
+"""'What changed' generation - a per-section diff note vs an earlier snapshot.
 
-At generation time the asset already has the previous current snapshot for the
-same (country, window) bucket. This module makes ONE LLM call comparing the
-prior payload against the freshly built one and emits a terse note per section
-that MATERIALLY changed (a new figure, a new event, an escalation or
-de-escalation). Sections with no material change are omitted; on the first
-generation (no prior) nothing is produced.
+The caller (situation/generate.py) picks WHAT to compare against and passes it
+in as `basis`: normally the preceding bucket of the same kind (last month for a
+monthly window), falling back to an earlier version of the same bucket when no
+preceding one exists. This module makes ONE LLM call comparing that prior
+payload against the freshly built one and emits a terse note per section that
+MATERIALLY changed (a new figure, a new event, an escalation or de-escalation).
+Sections with no material change are omitted; with nothing to compare against,
+nothing is produced.
 
 One call, not one per section: the model sees the whole before/after at once,
 which is cheaper than a call per section and lets it weigh relative
@@ -125,19 +127,41 @@ def generate_changes(
     *,
     prior_payload: dict[str, Any],
     new_payload: dict[str, Any],
+    basis: str,
     prior_generated_at: str,
+    compared_to_window_start: str,
+    compared_to_label: str,
     cache_key: str,
 ) -> SituationChanges:
-    """One LLM call diffing prior vs new. Returns empty changes on any
-    failure (the analysis still ships without change-notes)."""
+    """One LLM call diffing prior vs new. `basis` is "previous_period" or
+    "previous_generation" (see SituationChanges) and only changes how the
+    comparison is framed to the model - a period diff is about the world
+    moving, a generation diff about our picture of it improving, and
+    conflating them produces notes that overstate real-world change.
+    Returns empty changes on any failure (the analysis still ships)."""
     prior_d = _digest(prior_payload)
     new_d = _digest(new_payload)
 
+    if basis == "previous_period":
+        framing = (
+            f"PRIOR is the preceding period ({compared_to_label}); NEW is the "
+            "period being reported. Differences reflect the situation moving."
+        )
+    else:
+        framing = (
+            f"PRIOR and NEW are two readings of the SAME period "
+            f"({compared_to_label}), taken at different times. Differences "
+            "reflect newly arrived reporting, not necessarily real-world "
+            "change - do not phrase a note as an escalation when it is only "
+            "a figure being revised or a gap being filled."
+        )
+
     system = (
         "You are a humanitarian analyst. You are given the PRIOR and NEW "
-        "version of a country situation analysis, section by section. For "
-        "each section, decide whether anything MATERIALLY changed - a new or "
-        "revised figure, a newly reported event, an escalation or "
+        "version of a country situation analysis, section by section. "
+        + framing
+        + " For each section, decide whether anything MATERIALLY changed - a "
+        "new or revised figure, a newly reported event, an escalation or "
         "de-escalation. Emit a note ONLY for sections that materially "
         "changed; omit the rest. Notes are terse fragments (max 20 words), "
         "lead with the figure, and state the change, not the current state "
@@ -161,7 +185,12 @@ def generate_changes(
         )
     except Exception as exc:  # noqa: BLE001 - failure isolation
         logger.warning("[situation:changes] LLM call failed: %s", exc)
-        return SituationChanges(compared_to=prior_generated_at)
+        return SituationChanges(
+            basis=basis,
+            compared_to=prior_generated_at,
+            compared_to_window_start=compared_to_window_start,
+            compared_to_label=compared_to_label,
+        )
 
     notes: dict[str, str] = {}
     for c in result.changes:
@@ -170,4 +199,10 @@ def generate_changes(
         if key in _VALID_SECTIONS and note:
             notes[key] = note
 
-    return SituationChanges(compared_to=prior_generated_at, notes=notes)
+    return SituationChanges(
+        basis=basis,
+        compared_to=prior_generated_at,
+        compared_to_window_start=compared_to_window_start,
+        compared_to_label=compared_to_label,
+        notes=notes,
+    )

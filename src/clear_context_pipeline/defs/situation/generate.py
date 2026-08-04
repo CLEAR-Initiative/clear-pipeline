@@ -9,8 +9,8 @@ calendar year. This asset:
   3. Collects the contributing report ids, fetches their titles /
      source_url / published_at via `report_datapoints` lookups, sorts
      chronologically, and packs into `Sources`.
-  4. Generates the LLM-backed components — ai_summary, context_risks,
-     hazards_and_vulnerabilities, displacement, sectors — each grounded
+  4. Generates the LLM-backed components - ai_summary, context_risks,
+     hazards_and_vulnerabilities, displacement, sectors - each grounded
      in its own RAG search over `knowledgebase`. Set
      `SITUATION_SKIP_NARRATIVE` to ship a deterministic-only row when
      the provider is down or the budget is spent.
@@ -61,10 +61,10 @@ logger = logging.getLogger(__name__)
 
 # Only Sudan for the POC. When we widen, this lookup switches to
 # `clear_api.get_pipeline_countries()` and iterates the returned
-# list — no code change beyond dropping the hardcoded set.
+# list - no code change beyond dropping the hardcoded set.
 _POC_COUNTRIES = ("Sudan",)
 
-# Emergency kill-switch — set to "1" / "true" to skip every LLM
+# Emergency kill-switch - set to "1" / "true" to skip every LLM
 # narrative component and ship a deterministic-only row. Same
 # semantic as `KB_SKIP_CONTEXTUALIZATION` for the vector pipeline:
 # use when the LLM provider is down or the budget is exhausted, so
@@ -86,19 +86,19 @@ _LABEL_FUNDING_RECEIVED = "funding_received_usd"
 # headlines a country/appeal-wide figure, so this is driven by HNO /
 # HRP / appeal documents and is null for most field reports.
 #
-# This is deliberately NOT Population Affected — that is the wider
+# This is deliberately NOT Population Affected - that is the wider
 # circle (everyone the crisis touched) and it aggregates `Max` rather
 # than `latest_state`. The two are extracted and surfaced side by side;
 # do not conflate them. See docs/adr/0001-affected-extracted-not-sourced-from-events.md.
 _LABEL_POPULATION_IN_NEED = "overall_pin"
-# Population Affected — widest circle of crisis impact. `Max`-aggregated
+# Population Affected - widest circle of crisis impact. `Max`-aggregated
 # and, like PIN, sparse: only populated when a report states an explicit
 # affected figure. Distinct from `population_in_need`.
 _LABEL_POPULATION_AFFECTED = "overall_affected"
 
 
-# window_kind + window_start form the clear-api bucket key — (country,
-# window_kind, window_start, schema_version) — mirroring
+# window_kind + window_start form the clear-api bucket key - (country,
+# window_kind, window_start, schema_version) - mirroring
 # `aggregated_datapoints`. Month names build the monthly period label
 # ("July 2026") the LLM prompts and cache key key off.
 _MONTH_NAMES = (
@@ -111,7 +111,7 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
     """Jan 1 → Dec 31 of `year` in UTC, ISO-serialised.
 
     `window_start` is load-bearing: it keys the bucket. `window_end` is
-    stored for display and range work but is never matched on — this
+    stored for display and range work but is never matched on - this
     helper and clear-api's `calendarYearStart` are two independent
     implementations of the same calendar, and an end-of-day that differs
     by a millisecond (23:59:59.000 here vs 23:59:59.999 there) is exactly
@@ -127,7 +127,7 @@ def _calendar_month_window(year: int, month: int) -> tuple[str, str]:
 
     Same load-bearing rule as `_calendar_year_window`: `window_start` keys
     the bucket and is midnight-aligned so it matches clear-api's `monthOf`
-    start exactly. `window_end` is display-only (never matched on) — the
+    start exactly. `window_end` is display-only (never matched on) - the
     aggregation cascade keys on windowKind + windowStart, not the end.
     """
     start = datetime(year, month, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -138,6 +138,73 @@ def _calendar_month_window(year: int, month: int) -> tuple[str, str]:
     )
     end = next_month - timedelta(seconds=1)
     return start.isoformat(), end.isoformat()
+
+
+def _previous_window(window_kind: str, window_start: str) -> tuple[str, str] | None:
+    """Start (ISO) and period label of the bucket immediately preceding
+    `window_start` for the same kind, or None for a kind we cannot step.
+
+    This is what "what changed" should compare against. Diffing a bucket
+    against an earlier version of ITSELF answers "what did we learn since
+    the last run", which tracks pipeline cadence - regenerate twice in an
+    hour and the notes go empty even if the situation is deteriorating.
+    Diffing against the period before answers "what changed on the ground",
+    which is what the dashboard claims to show.
+    """
+    start = datetime.fromisoformat(window_start)
+    if window_kind == "yearly":
+        prev_year = start.year - 1
+        return _calendar_year_window(prev_year)[0], str(prev_year)
+    if window_kind == "monthly":
+        prev_year, prev_month = (
+            (start.year - 1, 12) if start.month == 1
+            else (start.year, start.month - 1)
+        )
+        return (
+            _calendar_month_window(prev_year, prev_month)[0],
+            f"{_MONTH_NAMES[prev_month - 1]} {prev_year}",
+        )
+    return None
+
+
+def _resolve_comparison(
+    *,
+    country_id: str,
+    window_kind: str,
+    window_start: str,
+    period_label: str,
+) -> tuple[dict[str, Any], str, str, str] | None:
+    """Pick the snapshot to diff the new payload against.
+
+    Returns (prior_row, basis, compared_to_window_start, label), or None
+    when there is nothing to compare against at all. Prefers the preceding
+    bucket of the same kind; falls back to the prior version of this same
+    bucket, which is all that exists for the first period we ever generate.
+
+    The same-bucket read is safe here only because it runs BEFORE the
+    upsert - it returns the row this generation is about to supersede.
+    """
+    prev = _previous_window(window_kind, window_start)
+    if prev is not None:
+        prev_start, prev_label = prev
+        prior = clear_api.get_situation_analysis(
+            country_location_id=country_id,
+            window_kind=window_kind,
+            window_start=prev_start,
+            schema_version=SCHEMA_VERSION,
+        )
+        if prior and prior.get("data"):
+            return prior, "previous_period", prev_start, prev_label
+
+    prior = clear_api.get_situation_analysis(
+        country_location_id=country_id,
+        window_kind=window_kind,
+        window_start=window_start,
+        schema_version=SCHEMA_VERSION,
+    )
+    if prior and prior.get("data"):
+        return prior, "previous_generation", window_start, period_label
+    return None
 
 
 def _field_value(data: dict[str, Any], label: str) -> float | None:
@@ -159,20 +226,20 @@ def _field_value(data: dict[str, Any], label: str) -> float | None:
 def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
     """Hoist the six headline numbers + freshness envelope out of the
     aggregated_datapoint's `data` blob. Missing bucket → all-null
-    Datapoints with a zero-report envelope — the dashboard renders
+    Datapoints with a zero-report envelope - the dashboard renders
     "no data yet" and moves on."""
     if not aggregated:
         return Datapoints()
     data = aggregated.get("data") or {}
 
     # KNOWN WRONG: this is the count of contributing reports, not of
-    # events — it duplicates `envelope.report_count` exactly, and more
+    # events - it duplicates `envelope.report_count` exactly, and more
     # reporting on one flood reads as more floods. Ticket #274 replaces
     # it with a count of distinct incident groups from the aggregator,
     # which is blocked on the incident key gaining its Event Type
     # dimension (#270). Not sourced from the `events` table: that is
     # event-driven data over event types that need not correspond to a
-    # report's — see docs/adr/0001-affected-extracted-not-sourced-from-events.md.
+    # report's - see docs/adr/0001-affected-extracted-not-sourced-from-events.md.
     number_of_events = int(aggregated.get("reportCount") or 0)
 
     return Datapoints(
@@ -199,7 +266,7 @@ def _build_sources(
     """Chronological (newest first) list of reports that fed this
     analysis. Falls back to the raw report_id when the metadata
     lookup misses (report_datapoints row exists but knowledgebase
-    doesn't have a title yet — mostly happens for backfilled rows)."""
+    doesn't have a title yet - mostly happens for backfilled rows)."""
     reports: list[Source] = []
     for rid in contributing_report_ids:
         meta = report_meta_by_id.get(rid, {})
@@ -209,7 +276,7 @@ def _build_sources(
             source_url=meta.get("sourceUrl") or "",
             published_at=meta.get("publishedAt") or "",
         ))
-    # Sort by published_at descending — most recent first. Rows with
+    # Sort by published_at descending - most recent first. Rows with
     # empty publishedAt sort to the bottom naturally because "" < any ISO date.
     reports.sort(key=lambda r: r.published_at, reverse=True)
     return Sources(reports=reports)
@@ -222,7 +289,7 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
     batched query can land later if the count grows.
 
     Missing rows (report_id in aggregation but no report_datapoints
-    entry) return an empty dict — the source falls back to the raw id."""
+    entry) return an empty dict - the source falls back to the raw id."""
     from clear_context_pipeline.providers.clear_api import _execute
 
     meta: dict[str, dict[str, Any]] = {}
@@ -235,7 +302,7 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
                 "} }",
                 {"id": rid},
             )
-        except Exception as exc:  # noqa: BLE001 — per-report lookup, isolate failures
+        except Exception as exc:  # noqa: BLE001 - per-report lookup, isolate failures
             logger.warning(
                 "[situation] report meta lookup failed for %s: %s", rid, exc,
             )
@@ -271,7 +338,7 @@ def generate_and_upsert_for_country_window(
     country_id = clear_api.resolve_country_location_id(country_name)
     if not country_id:
         log.warning(
-            "[situation] %s: no A0 location resolved — skipping (backfill locations first)",
+            "[situation] %s: no A0 location resolved - skipping (backfill locations first)",
             country_name,
         )
         return None
@@ -284,13 +351,13 @@ def generate_and_upsert_for_country_window(
             window_end=window_end,
             window_kind=window_kind,
             # Read the aggregation schema the knowledgebase pipeline
-            # writes, not the situation-analysis output schema —
+            # writes, not the situation-analysis output schema -
             # otherwise this reads stale buckets of the wrong version.
             schema_version=AGGREGATION_SCHEMA_VERSION,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "[situation] %s: aggregated_datapoint fetch failed (%s) — proceeding with empty datapoints",
+            "[situation] %s: aggregated_datapoint fetch failed (%s) - proceeding with empty datapoints",
             country_name, exc,
         )
 
@@ -302,7 +369,7 @@ def generate_and_upsert_for_country_window(
     skip = _skip_narrative()
     if skip:
         log.warning(
-            "[situation] %s: %s set — shipping deterministic-only row",
+            "[situation] %s: %s set - shipping deterministic-only row",
             country_name, _SKIP_NARRATIVE_ENV,
         )
         ai_summary_component = None
@@ -352,24 +419,37 @@ def generate_and_upsert_for_country_window(
         payload_kwargs["sectors"] = sectors_component
     payload = SituationAnalysisPayload(**payload_kwargs)
 
-    # "What changed" notes: diff this snapshot against the prior current one
-    # for the same yearly bucket (the tier the dashboard reads). Only when the
-    # narrative ran (needs the LLM) and a prior snapshot exists; best-effort,
-    # never blocks the upsert.
-    if not skip and window_kind == "yearly":
+    # "What changed" notes, for every bucket kind rather than yearly only -
+    # the monthly bucket is the one where a period-over-period diff actually
+    # means something. `_resolve_comparison` prefers the preceding bucket and
+    # falls back to this bucket's prior version, recording which in `basis`
+    # so the dashboard can label the strip honestly.
+    #
+    # Needs the LLM, so skipped on deterministic-only rows. Best-effort
+    # throughout: change notes never block the upsert.
+    if not skip:
         try:
-            prior = clear_api.get_situation_analysis(
-                country_location_id=country_id,
-                year=int(window_start[:4]),
-                schema_version=SCHEMA_VERSION,
+            comparison = _resolve_comparison(
+                country_id=country_id,
+                window_kind=window_kind,
+                window_start=window_start,
+                period_label=period_label,
             )
-            if prior and prior.get("data"):
+            if comparison is not None:
+                prior, basis, compared_start, compared_label = comparison
                 payload.changes = generate_changes(
                     llm,
                     prior_payload=prior["data"],
                     new_payload=payload.model_dump(mode="json"),
+                    basis=basis,
                     prior_generated_at=prior.get("generatedAt") or "",
+                    compared_to_window_start=compared_start,
+                    compared_to_label=compared_label,
                     cache_key=cache_key,
+                )
+                log.info(
+                    "[situation] %s: change notes vs %s (%s), %d section(s)",
+                    country_name, compared_label, basis, len(payload.changes.notes),
                 )
         except Exception as exc:  # noqa: BLE001 - change notes never block the upsert
             log.warning(
@@ -443,7 +523,7 @@ def generate_and_upsert_for_country_window(
 def generate_and_upsert_for_country_year(
     *, country_name: str, year: int, log_context=None,
 ) -> dict | None:
-    """Yearly (Jan 1 .. Dec 31) situation snapshot — the original behaviour,
+    """Yearly (Jan 1 .. Dec 31) situation snapshot - the original behaviour,
     now a thin wrapper over the window-based core. Kept as a named entry
     point so the manual-document job can trigger a yearly regen."""
     window_start, window_end = _calendar_year_window(year)
@@ -485,7 +565,7 @@ def weekly_situation_analyses(
     """Generate + upsert one situation-analysis snapshot per pipeline
     country for the current calendar year.
 
-    Two upstream dependencies — the analysis needs BOTH branches of
+    Two upstream dependencies - the analysis needs BOTH branches of
     this week's ingest to be fresh before it runs:
 
       - ``reliefweb_weekly_datapoint_aggregations`` (parameter dep):
@@ -499,11 +579,11 @@ def weekly_situation_analyses(
         `knowledgebase`. Without this dep declared, Dagster might
         run situation-analysis in parallel with the KB upsert and
         the LLM would ground its narrative in last-week's chunks.
-        We don't consume its output value — pure ordering constraint,
+        We don't consume its output value - pure ordering constraint,
         hence the `deps=[…]` form rather than a parameter.
 
     The upstream summary dict is used only to gate on "aggregation
-    refresh actually ran" — we re-fetch aggregations from clear-api
+    refresh actually ran" - we re-fetch aggregations from clear-api
     to pick up the freshly-inserted rows.
     """
     del reliefweb_weekly_datapoint_aggregations  # only used to enforce ordering
