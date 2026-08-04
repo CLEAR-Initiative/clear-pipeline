@@ -67,11 +67,10 @@ class _AISummaryLLM(BaseModel):
     """2–4 paragraph narrative synthesis. Prose only, no bullets."""
     text: str = Field(
         description=(
-            "Two to four paragraphs of prose synthesising the country's "
-            "humanitarian situation for the target year. Weave the "
-            "headline figures into the narrative naturally; avoid "
-            "bullet lists and section headings — this reads as a "
-            "briefing summary."
+            "Two or three tight paragraphs on the country's humanitarian "
+            "situation for the target year. Open with the headline figures, "
+            "then drivers, then outlook. Prose only, no bullet lists or "
+            "section headings. Concise: cut filler, do not restate the task."
         ),
     )
 
@@ -82,7 +81,7 @@ def _risk_domain_field() -> Any:
         default_factory=list,
         description=(
             "Concise bulleted risks / observations for this domain. "
-            "Each bullet is one sentence. Prefer 3–6 bullets. Return "
+            "Each bullet a terse fragment (max 15 words), figure or fact first. Prefer 3–6 bullets. Return "
             "an empty list only when no evidence in the retrieved "
             "sources supports any claim in this domain."
         ),
@@ -115,15 +114,15 @@ class _HazardsVulnerabilitiesLLM(BaseModel):
         default_factory=list,
         description=(
             "Bulleted list of natural / man-made hazards affecting the "
-            "country during the target period. One sentence per bullet."
+            "country during the target period. Terse fragment per bullet."
         ),
     )
     vulnerabilities: list[str] = Field(
         default_factory=list,
         description=(
             "Bulleted list of pre-crisis structural vulnerabilities "
-            "(economic, institutional, environmental, social). One "
-            "sentence per bullet."
+            "(economic, institutional, environmental, social). Terse "
+            "fragment per bullet."
         ),
     )
 
@@ -134,14 +133,14 @@ class _DisplacementLLM(BaseModel):
         description=(
             "Bulleted drivers pushing populations to displace — "
             "conflict, drought, insecurity, service collapse, etc. "
-            "One sentence per bullet."
+            "Terse fragment per bullet, driver first."
         ),
     )
     return_intention: list[str] = Field(
         default_factory=list,
         description=(
             "Bulleted signals about displaced populations' intent to "
-            "return — willingness, blockers, conditions. One sentence "
+            "return - willingness, blockers, conditions. Terse fragment "
             "per bullet."
         ),
     )
@@ -160,6 +159,10 @@ _BASE_INSTRUCTIONS = (
     "returning fewer bullets over speculating.\n"
     "\n"
     "Rules:\n"
+    "- Bullets are terse fragments, NOT full sentences. Aim for 15 words "
+    "  or fewer. Lead with the figure or the fact; drop filler openers "
+    "  ('there is', 'it is reported that', 'continues to'). One claim per "
+    "  bullet.\n"
     "- Report every number the way the source cites it (with unit and "
     "  scale). Do not extrapolate.\n"
     "- Use the country name and admin-region names as they appear in "
@@ -255,9 +258,9 @@ def generate_ai_summary(
     system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
         f"Produce the AI Summary component for {country_name}, {period_label}. "
-        "Two to four paragraphs of narrative prose. Weave the headline "
-        "figures and the retrieved evidence into a briefing that a "
-        "humanitarian program manager could read in under a minute.\n"
+        "Two or three tight paragraphs. Lead with the headline figures, "
+        "then drivers, then outlook. A program manager should read it in "
+        "under a minute. No filler, no restating the task.\n"
         "\n"
         "RETRIEVED EVIDENCE:\n"
         f"{rag.formatted_for_prompt}"
