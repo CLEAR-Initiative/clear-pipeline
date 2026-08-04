@@ -172,6 +172,10 @@ query AggregatedDatapoint(
     validTo
     schemaVersion
     onDemand
+    estimatedCurrentTotals {
+      displacement { total stock flowsSince t0 flowCount }
+      returns { total stock flowsSince t0 flowCount }
+    }
   }
 }
 """

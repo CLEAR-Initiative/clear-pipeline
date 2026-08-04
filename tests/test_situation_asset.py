@@ -19,6 +19,7 @@ import dagster as dg
 import pytest
 
 from clear_context_pipeline.defs.situation.generate import (
+    _build_datapoints,
     generate_and_upsert_for_country_month,
     generate_and_upsert_for_country_year,
     weekly_situation_analyses,
@@ -465,3 +466,52 @@ class TestWeeklySituationAnalysesAsset:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_build_datapoints_surfaces_current_totals_flows_and_divergences():
+    """ADR-0006 §4/§7: _build_datapoints hoists the estimated current totals,
+    the new_* flows, and any per-field divergence early-warnings."""
+    aggregated = {
+        "reportCount": 5,
+        "dataQualityScore": 0.8,
+        "newestSourceAt": "2026-07-10T00:00:00Z",
+        "oldestSourceAt": "2026-01-15T00:00:00Z",
+        "contributingReportIds": ["r-1"],
+        "data": {
+            "idp_stock": {
+                "value": 100000, "unit": "people",
+                "divergence": {"reportValue": 60000, "apiValue": 100000, "pctDiff": -40.0},
+            },
+            "new_displacements": {"value": 8000, "unit": "people"},
+            "new_returns": {"value": 1500, "unit": "people"},
+            "returnee_stock": {"value": 50000, "unit": "people"},
+        },
+        "estimatedCurrentTotals": {
+            "displacement": {
+                "total": 108000, "stock": 100000, "flowsSince": 8000,
+                "t0": "2026-06-30T00:00:00.000Z", "flowCount": 2,
+            },
+            "returns": None,
+        },
+    }
+    dp = _build_datapoints(aggregated)
+    assert dp.population_displaced == 100000
+    assert dp.new_displacements == 8000
+    assert dp.new_returns == 1500
+    assert dp.estimated_current_displacement is not None
+    assert dp.estimated_current_displacement.total == 108000
+    assert dp.estimated_current_displacement.flow_count == 2
+    assert dp.estimated_current_returns is None  # no anchoring returnee stock
+    assert len(dp.divergences) == 1
+    assert dp.divergences[0].field == "idp_stock"
+    assert dp.divergences[0].report_value == 60000
+    assert dp.divergences[0].api_value == 100000
+    assert dp.divergences[0].pct_diff == -40.0
+
+
+def test_build_datapoints_empty_bucket_has_no_totals_or_divergences():
+    dp = _build_datapoints(None)
+    assert dp.estimated_current_displacement is None
+    assert dp.estimated_current_returns is None
+    assert dp.divergences == []
+    assert dp.new_displacements is None
