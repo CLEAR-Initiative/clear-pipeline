@@ -28,7 +28,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import dagster as dg
 from dagster import AssetExecutionContext
@@ -49,9 +49,11 @@ from clear_context_pipeline.defs.situation.schemas import (
     SCHEMA_VERSION,
     Datapoints,
     DatapointsEnvelope,
+    DivergenceSignal,
     SituationAnalysisPayload,
     Source,
     Sources,
+    StockFlowEstimate,
 )
 from clear_context_pipeline.providers import clear_api, make_llm_provider
 
@@ -83,6 +85,9 @@ _LABEL_POPULATION_DISPLACED = "idp_stock"
 # single figure for a situation snapshot, mirroring idp_stock. The former
 # `returnees` label was split into returnee_stock + new_returns (ADR-0005 §4a).
 _LABEL_RETURNEES = "returnee_stock"
+# Period-increment FLOWS (additive) — the counterparts to the stocks above.
+_LABEL_NEW_DISPLACEMENTS = "new_displacements"
+_LABEL_NEW_RETURNS = "new_returns"
 _LABEL_FUNDING_REQUIRED = "funding_required_usd"
 _LABEL_FUNDING_RECEIVED = "funding_received_usd"
 # People in Need. Note `overall_pin` only populates when a report
@@ -226,14 +231,65 @@ def _field_value(data: dict[str, Any], label: str) -> float | None:
         return None
 
 
+def _stock_flow_estimate(raw: Any) -> Optional[StockFlowEstimate]:
+    """Map one `estimatedCurrentTotals` metric (ADR-0006 §4) into the payload
+    model. `None`/non-dict → `None` (no anchoring stock in scope)."""
+    if not isinstance(raw, dict):
+        return None
+    return StockFlowEstimate(
+        total=raw.get("total"),
+        stock=raw.get("stock"),
+        flows_since=raw.get("flowsSince"),
+        t0=raw.get("t0"),
+        flow_count=raw.get("flowCount"),
+    )
+
+
+def _collect_divergences(data: dict[str, Any]) -> list[DivergenceSignal]:
+    """Scan the aggregated `data` blob for per-field ADR-0006 §7 divergence
+    signals (a report figure that lost to the authoritative API figure by more
+    than the threshold) and surface them as early-warnings on the snapshot."""
+    out: list[DivergenceSignal] = []
+    for label, field in data.items():
+        if not isinstance(field, dict):
+            continue
+        div = field.get("divergence")
+        if not isinstance(div, dict):
+            continue
+        report_value = div.get("reportValue")
+        api_value = div.get("apiValue")
+        pct_diff = div.get("pctDiff")
+        if report_value is None or api_value is None or pct_diff is None:
+            continue
+        # Coerce defensively: `div` is an untyped JSONB blob, so a stray string
+        # or a future aggregator shape must NOT raise a ValidationError here —
+        # `_build_datapoints` runs outside the fetch try/except and the weekly
+        # asset has no per-country guard, so one bad value would fail the run for
+        # EVERY country and window. Skip the malformed signal instead (#30),
+        # matching `_field_value`'s (TypeError, ValueError)-swallowing posture.
+        try:
+            signal = DivergenceSignal(
+                field=label,
+                report_value=float(report_value),
+                api_value=float(api_value),
+                pct_diff=float(pct_diff),
+            )
+        except (TypeError, ValueError):
+            continue
+        out.append(signal)
+    return out
+
+
 def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
-    """Hoist the six headline numbers + freshness envelope out of the
-    aggregated_datapoint's `data` blob. Missing bucket → all-null
-    Datapoints with a zero-report envelope - the dashboard renders
-    "no data yet" and moves on."""
+    """Hoist the headline numbers + freshness envelope out of the
+    aggregated_datapoint's `data` blob, plus the estimated current
+    totals and divergence early-warnings (ADR-0006 §4/§7). Missing
+    bucket → all-null Datapoints with a zero-report envelope - the
+    dashboard renders "no data yet" and moves on."""
     if not aggregated:
         return Datapoints()
     data = aggregated.get("data") or {}
+    current_totals = aggregated.get("estimatedCurrentTotals") or {}
 
     # KNOWN WRONG: this is the count of contributing reports, not of
     # events - it duplicates `envelope.report_count` exactly, and more
@@ -250,9 +306,14 @@ def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
         population_in_need=_field_value(data, _LABEL_POPULATION_IN_NEED),
         population_affected=_field_value(data, _LABEL_POPULATION_AFFECTED),
         returnees=_field_value(data, _LABEL_RETURNEES),
+        new_displacements=_field_value(data, _LABEL_NEW_DISPLACEMENTS),
+        new_returns=_field_value(data, _LABEL_NEW_RETURNS),
         number_of_events=number_of_events,
         funding_required_usd=_field_value(data, _LABEL_FUNDING_REQUIRED),
         funding_received_usd=_field_value(data, _LABEL_FUNDING_RECEIVED),
+        estimated_current_displacement=_stock_flow_estimate(current_totals.get("displacement")),
+        estimated_current_returns=_stock_flow_estimate(current_totals.get("returns")),
+        divergences=_collect_divergences(data),
         envelope=DatapointsEnvelope(
             quality_score=aggregated.get("dataQualityScore"),
             newest_source_at=aggregated.get("newestSourceAt"),

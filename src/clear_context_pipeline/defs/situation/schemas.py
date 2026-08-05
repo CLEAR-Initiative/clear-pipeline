@@ -57,6 +57,28 @@ class DatapointsEnvelope(BaseModel):
     report_count: Optional[int] = None
 
 
+class StockFlowEstimate(BaseModel):
+    """Estimated current total for a stock/flow metric (ADR-0006 §4): the latest
+    authoritative stock plus the flows reported after its reference date T₀.
+    Flows at/before T₀ are already embedded in `stock` and are not re-added."""
+    total: Optional[float] = None
+    stock: Optional[float] = None
+    flows_since: Optional[float] = None
+    t0: Optional[str] = None
+    flow_count: Optional[int] = None
+
+
+class DivergenceSignal(BaseModel):
+    """An ADR-0006 §7 early-warning: a report figure diverged more than the
+    threshold from the authoritative API figure (which then won). Surfaced so
+    the dashboard can flag the disagreement — a possible emerging event or
+    extraction error — instead of hiding it behind the reconciled value."""
+    field: str
+    report_value: float
+    api_value: float
+    pct_diff: float
+
+
 class Datapoints(BaseModel):
     """Deterministic headline numbers hoisted from the yearly × A0
     aggregated_datapoint bucket. Each field is nullable - a country-
@@ -76,9 +98,28 @@ class Datapoints(BaseModel):
     # `returnee_stock` aggregate (ADR-0005 §4a split `returnees` into stock +
     # flow); the field name is kept for downstream/narrative stability.
     returnees: Optional[float] = None
+    # Period-increment FLOWS (additive) that accrue on top of the stocks.
+    # `new_returns` was previously unused; surfaced alongside `new_displacements`
+    # for the stock+flow current-total narrative (ADR-0006 §4).
+    new_displacements: Optional[float] = None
+    new_returns: Optional[float] = None
     number_of_events: int = 0
     funding_required_usd: Optional[float] = None
     funding_received_usd: Optional[float] = None
+    # Estimated current totals (ADR-0006 §4): latest authoritative stock + the
+    # flows since its T₀. Read from the aggregated_datapoint's
+    # `estimatedCurrentTotals` field.
+    #
+    # NOT period-scoped, unlike every other field on this model: clear-api
+    # computes it AS OF NOW over a lookback from now, ignoring the bucket window.
+    # It is therefore only populated on a snapshot whose window still includes
+    # now — a regeneration of a PAST year/month returns null — and the dashboard
+    # must label it "as of <generated_at>", never as the period's number. It is
+    # also null when no anchoring stock exists in scope.
+    estimated_current_displacement: Optional[StockFlowEstimate] = None
+    estimated_current_returns: Optional[StockFlowEstimate] = None
+    # ADR-0006 §7 divergence early-warnings collected across the datapoints block.
+    divergences: list[DivergenceSignal] = Field(default_factory=list)
     envelope: DatapointsEnvelope = Field(default_factory=DatapointsEnvelope)
 
 
