@@ -261,14 +261,22 @@ def _collect_divergences(data: dict[str, Any]) -> list[DivergenceSignal]:
         pct_diff = div.get("pctDiff")
         if report_value is None or api_value is None or pct_diff is None:
             continue
-        out.append(
-            DivergenceSignal(
+        # Coerce defensively: `div` is an untyped JSONB blob, so a stray string
+        # or a future aggregator shape must NOT raise a ValidationError here —
+        # `_build_datapoints` runs outside the fetch try/except and the weekly
+        # asset has no per-country guard, so one bad value would fail the run for
+        # EVERY country and window. Skip the malformed signal instead (#30),
+        # matching `_field_value`'s (TypeError, ValueError)-swallowing posture.
+        try:
+            signal = DivergenceSignal(
                 field=label,
-                report_value=report_value,
-                api_value=api_value,
-                pct_diff=pct_diff,
+                report_value=float(report_value),
+                api_value=float(api_value),
+                pct_diff=float(pct_diff),
             )
-        )
+        except (TypeError, ValueError):
+            continue
+        out.append(signal)
     return out
 
 

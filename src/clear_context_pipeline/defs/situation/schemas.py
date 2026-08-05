@@ -108,7 +108,14 @@ class Datapoints(BaseModel):
     funding_received_usd: Optional[float] = None
     # Estimated current totals (ADR-0006 §4): latest authoritative stock + the
     # flows since its T₀. Read from the aggregated_datapoint's
-    # `estimatedCurrentTotals` field; null when no anchoring stock exists.
+    # `estimatedCurrentTotals` field.
+    #
+    # NOT period-scoped, unlike every other field on this model: clear-api
+    # computes it AS OF NOW over a lookback from now, ignoring the bucket window.
+    # It is therefore only populated on a snapshot whose window still includes
+    # now — a regeneration of a PAST year/month returns null — and the dashboard
+    # must label it "as of <generated_at>", never as the period's number. It is
+    # also null when no anchoring stock exists in scope.
     estimated_current_displacement: Optional[StockFlowEstimate] = None
     estimated_current_returns: Optional[StockFlowEstimate] = None
     # ADR-0006 §7 divergence early-warnings collected across the datapoints block.

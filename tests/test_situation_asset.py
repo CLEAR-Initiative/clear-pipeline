@@ -515,3 +515,25 @@ def test_build_datapoints_empty_bucket_has_no_totals_or_divergences():
     assert dp.estimated_current_returns is None
     assert dp.divergences == []
     assert dp.new_displacements is None
+
+
+def test_build_datapoints_skips_malformed_divergence_without_raising():
+    # #30: an uncoercible divergence value must be skipped, not raise a
+    # ValidationError that would fail the whole weekly asset for every country.
+    aggregated = {
+        "reportCount": 1,
+        "contributingReportIds": ["r-1"],
+        "data": {
+            "idp_stock": {
+                "value": 100000,
+                "divergence": {"reportValue": "not-a-number", "apiValue": 100000, "pctDiff": -40.0},
+            },
+            "returnee_stock": {
+                "value": 50000,
+                "divergence": {"reportValue": 30000, "apiValue": 50000, "pctDiff": -40.0},
+            },
+        },
+    }
+    dp = _build_datapoints(aggregated)  # must not raise
+    assert len(dp.divergences) == 1  # the good signal survives, the bad one is dropped
+    assert dp.divergences[0].field == "returnee_stock"
