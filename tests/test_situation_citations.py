@@ -9,6 +9,8 @@ from clear_context_pipeline.defs.situation.citations import (
     resolve_bullets,
     resolve_prose,
 )
+from clear_context_pipeline.defs.situation.narrative import _sourced_bullets
+from clear_context_pipeline.defs.situation.rag_helper import RAGContext
 
 HITS = ["rep-A", "rep-B", "rep-C"]  # [R1]=A, [R2]=B, [R3]=C
 
@@ -90,3 +92,44 @@ def test_no_hits_resolves_to_empty_attribution():
     assert clean == ["Claim"]
     assert per == [[]]
     assert contrib == {}
+
+
+def test_marker_only_bullet_is_dropped_no_orphan_source():
+    # review #3: a bullet that is only a marker yields no clean bullet AND no
+    # source bucket — a report must never appear pointing at nothing.
+    clean, per, contrib = resolve_bullets(["[R1]", "Real claim [R2]"], HITS)
+    assert clean == ["Real claim"]
+    assert per == [["rep-B"]]
+    assert contrib == {"rep-B": ["Real claim"]}
+
+
+def test_sourced_bullets_per_bullet_resolved_only():
+    # review #1: an un-marked bullet cites NOTHING per-bullet — not the coarse
+    # RAG union. The union stays at the component level only.
+    rag = RAGContext(
+        formatted_for_prompt="",
+        contributing_report_ids=["rep-A", "rep-B"],
+        hit_report_ids=["rep-A", "rep-B"],
+        hit_count=2,
+    )
+    bullets, contributing = _sourced_bullets(["Marked [R1]", "Unmarked"], rag)
+    assert [b.description for b in bullets] == ["Marked", "Unmarked"]
+    assert bullets[0].source_report_ids == ["rep-A"]
+    assert bullets[1].source_report_ids == []  # not ["rep-A", "rep-B"]
+    assert contributing == {"rep-A": ["Marked"]}
+
+
+def test_prose_marker_at_end_is_the_contract():
+    # The prompt requires markers at the END; this is the path resolve_prose
+    # is built for. Pin it so a prompt/split change can't silently break it.
+    _clean, contrib = resolve_prose("Claim one [R1]. Claim two [R2].", HITS)
+    assert contrib == {"rep-A": ["Claim one."], "rep-B": ["Claim two."]}
+
+
+def test_prose_marker_at_start_is_a_known_limitation():
+    # review #2, PINNED: if a model violates the rule and LEADS with the marker,
+    # reattachment mis-assigns it to the previous sentence ("Claim two." loses
+    # its citation; rep-B lands on "Claim one."). Asserted so a change to the
+    # split/reattach logic surfaces here instead of silently inverting.
+    _clean, contrib = resolve_prose("[R1] Claim one. [R2] Claim two.", HITS)
+    assert contrib == {"rep-A": ["Claim one."], "rep-B": ["Claim one."]}

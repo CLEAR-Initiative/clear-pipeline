@@ -9,9 +9,11 @@ Four components:
 Component 6 (per-sector analysis) lives in `sectors.py` — it needs its
 own prompt discipline per sector.
 
-Each generator runs one RAG search and stamps that search's
-`contributing_report_ids` onto every bullet or sub-domain it produces,
-so a component's bullets always share one source set.
+Each generator runs one RAG search and asks the LLM to cite the
+retrieved evidence with inline `[Rn]` markers; `situation/citations.py`
+resolves those into a per-line `report_id -> [lines]` map
+(`contributing_sources`), with the search's `contributing_report_ids`
+union exposed as the component-level `source_report_ids` fallback.
 
 Prompt-cache strategy: every generator's system prompt is identical
 across a single country-year generation cycle. The shared prefix
@@ -56,15 +58,15 @@ logger = logging.getLogger(__name__)
 # LLM output schemas — decoupled from the DB-written schemas.
 #
 # The DB shapes (AISummary, RiskDomain, SourcedBullet …) carry
-# `source_report_ids` because the dashboard needs them. But asking
-# the LLM to emit report ids invites hallucination — it can't reason
-# about which specific report supported which specific bullet
-# reliably. Coarse-grained citation is what we ship today:
-#   LLM emits bullets → we stamp all bullets with the union of
-#   report ids that fed the RAG context.
-# The Phase E refinement (per-bullet [R1]-style markers post-
-# processed to specific ids) can layer on later without a schema
-# change on the DB side.
+# `source_report_ids` + `contributing_sources`. We do NOT ask the LLM
+# to emit report ids directly (it can't reason about which id supported
+# which bullet), and a nested {text, sources} output made the cheap
+# models return a JSON-encoded string and blank the whole component.
+# Instead the LLM appends inline [Rn] markers referring to the numbered
+# RETRIEVED EVIDENCE, and citations.py resolves those deterministically
+# to report ids (per-line map + component union). So the output schemas
+# below stay FLAT (list[str] / prose) — the markers ride inside the
+# strings and are stripped after resolution.
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -175,11 +177,12 @@ _BASE_INSTRUCTIONS = (
     "- Prefer verified / reported sources over media when both cover "
     "  the same claim. If they conflict, prefer the more recent report.\n"
     "- Neutral, factual tone. No editorialising. No calls to action.\n"
-    "- Cite evidence inline: end each bullet or sentence with the bracketed "
-    "  evidence numbers you drew from, e.g. [R2] or [R1][R4], matching the "
-    "  [Rn] items in RETRIEVED EVIDENCE. Cite only evidence you actually used; "
-    "  a line that uses none gets no marker. Put markers at the END of the "
-    "  line, after the full stop.\n"
+    "- Cite evidence inline. A bullet's or sentence's marker(s) MUST come at "
+    "  its very END — after the full stop — NEVER at the start. Placing a "
+    "  marker before the text it cites will mis-attribute it to the previous "
+    "  line. Use the bracketed evidence numbers you drew from, e.g. [R2] or "
+    "  [R1][R4], matching the [Rn] items in RETRIEVED EVIDENCE. Cite only "
+    "  evidence you actually used; a line that uses none gets no marker.\n"
 )
 
 
@@ -244,12 +247,16 @@ def _sourced_bullets(
     raw_bullets: list[str], rag: RAGContext,
 ) -> tuple[list[SourcedBullet], dict[str, list[str]]]:
     """Resolve inline [Rn] markers on a bullet list into SourcedBullets — each
-    carrying its own resolved report ids (falling back to the coarse RAG union
-    when a bullet cites nothing, so per-bullet attribution never regresses to
-    empty) — plus the report_id -> [bullets] map for `contributing_sources`."""
+    carrying ONLY its own resolved report ids (empty when that bullet cited
+    nothing) — plus the report_id -> [bullets] map for `contributing_sources`.
+
+    Per-bullet ids are the honest signal. A coarse-RAG-union fallback HERE would
+    stamp an un-marked terse bullet with every report that fed the search, which
+    the dashboard renders literally. The union is still exposed once, at the
+    component level (`source_report_ids`), which is where the fallback belongs."""
     clean, per_ids, contributing = resolve_bullets(raw_bullets, rag.hit_report_ids)
     bullets = [
-        SourcedBullet(description=c, source_report_ids=ids or rag.contributing_report_ids)
+        SourcedBullet(description=c, source_report_ids=ids)
         for c, ids in zip(clean, per_ids)
     ]
     return bullets, contributing

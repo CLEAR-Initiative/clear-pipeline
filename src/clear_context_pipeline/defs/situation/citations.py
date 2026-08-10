@@ -62,18 +62,25 @@ def resolve_bullets(
 
     Returns ``(clean_bullets, per_bullet_report_ids, contributing_sources)`` —
     the marker-free bullets, each bullet's resolved report ids, and the inverted
-    ``report_id -> [clean bullets]`` map (order-preserving, de-duplicated)."""
+    ``report_id -> [clean bullets]`` map (order-preserving, de-duplicated).
+
+    A bullet that is empty once its markers are stripped (a marker-only input
+    like ``"[R1]"``) is dropped entirely — it yields no clean bullet, no per-
+    bullet entry, and no source bucket, so a report never appears in the map
+    pointing at nothing."""
     clean_bullets: list[str] = []
     per_bullet_ids: list[list[str]] = []
     contributing: dict[str, list[str]] = {}
     for raw in bullets:
         clean = _clean(raw)
+        if not clean:
+            continue
         ids = _resolve_refs(raw, hit_report_ids)
         clean_bullets.append(clean)
         per_bullet_ids.append(ids)
         for rid in ids:
             bucket = contributing.setdefault(rid, [])
-            if clean and clean not in bucket:
+            if clean not in bucket:
                 bucket.append(clean)
     return clean_bullets, per_bullet_ids, contributing
 

@@ -174,10 +174,11 @@ _BASE_INSTRUCTIONS = (
     "- Use the local admin names as they appear in the sources.\n"
     "- Neutral factual tone. No editorialising, no calls to action.\n"
     "- Bullets are terse fragments (max 15 words), not sentences. Lead with the figure or fact; drop filler.\n"
-    "- Cite evidence inline: end each bullet with the bracketed evidence "
-    "  numbers you drew from, e.g. [R2] or [R1][R4], matching the [Rn] items "
-    "  in RETRIEVED EVIDENCE. Cite only evidence you actually used; a bullet "
-    "  that uses none gets no marker. Put markers at the END of the bullet.\n"
+    "- Cite evidence inline. A bullet's marker(s) MUST come at its very END, "
+    "  NEVER at the start. Use the bracketed evidence numbers you drew from, "
+    "  e.g. [R2] or [R1][R4], matching the [Rn] items in RETRIEVED EVIDENCE. "
+    "  Cite only evidence you actually used; a bullet that uses none gets no "
+    "  marker.\n"
 )
 
 
