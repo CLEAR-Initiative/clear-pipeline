@@ -19,7 +19,10 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "v1"
+# v2: sourced narrative components carry `contributing_sources`
+# (report_id -> [generated lines that report contributed to]) for in-line
+# citation in the dashboard, alongside the coarse `source_report_ids`.
+SCHEMA_VERSION = "v2"
 
 Severity = Literal["low", "medium", "high", "critical"]
 
@@ -134,6 +137,10 @@ class AISummary(BaseModel):
     state rather than a missing key."""
     text: str = ""
     source_report_ids: list[str] = Field(default_factory=list)
+    # report_id -> the generated sentences that report contributed to, resolved
+    # from the LLM's inline [Rn] citations (v2). Empty when the model emitted no
+    # usable markers — the dashboard falls back to source_report_ids then.
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -144,6 +151,8 @@ class AISummary(BaseModel):
 class RiskDomain(BaseModel):
     bullets: list[str] = Field(default_factory=list)
     source_report_ids: list[str] = Field(default_factory=list)
+    # report_id -> the bullets that report contributed to (v2). See AISummary.
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ContextRisks(BaseModel):
@@ -167,6 +176,9 @@ class ContextRisks(BaseModel):
 class HazardsAndVulnerabilities(BaseModel):
     hazards: list[SourcedBullet] = Field(default_factory=list)
     vulnerabilities: list[SourcedBullet] = Field(default_factory=list)
+    # report_id -> the bullets (hazards + vulnerabilities) that report
+    # contributed to (v2). Per-bullet ids also live on each SourcedBullet.
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -177,6 +189,9 @@ class HazardsAndVulnerabilities(BaseModel):
 class DisplacementNarrative(BaseModel):
     push_factors: list[SourcedBullet] = Field(default_factory=list)
     return_intention: list[SourcedBullet] = Field(default_factory=list)
+    # report_id -> the bullets (push_factors + return_intention) that report
+    # contributed to (v2). Per-bullet ids also live on each SourcedBullet.
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -206,6 +221,9 @@ class SectorAnalysis(BaseModel):
     priority_interventions: list[str] = Field(default_factory=list)
     information_coverage: list[InformationCoverageArea] = Field(default_factory=list)
     source_report_ids: list[str] = Field(default_factory=list)
+    # report_id -> the lines (across impact / conditions / needs / interventions)
+    # that report contributed to (v2). See AISummary.
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
     # Provenance of the analysis. 'sector' = built from sector-tagged
     # evidence; 'fallback' = the sector-scoped search was empty and an
     # unfiltered search supplied off-sector evidence, so the grade is an

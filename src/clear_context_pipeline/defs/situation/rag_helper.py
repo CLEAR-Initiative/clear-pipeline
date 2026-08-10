@@ -10,11 +10,12 @@ Grouping this in one place keeps prompts and citation logic
 consistent — every narrative section carries the same source-id
 provenance shape.
 
-POC citation model: coarse-grained. Every bullet in a component
-attributes to the union of contributing report ids for that
-component's RAG hits. Per-bullet citation refinement (LLM emits
-`[R1]` markers → post-processed to report ids) is a Phase E follow-up
-if the dashboard actually wants that granularity.
+Citation model: per-line. Each hit is numbered `[Rn]`; the generators
+ask the LLM to cite those numbers inline, and `situation/citations.py`
+resolves each `[Rn]` back to its report via `hit_report_ids` below,
+producing the `report_id -> [generated lines]` map the dashboard cites
+from. The deduped `contributing_report_ids` union is still exposed as
+each component's coarse `source_report_ids` fallback.
 """
 
 from dataclasses import dataclass, field
@@ -31,9 +32,16 @@ class RAGContext:
     list of chunks with per-hit metadata. `contributing_report_ids`
     is the deduped union of source reports across every hit, used to
     populate the component's `source_report_ids` field.
+
+    `hit_report_ids` is the report id of EACH hit, index-aligned to the
+    `[Rn]` marker (hit_report_ids[0] is `[R1]`). It carries duplicates
+    and preserves order — unlike `contributing_report_ids`, it lets the
+    citation resolver map a `[Rn]` marker back to its report. An empty
+    string marks a hit with no report id (unresolvable).
     """
     formatted_for_prompt: str
     contributing_report_ids: list[str] = field(default_factory=list)
+    hit_report_ids: list[str] = field(default_factory=list)
     hit_count: int = 0
 
     @property
@@ -72,17 +80,24 @@ def fetch_rag_context(
             seen.add(rid)
             ordered_report_ids.append(rid)
 
+    # Per-hit report id, index-aligned to the [Rn] marker (empty string for a
+    # hit with no report id, so the [Rn] numbering still lines up with the hits).
+    hit_report_ids = [hit.get("reportId") or "" for hit in hits]
+
     return RAGContext(
         formatted_for_prompt=_format_hits_for_prompt(hits),
         contributing_report_ids=ordered_report_ids,
+        hit_report_ids=hit_report_ids,
         hit_count=len(hits),
     )
 
 
 def _format_hits_for_prompt(hits: list[dict[str, Any]]) -> str:
-    """Render hits as a numbered evidence list. The `[Rn]` prefix
-    lets a future citation-enabled prompt refer to specific hits
-    (Phase E); for now, we just want a clean readable block.
+    """Render hits as a numbered evidence list. The `[Rn]` prefix is
+    load-bearing: the generators ask the LLM to cite these numbers
+    inline, and `citations.py` resolves each `[Rn]` back to its report
+    via `RAGContext.hit_report_ids`. The numbering here MUST stay
+    aligned with the hit order (hit i → `[R{i+1}]`).
 
     Each hit includes the report title, publication date, page range,
     and the chunk text itself — enough context for the LLM to reason

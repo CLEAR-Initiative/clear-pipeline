@@ -29,11 +29,21 @@ from clear_context_pipeline.defs.situation.narrative import (
 from clear_context_pipeline.defs.situation.rag_helper import RAGContext
 
 
-def _fake_rag_context(*, hits: int, report_ids: list[str] | None = None) -> RAGContext:
+def _fake_rag_context(
+    *,
+    hits: int,
+    report_ids: list[str] | None = None,
+    hit_report_ids: list[str] | None = None,
+) -> RAGContext:
     ids = report_ids if report_ids is not None else [f"r-{i}" for i in range(hits)]
+    # Per-hit ids ([Rn]-aligned). Default: one hit per unique id, cycling if the
+    # deduped `ids` is shorter than `hits`, so [Rn] markers resolve in tests.
+    if hit_report_ids is None:
+        hit_report_ids = [ids[i % len(ids)] if ids else "" for i in range(hits)]
     return RAGContext(
-        formatted_for_prompt=f"[R1] ...\n" * hits,
+        formatted_for_prompt="[R1] ...\n" * hits,
         contributing_report_ids=ids,
+        hit_report_ids=hit_report_ids,
         hit_count=hits,
     )
 
@@ -197,28 +207,34 @@ class TestGenerateHazardsAndVulnerabilities:
         assert result.vulnerabilities == []
         llm.complete_structured.assert_not_called()
 
-    def test_wraps_bullets_with_source_ids(self):
-        # LLM emits plain strings; the generator wraps each with the
-        # shared source list.
+    def test_resolves_per_bullet_from_inline_markers(self):
+        # LLM emits bullets with inline [Rn] markers; the generator strips them
+        # and attributes each bullet to ONLY the reports it cited (not the
+        # coarse union), and builds the container's report_id -> [lines] map.
         with patch(
             "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=2, report_ids=["r-x", "r-y"]),
         ):
             llm = MagicMock()
             llm.complete_structured.return_value = _HazardsVulnerabilitiesLLM(
-                hazards=["Drought", "Armed clashes"],
-                vulnerabilities=["Weak health system", "High poverty rate"],
+                hazards=["Drought [R1]", "Armed clashes [R2]"],
+                vulnerabilities=["Weak health system [R1]", "High poverty rate [R2]"],
             )
             result = generate_hazards_and_vulnerabilities(
                 llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
         assert [h.description for h in result.hazards] == ["Drought", "Armed clashes"]
-        # Every SourcedBullet carries the coarse-grained source list.
-        for h in result.hazards:
-            assert h.source_report_ids == ["r-x", "r-y"]
-        for v in result.vulnerabilities:
-            assert v.source_report_ids == ["r-x", "r-y"]
+        # Per-bullet: resolved-only, NOT the coarse union.
+        assert result.hazards[0].source_report_ids == ["r-x"]
+        assert result.hazards[1].source_report_ids == ["r-y"]
+        assert result.vulnerabilities[0].source_report_ids == ["r-x"]
+        assert result.vulnerabilities[1].source_report_ids == ["r-y"]
+        # Container map inverts across both lists.
+        assert result.contributing_sources == {
+            "r-x": ["Drought", "Weak health system"],
+            "r-y": ["Armed clashes", "High poverty rate"],
+        }
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -243,16 +259,16 @@ class TestGenerateDisplacementNarrative:
 
     def test_populates_push_factors_and_return_intention(self):
         # Regression guard for the `return_intention]` typo we hit in
-        # Phase C — the list comprehension must close cleanly with `]`
-        # and every SourcedBullet must carry the shared sources.
+        # Phase C — the list comprehension must close cleanly with `]`.
+        # Bullets carry inline [R1] markers → resolved per-bullet.
         with patch(
             "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=3, report_ids=["r-1"]),
         ):
             llm = MagicMock()
             llm.complete_structured.return_value = _DisplacementLLM(
-                push_factors=["Active conflict in Darfur"],
-                return_intention=["Wait until security stabilises"],
+                push_factors=["Active conflict in Darfur [R1]"],
+                return_intention=["Wait until security stabilises [R1]"],
             )
             result = generate_displacement_narrative(
                 llm, country_name="Sudan", period_label="2026",

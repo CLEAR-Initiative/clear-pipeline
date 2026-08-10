@@ -9,9 +9,11 @@ Four components:
 Component 6 (per-sector analysis) lives in `sectors.py` — it needs its
 own prompt discipline per sector.
 
-Each generator runs one RAG search and stamps that search's
-`contributing_report_ids` onto every bullet or sub-domain it produces,
-so a component's bullets always share one source set.
+Each generator runs one RAG search and asks the LLM to cite the
+retrieved evidence with inline `[Rn]` markers; `situation/citations.py`
+resolves those into a per-line `report_id -> [lines]` map
+(`contributing_sources`), with the search's `contributing_report_ids`
+union exposed as the component-level `source_report_ids` fallback.
 
 Prompt-cache strategy: every generator's system prompt is identical
 across a single country-year generation cycle. The shared prefix
@@ -30,6 +32,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from clear_context_pipeline.defs.situation.citations import (
+    merge_contributing,
+    resolve_bullets,
+    resolve_prose,
+)
 from clear_context_pipeline.defs.situation.rag_helper import (
     RAGContext,
     fetch_rag_context,
@@ -51,15 +58,15 @@ logger = logging.getLogger(__name__)
 # LLM output schemas — decoupled from the DB-written schemas.
 #
 # The DB shapes (AISummary, RiskDomain, SourcedBullet …) carry
-# `source_report_ids` because the dashboard needs them. But asking
-# the LLM to emit report ids invites hallucination — it can't reason
-# about which specific report supported which specific bullet
-# reliably. Coarse-grained citation is what we ship today:
-#   LLM emits bullets → we stamp all bullets with the union of
-#   report ids that fed the RAG context.
-# The Phase E refinement (per-bullet [R1]-style markers post-
-# processed to specific ids) can layer on later without a schema
-# change on the DB side.
+# `source_report_ids` + `contributing_sources`. We do NOT ask the LLM
+# to emit report ids directly (it can't reason about which id supported
+# which bullet), and a nested {text, sources} output made the cheap
+# models return a JSON-encoded string and blank the whole component.
+# Instead the LLM appends inline [Rn] markers referring to the numbered
+# RETRIEVED EVIDENCE, and citations.py resolves those deterministically
+# to report ids (per-line map + component union). So the output schemas
+# below stay FLAT (list[str] / prose) — the markers ride inside the
+# strings and are stripped after resolution.
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -170,6 +177,12 @@ _BASE_INSTRUCTIONS = (
     "- Prefer verified / reported sources over media when both cover "
     "  the same claim. If they conflict, prefer the more recent report.\n"
     "- Neutral, factual tone. No editorialising. No calls to action.\n"
+    "- Cite evidence inline. A bullet's or sentence's marker(s) MUST come at "
+    "  its very END — after the full stop — NEVER at the start. Placing a "
+    "  marker before the text it cites will mis-attribute it to the previous "
+    "  line. Use the bracketed evidence numbers you drew from, e.g. [R2] or "
+    "  [R1][R4], matching the [Rn] items in RETRIEVED EVIDENCE. Cite only "
+    "  evidence you actually used; a line that uses none gets no marker.\n"
 )
 
 
@@ -230,6 +243,25 @@ def _run_component(
     )
 
 
+def _sourced_bullets(
+    raw_bullets: list[str], rag: RAGContext,
+) -> tuple[list[SourcedBullet], dict[str, list[str]]]:
+    """Resolve inline [Rn] markers on a bullet list into SourcedBullets — each
+    carrying ONLY its own resolved report ids (empty when that bullet cited
+    nothing) — plus the report_id -> [bullets] map for `contributing_sources`.
+
+    Per-bullet ids are the honest signal. A coarse-RAG-union fallback HERE would
+    stamp an un-marked terse bullet with every report that fed the search, which
+    the dashboard renders literally. The union is still exposed once, at the
+    component level (`source_report_ids`), which is where the fallback belongs."""
+    clean, per_ids, contributing = resolve_bullets(raw_bullets, rag.hit_report_ids)
+    bullets = [
+        SourcedBullet(description=c, source_report_ids=ids)
+        for c, ids in zip(clean, per_ids)
+    ]
+    return bullets, contributing
+
+
 # ────────────────────────────────────────────────────────────────────
 # Component 2 — AI Summary
 # ────────────────────────────────────────────────────────────────────
@@ -273,9 +305,11 @@ def generate_ai_summary(
     except Exception as exc:  # noqa: BLE001 — component-level isolation
         logger.warning("[situation:ai_summary] LLM call failed: %s", exc)
         return AISummary()
+    clean_text, contributing = resolve_prose(result.text, rag.hit_report_ids)
     return AISummary(
-        text=result.text.strip(),
-        source_report_ids=rag.contributing_report_ids,
+        text=clean_text,
+        source_report_ids=list(contributing) or rag.contributing_report_ids,
+        contributing_sources=contributing,
     )
 
 
@@ -326,20 +360,27 @@ def generate_context_risks(
         logger.warning("[situation:context_risks] LLM call failed: %s", exc)
         return ContextRisks()
 
-    # Wrap each domain with the coarse-grained source list. Every
-    # domain sharing the same RAG set means the dashboard's
-    # per-domain "sources" panel looks identical — that's fine for
-    # POC; per-domain search + attribution can layer on later.
-    src_ids = rag.contributing_report_ids
+    # Resolve each domain's inline [Rn] citations independently — the eight
+    # domains share one RAG search, but each attributes only the bullets it
+    # actually emitted. A domain with no usable markers falls back to the coarse
+    # RAG union so its `source_report_ids` never regresses to empty.
+    def _domain(raw_bullets: list[str]) -> RiskDomain:
+        clean, _ids, contributing = resolve_bullets(raw_bullets, rag.hit_report_ids)
+        return RiskDomain(
+            bullets=clean,
+            source_report_ids=list(contributing) or rag.contributing_report_ids,
+            contributing_sources=contributing,
+        )
+
     return ContextRisks(
-        demographics=RiskDomain(bullets=result.demographics, source_report_ids=src_ids),
-        political=RiskDomain(bullets=result.political, source_report_ids=src_ids),
-        economy=RiskDomain(bullets=result.economy, source_report_ids=src_ids),
-        socio_culture=RiskDomain(bullets=result.socio_culture, source_report_ids=src_ids),
-        security=RiskDomain(bullets=result.security, source_report_ids=src_ids),
-        legal_policy=RiskDomain(bullets=result.legal_policy, source_report_ids=src_ids),
-        infrastructure=RiskDomain(bullets=result.infrastructure, source_report_ids=src_ids),
-        environment=RiskDomain(bullets=result.environment, source_report_ids=src_ids),
+        demographics=_domain(result.demographics),
+        political=_domain(result.political),
+        economy=_domain(result.economy),
+        socio_culture=_domain(result.socio_culture),
+        security=_domain(result.security),
+        legal_policy=_domain(result.legal_policy),
+        infrastructure=_domain(result.infrastructure),
+        environment=_domain(result.environment),
     )
 
 
@@ -385,9 +426,12 @@ def generate_hazards_and_vulnerabilities(
         logger.warning("[situation:hazards_and_vulnerabilities] LLM call failed: %s", exc)
         return HazardsAndVulnerabilities()
 
+    hazards, haz_contrib = _sourced_bullets(result.hazards, rag)
+    vulns, vuln_contrib = _sourced_bullets(result.vulnerabilities, rag)
     return HazardsAndVulnerabilities(
-        hazards=[SourcedBullet(description=b, source_report_ids=rag.contributing_report_ids) for b in result.hazards],
-        vulnerabilities=[SourcedBullet(description=b, source_report_ids=rag.contributing_report_ids) for b in result.vulnerabilities],
+        hazards=hazards,
+        vulnerabilities=vulns,
+        contributing_sources=merge_contributing(haz_contrib, vuln_contrib),
     )
 
 
@@ -433,7 +477,10 @@ def generate_displacement_narrative(
         logger.warning("[situation:displacement] LLM call failed: %s", exc)
         return DisplacementNarrative()
 
+    push, push_contrib = _sourced_bullets(result.push_factors, rag)
+    ret, ret_contrib = _sourced_bullets(result.return_intention, rag)
     return DisplacementNarrative(
-        push_factors=[SourcedBullet(description=b, source_report_ids=rag.contributing_report_ids) for b in result.push_factors],
-        return_intention=[SourcedBullet(description=b, source_report_ids=rag.contributing_report_ids) for b in result.return_intention],
+        push_factors=push,
+        return_intention=ret,
+        contributing_sources=merge_contributing(push_contrib, ret_contrib),
     )
