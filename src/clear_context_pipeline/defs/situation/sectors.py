@@ -22,6 +22,10 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from clear_context_pipeline.defs.situation.citations import (
+    merge_contributing,
+    resolve_bullets,
+)
 from clear_context_pipeline.defs.situation.rag_helper import fetch_rag_context
 from clear_context_pipeline.defs.situation.schemas import (
     InformationCoverageArea,
@@ -170,6 +174,10 @@ _BASE_INSTRUCTIONS = (
     "- Use the local admin names as they appear in the sources.\n"
     "- Neutral factual tone. No editorialising, no calls to action.\n"
     "- Bullets are terse fragments (max 15 words), not sentences. Lead with the figure or fact; drop filler.\n"
+    "- Cite evidence inline: end each bullet with the bracketed evidence "
+    "  numbers you drew from, e.g. [R2] or [R1][R4], matching the [Rn] items "
+    "  in RETRIEVED EVIDENCE. Cite only evidence you actually used; a bullet "
+    "  that uses none gets no marker. Put markers at the END of the bullet.\n"
 )
 
 
@@ -289,15 +297,26 @@ def _generate_one_sector(
         for area in result.information_coverage
     ]
 
+    # Resolve inline [Rn] citations on every bulleted field; merge into one
+    # report_id -> [lines] map for the sector. Each field's markers are stripped
+    # from the rendered bullets.
+    impact, _, c_impact = resolve_bullets(result.impact, rag.hit_report_ids)
+    conditions, _, c_cond = resolve_bullets(result.humanitarian_conditions, rag.hit_report_ids)
+    vulnerable, _, c_vuln = resolve_bullets(result.vulnerable_sections, rag.hit_report_ids)
+    needs, _, c_needs = resolve_bullets(result.top_needs, rag.hit_report_ids)
+    interventions, _, c_interv = resolve_bullets(result.priority_interventions, rag.hit_report_ids)
+    contributing = merge_contributing(c_impact, c_cond, c_vuln, c_needs, c_interv)
+
     return SectorAnalysis(
         severity=result.severity,
-        impact=result.impact,
-        humanitarian_conditions=result.humanitarian_conditions,
-        vulnerable_sections=result.vulnerable_sections,
-        top_needs=result.top_needs,
-        priority_interventions=result.priority_interventions,
+        impact=impact,
+        humanitarian_conditions=conditions,
+        vulnerable_sections=vulnerable,
+        top_needs=needs,
+        priority_interventions=interventions,
         information_coverage=info_coverage,
-        source_report_ids=rag.contributing_report_ids,
+        source_report_ids=list(contributing) or rag.contributing_report_ids,
+        contributing_sources=contributing,
         evidence_scope="fallback" if used_fallback else "sector",
     )
 

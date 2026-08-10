@@ -31,9 +31,16 @@ class RAGContext:
     list of chunks with per-hit metadata. `contributing_report_ids`
     is the deduped union of source reports across every hit, used to
     populate the component's `source_report_ids` field.
+
+    `hit_report_ids` is the report id of EACH hit, index-aligned to the
+    `[Rn]` marker (hit_report_ids[0] is `[R1]`). It carries duplicates
+    and preserves order — unlike `contributing_report_ids`, it lets the
+    citation resolver map a `[Rn]` marker back to its report. An empty
+    string marks a hit with no report id (unresolvable).
     """
     formatted_for_prompt: str
     contributing_report_ids: list[str] = field(default_factory=list)
+    hit_report_ids: list[str] = field(default_factory=list)
     hit_count: int = 0
 
     @property
@@ -72,9 +79,14 @@ def fetch_rag_context(
             seen.add(rid)
             ordered_report_ids.append(rid)
 
+    # Per-hit report id, index-aligned to the [Rn] marker (empty string for a
+    # hit with no report id, so the [Rn] numbering still lines up with the hits).
+    hit_report_ids = [hit.get("reportId") or "" for hit in hits]
+
     return RAGContext(
         formatted_for_prompt=_format_hits_for_prompt(hits),
         contributing_report_ids=ordered_report_ids,
+        hit_report_ids=hit_report_ids,
         hit_count=len(hits),
     )
 
