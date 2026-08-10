@@ -21,7 +21,7 @@ from typing import Literal, Optional
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Schema versions:
 #   v1 — pre-launch baseline: Figure Scope on NumericField
@@ -34,12 +34,18 @@ from pydantic import BaseModel, Field, field_validator
 #        narrative_and_confidence), and the returnee stock/flow split
 #        (returnee_stock + new_returns replace returnees). See the clear-
 #        context-pipeline ADR-0004 / ADR-0005.
+#   v3 — interval-and-range model, Phase 1 "Capture" (ADR-0007): every
+#        NumericField gains value_low/value_high (magnitude range), qualifier
+#        (per-figure bias direction), measure_type (stock/flow/cumulative), and
+#        an optional figure-level basis_period_start/end. `value` stays the
+#        headline point so downstream (clear-api aggregation) is unaffected; the
+#        richer shape is captured now and consumed by the reducer in later phases.
 #
 # Pre-launch the corpus is a handful of test reports we wipe and re-extract on
 # every change, so the version mainly documents the shape. Aggregation still
-# combines only same-version rows, so the bump keeps any remaining v1 rows from
-# mixing with the re-extracted v2 rows.
-SCHEMA_VERSION = "v2"
+# combines only same-version rows, so the bump keeps any remaining older rows
+# from mixing with the re-extracted v3 rows.
+SCHEMA_VERSION = "v3"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -73,6 +79,16 @@ ConfidenceTier = Literal[
 # Three-valued so the aggregator scores met = 1.0 / partial = 0.5 / unmet = 0.0
 # and weights each criterion into the 0–10 information_credibility score.
 CredibilityRating = Literal["met", "partial", "unmet"]
+
+# ── Interval-and-range model (ADR-0007) ──────────────────────────────
+# The per-figure bias direction the source states. Supersedes the field/source
+# `qualityBias` prior where present ("at_least" → truth ≥ reported).
+Qualifier = Literal["exact", "at_least", "at_most", "approx"]
+
+# What a number measures over time — routes a figure to the right reduction.
+# `cumulative_to_date` behaves as a stock (bypasses the flow rate math) and
+# sidesteps period-overlap, so it is preferred where a source frames it that way.
+MeasureType = Literal["stock_as_of", "period_flow", "cumulative_to_date"]
 
 
 class FigureCredibility(BaseModel):
@@ -119,6 +135,76 @@ class NumericField(BaseModel):
     unit: str = Field(description='e.g. "people", "USD", "%", "cases"')
     confidence: ConfidenceTier = Field(
         description="How trustworthy is the source of this number?",
+    )
+    # ── Interval-and-range model, Phase 1 capture (ADR-0007) ───────────
+    # A figure is a value-RANGE over a time-INTERVAL, tagged by measure type.
+    # `value` above stays the headline point (== the figure when exact) so the
+    # existing aggregator/dashboard are unaffected; the fields below carry the
+    # richer shape the interval reducer consumes in later phases. `value_low` /
+    # `value_high` default to `value` (a degenerate point) when the source gives
+    # a single number — see `_fill_range_from_point`.
+    value_low: Optional[float] = Field(
+        default=None,
+        description=(
+            "Lower bound of the reported magnitude — always FINITE, never open "
+            "(a floor of 0 for an 'up to' figure is unusable; infer a plausible "
+            "one from context instead). For an exact figure this equals `value` "
+            "— leave null then, it is filled in. For 'between 500 and 700', 500; "
+            "for 'at least 500', 500 (the firm floor); for 'up to 700', a "
+            "plausible lower bound; for 'around 600', the low end of a modest "
+            "band."
+        ),
+    )
+    value_high: Optional[float] = Field(
+        default=None,
+        description=(
+            "Upper bound of the reported magnitude — always FINITE, never open "
+            "(NOT infinity for an 'at least' figure; infer a plausible ceiling "
+            "from the report's own figures + context). Equals `value` for an "
+            "exact figure (leave null). For 'at least 500', a plausible upper "
+            "bound; for 'up to 700', 700 (the firm ceiling); for 'around 600', "
+            "the high end of a modest band."
+        ),
+    )
+    qualifier: Qualifier = Field(
+        default="exact",
+        description=(
+            "The bias direction the source states for THIS figure — this is "
+            "per-figure EVIDENCE, distinct from and superseding the field-level "
+            "`qualityBias` prior (clear-api FieldRule) where stated. 'exact' (a "
+            "precise count → point), 'at_least' (a firm FLOOR — 'more than', "
+            "'at least', 'over'), 'at_most' (a firm CEILING — 'up to', 'fewer "
+            "than', 'nearly'), or 'approx' (symmetric vagueness — 'around', "
+            "'roughly', 'an estimated', '~', or a stated 'between X and Y'). "
+            "Whatever the qualifier, value_low/value_high carry a finite band."
+        ),
+    )
+    measure_type: Optional[MeasureType] = Field(
+        default=None,
+        description=(
+            "What the number measures over time, chosen from the wording: "
+            "'stock_as_of' = a point-in-time total ('currently', 'as of', "
+            "'total displaced'); 'period_flow' = a quantity accrued DURING a "
+            "period ('newly displaced', 'during May', 'this week', 'new "
+            "cases'); 'cumulative_to_date' = a running total since an origin "
+            "('since January', 'cumulative', 'to date'). Null only if the "
+            "wording is genuinely indeterminate."
+        ),
+    )
+    # Figure-level period, only when the text states one distinct from the
+    # report's overall reporting_period_start/end (which applies otherwise, at
+    # aggregation). ISO date strings.
+    basis_period_start: Optional[str] = Field(
+        default=None,
+        description=(
+            "Start of the period THIS figure covers, if stated distinctly from "
+            "the report's overall period (ISO date, e.g. '2026-04-02'). Else "
+            "null — the report's reporting period is used."
+        ),
+    )
+    basis_period_end: Optional[str] = Field(
+        default=None,
+        description="End of the period this figure covers (ISO date) or null.",
     )
     source_quote: str = Field(
         description="The sentence in the report the number came from.",
@@ -194,6 +280,20 @@ class NumericField(BaseModel):
             "assessment. Do NOT restate directness/recency here."
         ),
     )
+
+    @model_validator(mode="after")
+    def _fill_range_from_point(self) -> "NumericField":
+        """Default the value range to the point when the source gave a single
+        number, so `value_low`/`value_high` are always populated (a degenerate
+        point == `value`). An inverted range is normalised. `value` stays the
+        authoritative headline; low/high bound it."""
+        if self.value_low is None:
+            self.value_low = self.value
+        if self.value_high is None:
+            self.value_high = self.value
+        if self.value_low > self.value_high:
+            self.value_low, self.value_high = self.value_high, self.value_low
+        return self
 
 
 class TextField(BaseModel):
