@@ -86,6 +86,36 @@ class TestAggregationAsset:
             days_between = (to_dt - from_dt).days
             assert 89 <= days_between <= 91, f"initial window should be ~90d, got {days_between}"
 
+    def test_unresolved_iso3_forces_initial_window(self):
+        # F1: a new country whose iso3 doesn't resolve to a location id must NOT
+        # fall through to the global has_aggregated check (which would read as
+        # "populated" and pick the weekly window, so the country never backfills).
+        # None short-circuits the check and forces the wide initial window.
+        os.environ.pop("KB_AGGREGATION_INITIAL_LOOKBACK_DAYS", None)
+        with (
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.resolve_country_location_id_by_iso3",
+                return_value=None,
+            ),
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+            ) as mock_has,
+            patch(
+                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+            ) as mock_refresh,
+        ):
+            mock_refresh.return_value = {
+                "computedBuckets": 1, "supersededBuckets": 0, "schemaVersion": "v1",
+            }
+            reliefweb_weekly_datapoint_aggregations(
+                _build_op_context(), reliefweb_weekly_datapoints=[{"report_id": "r1"}],
+            )
+            mock_has.assert_not_called()  # None short-circuits the existence check
+            call_kwargs = mock_refresh.call_args.kwargs
+            days = (_parse_iso(call_kwargs["to_iso"]) - _parse_iso(call_kwargs["from_iso"])).days
+            assert 89 <= days <= 91, f"unresolved iso3 must use the ~90d window, got {days}"
+            assert call_kwargs["country_location_id"] is None  # global (unscoped) refresh
+
     def test_subsequent_run_uses_weekly_window(self):
         # Populated cache: has_aggregated_datapoints returns True →
         # asset picks the narrower weekly window.

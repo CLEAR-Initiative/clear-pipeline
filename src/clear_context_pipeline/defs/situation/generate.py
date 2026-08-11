@@ -659,7 +659,7 @@ def weekly_situation_analyses(
     names_by_iso3 = {
         c["iso3"].lower(): c["name"] for c in clear_api.get_pipeline_countries()
     }
-    country_name = names_by_iso3.get(iso3)
+    country_name = names_by_iso3.get(iso3.lower())
     if country_name is None:
         raise dg.Failure(
             description=(

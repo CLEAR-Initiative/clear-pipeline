@@ -43,7 +43,7 @@ the weekly cron out to **one run per partition**.
 
 ### Phase 1 — Pipeline: partition the KB path (core)
 
-1. **New `defs/knowledgebase/countries.py`** (single source of truth):
+1. **New `defs/reliefweb_partitions.py`** (single source of truth):
    - `country_partitions = dg.DynamicPartitionsDefinition(name="reliefweb_country")`
    - `def list_pipeline_iso3s() -> list[str]:` — `clear_api.get_pipeline_countries()`
      → lowercased `iso3`s. (Runtime call; the sensor uses it.)
@@ -99,7 +99,7 @@ clear-api-first rule).
 
 ## Files touched
 
-- **New:** `defs/knowledgebase/countries.py` (partitions def + iso3 list + format
+- **New:** `defs/reliefweb_partitions.py` (partitions def + iso3 list + format
   constants); the sync sensor + partitioned schedule (either in `countries.py` or
   alongside the job in `reliefweb_to_s3.py`).
 - **Edit (Phase 1):** `reliefweb_to_s3.py` (3 assets + helpers + job/schedule),

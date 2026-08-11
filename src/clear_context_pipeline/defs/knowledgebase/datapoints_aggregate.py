@@ -125,19 +125,34 @@ def reliefweb_weekly_datapoint_aggregations(
     # backfill and use the wider initial window; else the routine weekly delta.
     # A schema-version bump also re-triggers a backfill because superseded
     # (validTo NOT NULL) history rows don't count towards this check.
-    try:
-        already_populated = clear_api.has_aggregated_datapoints(
-            SCHEMA_VERSION, country_location_id=country_location_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # Existence check is advisory — if clear-api is momentarily
-        # unhealthy, fall back to the safer wider window rather than
-        # silently under-refreshing.
+    if country_location_id is None:
+        # The iso3 didn't resolve to a clear-api location (a country onboarded
+        # before its location_metadata landed, or a name/iso3 mismatch). Passing
+        # None would make has_aggregated_datapoints run the GLOBAL check — which
+        # reads as "populated" the moment ANY country exists, so a genuinely-new
+        # country would silently take the weekly window and never backfill (F1).
+        # Force the wide initial window instead: over-refreshing is idempotent and
+        # recoverable; silently under-refreshing a new country is not.
         context.log.warning(
-            "has_aggregated_datapoints check failed (%s) — falling back to initial-window lookback",
-            exc,
+            "[%s] iso3 did not resolve to a clear-api location — using the initial "
+            "(wide) lookback window rather than the global first-run check",
+            iso3,
         )
         already_populated = False
+    else:
+        try:
+            already_populated = clear_api.has_aggregated_datapoints(
+                SCHEMA_VERSION, country_location_id=country_location_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Existence check is advisory — if clear-api is momentarily
+            # unhealthy, fall back to the safer wider window rather than
+            # silently under-refreshing.
+            context.log.warning(
+                "has_aggregated_datapoints check failed (%s) — falling back to initial-window lookback",
+                exc,
+            )
+            already_populated = False
 
     if already_populated:
         lookback_days = int(

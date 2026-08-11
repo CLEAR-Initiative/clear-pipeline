@@ -9,7 +9,7 @@ retries, its own backfills. This module is the single source of truth for:
     ``pipelineCountries`` via the sync sensor, so onboarding a country in
     clear-api is all it takes to add a partition; and
   - the S3 key scheme, keyed by ``iso3`` (previously a duplicated
-    ``COUNTRY_ISO3 = "sdn"`` constant in six modules).
+    ``COUNTRY_ISO3 = "sdn"`` constant duplicated across the KB modules).
 
 The prefix strings are byte-for-byte what the pre-partition constants produced
 for ``iso3="sdn"``, so Sudan's existing S3 artefacts are adopted unchanged (no
