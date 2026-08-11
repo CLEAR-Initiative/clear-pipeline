@@ -286,7 +286,7 @@ The aggregator is a switch table over field kind. Every field in the exhaustive 
 
 | Field kind | Aggregation | Example fields |
 |---|---|---|
-| **Additive count** | quality-weighted sum, dedup by (event, location, date_bucket) | killed, new_displacements, incidents, funding_received |
+| **Additive count** | dedup by (event, location, date_bucket), then the interval-and-range reduce — flow sweep + cumulative differencing + event-type containment (**§6.8**), not a naïve sum | killed, new_displacements, incidents, funding_received |
 | **Latest state** | latest `publishedAt` wins | IDP stock, PIN, IPC phase, risk level |
 | **Set union** | union of contributing values | locations_affected, event_types, active_clusters |
 | **Max** | pick the largest quality-adjusted value | population_affected (upper-bound reporting) |
@@ -370,7 +370,7 @@ Deduplication is the load-bearing part of aggregation: it's what turns "sum of e
 
 #### 6.4.1 The incident key
 
-An incident key is a tuple `(figure_scope_location, time_bucket, event_type_set)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one figure; the aggregator picks one and discards the rest. (This is the canonical key per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md); the *shipped* key today is only `(location, time_bucket)` — the `event_type_set` dimension is specified here but not yet built, which silently collapses co-located distinct events. See ADR-0002 Consequences.)
+An incident key is a tuple `(figure_scope_location, time_bucket, event_type_set)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one figure; the aggregator picks one and discards the rest. All three dimensions are now shipped — the incident key is `location | time_bucket | event_type_set`, so co-located distinct events (a conflict toll and a flood toll in the same place/week) group and sum separately instead of collapsing, and the additive combine caps an unqualified superset against its sub-causes (§7.3, see §6.8). The remaining gap is **canonicalisation**: the event-type dimension is currently the report's raw `event_types` (lowercased + sorted), not yet mapped through the glide-code taxonomy in the table below — so `"armed clash"` and `"battle"` are still distinct keys until that mapping lands. See [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md).
 
 | Dimension | Canonicalisation rule |
 |---|---|
@@ -398,7 +398,7 @@ Within an incident group, one row wins and is emitted; others are dropped. The d
 | Policy | Applied to | Rule |
 |---|---|---|
 | `latest_wins` | State snapshots | Highest `publishedAt`. Confidence weight breaks ties. |
-| `latest_wins_with_confidence_override` | Additive counts | Highest `publishedAt` wins, UNLESS a `verified`-tier row exists within 3 days of the winner — that verified row overrides. Configurable window. |
+| `latest_wins_with_confidence_override` | Additive counts | Among the rows within the freshest's override reach (`validityWindowDays / overrideDivisor`), take the top **data-quality** tier (reliability × credibility, [ADR-0005](./data-quality-scoring-design.md)); the field's directional **bias** breaks the tie (`overreport` → lower, `underreport` → higher), and each figure's **qualifier** constrains that projection (an `at_least` floor / `at_most` ceiling can't be crossed — ADR-0007, §6.8). This replaces the original "a `verified` row within 3 days overrides" rule. |
 | `max_within_report_then_latest` | MAX fields (`population_affected`) | First pick the MAX value **within each report** (a report may mention the same figure twice), then apply `latest_wins` across reports. Prevents double-counting a re-quoted number. |
 | `set_union_all` | Set-union fields | All rows contribute — no winner, no dedup. |
 
@@ -416,16 +416,16 @@ Rule: **collapse same-report duplicates before cross-report dedup.** Within one 
 - `latest_wins_with_confidence_override`: same confidence tier, latest `publishedAt` wins.
 - Aggregate: `42000` (not `84000`). `contributing_report_ids` records both.
 
-**B) DTM (verified, 40k) vs media (unverified, 55k) for the same incident**
+**B) DTM (high data-quality, 40k) vs media (unverified, 55k) for the same incident**
 - Same incident key.
 - Media report is 2 days newer; would win under naive `latest_wins`.
-- `latest_wins_with_confidence_override`: verified row is within the 3-day window → verified wins with value `40k`.
-- `quality_score` for the bucket reflects the DTM row's confidence weight; media row is recorded in `confidence_mix` for transparency but doesn't contribute value.
+- `latest_wins_with_confidence_override`: within the override reach, the DTM row's data-quality (reliability × credibility) puts it alone in the top tier, so it wins with `40k` — and on `killed` (overreport) the directional bias also leans low, agreeing. (Had they been comparable quality, the overreport bias alone would pick the lower figure.)
+- `quality_score` for the bucket reflects the DTM row's weight; the media `55k` is recorded in `confidence_mix` for transparency but doesn't contribute value.
 
 **C) Two weekly reports of the same week's toll (El Fasher)**
 - Report A (period ending 2026-07-02): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 3 }` — a weekly **total** for the scope, not a single-incident record (per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md) the source reports totals, not incident logs).
 - Report B (period ending 2026-07-04, same ISO week): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 5 }`
-- Same week + same figure scope + same event-type set → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a `verified` figure within 3 days would override — §6.4.3). Reports from a *different* week — or a *different* event-type set (e.g. a co-located flood, `{flood}`) — are different figures and sum (ADR-0002).
+- Same week + same figure scope + same event-type set → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a higher data-quality figure within the override reach would win instead, biased low for `killed` — §6.4.3). Reports from a *different* week — or a *different* event-type set (e.g. a co-located flood, `{flood}`) — are different figures and sum (ADR-0002).
 
 **D) Same report re-quotes displacement figure in 4 places**
 - Same-report multi-mention collapse (§6.4.4): pick one mention (highest confidence, earliest chunk).
@@ -474,7 +474,7 @@ def aggregate_field(field_kind, contributing_reports, location_scope, window):
     return combine(winners, rule=field_kind.combine_rule)
 ```
 
-`incident_key`, `resolve_within_group`, and `combine` are the three extension points where new field kinds and new policies plug in. This is the shared function §6.6 imports for both the Dagster pre-compute asset and the clear-api runtime resolver.
+`incident_key`, `resolve_within_group`, and `combine` are the three extension points where new field kinds and new policies plug in. This is the shared function §6.6 imports for both the Dagster pre-compute asset and the clear-api runtime resolver. Two steps have grown well past this sketch and are detailed in **§6.8**: `resolve_within_group` for additive fields is the bias-and-qualifier projection (not a plain latest/verified pick), and `combine` for additive fields is the interval-and-range reducer (breakpoint flow sweep → cumulative differencing → event-type containment), not the `weight_for(confidence) × value` sum shown in §6.3.
 
 ### 6.5 Staleness handling
 
@@ -568,7 +568,9 @@ Worked example: `A[2–10 Apr] 800` (100/day) + `B[5–15 Apr] 660` (66/day), `k
 
 **Backward compatibility.** A pre-v3 (point) figure has `value_low = value_high = value`, so it reduces exactly as before. One nuance: the basis *period* falls back to the report's reporting period, so a v2 figure whose report states a multi-day period **does** enter the sweep — a lone such figure integrates back to its own value (no change), and only *overlapping* v2 figures move (from the old double-count to a reconciled total).
 
-**Captured, not yet routed.** `measure_type` and `qualifier` are stored on every figure but do **not** yet drive reduction — routing is still by the static field-kind (§6.2) plus the presence of a multi-day basis period, and bias is projected from the field-level prior, not the per-figure qualifier. Wiring `measure_type`-driven routing and per-figure qualifier projection are flagged ADR-0007 follow-ups.
+**Qualifier as a directional constraint.** The per-figure `qualifier` composes with the field-level `qualityBias` rather than replacing it — they are different axes (what the *source asserted* about this figure's bound vs the field's *systematic skew*). The qualifier is a **hard constraint**, the bias breaks the tie within it: an `at_least` figure's floor may not be projected below, an `at_most` figure's ceiling not above, whatever the field bias says; `approx`/`exact` add no constraint (so an all-exact corpus is unchanged). Wired in the bias-projection step (`biasWinner`, and the flow sweep's rate reconciliation).
+
+**Measure-type reconciliation — running totals are differenced, not summed.** A `stock_as_of` / `cumulative_to_date` figure is a running total to its as-of date, not a period increment. On an additive field these are **first-differenced** into the increments they imply (consecutive snapshots → `Cᵢ − Cᵢ₋₁` over the interval between them; the earliest → the total over `[origin, as-of]`), and reported flows that fall **inside** a cumulative's coverage are dropped as already-counted (flows *outside* it are kept and extend the series). The result flows through the same breakpoint sweep, so a running total is integrated over exactly its own span and never added on top of the flows it already contains — `C(Mar31)=3000` then `C(Apr30)=5000` yields **5000**, not 8000. `measure_type` does **not** change the field-level combine strategy: `FieldRule.kind` still owns sum vs latest vs max vs union; it only refines stock-vs-flow within an additive field. *Edge:* a reported flow that only **partially** overlaps a cumulative's coverage boundary is dropped (conservative — favours a small undercount over a double-count).
 
 **Per-country refresh scope.** `refreshAggregatedDatapoints` and `hasAggregatedDatapoints` take an optional `countryLocationId` (an admin-0 id) so the country-partitioned pipeline recomputes / first-run-checks one country's subtree at a time instead of a global pass.
 
