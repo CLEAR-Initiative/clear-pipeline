@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION,
 )
+from clear_context_pipeline.defs.reliefweb_partitions import country_partitions
 from clear_context_pipeline.providers import clear_api
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
@@ -91,7 +92,7 @@ def _earliest_reporting_period_end(summaries: list[dict]) -> datetime | None:
     return earliest
 
 
-@dg.asset(group_name="reliefweb_kb")
+@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
 def reliefweb_weekly_datapoint_aggregations(
     context: AssetExecutionContext,
     reliefweb_weekly_datapoints: list[dict],
@@ -104,29 +105,54 @@ def reliefweb_weekly_datapoint_aggregations(
     bitemporal supersede semantics), so a re-run against unchanged
     data produces no observable change.
     """
+    iso3 = context.partition_key
     if not reliefweb_weekly_datapoints:
         context.log.info(
-            "no per-report datapoints landed this week — skipping aggregation refresh",
+            "[%s] no per-report datapoints landed this run — skipping aggregation refresh",
+            iso3,
         )
         return {"computed_buckets": 0, "superseded_buckets": 0, "skipped": True}
 
-    # First-run detection: does any current aggregation row exist for
-    # this schema version? If not, treat this as a backfill and use
-    # the wider initial window; else use the routine weekly delta.
-    # A schema-version bump correctly triggers another backfill for
-    # the new version because superseded (validTo NOT NULL) history
-    # rows from the old version don't count towards this check.
-    try:
-        already_populated = clear_api.has_aggregated_datapoints(SCHEMA_VERSION)
-    except Exception as exc:  # noqa: BLE001
-        # Existence check is advisory — if clear-api is momentarily
-        # unhealthy, fall back to the safer wider window rather than
-        # silently under-refreshing.
+    # Resolve this partition's country to a clear-api location id so first-run
+    # detection and the refresh below are scoped to THIS country (Phase 2): a
+    # newly-onboarded country then genuinely triggers the initial-lookback window
+    # even after other countries are established, and the refresh recomputes only
+    # its own buckets instead of a redundant global pass.
+    country_location_id = clear_api.resolve_country_location_id_by_iso3(iso3)
+
+    # First-run detection, PER COUNTRY: does any current aggregation row exist for
+    # this schema version AND this country? If not, treat this as the country's
+    # backfill and use the wider initial window; else the routine weekly delta.
+    # A schema-version bump also re-triggers a backfill because superseded
+    # (validTo NOT NULL) history rows don't count towards this check.
+    if country_location_id is None:
+        # The iso3 didn't resolve to a clear-api location (a country onboarded
+        # before its location_metadata landed, or a name/iso3 mismatch). Passing
+        # None would make has_aggregated_datapoints run the GLOBAL check — which
+        # reads as "populated" the moment ANY country exists, so a genuinely-new
+        # country would silently take the weekly window and never backfill (F1).
+        # Force the wide initial window instead: over-refreshing is idempotent and
+        # recoverable; silently under-refreshing a new country is not.
         context.log.warning(
-            "has_aggregated_datapoints check failed (%s) — falling back to initial-window lookback",
-            exc,
+            "[%s] iso3 did not resolve to a clear-api location — using the initial "
+            "(wide) lookback window rather than the global first-run check",
+            iso3,
         )
         already_populated = False
+    else:
+        try:
+            already_populated = clear_api.has_aggregated_datapoints(
+                SCHEMA_VERSION, country_location_id=country_location_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Existence check is advisory — if clear-api is momentarily
+            # unhealthy, fall back to the safer wider window rather than
+            # silently under-refreshing.
+            context.log.warning(
+                "has_aggregated_datapoints check failed (%s) — falling back to initial-window lookback",
+                exc,
+            )
+            already_populated = False
 
     if already_populated:
         lookback_days = int(
@@ -187,6 +213,7 @@ def reliefweb_weekly_datapoint_aggregations(
             from_iso=window_start.isoformat(),
             to_iso=now.isoformat(),
             schema_version=SCHEMA_VERSION,
+            country_location_id=country_location_id,
         )
     except clear_api.ClearApiError as exc:
         # 4xx from clear-api — mutation shape or config is wrong. Fail

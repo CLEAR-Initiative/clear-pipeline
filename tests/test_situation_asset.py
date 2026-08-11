@@ -410,14 +410,18 @@ class TestGenerateAndUpsertForCountryYear:
 
 
 class TestWeeklySituationAnalysesAsset:
-    """The asset is a thin loop over `_POC_COUNTRIES` calling the
-    helper. These tests exercise the loop shape, not the helper (the
-    helper has its own class above)."""
+    """The asset runs for ONE country partition (its `partition_key` iso3,
+    resolved to a name via pipelineCountries) and writes two snapshots — yearly
+    + current-month. These tests exercise that shape, not the helper (the helper
+    has its own class above)."""
 
-    def test_iterates_all_poc_countries(self):
-        # POC scope is Sudan only. The asset now writes TWO snapshots per
-        # country - yearly + current-month - so Sudan yields two calls.
+    def test_runs_for_the_partition_country(self):
+        # Partition `sdn` → resolves to "Sudan" → one yearly + one monthly call.
         with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
+                return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": None}],
+            ),
             patch(
                 "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
             ) as mock_year,
@@ -433,21 +437,36 @@ class TestWeeklySituationAnalysesAsset:
                 "country_name": "Sudan", "window_kind": "monthly",
                 "situation_analysis_id": "sit-month",
             }
-            ctx = dg.build_asset_context()
+            ctx = dg.build_asset_context(partition_key="sdn")
             result = weekly_situation_analyses(
                 ctx, reliefweb_weekly_datapoint_aggregations={},
             )
-        # Sudan-only for POC → one yearly + one monthly call.
         assert mock_year.call_count == 1
         assert mock_month.call_count == 1
         assert mock_year.call_args.kwargs["country_name"] == "Sudan"
         assert mock_month.call_args.kwargs["country_name"] == "Sudan"
         assert {r["situation_analysis_id"] for r in result} == {"sit-year", "sit-month"}
 
+    def test_unknown_partition_fails_loud(self):
+        # A partition iso3 not in pipelineCountries can't resolve a name.
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
+                return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": None}],
+            ),
+            pytest.raises(dg.Failure),
+        ):
+            ctx = dg.build_asset_context(partition_key="xxx")
+            weekly_situation_analyses(ctx, reliefweb_weekly_datapoint_aggregations={})
+
     def test_helper_returning_none_is_dropped_from_summaries(self):
         # Both helpers return None (e.g. country resolver failed). The asset
         # keeps going and omits the country from the summary list.
         with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
+                return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": None}],
+            ),
             patch(
                 "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
                 return_value=None,
@@ -457,7 +476,7 @@ class TestWeeklySituationAnalysesAsset:
                 return_value=None,
             ),
         ):
-            ctx = dg.build_asset_context()
+            ctx = dg.build_asset_context(partition_key="sdn")
             result = weekly_situation_analyses(
                 ctx, reliefweb_weekly_datapoint_aggregations={},
             )

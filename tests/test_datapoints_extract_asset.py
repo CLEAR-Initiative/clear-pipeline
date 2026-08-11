@@ -114,7 +114,8 @@ def _canned_doc_text_body() -> str:
 
 
 def _build_asset_context():
-    return dg.build_asset_context()
+    # The asset is partitioned by country iso3; materialize the Sudan partition.
+    return dg.build_asset_context(partition_key="sdn")
 
 
 @pytest.fixture(autouse=True)

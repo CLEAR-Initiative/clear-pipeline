@@ -35,6 +35,10 @@ from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
+from clear_context_pipeline.defs.reliefweb_partitions import (
+    country_partitions,
+    enriched_prefix,
+)
 from clear_context_pipeline.providers import (
     clear_api,
     load_guardrails,
@@ -43,10 +47,8 @@ from clear_context_pipeline.providers import (
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
-COUNTRY_ISO3 = "sdn"
-FORMAT_SLUG = "situation-report"
-
-S3_ENRICHED_PREFIX = f"reliefweb/kb/enriched/{COUNTRY_ISO3}/{FORMAT_SLUG}"
+# Country scope is a Dagster partition (see reliefweb_partitions); this stage's
+# S3 layout is `enriched_prefix(iso3)`.
 
 # SAF sectors — mirrored from the Norwegian Refugee Council's operational
 # taxonomy. Constraining the LLM output with a Literal enum forces JSON-
@@ -143,8 +145,8 @@ def _s3_client():
     return s3_client()
 
 
-def _enriched_key(report_id: str) -> str:
-    return f"{S3_ENRICHED_PREFIX}/{report_id}.jsonl"
+def _enriched_key(iso3: str, report_id: str) -> str:
+    return f"{enriched_prefix(iso3)}/{report_id}.jsonl"
 
 
 def _read_chunks(s3, bucket: str, key: str) -> list[dict]:
@@ -210,7 +212,7 @@ def _log_hiccup(ref: LocationRef, exc: BaseException) -> None:
     )
 
 
-@dg.asset(group_name="reliefweb_kb")
+@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
 def reliefweb_weekly_enriched_chunks(
     context: AssetExecutionContext,
     reliefweb_weekly_chunks: list[dict],
@@ -219,6 +221,7 @@ def reliefweb_weekly_enriched_chunks(
     """Chunks with LLM-generated context + extracted parameters +
     resolved location IDs. Persists to S3 for replay; returns a summary
     list the upsert asset consumes."""
+    iso3 = context.partition_key
     bucket = os.environ["S3_BUCKET"]
     guardrails = load_guardrails()
     s3 = _s3_client()
@@ -243,7 +246,7 @@ def reliefweb_weekly_enriched_chunks(
     reused = 0
     for report in reliefweb_weekly_chunks:
         report_id = report["report_id"]
-        enriched_key = _enriched_key(report_id)
+        enriched_key = _enriched_key(iso3, report_id)
 
         # Idempotency: reuse a report already enriched by a prior run rather
         # than re-running the LLM contextualization + extraction (the
@@ -351,7 +354,7 @@ def reliefweb_weekly_enriched_chunks(
         "chunks_enriched": dg.MetadataValue.int(total_enriched),
         "chunks_skipped": dg.MetadataValue.int(total_skipped),
         "contextualization_skipped": dg.MetadataValue.bool(guardrails.skip_contextualization),
-        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{S3_ENRICHED_PREFIX}/"),
+        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{enriched_prefix(iso3)}/"),
     })
     return summaries
 

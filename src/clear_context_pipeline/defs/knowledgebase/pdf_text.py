@@ -27,6 +27,10 @@ from clear_context_pipeline.defs.knowledgebase._pdf_extract import (
     extract_pages,
     extract_pages_pypdf,
 )
+from clear_context_pipeline.defs.reliefweb_partitions import (
+    country_partitions,
+    text_prefix,
+)
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
@@ -37,13 +41,9 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 # instead of OOM-killing the worker.
 _MP_SPAWN = multiprocessing.get_context("spawn")
 
-# Match the country / format scope used by reliefweb_to_s3 so the S3
-# paths stay parallel to the existing tree — a future switch to another
-# country / format is one env var, not a scavenger hunt.
-COUNTRY_ISO3 = "sdn"
-FORMAT_SLUG = "situation-report"
-
-S3_TEXT_PREFIX = f"reliefweb/kb/text/{COUNTRY_ISO3}/{FORMAT_SLUG}"
+# Country scope is a Dagster partition (see reliefweb_partitions); the S3 layout
+# for this stage is `text_prefix(iso3)`, keeping paths parallel to the rest of
+# the tree while each country lands under its own `<iso3>/` segment.
 
 
 def _s3_client():
@@ -52,8 +52,8 @@ def _s3_client():
     return s3_client()
 
 
-def _text_key(report_id: str) -> str:
-    return f"{S3_TEXT_PREFIX}/{report_id}.jsonl"
+def _text_key(iso3: str, report_id: str) -> str:
+    return f"{text_prefix(iso3)}/{report_id}.jsonl"
 
 
 def _extract_pages_isolated(pdf_bytes: bytes, fn=extract_pages) -> list[dict]:
@@ -142,6 +142,7 @@ def _report_summary(
     # parallel — text extraction then races ahead of the upload and hits
     # NoSuchKey. Invisible at 7-day volume; exposed by the 90-day initial run.
     deps=["reliefweb_weekly_pdfs_in_s3"],
+    partitions_def=country_partitions,
 )
 def reliefweb_weekly_pdf_text(
     context: AssetExecutionContext,
@@ -155,6 +156,7 @@ def reliefweb_weekly_pdf_text(
     downstream assets consume — the actual page text stays in S3 to
     keep the Dagster IO manager payload small.
     """
+    iso3 = context.partition_key
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
 
@@ -179,7 +181,7 @@ def reliefweb_weekly_pdf_text(
     summaries: list[dict] = []
     reused = 0
     for report_id, entries in by_report.items():
-        text_key = _text_key(report_id)
+        text_key = _text_key(iso3, report_id)
 
         # Idempotency: a report already extracted by a prior run is reused,
         # not re-parsed. Re-extraction is wasted work on every re-run and
@@ -284,6 +286,6 @@ def reliefweb_weekly_pdf_text(
         "reports_processed": dg.MetadataValue.int(len(summaries)),
         "reports_reused": dg.MetadataValue.int(reused),
         "reports_skipped": dg.MetadataValue.int(len(by_report) - len(summaries)),
-        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{S3_TEXT_PREFIX}/"),
+        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{text_prefix(iso3)}/"),
     })
     return summaries

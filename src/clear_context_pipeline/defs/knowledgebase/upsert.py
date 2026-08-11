@@ -26,6 +26,7 @@ import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
+from clear_context_pipeline.defs.reliefweb_partitions import country_partitions
 from clear_context_pipeline.providers import clear_api, make_embedding_provider
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
@@ -78,7 +79,7 @@ def _embedding_batches(enriched: list[dict], embedder):
         yield batch
 
 
-@dg.asset(group_name="reliefweb_kb")
+@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
 def reliefweb_weekly_knowledgebase_upsert(
     context: AssetExecutionContext,
     reliefweb_weekly_enriched_chunks: list[dict],

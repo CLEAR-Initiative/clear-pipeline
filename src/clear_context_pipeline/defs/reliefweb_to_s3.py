@@ -48,6 +48,15 @@ import dagster as dg
 import requests
 from dotenv import load_dotenv
 
+from clear_context_pipeline.defs.reliefweb_partitions import (
+    FORMAT_NAME,
+    country_partitions,
+    list_pipeline_iso3s,
+    pdf_key,
+    pdf_prefix,
+    reports_prefix,
+)
+
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[3] / ".env")
 
 RELIEFWEB_REPORTS_URL = "https://api.reliefweb.int/v2/reports"
@@ -59,23 +68,12 @@ PDF_DOWNLOAD_TIMEOUT = 120  # PDFs are bigger than JSON; allow more time.
 # to /tmp instead of blowing up the worker.
 SPOOL_MAX_BYTES = 32 * 1024 * 1024
 
-# Country scope. Filtering by `primary_country.iso3` rather than
-# `country.iso3` restricts results to reports where Sudan is the primary
-# focus — this excludes regional dashboards (e.g. WHO EMR polio
-# bulletins) and refugee-flow reports (e.g. UNHCR Uganda factsheets that
-# mention Sudanese refugees) that tag Sudan as a secondary country.
-# ISO3 rather than name avoids the South-Sudan / Sudan collision.
-COUNTRY_ISO3 = "sdn"
-
-# Report format scope. ReliefWeb's `format` taxonomy distinguishes
-# "Situation Report" (the operational sitreps we want) from "Map",
-# "News and Press Release", "Infographic", etc. `FORMAT_SLUG` is the
-# lowercased / hyphenated S3 path segment — keeping it as a separate
-# segment from the country means a future switch to a different format
-# won't silently overwrite this archive, and adding more formats later
-# is just another folder under the same `<iso3>/` prefix.
-FORMAT_NAME = "Situation Report"
-FORMAT_SLUG = "situation-report"
+# Country scope is now a Dagster PARTITION, not a module constant: each asset
+# reads `iso3 = context.partition_key` and the S3 layout + `FORMAT_NAME` filter
+# live in `reliefweb_partitions`. Filtering by `primary_country.iso3` (not
+# `country.iso3`) still restricts results to reports where the partition's country
+# is the PRIMARY focus — excluding regional dashboards and cross-country refugee
+# reports that only tag it secondarily; ISO3 avoids the South-Sudan collision.
 
 # Rolling ingest window. On the first run (no report window in S3 yet) the
 # fetch reaches back the wider initial lookback, matching what the datapoint
@@ -118,22 +116,14 @@ def _week_tag(at: datetime) -> str:
     return f"{iso_year}-W{iso_week:02d}"
 
 
-def _reports_prefix() -> str:
-    return f"reliefweb/reports/{COUNTRY_ISO3}/{FORMAT_SLUG}/"
-
-
-def _is_first_ingest(s3, bucket: str) -> bool:
-    """True when no report window has been written yet — this ingest's own
-    first run. Self-contained (keys off the fetch's S3 output, not any
-    downstream DB), so it's correct whether the run is KB-only or the full
-    datapoints pipeline."""
-    resp = s3.list_objects_v2(Bucket=bucket, Prefix=_reports_prefix(), MaxKeys=1)
+def _is_first_ingest(s3, bucket: str, iso3: str) -> bool:
+    """True when no report window has been written yet for THIS country — the
+    country's own first ingest. Country-scoped (keys off the partition's S3
+    prefix, not any downstream DB), so a newly-onboarded country correctly gets
+    the wider initial lookback even after other countries are established, and
+    it's correct whether the run is KB-only or the full datapoints pipeline."""
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=reports_prefix(iso3), MaxKeys=1)
     return int(resp.get("KeyCount", 0)) == 0
-
-
-def _pdf_key(report_id: str, filename: str) -> str:
-    """Stable S3 key for one report's PDF attachment."""
-    return f"reliefweb/pdfs/{COUNTRY_ISO3}/{FORMAT_SLUG}/{report_id}/{filename}"
 
 
 def _s3_object_exists(s3, bucket: str, key: str) -> bool:
@@ -157,8 +147,9 @@ def _s3_object_exists(s3, bucket: str, key: str) -> bool:
 
 def _fetch_window(
     context: dg.AssetExecutionContext, appname: str, start: datetime, end: datetime,
+    iso3: str,
 ) -> list[dict]:
-    """Page through ``/v2/reports`` for the [start, end] window."""
+    """Page through ``/v2/reports`` for the [start, end] window, for one country."""
     reports: list[dict] = []
     offset = 0
     while True:
@@ -170,7 +161,7 @@ def _fetch_window(
                         "field": "date.created",
                         "value": {"from": _iso_seconds(start), "to": _iso_seconds(end)},
                     },
-                    {"field": "primary_country.iso3", "value": COUNTRY_ISO3},
+                    {"field": "primary_country.iso3", "value": iso3},
                     {"field": "format.name", "value": FORMAT_NAME},
                 ],
             },
@@ -209,26 +200,27 @@ def _fetch_window(
     return reports
 
 
-@dg.asset(group_name="reliefweb")
+@dg.asset(group_name="reliefweb", partitions_def=country_partitions)
 def reliefweb_weekly_reports_in_s3(
     context: dg.AssetExecutionContext,
 ) -> list[dict]:
-    """Fetch a rolling window of ReliefWeb report metadata for the
-    configured country and write it to S3 as JSONL. Routine runs take the
-    7-day weekly delta; the first run (no report window in S3 yet) reaches
-    back the wider initial lookback (90d) so the datapoint aggregation has a
-    full window to backfill over.
+    """Fetch a rolling window of ReliefWeb report metadata for this run's
+    country partition and write it to S3 as JSONL. Routine runs take the
+    7-day weekly delta; the country's FIRST run (no report window in S3 yet for
+    that iso3) reaches back the wider initial lookback (90d) so the datapoint
+    aggregation has a full window to backfill over.
 
     Returns the report list so the downstream PDF-manifest asset can
     consume it without a round-trip back to S3."""
+    iso3 = context.partition_key
     appname = _require_env("RELIEFWEB_APPNAME")
     bucket = _require_env("S3_BUCKET")
     s3 = _s3_client()
 
-    # First run (no report window in S3 yet) reaches back the wider initial
-    # lookback so the pipeline seeds the window the aggregation backfills;
-    # routine runs use the weekly delta.
-    if _is_first_ingest(s3, bucket):
+    # This COUNTRY's first run (no report window in S3 yet for its iso3) reaches
+    # back the wider initial lookback so a freshly-onboarded country seeds the
+    # window the aggregation backfills; routine runs use the weekly delta.
+    if _is_first_ingest(s3, bucket, iso3):
         lookback_days = int(
             os.environ.get("KB_INGEST_INITIAL_LOOKBACK_DAYS", str(_DEFAULT_INITIAL_LOOKBACK_DAYS)),
         )
@@ -242,12 +234,12 @@ def reliefweb_weekly_reports_in_s3(
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)
     context.log.info(
-        "reliefweb ingest: mode=%s window=[%s, %s]",
-        window_label, start.isoformat(), end.isoformat(),
+        "reliefweb ingest: country=%s mode=%s window=[%s, %s]",
+        iso3, window_label, start.isoformat(), end.isoformat(),
     )
-    reports = _fetch_window(context, appname, start, end)
+    reports = _fetch_window(context, appname, start, end, iso3)
 
-    key = f"reliefweb/reports/{COUNTRY_ISO3}/{FORMAT_SLUG}/{_week_tag(end)}.jsonl"
+    key = f"{reports_prefix(iso3)}{_week_tag(end)}.jsonl"
     body = b"\n".join(
         json.dumps(r, separators=(",", ":")).encode("utf-8") for r in reports
     )
@@ -263,7 +255,7 @@ def reliefweb_weekly_reports_in_s3(
 
     context.add_output_metadata(
         {
-            "country": dg.MetadataValue.text(COUNTRY_ISO3),
+            "country": dg.MetadataValue.text(iso3),
             "format": dg.MetadataValue.text(FORMAT_NAME),
             "mode": dg.MetadataValue.text(window_label),
             "window_from": dg.MetadataValue.text(start.isoformat()),
@@ -281,7 +273,7 @@ def reliefweb_weekly_reports_in_s3(
 # Step 2 — build the PDF manifest
 # ────────────────────────────────────────────────────────────────────────
 
-@dg.asset(group_name="reliefweb")
+@dg.asset(group_name="reliefweb", partitions_def=country_partitions)
 def reliefweb_weekly_pdf_manifest(
     context: dg.AssetExecutionContext,
     reliefweb_weekly_reports_in_s3: list[dict],
@@ -295,6 +287,7 @@ def reliefweb_weekly_pdf_manifest(
 
     The download step keys off ``s3_key`` so renaming this convention in
     one place automatically retargets future uploads."""
+    iso3 = context.partition_key
     bucket = _require_env("S3_BUCKET")
 
     manifest: list[dict] = []
@@ -320,12 +313,12 @@ def reliefweb_weekly_pdf_manifest(
                     "report_id": report_id,
                     "filename": filename,
                     "url": url,
-                    "s3_key": _pdf_key(report_id, filename),
+                    "s3_key": pdf_key(iso3, report_id, filename),
                 },
             )
 
     end = datetime.now(timezone.utc)
-    manifest_key = f"reliefweb/pdfs/{COUNTRY_ISO3}/{FORMAT_SLUG}/{_week_tag(end)}.manifest.jsonl"
+    manifest_key = f"{pdf_prefix(iso3)}{_week_tag(end)}.manifest.jsonl"
     body = b"\n".join(
         json.dumps(entry, separators=(",", ":")).encode("utf-8") for entry in manifest
     )
@@ -375,7 +368,7 @@ def _upload_pdf(
     return size
 
 
-@dg.asset(group_name="reliefweb")
+@dg.asset(group_name="reliefweb", partitions_def=country_partitions)
 def reliefweb_weekly_pdfs_in_s3(
     context: dg.AssetExecutionContext,
     reliefweb_weekly_pdf_manifest: list[dict],
@@ -386,6 +379,7 @@ def reliefweb_weekly_pdfs_in_s3(
     individual PDFs are logged and counted but never abort the run — the
     manifest will still be in S3 so a re-run picks up where this one
     left off."""
+    iso3 = context.partition_key
     bucket = _require_env("S3_BUCKET")
     s3 = _s3_client()
 
@@ -429,7 +423,7 @@ def reliefweb_weekly_pdfs_in_s3(
         "failed": dg.MetadataValue.int(failed),
         "bytes_uploaded": dg.MetadataValue.int(total_bytes),
         "s3_bucket": dg.MetadataValue.text(bucket),
-        "s3_prefix": dg.MetadataValue.text(f"reliefweb/pdfs/{COUNTRY_ISO3}/{FORMAT_SLUG}/"),
+        "s3_prefix": dg.MetadataValue.text(pdf_prefix(iso3)),
     }
     if failures:
         # First few only — the run log carries the full list.
@@ -461,14 +455,59 @@ reliefweb_weekly_kb_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("reliefweb", "reliefweb_kb"),
 )
 
-# Monday 06:00 UTC — by the time we run, all of "last week" is settled
-# in ReliefWeb's index. Cron lives here rather than as `cron_schedule`
-# on the asset so a one-off ad-hoc run can target the job by name.
-# Points at the KB-inclusive job so the weekly cron builds the full
-# knowledge base, not just the S3 ingest.
-reliefweb_weekly_schedule = dg.ScheduleDefinition(
+# Monday 06:00 UTC — by the time we run, all of "last week" is settled in
+# ReliefWeb's index. The assets are partitioned by country, so the schedule
+# fans out ONE run per live country partition (rather than a single global run).
+# `run_key` is per-country-per-week so a re-tick in the same week is deduped.
+# Points at the KB-inclusive job so the weekly cron builds the full knowledge
+# base for every country, not just the S3 ingest.
+@dg.schedule(
     name="reliefweb_weekly_schedule",
     job=reliefweb_weekly_kb_job,
     cron_schedule="0 6 * * MON",
     execution_timezone="UTC",
 )
+def reliefweb_weekly_schedule(context: dg.ScheduleEvaluationContext):
+    iso3s = context.instance.get_dynamic_partitions(country_partitions.name)
+    if not iso3s:
+        # The sync sensor seeds the partition set from pipelineCountries; until
+        # it has ticked once there is nothing to run.
+        return dg.SkipReason(
+            "no country partitions registered yet — the partition sensor seeds "
+            "them from clear-api pipelineCountries",
+        )
+    week = _week_tag(context.scheduled_execution_time)
+    return [
+        dg.RunRequest(partition_key=iso3, run_key=f"{iso3}-{week}")
+        for iso3 in iso3s
+    ]
+
+
+# Keep the dynamic partition set in lockstep with clear-api's `pipelineCountries`
+# so onboarding a country there is all it takes to add it to the KB pipeline.
+# ADD-ONLY: registering a partition is safe, but REMOVING one would discard that
+# country's materialization history, so a de-listed country is logged for a human
+# rather than dropped. The sensor does NOT launch runs — a new country is picked
+# up by the Monday schedule (its first run is the initial-lookback ingest), or an
+# operator can backfill it on demand from the Dagster UI.
+@dg.sensor(
+    name="reliefweb_country_partition_sensor",
+    minimum_interval_seconds=3600,
+)
+def reliefweb_country_partition_sensor(context: dg.SensorEvaluationContext):
+    desired = set(list_pipeline_iso3s())
+    existing = set(context.instance.get_dynamic_partitions(country_partitions.name))
+    stale = sorted(existing - desired)
+    if stale:
+        context.log.warning(
+            "country partitions no longer in pipelineCountries (kept to preserve "
+            "history — remove manually if intended): %s",
+            ", ".join(stale),
+        )
+    new = sorted(desired - existing)
+    if not new:
+        return dg.SkipReason("country partition set already matches pipelineCountries")
+    context.log.info("registering new country partitions: %s", ", ".join(new))
+    return dg.SensorResult(
+        dynamic_partitions_requests=[country_partitions.build_add_request(new)],
+    )

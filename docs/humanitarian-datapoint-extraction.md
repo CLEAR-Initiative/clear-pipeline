@@ -286,7 +286,7 @@ The aggregator is a switch table over field kind. Every field in the exhaustive 
 
 | Field kind | Aggregation | Example fields |
 |---|---|---|
-| **Additive count** | quality-weighted sum, dedup by (event, location, date_bucket) | killed, new_displacements, incidents, funding_received |
+| **Additive count** | dedup by (event, location, date_bucket), then the interval-and-range reduce — flow sweep + cumulative differencing + event-type containment (**§6.8**), not a naïve sum | killed, new_displacements, incidents, funding_received |
 | **Latest state** | latest `publishedAt` wins | IDP stock, PIN, IPC phase, risk level |
 | **Set union** | union of contributing values | locations_affected, event_types, active_clusters |
 | **Max** | pick the largest quality-adjusted value | population_affected (upper-bound reporting) |
@@ -317,7 +317,7 @@ The four rules, and which report "wins" when two describe the same thing:
 
 **Why the combine rule differs:** counts of *things that happened* (deaths, new displacements, incidents, money received) are **summed** — each report adds new events. Point-in-time *states* (how many people are currently displaced or in need, how much funding is still required) are **latest-wins** — a newer report replaces the old figure rather than adding to it. Population Affected takes the **highest** figure because it describes the widest reach of the crisis, which a later, narrower report shouldn't shrink.
 
-**Why the window is a week:** reports arrive weekly and each figure is already a total over the report's period ("600 affected between two dates"), so a *summed* figure counts as the same measurement when two reports cover the same **week** — different weeks are genuinely different and add up. Slow-moving *states* (people in need, currently displaced) use a **month**. The full grouping rule is in §6.4.2 and the tie-break rules (which report wins) in §6.4.3. *Limitation:* sitreps often cover 2–6 week, overlapping windows, so a weekly window isn't exact — matching by overlapping date ranges is a planned refinement (§6.4.2).
+**Why the window is a week:** reports arrive weekly and each figure is already a total over the report's period ("600 affected between two dates"), so a *summed* figure counts as the same measurement when two reports cover the same **week** — different weeks are genuinely different and add up. Slow-moving *states* (people in need, currently displaced) use a **month**. The full grouping rule is in §6.4.2 and the tie-break rules (which report wins) in §6.4.3. The 2–6 week **overlapping** windows this single-date bucketing can't express are now handled by the breakpoint flow sweep — see **§6.8** (ADR-0007), which reconciles overlapping period *ranges* instead of bucketing one date.
 
 Any datapoint not in this list (e.g. the narrative summary) is kept as text and not merged into a number.
 
@@ -370,7 +370,7 @@ Deduplication is the load-bearing part of aggregation: it's what turns "sum of e
 
 #### 6.4.1 The incident key
 
-An incident key is a tuple `(figure_scope_location, time_bucket, event_type_set)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one figure; the aggregator picks one and discards the rest. (This is the canonical key per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md); the *shipped* key today is only `(location, time_bucket)` — the `event_type_set` dimension is specified here but not yet built, which silently collapses co-located distinct events. See ADR-0002 Consequences.)
+An incident key is a tuple `(figure_scope_location, time_bucket, event_type_set)` that identifies "the same real-world thing" across reports. Two extracted datapoints with the same key are treated as competing observations of one figure; the aggregator picks one and discards the rest. All three dimensions are now shipped — the incident key is `location | time_bucket | event_type_set`, so co-located distinct events (a conflict toll and a flood toll in the same place/week) group and sum separately instead of collapsing, and the additive combine caps an unqualified superset against its sub-causes (§7.3, see §6.8). The remaining gap is **canonicalisation**: the event-type dimension is currently the report's raw `event_types` (lowercased + sorted), not yet mapped through the glide-code taxonomy in the table below — so `"armed clash"` and `"battle"` are still distinct keys until that mapping lands. See [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md).
 
 | Dimension | Canonicalisation rule |
 |---|---|
@@ -389,7 +389,7 @@ Our source reports are **analytical and weekly**, and a figure is already a tota
 | **State snapshots** (people displaced / in need, refugees, funding required, IPC phase) | **Month** | These change slowly and are latest-wins, so a month groups a period's reports and takes the most recent. |
 | **Set-union** labels (event types, clusters) | — | No window; every report's values are merged into one list. |
 
-**Known limitation — overlapping periods.** Sitreps often cover **2–6 week windows**, and those windows overlap. A calendar week can't express that: two reports whose periods overlap but *end* in different weeks land in different weeks and both count. The correct fix compares the reports' period **ranges** (`reporting_period_start`..`end`) for overlap rather than bucketing a single date — a planned refinement, not yet built. A weekly window is the best single-date approximation short of it.
+**Overlapping periods — handled by the flow sweep (§6.8).** Sitreps often cover **2–6 week windows** that overlap, which a calendar-week bucket can't express: two reports whose periods overlap but *end* in different weeks would land in different weeks and both count. The interval-and-range reducer (ADR-0007, §6.8) fixes this — it compares the reports' period **ranges** (`basis_period_start`..`end`), cuts the timeline at every figure edge and bucket boundary, and reconciles the covering rate-ranges on each atomic sub-interval instead of bucketing a single date. The weekly window described here is the point-figure fallback (figures with no multi-day basis period), which the sweep reduces to unchanged.
 
 #### 6.4.3 Within-group winner selection
 
@@ -398,7 +398,7 @@ Within an incident group, one row wins and is emitted; others are dropped. The d
 | Policy | Applied to | Rule |
 |---|---|---|
 | `latest_wins` | State snapshots | Highest `publishedAt`. Confidence weight breaks ties. |
-| `latest_wins_with_confidence_override` | Additive counts | Highest `publishedAt` wins, UNLESS a `verified`-tier row exists within 3 days of the winner — that verified row overrides. Configurable window. |
+| `latest_wins_with_confidence_override` | Additive counts | Among the rows within the freshest's override reach (`validityWindowDays / overrideDivisor`), take the top **data-quality** tier (reliability × credibility, [ADR-0005](./data-quality-scoring-design.md)); the field's directional **bias** breaks the tie (`overreport` → lower, `underreport` → higher), and each figure's **qualifier** constrains that projection (an `at_least` floor / `at_most` ceiling can't be crossed — ADR-0007, §6.8). This replaces the original "a `verified` row within 3 days overrides" rule. |
 | `max_within_report_then_latest` | MAX fields (`population_affected`) | First pick the MAX value **within each report** (a report may mention the same figure twice), then apply `latest_wins` across reports. Prevents double-counting a re-quoted number. |
 | `set_union_all` | Set-union fields | All rows contribute — no winner, no dedup. |
 
@@ -416,16 +416,16 @@ Rule: **collapse same-report duplicates before cross-report dedup.** Within one 
 - `latest_wins_with_confidence_override`: same confidence tier, latest `publishedAt` wins.
 - Aggregate: `42000` (not `84000`). `contributing_report_ids` records both.
 
-**B) DTM (verified, 40k) vs media (unverified, 55k) for the same incident**
+**B) DTM (high data-quality, 40k) vs media (unverified, 55k) for the same incident**
 - Same incident key.
 - Media report is 2 days newer; would win under naive `latest_wins`.
-- `latest_wins_with_confidence_override`: verified row is within the 3-day window → verified wins with value `40k`.
-- `quality_score` for the bucket reflects the DTM row's confidence weight; media row is recorded in `confidence_mix` for transparency but doesn't contribute value.
+- `latest_wins_with_confidence_override`: within the override reach, the DTM row's data-quality (reliability × credibility) puts it alone in the top tier, so it wins with `40k` — and on `killed` (overreport) the directional bias also leans low, agreeing. (Had they been comparable quality, the overreport bias alone would pick the lower figure.)
+- `quality_score` for the bucket reflects the DTM row's weight; the media `55k` is recorded in `confidence_mix` for transparency but doesn't contribute value.
 
 **C) Two weekly reports of the same week's toll (El Fasher)**
 - Report A (period ending 2026-07-02): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 3 }` — a weekly **total** for the scope, not a single-incident record (per [ADR-0002](./adr/0002-deduplicate-at-figure-scope.md) the source reports totals, not incident logs).
 - Report B (period ending 2026-07-04, same ISO week): `{ event_type_set: {armed-clash}, figure_scope: SD0201 (A2), killed: 5 }`
-- Same week + same figure scope + same event-type set → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a `verified` figure within 3 days would override — §6.4.3). Reports from a *different* week — or a *different* event-type set (e.g. a co-located flood, `{flood}`) — are different figures and sum (ADR-0002).
+- Same week + same figure scope + same event-type set → the same weekly total → **deduped, not summed**. The later report wins → `killed = 5` (a higher data-quality figure within the override reach would win instead, biased low for `killed` — §6.4.3). Reports from a *different* week — or a *different* event-type set (e.g. a co-located flood, `{flood}`) — are different figures and sum (ADR-0002).
 
 **D) Same report re-quotes displacement figure in 4 places**
 - Same-report multi-mention collapse (§6.4.4): pick one mention (highest confidence, earliest chunk).
@@ -474,7 +474,7 @@ def aggregate_field(field_kind, contributing_reports, location_scope, window):
     return combine(winners, rule=field_kind.combine_rule)
 ```
 
-`incident_key`, `resolve_within_group`, and `combine` are the three extension points where new field kinds and new policies plug in. This is the shared function §6.6 imports for both the Dagster pre-compute asset and the clear-api runtime resolver.
+`incident_key`, `resolve_within_group`, and `combine` are the three extension points where new field kinds and new policies plug in. This is the shared function §6.6 imports for both the Dagster pre-compute asset and the clear-api runtime resolver. Two steps have grown well past this sketch and are detailed in **§6.8**: `resolve_within_group` for additive fields is the bias-and-qualifier projection (not a plain latest/verified pick), and `combine` for additive fields is the interval-and-range reducer (breakpoint flow sweep → cumulative differencing → event-type containment), not the `weight_for(confidence) × value` sum shown in §6.3.
 
 ### 6.5 Staleness handling
 
@@ -535,6 +535,44 @@ When a new `report_datapoint` row lands:
    always see fresh numbers.
 
 Between invalidation and recompute, the resolver falls back to the on-demand path for stale tiers. Users always see fresh numbers; the cache is a latency optimisation only.
+
+### 6.8 Interval-and-range model (ADR-0007) — the shipped reducer
+
+The math in §6.2–§6.4 collapses each figure to a single point early and buckets it by a single date. The **interval-and-range model** ([ADR-0007](./adr/0007-figures-as-ranges-over-intervals.md), [design](./interval-range-datapoint-model-design.md)) generalises that: **a figure is a value-RANGE over a time-INTERVAL, tagged by measure type**, aggregated **losslessly** with bias **projected last**. This is what the clear-api reducer (`datapoint-aggregation.ts`) runs today; the sections above describe the point-only special case it still reduces to for exact figures.
+
+**What every figure now carries** (captured at extraction, schema v3):
+
+| Field | Meaning |
+|---|---|
+| `value` | The headline point — unchanged; still what a version-less read returns. |
+| `value_low` / `value_high` | The magnitude band, **always finite** (never an open `[500, ∞)`). Equals `value` for an exact figure (zero-width). |
+| `qualifier` | Per-figure evidence of direction: `exact` / `at_least` (firm floor) / `at_most` (firm ceiling) / `approx` (symmetric). |
+| `measure_type` | `stock_as_of` (point-in-time) / `period_flow` (accrued during a period) / `cumulative_to_date` (running total). |
+| `basis_period_start/end` | The figure's own period when stated, else the report's reporting period. |
+
+**Guiding principle — aggregate lossless, project bias late.** Ranges are combined without collapsing to a point; the field-level quality bias (ADR-0005 §3) is applied *last*, as a projection of the aggregate band onto a single headline (`overreport` → the low end, `underreport` → the high, `neutral` → freshest).
+
+**Breakpoint flow sweep (§6.2 of the ADR) — the overlapping-period fix.** For additive/flow fields where any figure carries a real multi-day `basis_period`, the reducer no longer buckets by a single date. It cuts the timeline at **every figure edge AND bucket boundary**, and on each atomic sub-interval reconciles the covering figures' **daily rate-ranges** into one:
+
+- the reconciled **band** is the *union* of the covering rate-ranges (`min low … max high`) — two sitreps that disagree about the same days surface that disagreement as **width**, not a silent pick;
+- the reconciled **point** is the **bias projection** onto that band, with **no recency gate** — both figures genuinely measure the same elapsed days, so quality/bias decides, not publish order (a later sitrep re-counting the same window is a second observation, not fresher truth);
+- the sub-interval rate is integrated over its length and added to the bucket that contains it, so an overlap **reconciles** instead of double-counting and a period straddling two buckets **splits by rate**.
+
+Worked example: `A[2–10 Apr] 800` (100/day) + `B[5–15 Apr] 660` (66/day), `killed` = overreport → **960**, not 1460 (naïve sum) or 800 (max); the A-vs-B disagreement on the overlap shows up as upward band width.
+
+**Event-type containment = max (§7.3).** Within a bucket, an *unqualified* (empty event-type) figure is a **superset** of its qualified sub-causes, so the bucket total is `max(Σ qualified, the widest unqualified)` — never the whole added on top of its own parts (`1M killed` + `100k drone deaths` → **1M**, not 1.1M). Max, not sum, on the *unknown* relationship: an undercount is recoverable, a silent double-count is not. Distinct qualified event-type sets are disjoint and still **sum**.
+
+**Published confidence band.** The aggregate ships `value_low` / `value_high` / `range_width` alongside `value`, plus the field's `bias` direction — an honest uncertainty envelope built the *same way the point was* (flows integrated over their intervals, supersets capped, distinct causes summed), so `value` always lies inside `[value_low, value_high]`. A consumer can render error bars or project its own headline.
+
+**Range-overlap divergence guard (§9).** For a `latest_state` field with an authoritative API anchor (ADR-0006 §7): if the **report figures carry a real band** and the API value falls **inside** it, that's agreement (the anchor tightens the estimate — no signal); an anchor the band **excludes** is the divergence (API wins, the gap is surfaced). "Real band" is a **per-figure** property (a stated range), not the aggregate spread — so two *exact* figures that merely disagree don't fake a band; they fall back to the ADR-0006 §7 fixed **25%** tolerance, and pure exact-vs-exact disagreement still trips the guard.
+
+**Backward compatibility.** A pre-v3 (point) figure has `value_low = value_high = value`, so it reduces exactly as before. One nuance: the basis *period* falls back to the report's reporting period, so a v2 figure whose report states a multi-day period **does** enter the sweep — a lone such figure integrates back to its own value (no change), and only *overlapping* v2 figures move (from the old double-count to a reconciled total).
+
+**Qualifier as a directional constraint.** The per-figure `qualifier` composes with the field-level `qualityBias` rather than replacing it — they are different axes (what the *source asserted* about this figure's bound vs the field's *systematic skew*). The qualifier is a **hard constraint**, the bias breaks the tie within it: an `at_least` figure's floor may not be projected below, an `at_most` figure's ceiling not above, whatever the field bias says; `approx`/`exact` add no constraint (so an all-exact corpus is unchanged). Wired in the bias-projection step (`biasWinner`, and the flow sweep's rate reconciliation).
+
+**Measure-type reconciliation — running totals are differenced, not summed.** A `stock_as_of` / `cumulative_to_date` figure is a running total to its as-of date, not a period increment. On an additive field these are **first-differenced** into the increments they imply (consecutive snapshots → `Cᵢ − Cᵢ₋₁` over the interval between them; the earliest → the total over `[origin, as-of]`), and reported flows that fall **inside** a cumulative's coverage are dropped as already-counted (flows *outside* it are kept and extend the series). The result flows through the same breakpoint sweep, so a running total is integrated over exactly its own span and never added on top of the flows it already contains — `C(Mar31)=3000` then `C(Apr30)=5000` yields **5000**, not 8000. `measure_type` does **not** change the field-level combine strategy: `FieldRule.kind` still owns sum vs latest vs max vs union; it only refines stock-vs-flow within an additive field. *Edge:* a reported flow that only **partially** overlaps a cumulative's coverage boundary is dropped (conservative — favours a small undercount over a double-count).
+
+**Per-country refresh scope.** `refreshAggregatedDatapoints` and `hasAggregatedDatapoints` take an optional `countryLocationId` (an admin-0 id) so the country-partitioned pipeline recomputes / first-run-checks one country's subtree at a time instead of a global pass.
 
 ---
 
