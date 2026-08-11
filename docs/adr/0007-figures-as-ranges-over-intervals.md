@@ -59,8 +59,13 @@ they are assigned *to*. A point at a single date is the degenerate case.
 Add `measure_type ∈ { stock_as_of, period_flow, cumulative_to_date }` to every extracted
 `NumericField`, chosen by the extractor from linguistic cues ("total / currently / as of" →
 stock; "new / additional / during" → flow; "since <date>" → cumulative). It is no longer
-implicit in *which field* the LLM selects. `cumulative_to_date` is preferred where a source
-frames it that way — it behaves as a stock and sidesteps overlap entirely.
+implicit in *which field* the LLM selects. A `cumulative_to_date` (and a `stock_as_of` on an
+additive field) is a running total to its as-of date; at aggregation it is **first-differenced**
+into the period increments it implies and reconciled with the reported flows (§4), so it is
+neither summed as a flow nor added on top of the flows it already contains. *(This supersedes
+this ADR's original "cumulative behaves as a stock and sidesteps overlap" framing — decided in
+the #124 review, which chose first-differencing over cumulative-as-stock for cross-bucket
+precision.)*
 
 ### 2. Figures carry `basis_period`; a bucket is a query window
 
@@ -68,8 +73,11 @@ Every figure keeps its true `[start, end]` (we already store `reportingPeriodSta
 start *using* them). A figure is **not** assigned to one bucket — it **contributes to every
 standard window its interval intersects**, reduced per its `measure_type`:
 
-- **Stock / cumulative** → a *point* at its as-of date; lands in the single window containing
+- **Stock (`stock_as_of`)** → a *point* at its as-of date; lands in the single window containing
   that instant; latest-wins within a window (today's `latest_state`, keyed on the as-of date).
+- **Cumulative (`cumulative_to_date`)** → a running total; **first-differenced** into per-interval
+  flows (§4) so it contributes correctly to every window its span crosses, not only the one
+  holding its as-of.
 - **Flow** → an *interval quantity*; the window value is the interval reduction (§4).
 
 The pre-computed `aggregated_datapoints` rows (one per `window × kind × location`) are
@@ -79,8 +87,13 @@ analysis) read the same rows.
 ### 3. Figures carry a value-range; aggregate in range-space, project late
 
 Extract `value_low`, `value_high`, and a `qualifier` ("at least" / "up to" / "around" /
-exact). The qualifier encodes the bias direction **per figure** ("at least 500k" → firm lower
-bound), which supersedes the field-level `qualityBias` prior where present.
+exact). The qualifier encodes a firm **per-figure bound** ("at least 500k" → floor, "up to" →
+ceiling). It **composes** with the field-level `qualityBias` as a hard *constraint* rather than
+replacing it: the floor and ceiling bound the projection in **both** directions and the bias
+only breaks the tie inside `[floor, ceiling]`; opposing qualifiers (`at_least X` with `at_most
+Y`, X > Y) are an impossible contradiction → fall back deterministically, never breach a bound.
+*(Refined from "supersedes" in the #124 review — a qualifier and the field bias are different
+axes that can disagree, so they compose.)*
 
 Aggregation is performed **in range-space (lossless)**; the collapse to a single number is
 **deferred to the consumer edge** and driven by bias-as-projection: an `overreport` field
@@ -99,6 +112,15 @@ reduction *within* and *across* groups:
   **rate-ranges** via the existing `pickWinner` (data-quality override, else `qualityBias`
   direction), multiply by the sub-interval length, and add to the window that contains it.
   One sweep handles overlap (#2) and boundary-spanning (#3), and re-uses ADR-0005's bias.
+- **Cumulative / stock-as-of on an additive field** — a running total, not an increment. Sort
+  the snapshots by as-of and **first-difference** them (`Cᵢ − Cᵢ₋₁`; a *drop* is a counter reset →
+  `Cᵢ` is a fresh total; a *no-origin* earliest base spans the day ending at its as-of so it isn't
+  reconciled away), then feed the derived increments through the same additive-flow sweep.
+  Reported flows entirely inside a cumulative's coverage are subsumed (dropped); a partial-overlap
+  flow keeps its outside portion, scaled. The increments telescope to the **latest** running total
+  — the same "latest stock + forward flows since" model as `estimateStockFlowTotal` (clear-api,
+  ADR-0006 §4), additionally distributed across buckets so sub-window queries are correct. Competing
+  snapshots at the same as-of are reconciled to one before differencing.
 - **Latest-state / stock** — **intersect** the ranges of comparable-quality bounds
   (independent bounds tighten the estimate); a clearly-higher-quality figure overrides;
   **non-overlapping** ranges are a contradiction → divergence signal.
