@@ -38,6 +38,11 @@ from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION,
     LocationRef,
 )
+from clear_context_pipeline.defs.reliefweb_partitions import (
+    chunks_prefix,
+    country_partitions,
+    datapoints_prefix,
+)
 from clear_context_pipeline.providers import (
     clear_api,
     load_guardrails,
@@ -48,12 +53,9 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
 logger = logging.getLogger(__name__)
 
-COUNTRY_ISO3 = "sdn"
-FORMAT_SLUG = "situation-report"
-
-# S3 debug snapshot prefix — mirrors the vector pipeline's convention
-# (`reliefweb/kb/…`) so both layers' artefacts live in one namespace.
-S3_DATAPOINTS_PREFIX = f"reliefweb/kb/datapoints/{COUNTRY_ISO3}/{FORMAT_SLUG}"
+# Country scope is a Dagster partition (see reliefweb_partitions). The S3 debug
+# snapshot prefix — `datapoints_prefix(iso3)` — mirrors the vector pipeline's
+# convention (`reliefweb/kb/…`) so both layers' artefacts live in one namespace.
 
 
 # ── Plausibility crisis briefs (ADR-0004 §4) ──────────────────────────
@@ -237,8 +239,8 @@ def _s3_client():
     return s3_client()
 
 
-def _debug_key(report_id: str) -> str:
-    return f"{S3_DATAPOINTS_PREFIX}/{report_id}.json"
+def _debug_key(iso3: str, report_id: str) -> str:
+    return f"{datapoints_prefix(iso3)}/{report_id}.json"
 
 
 def _read_doc_text(s3, bucket: str, key: str) -> str:
@@ -526,16 +528,15 @@ def _norm_text(s: Any) -> str:
     return " ".join(str(s or "").split()).lower()
 
 
-def _read_report_chunks(s3, bucket: str, report_id: str) -> list[dict] | None:
+def _read_report_chunks(s3, bucket: str, report_id: str, iso3: str) -> list[dict] | None:
     """Fetch the report's authoritative chunks (the vector-store artifact,
-    `{chunk_index, page_start, page_end, text}` per line) from S3. Returns
-    None when absent — the chunks asset is a sibling of this one (both fan
-    out from pdf_text), and a manual doc may skip chunking — so the caller
-    degrades to a null chunk_index rather than failing extraction."""
-    from clear_context_pipeline.defs.knowledgebase.chunks import _chunks_key
-
+    `{chunk_index, page_start, page_end, text}` per line) from S3 for this
+    country. Returns None when absent — the chunks asset is a sibling of this one
+    (both fan out from pdf_text), and a manual doc may skip chunking — so the
+    caller degrades to a null chunk_index rather than failing extraction."""
     try:
-        body = s3.get_object(Bucket=bucket, Key=_chunks_key(report_id))["Body"].read()
+        key = f"{chunks_prefix(iso3)}/{report_id}.jsonl"
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
     except Exception as exc:  # noqa: BLE001 — missing/unreadable → degrade gracefully
         logger.info(
             "[DATAPOINTS] no chunk artifact for %s (%s) — chunk_index stays null",
@@ -655,6 +656,7 @@ def extract_datapoints_for_one_report(
     publisher_name: str | None = None,
     publisher_homepage: str | None = None,
     country_iso3: str | None = None,
+    storage_iso3: str = "sdn",
 ) -> dict:
     """Run the six domain LLM extractions for one report, resolve
     locations, hoist hot totals, snapshot a debug artefact to S3, and
@@ -684,6 +686,11 @@ def extract_datapoints_for_one_report(
         (ReliefWeb `report.source`, first entry). Resolved to the
         report-level `sourceId` — the source fallback for any figure
         that cites no distinct origin. None for manual documents.
+      storage_iso3: the COUNTRY partition whose S3 namespace holds this
+        report's chunk artifact + debug snapshot (`reliefweb/kb/{chunks,
+        datapoints}/<iso3>/…`). The weekly asset passes its partition key;
+        the manual op keeps the historical `"sdn"` default (its chunk read
+        returns None regardless, as manual docs use a separate namespace).
 
     Returns:
       Summary dict identical in shape to the weekly asset's per-report
@@ -747,7 +754,7 @@ def extract_datapoints_for_one_report(
     # and the upsert so both carry the filled indices. Skipped (chunk_index
     # left null) when the chunk artifact isn't in S3 yet.
     if s3 is not None and s3_bucket:
-        chunks = _read_report_chunks(s3, s3_bucket, report_id)
+        chunks = _read_report_chunks(s3, s3_bucket, report_id, storage_iso3)
         if chunks:
             cq_total, cq_matched = _backfill_chunk_indices(merged, chunks)
             log.info(
@@ -790,7 +797,7 @@ def extract_datapoints_for_one_report(
     # ── Debug snapshot — replay-friendly ──────────────────────────
     debug_key: str | None = None
     if s3 is not None and s3_bucket:
-        debug_key = _debug_key(report_id)
+        debug_key = _debug_key(storage_iso3, report_id)
         debug_payload = {
             "report_id": report_id,
             "schema_version": SCHEMA_VERSION,
@@ -858,12 +865,13 @@ def extract_datapoints_for_one_report(
     # null. We read the artifact by report_id, so we need the ordering, not
     # the chunks value passed in.
     deps=["reliefweb_weekly_chunks"],
+    partitions_def=country_partitions,
 )
 def reliefweb_weekly_datapoints(
     context: AssetExecutionContext,
     reliefweb_weekly_pdf_text: list[dict],
 ) -> list[dict]:
-    """One extraction pass per report in this week's ingest.
+    """One extraction pass per report in this country partition's ingest.
 
     Returns a summary list ``[{report_id, domains_ok, domains_failed,
     resolved_locations, s3_debug_key}]`` — the aggregation asset
@@ -873,6 +881,7 @@ def reliefweb_weekly_datapoints(
     Runs after ``reliefweb_weekly_chunks`` so the chunk artifact exists
     when we backfill ``chunk_index`` (see the decorator's `deps`).
     """
+    iso3 = context.partition_key
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
     guardrails = load_guardrails()
@@ -961,6 +970,7 @@ def reliefweb_weekly_datapoints(
                 publisher_name=report.get("publisher_name"),
                 publisher_homepage=report.get("publisher_homepage"),
                 country_iso3=report.get("country_iso3"),
+                storage_iso3=iso3,
             )
         except _NothingExtracted:
             context.log.error(
@@ -1009,6 +1019,6 @@ def reliefweb_weekly_datapoints(
         "reports_reused": dg.MetadataValue.int(reused),
         "schema_version": dg.MetadataValue.text(SCHEMA_VERSION),
         "extraction_model": dg.MetadataValue.text(llm.model),
-        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{S3_DATAPOINTS_PREFIX}/"),
+        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{datapoints_prefix(iso3)}/"),
     })
     return summaries

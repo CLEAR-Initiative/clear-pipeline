@@ -55,16 +55,17 @@ from clear_context_pipeline.defs.situation.schemas import (
     Sources,
     StockFlowEstimate,
 )
+from clear_context_pipeline.defs.reliefweb_partitions import country_partitions
 from clear_context_pipeline.providers import clear_api, make_llm_provider
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
 logger = logging.getLogger(__name__)
 
-# Only Sudan for the POC. When we widen, this lookup switches to
-# `clear_api.get_pipeline_countries()` and iterates the returned
-# list - no code change beyond dropping the hardcoded set.
-_POC_COUNTRIES = ("Sudan",)
+# Country is a Dagster partition: `weekly_situation_analyses` runs once per
+# country (its `context.partition_key` iso3), resolving the name from
+# `clear_api.get_pipeline_countries()`. The old hardcoded POC set is gone — the
+# partition set is what scopes which countries get situation snapshots.
 
 # Emergency kill-switch - set to "1" / "true" to skip every LLM
 # narrative component and ship a deterministic-only row. Same
@@ -621,13 +622,14 @@ def generate_and_upsert_for_country_month(
 @dg.asset(
     group_name="reliefweb_kb",
     deps=["reliefweb_weekly_knowledgebase_upsert"],
+    partitions_def=country_partitions,
 )
 def weekly_situation_analyses(
     context: AssetExecutionContext,
     reliefweb_weekly_datapoint_aggregations: dict,
 ) -> list[dict]:
-    """Generate + upsert one situation-analysis snapshot per pipeline
-    country for the current calendar year.
+    """Generate + upsert the situation-analysis snapshots for THIS country
+    partition (calendar-year-to-date + current month) for the current year.
 
     Two upstream dependencies - the analysis needs BOTH branches of
     this week's ingest to be fresh before it runs:
@@ -652,29 +654,42 @@ def weekly_situation_analyses(
     """
     del reliefweb_weekly_datapoint_aggregations  # only used to enforce ordering
 
+    iso3 = context.partition_key
+    # Map the partition iso3 back to the country name the generators expect.
+    names_by_iso3 = {
+        c["iso3"].lower(): c["name"] for c in clear_api.get_pipeline_countries()
+    }
+    country_name = names_by_iso3.get(iso3)
+    if country_name is None:
+        raise dg.Failure(
+            description=(
+                f"partition {iso3!r} is not in clear-api pipelineCountries — cannot "
+                "resolve a country name for situation generation"
+            ),
+        )
+
     now = datetime.now(timezone.utc)
     year = now.year
     month = now.month
 
+    # Two snapshots for this country: the calendar-year-to-date view and the
+    # current month. Each reads its own country-scoped aggregated bucket
+    # (yearly-A0 and monthly-A0) for the matching window.
     summaries: list[dict] = []
-    for country_name in _POC_COUNTRIES:
-        # Two snapshots per country: the calendar-year-to-date view and the
-        # current month. Each reads its own country-scoped aggregated bucket
-        # (yearly-A0 and monthly-A0) for the matching window.
-        for summary in (
-            generate_and_upsert_for_country_year(
-                country_name=country_name, year=year, log_context=context.log,
-            ),
-            generate_and_upsert_for_country_month(
-                country_name=country_name, year=year, month=month,
-                log_context=context.log,
-            ),
-        ):
-            if summary is not None:
-                summaries.append(summary)
+    for summary in (
+        generate_and_upsert_for_country_year(
+            country_name=country_name, year=year, log_context=context.log,
+        ),
+        generate_and_upsert_for_country_month(
+            country_name=country_name, year=year, month=month,
+            log_context=context.log,
+        ),
+    ):
+        if summary is not None:
+            summaries.append(summary)
 
     context.add_output_metadata({
-        "countries_processed": dg.MetadataValue.int(len(_POC_COUNTRIES)),
+        "country": dg.MetadataValue.text(iso3),
         "snapshots_written": dg.MetadataValue.int(len(summaries)),
         "year": dg.MetadataValue.int(year),
         "month": dg.MetadataValue.int(month),

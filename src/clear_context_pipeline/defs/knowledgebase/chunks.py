@@ -40,15 +40,17 @@ import tiktoken
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
+from clear_context_pipeline.defs.reliefweb_partitions import (
+    chunks_prefix,
+    country_partitions,
+)
+
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
-COUNTRY_ISO3 = "sdn"
-FORMAT_SLUG = "situation-report"
-
+# Country scope is a Dagster partition (see reliefweb_partitions); this stage's
+# S3 layout is `chunks_prefix(iso3)`.
 CHUNK_TOKENS = 800
 CHUNK_OVERLAP_TOKENS = 100
-
-S3_CHUNKS_PREFIX = f"reliefweb/kb/chunks/{COUNTRY_ISO3}/{FORMAT_SLUG}"
 
 # Lazily-loaded tiktoken encoding — deliberately NOT loaded at import.
 # `get_encoding` downloads the BPE vocab over the network on a cold cache,
@@ -72,8 +74,8 @@ def _s3_client():
     return s3_client()
 
 
-def _chunks_key(report_id: str) -> str:
-    return f"{S3_CHUNKS_PREFIX}/{report_id}.jsonl"
+def _chunks_key(iso3: str, report_id: str) -> str:
+    return f"{chunks_prefix(iso3)}/{report_id}.jsonl"
 
 
 def _read_pages(s3, bucket: str, key: str) -> list[dict]:
@@ -141,7 +143,7 @@ def _slice_into_chunks(
     return chunks
 
 
-@dg.asset(group_name="reliefweb_kb")
+@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
 def reliefweb_weekly_chunks(
     context: AssetExecutionContext,
     reliefweb_weekly_pdf_text: list[dict],
@@ -152,6 +154,7 @@ def reliefweb_weekly_chunks(
     S3 so chunk boundaries can be re-tweaked and the enrichment
     replayed without re-extracting PDFs.
     """
+    iso3 = context.partition_key
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
 
@@ -170,7 +173,7 @@ def reliefweb_weekly_chunks(
             )
             continue
 
-        chunks_key = _chunks_key(report["report_id"])
+        chunks_key = _chunks_key(iso3, report["report_id"])
         body = b"\n".join(
             json.dumps(
                 {"report_id": report["report_id"], **c},
@@ -196,6 +199,6 @@ def reliefweb_weekly_chunks(
         "total_chunks": dg.MetadataValue.int(total_chunks),
         "chunk_size_tokens": dg.MetadataValue.int(CHUNK_TOKENS),
         "chunk_overlap_tokens": dg.MetadataValue.int(CHUNK_OVERLAP_TOKENS),
-        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{S3_CHUNKS_PREFIX}/"),
+        "s3_prefix": dg.MetadataValue.text(f"s3://{bucket}/{chunks_prefix(iso3)}/"),
     })
     return summaries

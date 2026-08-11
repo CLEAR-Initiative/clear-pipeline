@@ -83,8 +83,8 @@ mutation UpsertReportDatapoints($input: UpsertReportDatapointsInput!) {
 """
 
 _REFRESH_AGGREGATED_DATAPOINTS = """
-mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVersion: String!) {
-  refreshAggregatedDatapoints(from: $from, to: $to, schemaVersion: $schemaVersion) {
+mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVersion: String!, $countryLocationId: String) {
+  refreshAggregatedDatapoints(from: $from, to: $to, schemaVersion: $schemaVersion, countryLocationId: $countryLocationId) {
     computedBuckets
     supersededBuckets
     situationAnalysesInvalidated
@@ -94,8 +94,8 @@ mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVe
 """
 
 _HAS_AGGREGATED_DATAPOINTS = """
-query HasAggregatedDatapoints($schemaVersion: String!) {
-  hasAggregatedDatapoints(schemaVersion: $schemaVersion)
+query HasAggregatedDatapoints($schemaVersion: String!, $countryLocationId: String) {
+  hasAggregatedDatapoints(schemaVersion: $schemaVersion, countryLocationId: $countryLocationId)
 }
 """
 
@@ -408,16 +408,22 @@ def upsert_report_datapoints(
     return result["upsertReportDatapoints"]
 
 
-def has_aggregated_datapoints(schema_version: str) -> bool:
+def has_aggregated_datapoints(
+    schema_version: str, *, country_location_id: str | None = None,
+) -> bool:
     """Cheap existence check - is there at least one current
-    aggregated_datapoints row for this schema version?
+    aggregated_datapoints row for this schema version (and, when
+    ``country_location_id`` is given, for THAT country)?
 
-    Used by the aggregation asset to distinguish first-run backfill
-    (needs a wide lookback window to catch existing history) from
-    routine weekly refreshes (narrow window is enough).
+    Used by the aggregation asset to distinguish a first-run backfill
+    (needs a wide lookback window to catch existing history) from a
+    routine weekly refresh (narrow window is enough). Scoping it to the
+    country makes a newly-onboarded country's first run use the initial
+    window even after other countries are already established.
     """
     data = _execute(
-        _HAS_AGGREGATED_DATAPOINTS, {"schemaVersion": schema_version},
+        _HAS_AGGREGATED_DATAPOINTS,
+        {"schemaVersion": schema_version, "countryLocationId": country_location_id},
     )
     return bool(data.get("hasAggregatedDatapoints"))
 
@@ -461,9 +467,13 @@ def refresh_aggregated_datapoints(
     from_iso: str,
     to_iso: str,
     schema_version: str,
+    country_location_id: str | None = None,
 ) -> dict[str, Any]:
     """Trigger clear-api's four-tier aggregation refresh for every
     report whose ``reportingPeriodEnd`` falls in ``[from_iso, to_iso]``.
+    When ``country_location_id`` is given the refresh is SCOPED to that
+    country's subtree, so a per-country partition run recomputes only its
+    own buckets instead of a redundant global pass.
 
     Returns the server-side summary: ``{ computedBuckets,
     supersededBuckets, schemaVersion }``. clear-api walks the
@@ -473,7 +483,12 @@ def refresh_aggregated_datapoints(
     """
     data = _execute(
         _REFRESH_AGGREGATED_DATAPOINTS,
-        {"from": from_iso, "to": to_iso, "schemaVersion": schema_version},
+        {
+            "from": from_iso,
+            "to": to_iso,
+            "schemaVersion": schema_version,
+            "countryLocationId": country_location_id,
+        },
     )
     return data["refreshAggregatedDatapoints"]
 
@@ -679,6 +694,24 @@ def resolve_country_location_id(country_name: str) -> str | None:
     Kept as a wrapper so future callers (dashboards, exports) can
     hit one function even if the underlying resolver evolves."""
     return resolve_location(name=country_name, admin_level=0)
+
+
+def resolve_country_location_id_by_iso3(iso3: str) -> str | None:
+    """A country's `locations.id` from its ISO3 — the reliefweb partition key.
+    `pipelineCountries` carries name+iso3 but not the location id, so map the
+    iso3 to the country name there, then resolve the id by name (admin_level=0).
+    Returns None when the iso3 isn't a configured pipeline country or the name
+    doesn't resolve — the aggregation asset then falls back to the wider
+    (unscoped) initial window rather than silently under-refreshing."""
+    name_by_iso3 = {
+        c["iso3"].lower(): c["name"]
+        for c in get_pipeline_countries()
+        if c.get("iso3")
+    }
+    country_name = name_by_iso3.get(iso3.lower())
+    if country_name is None:
+        return None
+    return resolve_country_location_id(country_name)
 
 
 def search_knowledgebase(

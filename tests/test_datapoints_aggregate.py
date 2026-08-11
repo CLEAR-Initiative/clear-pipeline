@@ -24,11 +24,22 @@ def _build_op_context():
     asset invocation — a MagicMock trips the isinstance check.
     `build_asset_context()` produces a lightweight one with in-memory
     log capture and metadata accumulation, exactly what these tests
-    need."""
-    return dg.build_asset_context()
+    need. The asset is partitioned by country iso3 — materialize `sdn`."""
+    return dg.build_asset_context(partition_key="sdn")
 
 
 class TestAggregationAsset:
+    @pytest.fixture(autouse=True)
+    def _mock_country_resolve(self):
+        # The asset resolves its partition iso3 → a clear-api location id before
+        # the first-run check; stub it so the window-selection tests don't need a
+        # live clear-api. (None would also work — it just means an unscoped call.)
+        with patch(
+            "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.resolve_country_location_id_by_iso3",
+            return_value="loc-sdn",
+        ):
+            yield
+
     def test_skips_when_no_new_reports_landed(self):
         # If the extraction asset produced no summaries, there's
         # nothing to trigger a refresh over — bail early rather than
