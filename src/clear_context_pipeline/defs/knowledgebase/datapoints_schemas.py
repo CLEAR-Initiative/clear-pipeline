@@ -19,9 +19,10 @@ of the design doc).
 from typing import Literal, Optional
 
 import json
+import re
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Schema versions:
 #   v1 — pre-launch baseline: Figure Scope on NumericField
@@ -34,12 +35,18 @@ from pydantic import BaseModel, Field, field_validator
 #        narrative_and_confidence), and the returnee stock/flow split
 #        (returnee_stock + new_returns replace returnees). See the clear-
 #        context-pipeline ADR-0004 / ADR-0005.
+#   v3 — interval-and-range model, Phase 1 "Capture" (ADR-0007): every
+#        NumericField gains value_low/value_high (magnitude range), qualifier
+#        (per-figure bias direction), measure_type (stock/flow/cumulative), and
+#        an optional figure-level basis_period_start/end. `value` stays the
+#        headline point so downstream (clear-api aggregation) is unaffected; the
+#        richer shape is captured now and consumed by the reducer in later phases.
 #
 # Pre-launch the corpus is a handful of test reports we wipe and re-extract on
 # every change, so the version mainly documents the shape. Aggregation still
-# combines only same-version rows, so the bump keeps any remaining v1 rows from
-# mixing with the re-extracted v2 rows.
-SCHEMA_VERSION = "v2"
+# combines only same-version rows, so the bump keeps any remaining older rows
+# from mixing with the re-extracted v3 rows.
+SCHEMA_VERSION = "v3"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -73,6 +80,48 @@ ConfidenceTier = Literal[
 # Three-valued so the aggregator scores met = 1.0 / partial = 0.5 / unmet = 0.0
 # and weights each criterion into the 0–10 information_credibility score.
 CredibilityRating = Literal["met", "partial", "unmet"]
+
+# ── Interval-and-range model (ADR-0007) ──────────────────────────────
+# The per-figure bias direction the source states. Supersedes the field/source
+# `qualityBias` prior where present ("at_least" → truth ≥ reported).
+Qualifier = Literal["exact", "at_least", "at_most", "approx"]
+
+# What a number measures over time — routes a figure to the right reduction.
+# `cumulative_to_date` behaves as a stock (bypasses the flow rate math) and
+# sidesteps period-overlap, so it is preferred where a source frames it that way.
+MeasureType = Literal["stock_as_of", "period_flow", "cumulative_to_date"]
+
+# Both enums live on EVERY numeric leaf, so a single off-taxonomy value ("flow"
+# for "period_flow", "minimum" for "at_least") would raise a ValidationError that
+# the extractor catches at DOMAIN granularity — nulling every figure in that
+# domain, not just the one leaf. To keep that blast radius from following the new
+# enums, coerce leniently at the field boundary: map the obvious synonyms, and
+# fall back to a SAFE default (qualifier → "exact" = no bias claim; measure_type →
+# None = indeterminate) rather than letting one bad token void the domain.
+_QUALIFIER_ALIASES: dict[str, str] = {
+    "minimum": "at_least", "min": "at_least", "more_than": "at_least",
+    "greater_than": "at_least", "over": "at_least", "atleast": "at_least",
+    "maximum": "at_most", "max": "at_most", "less_than": "at_most",
+    "fewer_than": "at_most", "up_to": "at_most", "atmost": "at_most",
+    "approximate": "approx", "approximately": "approx", "estimated": "approx",
+    "estimate": "approx", "around": "approx", "roughly": "approx", "about": "approx",
+    "precise": "exact", "point": "exact", "exactly": "exact",
+}
+# Last-resort band width when a directional qualifier's SOFT bound collapsed onto
+# the point (the extractor emitted only the firm bound). The prompt is the primary
+# path — it asks for a context-informed finite band — so this fires only on that
+# fallback, opening a modest ±15% band in the qualifier's direction rather than
+# leaving a degenerate [500,500] that reads as 'exactly 500' for 'at least 500'.
+_FALLBACK_OPEN_BAND_FRACTION = 0.15
+
+_MEASURE_TYPE_ALIASES: dict[str, str] = {
+    "stock": "stock_as_of", "point_in_time": "stock_as_of", "total": "stock_as_of",
+    "as_of": "stock_as_of", "snapshot": "stock_as_of",
+    "flow": "period_flow", "new": "period_flow", "incremental": "period_flow",
+    "during_period": "period_flow", "period": "period_flow",
+    "cumulative": "cumulative_to_date", "running_total": "cumulative_to_date",
+    "to_date": "cumulative_to_date", "since": "cumulative_to_date",
+}
 
 
 class FigureCredibility(BaseModel):
@@ -119,6 +168,76 @@ class NumericField(BaseModel):
     unit: str = Field(description='e.g. "people", "USD", "%", "cases"')
     confidence: ConfidenceTier = Field(
         description="How trustworthy is the source of this number?",
+    )
+    # ── Interval-and-range model, Phase 1 capture (ADR-0007) ───────────
+    # A figure is a value-RANGE over a time-INTERVAL, tagged by measure type.
+    # `value` above stays the headline point (== the figure when exact) so the
+    # existing aggregator/dashboard are unaffected; the fields below carry the
+    # richer shape the interval reducer consumes in later phases. `value_low` /
+    # `value_high` default to `value` (a degenerate point) when the source gives
+    # a single number — see `_fill_range_from_point`.
+    value_low: Optional[float] = Field(
+        default=None,
+        description=(
+            "Lower bound of the reported magnitude — always FINITE, never open "
+            "(a floor of 0 for an 'up to' figure is unusable; infer a plausible "
+            "one from context instead). For an exact figure this equals `value` "
+            "— leave null then, it is filled in. For 'between 500 and 700', 500; "
+            "for 'at least 500', 500 (the firm floor); for 'up to 700', a "
+            "plausible lower bound; for 'around 600', the low end of a modest "
+            "band."
+        ),
+    )
+    value_high: Optional[float] = Field(
+        default=None,
+        description=(
+            "Upper bound of the reported magnitude — always FINITE, never open "
+            "(NOT infinity for an 'at least' figure; infer a plausible ceiling "
+            "from the report's own figures + context). Equals `value` for an "
+            "exact figure (leave null). For 'at least 500', a plausible upper "
+            "bound; for 'up to 700', 700 (the firm ceiling); for 'around 600', "
+            "the high end of a modest band."
+        ),
+    )
+    qualifier: Qualifier = Field(
+        default="exact",
+        description=(
+            "The bias direction the source states for THIS figure — this is "
+            "per-figure EVIDENCE, distinct from and superseding the field-level "
+            "`qualityBias` prior (clear-api FieldRule) where stated. 'exact' (a "
+            "precise count → point), 'at_least' (a firm FLOOR — 'more than', "
+            "'at least', 'over'), 'at_most' (a firm CEILING — 'up to', 'fewer "
+            "than', 'nearly'), or 'approx' (symmetric vagueness — 'around', "
+            "'roughly', 'an estimated', '~', or a stated 'between X and Y'). "
+            "Whatever the qualifier, value_low/value_high carry a finite band."
+        ),
+    )
+    measure_type: Optional[MeasureType] = Field(
+        default=None,
+        description=(
+            "What the number measures over time, chosen from the wording: "
+            "'stock_as_of' = a point-in-time total ('currently', 'as of', "
+            "'total displaced'); 'period_flow' = a quantity accrued DURING a "
+            "period ('newly displaced', 'during May', 'this week', 'new "
+            "cases'); 'cumulative_to_date' = a running total since an origin "
+            "('since January', 'cumulative', 'to date'). Null only if the "
+            "wording is genuinely indeterminate."
+        ),
+    )
+    # Figure-level period, only when the text states one distinct from the
+    # report's overall reporting_period_start/end (which applies otherwise, at
+    # aggregation). ISO date strings.
+    basis_period_start: Optional[str] = Field(
+        default=None,
+        description=(
+            "Start of the period THIS figure covers, if stated distinctly from "
+            "the report's overall period (ISO date, e.g. '2026-04-02'). Else "
+            "null — the report's reporting period is used."
+        ),
+    )
+    basis_period_end: Optional[str] = Field(
+        default=None,
+        description="End of the period this figure covers (ISO date) or null.",
     )
     source_quote: str = Field(
         description="The sentence in the report the number came from.",
@@ -194,6 +313,79 @@ class NumericField(BaseModel):
             "assessment. Do NOT restate directness/recency here."
         ),
     )
+
+    @field_validator("qualifier", mode="before")
+    @classmethod
+    def _coerce_qualifier(cls, v: object) -> object:
+        """Map synonyms → the four canonical qualifiers; unknown → "exact" (no
+        bias claim). `qualifier` is a required Literal on every numeric leaf, so
+        without this a single off-taxonomy token ("minimum") would raise a
+        ValidationError the extractor catches at DOMAIN granularity — nulling every
+        figure in the domain, not just this leaf. Coercing here keeps that blast
+        radius contained. None/blank also default to "exact"."""
+        if v is None:
+            return "exact"
+        s = re.sub(r"[\s-]+", "_", str(v).strip().lower())
+        if s in ("exact", "at_least", "at_most", "approx"):
+            return s
+        return _QUALIFIER_ALIASES.get(s, "exact")
+
+    @field_validator("measure_type", mode="before")
+    @classmethod
+    def _coerce_measure_type(cls, v: object) -> object:
+        """Map synonyms → the three canonical measure types; unknown → None
+        (indeterminate — the same as an omitted value). Never raises, so a stray
+        token can't void the domain."""
+        if v is None:
+            return None
+        s = re.sub(r"[\s-]+", "_", str(v).strip().lower())
+        if s in ("stock_as_of", "period_flow", "cumulative_to_date"):
+            return s
+        return _MEASURE_TYPE_ALIASES.get(s)
+
+    @model_validator(mode="after")
+    def _fill_range_from_point(self) -> "NumericField":
+        """Default the value range to the point when the source gave a single
+        number, so `value_low`/`value_high` are always populated (a degenerate
+        point == `value`). An inverted range is normalised, then the band is
+        widened if needed so `value` always lies inside it.
+
+        `value` is the authoritative headline (clear-api reads it, and its
+        interval reducer trusts value ∈ [value_low, value_high] — its band-vs-
+        point clamp silently mis-widens otherwise). When the model emits a point
+        outside its own bounds ('900' with a '[500, 700]' band, or a swap that
+        strands the point), we EXPAND the band to contain the point rather than
+        clamp the headline or reject the figure: keep the number the extractor
+        chose, make the envelope consistent, never null the record over it."""
+        if self.value_low is None:
+            self.value_low = self.value
+        if self.value_high is None:
+            self.value_high = self.value
+        if self.value_low > self.value_high:
+            self.value_low, self.value_high = self.value_high, self.value_low
+        # value is the headline; the band must contain it (fixes an out-of-band
+        # point and a qualifier-blind swap that leaves value outside in one step).
+        self.value_low = min(self.value_low, self.value)
+        self.value_high = max(self.value_high, self.value)
+        # Qualifier ↔ band direction. By the extraction convention `value` IS the
+        # firm bound of a directional qualifier — the floor of an `at_least`, the
+        # ceiling of an `at_most` — so pin that bound to `value` and keep the soft
+        # bound on the correct side: an `at_most` band must not sit ABOVE its
+        # ceiling (e.g. "up to 700" with a band reaching 900 is contradictory —
+        # the ceiling is firm, so value_high is pulled back to it). If the soft
+        # bound collapsed onto the point (the extractor gave only the firm bound),
+        # open a modest finite band in the qualifier's direction so the figure
+        # stays directionally honest instead of degenerating to a pseudo-exact
+        # point — a degenerate [500,500] reads as "exactly 500" for "at least 500".
+        if self.qualifier == "at_least":
+            self.value_low = self.value  # the firm floor
+            if self.value_high <= self.value:
+                self.value_high = self.value * (1 + _FALLBACK_OPEN_BAND_FRACTION)
+        elif self.qualifier == "at_most":
+            self.value_high = self.value  # the firm ceiling
+            if self.value_low >= self.value:
+                self.value_low = self.value * (1 - _FALLBACK_OPEN_BAND_FRACTION)
+        return self
 
 
 class TextField(BaseModel):
