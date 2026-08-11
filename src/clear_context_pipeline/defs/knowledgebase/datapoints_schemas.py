@@ -19,6 +19,7 @@ of the design doc).
 from typing import Literal, Optional
 
 import json
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -89,6 +90,38 @@ Qualifier = Literal["exact", "at_least", "at_most", "approx"]
 # `cumulative_to_date` behaves as a stock (bypasses the flow rate math) and
 # sidesteps period-overlap, so it is preferred where a source frames it that way.
 MeasureType = Literal["stock_as_of", "period_flow", "cumulative_to_date"]
+
+# Both enums live on EVERY numeric leaf, so a single off-taxonomy value ("flow"
+# for "period_flow", "minimum" for "at_least") would raise a ValidationError that
+# the extractor catches at DOMAIN granularity — nulling every figure in that
+# domain, not just the one leaf. To keep that blast radius from following the new
+# enums, coerce leniently at the field boundary: map the obvious synonyms, and
+# fall back to a SAFE default (qualifier → "exact" = no bias claim; measure_type →
+# None = indeterminate) rather than letting one bad token void the domain.
+_QUALIFIER_ALIASES: dict[str, str] = {
+    "minimum": "at_least", "min": "at_least", "more_than": "at_least",
+    "greater_than": "at_least", "over": "at_least", "atleast": "at_least",
+    "maximum": "at_most", "max": "at_most", "less_than": "at_most",
+    "fewer_than": "at_most", "up_to": "at_most", "atmost": "at_most",
+    "approximate": "approx", "approximately": "approx", "estimated": "approx",
+    "estimate": "approx", "around": "approx", "roughly": "approx", "about": "approx",
+    "precise": "exact", "point": "exact", "exactly": "exact",
+}
+# Last-resort band width when a directional qualifier's SOFT bound collapsed onto
+# the point (the extractor emitted only the firm bound). The prompt is the primary
+# path — it asks for a context-informed finite band — so this fires only on that
+# fallback, opening a modest ±15% band in the qualifier's direction rather than
+# leaving a degenerate [500,500] that reads as 'exactly 500' for 'at least 500'.
+_FALLBACK_OPEN_BAND_FRACTION = 0.15
+
+_MEASURE_TYPE_ALIASES: dict[str, str] = {
+    "stock": "stock_as_of", "point_in_time": "stock_as_of", "total": "stock_as_of",
+    "as_of": "stock_as_of", "snapshot": "stock_as_of",
+    "flow": "period_flow", "new": "period_flow", "incremental": "period_flow",
+    "during_period": "period_flow", "period": "period_flow",
+    "cumulative": "cumulative_to_date", "running_total": "cumulative_to_date",
+    "to_date": "cumulative_to_date", "since": "cumulative_to_date",
+}
 
 
 class FigureCredibility(BaseModel):
@@ -281,18 +314,77 @@ class NumericField(BaseModel):
         ),
     )
 
+    @field_validator("qualifier", mode="before")
+    @classmethod
+    def _coerce_qualifier(cls, v: object) -> object:
+        """Map synonyms → the four canonical qualifiers; unknown → "exact" (no
+        bias claim). `qualifier` is a required Literal on every numeric leaf, so
+        without this a single off-taxonomy token ("minimum") would raise a
+        ValidationError the extractor catches at DOMAIN granularity — nulling every
+        figure in the domain, not just this leaf. Coercing here keeps that blast
+        radius contained. None/blank also default to "exact"."""
+        if v is None:
+            return "exact"
+        s = re.sub(r"[\s-]+", "_", str(v).strip().lower())
+        if s in ("exact", "at_least", "at_most", "approx"):
+            return s
+        return _QUALIFIER_ALIASES.get(s, "exact")
+
+    @field_validator("measure_type", mode="before")
+    @classmethod
+    def _coerce_measure_type(cls, v: object) -> object:
+        """Map synonyms → the three canonical measure types; unknown → None
+        (indeterminate — the same as an omitted value). Never raises, so a stray
+        token can't void the domain."""
+        if v is None:
+            return None
+        s = re.sub(r"[\s-]+", "_", str(v).strip().lower())
+        if s in ("stock_as_of", "period_flow", "cumulative_to_date"):
+            return s
+        return _MEASURE_TYPE_ALIASES.get(s)
+
     @model_validator(mode="after")
     def _fill_range_from_point(self) -> "NumericField":
         """Default the value range to the point when the source gave a single
         number, so `value_low`/`value_high` are always populated (a degenerate
-        point == `value`). An inverted range is normalised. `value` stays the
-        authoritative headline; low/high bound it."""
+        point == `value`). An inverted range is normalised, then the band is
+        widened if needed so `value` always lies inside it.
+
+        `value` is the authoritative headline (clear-api reads it, and its
+        interval reducer trusts value ∈ [value_low, value_high] — its band-vs-
+        point clamp silently mis-widens otherwise). When the model emits a point
+        outside its own bounds ('900' with a '[500, 700]' band, or a swap that
+        strands the point), we EXPAND the band to contain the point rather than
+        clamp the headline or reject the figure: keep the number the extractor
+        chose, make the envelope consistent, never null the record over it."""
         if self.value_low is None:
             self.value_low = self.value
         if self.value_high is None:
             self.value_high = self.value
         if self.value_low > self.value_high:
             self.value_low, self.value_high = self.value_high, self.value_low
+        # value is the headline; the band must contain it (fixes an out-of-band
+        # point and a qualifier-blind swap that leaves value outside in one step).
+        self.value_low = min(self.value_low, self.value)
+        self.value_high = max(self.value_high, self.value)
+        # Qualifier ↔ band direction. By the extraction convention `value` IS the
+        # firm bound of a directional qualifier — the floor of an `at_least`, the
+        # ceiling of an `at_most` — so pin that bound to `value` and keep the soft
+        # bound on the correct side: an `at_most` band must not sit ABOVE its
+        # ceiling (e.g. "up to 700" with a band reaching 900 is contradictory —
+        # the ceiling is firm, so value_high is pulled back to it). If the soft
+        # bound collapsed onto the point (the extractor gave only the firm bound),
+        # open a modest finite band in the qualifier's direction so the figure
+        # stays directionally honest instead of degenerating to a pseudo-exact
+        # point — a degenerate [500,500] reads as "exactly 500" for "at least 500".
+        if self.qualifier == "at_least":
+            self.value_low = self.value  # the firm floor
+            if self.value_high <= self.value:
+                self.value_high = self.value * (1 + _FALLBACK_OPEN_BAND_FRACTION)
+        elif self.qualifier == "at_most":
+            self.value_high = self.value  # the firm ceiling
+            if self.value_low >= self.value:
+                self.value_low = self.value * (1 - _FALLBACK_OPEN_BAND_FRACTION)
         return self
 
 

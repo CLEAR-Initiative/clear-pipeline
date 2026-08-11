@@ -885,10 +885,11 @@ def reliefweb_weekly_datapoints(
         )
         return []
 
-    # Deploy-order preflight (fail loud, once, before any LLM spend): schema v2
-    # sends `sourceId` on every upsert, so an undeployed clear-api would 400 each
-    # report AFTER its 6 LLM calls, and the per-report `continue` below would let
-    # the run finish GREEN with zero data. Probe read-only; only when there's work.
+    # Deploy-order preflight (fail loud, once, before any LLM spend): the pipeline
+    # has sent `sourceId` on every upsert since PR #110, so an undeployed clear-api
+    # would 400 each report AFTER its 6 LLM calls, and the per-report `continue`
+    # below would let the run finish GREEN with zero data. Probe read-only; only
+    # when there's work.
     if reliefweb_weekly_pdf_text:
         try:
             source_attribution_ready = clear_api.supports_source_attribution()
