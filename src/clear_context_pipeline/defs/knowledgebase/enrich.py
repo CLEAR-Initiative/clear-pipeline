@@ -33,7 +33,7 @@ from typing import Literal
 import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from clear_context_pipeline.defs.reliefweb_partitions import (
     country_partitions,
@@ -51,12 +51,34 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 # S3 layout is `enriched_prefix(iso3)`.
 
 # SAF sectors — mirrored from the Norwegian Refugee Council's operational
-# taxonomy. Constraining the LLM output with a Literal enum forces JSON-
-# schema mode to reject off-taxonomy values, so downstream filter
-# queries don't have to normalise variants.
+# taxonomy. The Literal steers the LLM toward these six, but models routinely
+# emit cluster/sector labels outside it (Nutrition, CCCM, MHPSS, Child
+# Protection, Funding, Access & Logistics …). A strict enum rejected the WHOLE
+# extraction on any such value — a `literal_error` that nuked the chunk and
+# triggered fallback churn — so `ExtractedParameters` soft-coerces `need_sectors`
+# (see `_SAF_SECTOR_ALIASES` + the before-validator): map the obvious synonyms
+# onto the six, DROP the rest. Downstream still only ever sees the six values.
 SafSector = Literal[
     "Shelter", "WASH", "Protection", "Health", "Food Security", "Education",
 ]
+
+# Off-taxonomy sector label (lowercased) → one of the six SAF sectors. Anything
+# not here and not already canonical is dropped, not mapped.
+_SAF_SECTOR_ALIASES: dict[str, str] = {
+    "child protection": "Protection", "gbv": "Protection", "mine action": "Protection",
+    "gender-based violence": "Protection", "hlp": "Protection",
+    "housing, land and property": "Protection",
+    "nutrition": "Food Security", "food": "Food Security", "livelihoods": "Food Security",
+    "food security and nutrition": "Food Security", "food security & nutrition": "Food Security",
+    "mhpss": "Health", "mental health": "Health", "health and nutrition": "Health",
+    "cccm": "Shelter", "nfi": "Shelter", "shelter and nfi": "Shelter", "shelter/nfi": "Shelter",
+    "water": "WASH", "sanitation": "WASH", "hygiene": "WASH",
+    "education in emergencies": "Education",
+}
+_SAF_CANONICAL: dict[str, str] = {
+    "shelter": "Shelter", "wash": "WASH", "protection": "Protection",
+    "health": "Health", "food security": "Food Security", "education": "Education",
+}
 
 
 class LocationRef(BaseModel):
@@ -101,6 +123,22 @@ class ExtractedParameters(BaseModel):
         default_factory=list,
         description="NRC SAF sectors the chunk discusses",
     )
+
+    @field_validator("need_sectors", mode="before")
+    @classmethod
+    def _coerce_sectors(cls, v: object) -> object:
+        """Map off-taxonomy sector labels to the six SAF sectors and DROP the
+        rest, so one stray value (Nutrition, CCCM, Funding, …) doesn't reject the
+        whole extraction and trigger a model fallback. Dedupes, order-preserving."""
+        if not isinstance(v, list):
+            return v  # let pydantic report a non-list as it would today
+        out: list[str] = []
+        for item in v:
+            key = str(item).strip().lower()
+            canon = _SAF_CANONICAL.get(key) or _SAF_SECTOR_ALIASES.get(key)
+            if canon and canon not in out:
+                out.append(canon)
+        return out
 
 
 # (The former `ChunkContext` schema is gone — the context step now returns a

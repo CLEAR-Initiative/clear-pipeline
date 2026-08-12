@@ -182,7 +182,7 @@ query AggregatedDatapoint(
 
 _GET_PIPELINE_COUNTRIES = """
 query PipelineCountriesForSituation {
-  pipelineCountries { name iso3 bbox }
+  pipelineCountries { name iso3 pcode bbox }
 }
 """
 
@@ -687,31 +687,30 @@ def upsert_location_metadata_batch(
     return out
 
 
-def resolve_country_location_id(country_name: str) -> str | None:
-    """Reverse-lookup a country's `locations.id` from its name.
-    Reuses the knowledgebase location resolver with admin_level=0.
-
-    Kept as a wrapper so future callers (dashboards, exports) can
-    hit one function even if the underlying resolver evolves."""
-    return resolve_location(name=country_name, admin_level=0)
+def resolve_country_location_id(
+    country_name: str, *, pcode: str | None = None,
+) -> str | None:
+    """Reverse-lookup a country's admin-0 `locations.id`. Resolves by PCODE first
+    (the strong, name-independent key — `resolveKnowledgebaseLocation` prefers
+    pcode over name), falling back to the name at admin_level=0. Prefer passing
+    the pcode: the backfilled A0 name is often the long official form
+    ("Venezuela (Bolivarian Republic of)") that an exact-name lookup misses."""
+    return resolve_location(pcode=pcode, name=country_name, admin_level=0)
 
 
 def resolve_country_location_id_by_iso3(iso3: str) -> str | None:
-    """A country's `locations.id` from its ISO3 — the reliefweb partition key.
-    `pipelineCountries` carries name+iso3 but not the location id, so map the
-    iso3 to the country name there, then resolve the id by name (admin_level=0).
-    Returns None when the iso3 isn't a configured pipeline country or the name
-    doesn't resolve — the aggregation asset then falls back to the wider
-    (unscoped) initial window rather than silently under-refreshing."""
-    name_by_iso3 = {
-        c["iso3"].lower(): c["name"]
-        for c in get_pipeline_countries()
-        if c.get("iso3")
-    }
-    country_name = name_by_iso3.get(iso3.lower())
-    if country_name is None:
+    """A country's admin-0 `locations.id` from its ISO3 — the reliefweb partition
+    key. Looks the country up in `pipelineCountries` (by iso3) for its pcode +
+    name, then resolves by PCODE (name fallback). Returns None when the iso3 isn't
+    a configured pipeline country or nothing resolves — the aggregation asset then
+    forces the wider initial window rather than silently under-refreshing."""
+    row = next(
+        (c for c in get_pipeline_countries() if (c.get("iso3") or "").lower() == iso3.lower()),
+        None,
+    )
+    if row is None:
         return None
-    return resolve_country_location_id(country_name)
+    return resolve_country_location_id(row["name"], pcode=row.get("pcode"))
 
 
 def search_knowledgebase(
