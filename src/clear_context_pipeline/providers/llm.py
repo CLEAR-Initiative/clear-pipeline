@@ -330,6 +330,28 @@ def _pydantic_to_anthropic_tool(schema: type[BaseModel]) -> dict[str, Any]:
 # ────────────────────────────────────────────────────────────────────
 
 
+def _to_strict_json_schema(node: Any) -> Any:
+    """Rewrite a Pydantic JSON schema into an OpenAI **strict**-mode valid one so
+    providers can grammar-constrain decoding instead of free-generating.
+
+    `model_json_schema()` omits the two things strict mode mandates: every object
+    must carry `additionalProperties: false`, and its `required` must list ALL
+    property names (optional fields stay nullable via their existing `anyOf`
+    `null`). Without this, `strict: true` is silently a no-op — the model is
+    unconstrained and can run a string value into a repetition loop that never
+    closes (the "EOF while parsing a string" truncation). Applied recursively so
+    `$defs` (e.g. `LocationRef`) are strict too."""
+    if isinstance(node, dict):
+        out = {k: _to_strict_json_schema(v) for k, v in node.items()}
+        if out.get("type") == "object" and isinstance(out.get("properties"), dict):
+            out["additionalProperties"] = False
+            out["required"] = list(out["properties"].keys())
+        return out
+    if isinstance(node, list):
+        return [_to_strict_json_schema(v) for v in node]
+    return node
+
+
 class OpenAICompatibleProvider:
     """Provider for any /v1/chat/completions endpoint.
 
@@ -339,9 +361,9 @@ class OpenAICompatibleProvider:
     ``LLM_<role>_BASE_URL`` sets.
 
     Structured output is done via ``response_format={"type":
-    "json_schema", …}`` when the endpoint supports it (Together
-    exposes this for their Llama endpoints), falling back to plain
-    ``json_object`` mode with a Pydantic-guided retry.
+    "json_schema", …}`` with a STRICT-valid schema (``_to_strict_json_schema``)
+    so a capable provider grammar-constrains decoding; falls back to plain
+    ``json_object`` mode with a Pydantic-guided retry when a role opts out.
     """
 
     provider_name = "openai_compat"
@@ -354,12 +376,29 @@ class OpenAICompatibleProvider:
         base_url: str,
         api_key: str,
         json_schema_mode: bool = True,
+        disable_thinking: bool = False,
+        require_parameters: bool = False,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.role = role
         self.model = model
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        # Non-standard request-body fields sent via the OpenAI `extra_body`:
+        #  - think:false — Ollama Cloud models default to THINKING, whose reasoning
+        #    tokens count against max_tokens, so a short-output role (context,
+        #    max_tokens=200) comes back with empty `content`.
+        #  - provider.require_parameters — OpenRouter routes a model across several
+        #    backends; only some honour `response_format`. This forces routing to a
+        #    backend that supports every requested param, so structured output is
+        #    actually enforced (not silently dropped → free-form → truncation).
+        # No-ops on providers that ignore unknown body fields.
+        extra_body: dict[str, Any] = {}
+        if disable_thinking:
+            extra_body["think"] = False
+        if require_parameters:
+            extra_body["provider"] = {"require_parameters": True}
+        self._extra_kwargs: dict[str, Any] = {"extra_body": extra_body} if extra_body else {}
 
     @retry(
         retry=retry_if_exception_type(
@@ -393,7 +432,7 @@ class OpenAICompatibleProvider:
                 "type": "json_schema",
                 "json_schema": {
                     "name": schema.__name__,
-                    "schema": schema.model_json_schema(),
+                    "schema": _to_strict_json_schema(schema.model_json_schema()),
                     "strict": True,
                 },
             }
@@ -408,6 +447,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format=response_format,  # type: ignore[arg-type]
+            **self._extra_kwargs,
         )
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
@@ -472,6 +512,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            **self._extra_kwargs,
         )
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
@@ -601,6 +642,14 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
       LLM_<ROLE>_MODEL      = e.g. "claude-haiku-4-5", "meta-llama/…"
       LLM_<ROLE>_API_KEY    = provider API key
       LLM_<ROLE>_BASE_URL   = required for "openai_compat" only
+      LLM_<ROLE>_NO_THINK   = "true" to disable an Ollama thinking model's
+                              reasoning (sent as `think: false`) — otherwise a
+                              short-output role gets an empty `content`.
+      LLM_<ROLE>_REQUIRE_PARAMETERS
+                            = "true" to send OpenRouter's
+                              `provider.require_parameters` so it only routes to a
+                              backend that honours `response_format` — needed for
+                              structured output to actually be enforced (openai_compat).
 
     For ``datapoints`` / ``narrative`` a missing role-scoped var falls back
     to the ``extraction`` role's equivalent (see ``_ROLE_ENV_FALLBACK``).
@@ -621,7 +670,19 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     api_key = _env("API_KEY", required=True)
     assert model is not None and api_key is not None  # narrow for type-checkers
 
-    def _construct(prov: str, mdl: str, key: str, base_url: str | None) -> LLMProvider:
+    # Disable a thinking model's reasoning for this role (Ollama Cloud models
+    # default to thinking, which empties `content` on a short-output role). Only
+    # the primary honours it — the reliable fallback is typically Claude.
+    no_think = (_env("NO_THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
+    # Force OpenRouter to route to a backend that honours `response_format`;
+    # without it a "supports structured outputs" model can still land on a
+    # backend that ignores the schema → free-form output → truncation.
+    require_params = (_env("REQUIRE_PARAMETERS", required=False) or "").strip().lower() in ("1", "true", "yes")
+
+    def _construct(
+        prov: str, mdl: str, key: str, base_url: str | None, *,
+        disable_thinking: bool = False, require_parameters: bool = False,
+    ) -> LLMProvider:
         if prov == "anthropic":
             return AnthropicProvider(role=role, model=mdl, api_key=key)
         if prov == "openai_compat":
@@ -631,6 +692,8 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
                 )
             return OpenAICompatibleProvider(
                 role=role, model=mdl, base_url=base_url, api_key=key,
+                disable_thinking=disable_thinking,
+                require_parameters=require_parameters,
             )
         raise ValueError(
             f"Unsupported provider {prov!r} for role {role}. "
@@ -640,6 +703,8 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     primary = _construct(
         provider, model, api_key,
         _env("BASE_URL", required=(provider == "openai_compat")),
+        disable_thinking=no_think,
+        require_parameters=require_params,
     )
 
     # Optional reliable fallback. When a (typically cheap/OSS) primary fails or

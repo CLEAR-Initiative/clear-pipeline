@@ -381,6 +381,7 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
 def generate_and_upsert_for_country_window(
     *,
     country_name: str,
+    country_pcode: str | None = None,
     window_start: str,
     window_end: str,
     window_kind: str,
@@ -400,11 +401,11 @@ def generate_and_upsert_for_country_window(
     """
     log = log_context or logger
 
-    country_id = clear_api.resolve_country_location_id(country_name)
+    country_id = clear_api.resolve_country_location_id(country_name, pcode=country_pcode)
     if not country_id:
         log.warning(
-            "[situation] %s: no A0 location resolved - skipping (backfill locations first)",
-            country_name,
+            "[situation] %s (pcode=%s): no A0 location resolved - skipping (backfill locations first)",
+            country_name, country_pcode or "-",
         )
         return None
 
@@ -586,7 +587,7 @@ def generate_and_upsert_for_country_window(
 
 
 def generate_and_upsert_for_country_year(
-    *, country_name: str, year: int, log_context=None,
+    *, country_name: str, country_pcode: str | None = None, year: int, log_context=None,
 ) -> dict | None:
     """Yearly (Jan 1 .. Dec 31) situation snapshot - the original behaviour,
     now a thin wrapper over the window-based core. Kept as a named entry
@@ -594,6 +595,7 @@ def generate_and_upsert_for_country_year(
     window_start, window_end = _calendar_year_window(year)
     return generate_and_upsert_for_country_window(
         country_name=country_name,
+        country_pcode=country_pcode,
         window_start=window_start,
         window_end=window_end,
         window_kind="yearly",
@@ -603,7 +605,7 @@ def generate_and_upsert_for_country_year(
 
 
 def generate_and_upsert_for_country_month(
-    *, country_name: str, year: int, month: int, log_context=None,
+    *, country_name: str, country_pcode: str | None = None, year: int, month: int, log_context=None,
 ) -> dict | None:
     """Monthly (1st .. last day) situation snapshot. Reads the monthly ×
     country aggregated_datapoint bucket (emitted by clear-api's A0 tier) for
@@ -611,6 +613,7 @@ def generate_and_upsert_for_country_month(
     window_start, window_end = _calendar_month_window(year, month)
     return generate_and_upsert_for_country_window(
         country_name=country_name,
+        country_pcode=country_pcode,
         window_start=window_start,
         window_end=window_end,
         window_kind="monthly",
@@ -655,18 +658,21 @@ def weekly_situation_analyses(
     del reliefweb_weekly_datapoint_aggregations  # only used to enforce ordering
 
     iso3 = context.partition_key
-    # Map the partition iso3 back to the country name the generators expect.
-    names_by_iso3 = {
-        c["iso3"].lower(): c["name"] for c in clear_api.get_pipeline_countries()
+    # Map the partition iso3 back to the country's name + pcode. The generators
+    # resolve the A0 location by PCODE (name-independent), falling back to name.
+    row_by_iso3 = {
+        (c.get("iso3") or "").lower(): c for c in clear_api.get_pipeline_countries()
     }
-    country_name = names_by_iso3.get(iso3.lower())
-    if country_name is None:
+    country = row_by_iso3.get(iso3.lower())
+    if country is None:
         raise dg.Failure(
             description=(
                 f"partition {iso3!r} is not in clear-api pipelineCountries — cannot "
-                "resolve a country name for situation generation"
+                "resolve a country for situation generation"
             ),
         )
+    country_name = country["name"]
+    country_pcode = country.get("pcode")
 
     now = datetime.now(timezone.utc)
     year = now.year
@@ -678,11 +684,12 @@ def weekly_situation_analyses(
     summaries: list[dict] = []
     for summary in (
         generate_and_upsert_for_country_year(
-            country_name=country_name, year=year, log_context=context.log,
+            country_name=country_name, country_pcode=country_pcode,
+            year=year, log_context=context.log,
         ),
         generate_and_upsert_for_country_month(
-            country_name=country_name, year=year, month=month,
-            log_context=context.log,
+            country_name=country_name, country_pcode=country_pcode,
+            year=year, month=month, log_context=context.log,
         ),
     ):
         if summary is not None:
