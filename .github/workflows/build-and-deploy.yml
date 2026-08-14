@@ -58,14 +58,23 @@ jobs:
     name: Deploy to ${{ github.ref_name }}
     needs: build
     runs-on: ubuntu-latest
+    # `packages: read` lets the run's GITHUB_TOKEN pull the private GHCR image;
+    # we pass it into the SSH session and `docker login` there so the deploy no
+    # longer depends on a persistent (expirable) `docker login` on the VM.
+    permissions:
+      contents: read
+      packages: read
     environment: ${{ github.ref_name }}
     steps:
       - name: SSH and roll the deployment
         uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.APP_VM_HOST }}
           username: ubuntu
           key: ${{ secrets.APP_VM_SSH_KEY }}
+          envs: GHCR_TOKEN
           # Note: `script_stop` is no longer accepted by @v1 — the same
           # halt-on-error behaviour is provided by `set -e` at the top
           # of the script below, which is the maintainer's recommended
@@ -82,6 +91,9 @@ jobs:
           # when only the image SHA changed under a moving tag.
           script: |
             set -e
+            # Authenticate to GHCR every deploy — no reliance on a VM-side login
+            # that can silently expire (the cause of the `denied` pull error).
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             cd /srv/app
             docker compose pull dagster-code dagster-daemon dagster-webserver
             docker compose up -d --force-recreate dagster-code
