@@ -37,6 +37,13 @@ COPY . .
 # extra_files-materialised directory on the VM.
 ENV DAGSTER_HOME=/opt/dagster
 
+# Bake the instance + workspace config into DAGSTER_HOME so hosts WITHOUT a
+# mount (Railway, plain `docker run`) pick them up automatically. The VM/
+# compose deployment bind-mounts its own dagster.yaml / workspace.yaml over
+# these, so this changes nothing there.
+RUN mkdir -p /opt/dagster
+COPY deploy/dagster.yaml deploy/workspace.yaml /opt/dagster/
+
 # No ENTRYPOINT — compose supplies the full command per service. If we
 # left `ENTRYPOINT ["bash", "-lc"]` here (as an earlier version did),
 # compose's tokenised `command:` would collapse into positional params

@@ -1,0 +1,52 @@
+# Dagster instance config, baked into the image at DAGSTER_HOME=/opt/dagster
+# (see Dockerfile). The webserver + daemon read it automatically.
+#
+# All run / event-log / schedule metadata lives in Postgres so it SURVIVES
+# redeploys — a Railway (or any container) filesystem is ephemeral. Point
+# DAGSTER_POSTGRES_URL at a Postgres DEDICATED to Dagster (its own database,
+# NOT clear-api's — Dagster owns and migrates its own schema). Dagster
+# auto-creates its tables on first boot.
+#
+# The VM/compose deployment bind-mounts its own dagster.yaml over this file,
+# so this baked copy is only used where nothing is mounted (Railway, docker run).
+
+run_storage:
+  module: dagster_postgres.run_storage
+  class: PostgresRunStorage
+  config:
+    postgres_url:
+      env: DAGSTER_POSTGRES_URL
+
+event_log_storage:
+  module: dagster_postgres.event_log
+  class: PostgresEventLogStorage
+  config:
+    postgres_url:
+      env: DAGSTER_POSTGRES_URL
+
+schedule_storage:
+  module: dagster_postgres.schedule_storage
+  class: PostgresScheduleStorage
+  config:
+    postgres_url:
+      env: DAGSTER_POSTGRES_URL
+
+# Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
+# forks each run's step workers as subprocesses). The daemon dequeues up to
+# max_concurrent_runs at a time.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs: 2
+
+# DefaultRunLauncher forks each run as a subprocess of the process that
+# launches it (the daemon, here). Simplest launcher; fine for a single-node
+# Railway deployment. The daemon service therefore needs the run memory.
+run_launcher:
+  module: dagster.core.launcher
+  class: DefaultRunLauncher
+
+# No anonymous telemetry pings on every run start.
+telemetry:
+  enabled: false
