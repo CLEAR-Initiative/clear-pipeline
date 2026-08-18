@@ -249,6 +249,20 @@ def test_translate_unknown_entity_type_is_dropped():
     assert result.metadata["cleared"] == 1
 
 
+# ── single-inference: group_signal reuses classify_locally's prediction ──────
+
+def test_classify_locally_carries_taxonomy_for_group_reuse():
+    from clear_context_pipeline.providers.classify import SignalClassification, classify_locally
+
+    # group_signal reads glide (disaster_types[0]) + type_level_2 off the
+    # classification instead of re-running the model, so classify_locally must
+    # carry them.
+    assert "type_level_2" in SignalClassification.model_fields
+    c = classify_locally(title="Flooding displaces thousands", description="Heavy rains in the region")
+    assert c.type_level_2 is not None
+    assert c.disaster_types and c.disaster_types[0]  # glide code
+
+
 # ── translation-hash helper (must agree with clear-api's TS helper) ──────────
 
 def test_translation_hash_event_fields_and_staleness():

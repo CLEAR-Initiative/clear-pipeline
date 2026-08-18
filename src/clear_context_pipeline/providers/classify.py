@@ -24,9 +24,15 @@ class SignalClassification(BaseModel):
     """Output from signal classification (disaster types, relevance, severity)."""
 
     disaster_types: list[str]  # glide numbers e.g. ["fl", "ff"]
-    relevance: float  # 0.0-1.0
+    relevance: float  # 0.0-1.0 (== the classifier's confidence)
     severity: int  # 1-5
     summary: str
+    # Full taxonomy prediction from the local classifier, carried so the grouping
+    # stage can reuse it instead of running a second inference on the same text.
+    # ``disaster_types[0]`` is the glide code; ``relevance`` is the confidence.
+    type_level_1: str | None = None
+    type_level_2: str | None = None
+    type_level_3: str | None = None
 
 
 # ── Event classifier (sentence-transformer taxonomy matcher) ─────────────────
@@ -387,8 +393,9 @@ def classify_locally(
     top = pred["top_k"][0] if pred.get("top_k") else {}
 
     glide_code: str | None = top.get("id")
-    level_3: str | None = top.get("type_level_3")
     level_1: str | None = top.get("type_level_1")
+    level_2: str | None = top.get("type_level_2")
+    level_3: str | None = top.get("type_level_3")
     confidence: float = float(pred.get("confidence") or 0.0)
 
     # Summary is a cheap extraction from the title/description — no LLM
@@ -400,10 +407,13 @@ def classify_locally(
         relevance=confidence,
         severity=source_severity if source_severity is not None else default_severity,
         summary=summary,
+        type_level_1=level_1,
+        type_level_2=level_2,
+        type_level_3=level_3,
     )
     logger.info(
-        "[LOCAL CLASSIFY] l1=%s l3=%s code=%s confidence=%.3f severity=%d (source=%s)",
-        level_1, level_3, glide_code, confidence,
+        "[LOCAL CLASSIFY] l1=%s l2=%s l3=%s code=%s confidence=%.3f severity=%d (source=%s)",
+        level_1, level_2, level_3, glide_code, confidence,
         classification.severity, source_severity,
     )
     return classification

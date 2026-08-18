@@ -20,8 +20,6 @@ from clear_context_pipeline.providers.classify import (
     SignalClassification,
     code_to_level2_map,
     code_to_level3_map,
-    get_classifier,
-    level2_to_codes_map,
 )
 from clear_context_pipeline.providers.clear_api import create_event, get_events, update_event
 from clear_context_pipeline.providers.llm import make_llm_provider
@@ -516,15 +514,16 @@ def group_signal(
         )
         return existing
 
-    # ── 1. Classify the signal ─────────────────────────────────────────
-    classifier = get_classifier()
-    text = " ".join(filter(None, [signal_title, signal_description]))
-    pred = classifier.predict(text, top_k=1)
-    top = pred["top_k"][0] if pred.get("top_k") else {}
-    glide_code: str | None = top.get("id")
-    level_1: str | None = top.get("type_level_1")
-    level_2: str | None = top.get("type_level_2")
-    confidence: float = float(pred.get("confidence") or 0.0)
+    # ── 1. Reuse the classifier prediction ─────────────────────────────
+    # classify_locally already ran the taxonomy classifier on the same
+    # title + description (upstream, for the relevance gate) and carried its full
+    # result on `classification`. Reuse it instead of running a SECOND inference
+    # here — a re-prediction could pick a different glide/level_2 than the one that
+    # admitted the signal, and doubles the model cost per signal.
+    glide_code: str | None = classification.disaster_types[0] if classification.disaster_types else None
+    level_1: str | None = classification.type_level_1
+    level_2: str | None = classification.type_level_2
+    confidence: float = classification.relevance
 
     logger.info(
         "[GROUPING] Signal %s classified: l1=%s l2=%s code=%s confidence=%.3f",
@@ -532,7 +531,7 @@ def group_signal(
     )
 
     if not level_2 or not glide_code:
-        logger.warning("[GROUPING] Classifier produced no usable level_2 — creating isolated event")
+        logger.warning("[GROUPING] Classification has no usable level_2 — creating isolated event")
         level_2 = level_2 or "other"
         glide_code = glide_code or "ot"
 
