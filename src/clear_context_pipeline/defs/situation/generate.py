@@ -58,6 +58,7 @@ from clear_context_pipeline.defs.situation.schemas import (
 )
 from clear_context_pipeline.defs.reliefweb_partitions import country_partitions
 from clear_context_pipeline.providers import clear_api, make_llm_provider
+from clear_context_pipeline.providers.translate import configured_target_locales
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
@@ -595,6 +596,23 @@ def generate_and_upsert_for_country_window(
         result["supersededPrevious"],
         len(deterministic_source_ids), len(all_source_ids), generated_by_model,
     )
+
+    # Enqueue the freshly-written analysis for translation at every configured
+    # target locale. Each regeneration is a new row id, so this always enqueues
+    # the current generation; the translate drain fetches its canonical prose,
+    # translates, and upserts the overlay. Never fail the write on an enqueue
+    # error — the analysis still ships in English, and the read-miss path will
+    # re-enqueue on the next non-English read.
+    analysis_id = result["situationAnalysisId"]
+    for locale in configured_target_locales():
+        try:
+            clear_api.enqueue_translation("situationAnalysis", analysis_id, locale)
+        except Exception:  # noqa: BLE001 — translation enqueue must not fail generation
+            log.warning(
+                "[situation] %s: enqueue_translation failed for analysis %s (%s) — translation skipped",
+                country_name, analysis_id, locale, exc_info=True,
+            )
+
     return {
         "country_name": country_name,
         "country_location_id": country_id,

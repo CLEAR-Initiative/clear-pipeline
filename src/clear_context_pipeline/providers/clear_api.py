@@ -27,6 +27,8 @@ from typing import Any
 
 import httpx
 
+from clear_context_pipeline.providers.situation_prose import extract_situation_prose
+
 logger = logging.getLogger(__name__)
 
 
@@ -1689,6 +1691,15 @@ query LocationCanonical($id: String!) {
 }
 """
 
+GET_SITUATION_CANONICAL = """
+query SituationAnalysisById($id: String!) {
+  situationAnalysisById(id: $id) {
+    id
+    data
+  }
+}
+"""
+
 
 def get_crisis_canonical(crisis_id: str) -> dict | None:
     """Fetch only the four translatable fields of a crisis. Used by the
@@ -1717,6 +1728,23 @@ def get_location_canonical(location_id: str) -> dict | None:
     pipeline-language invariant as get_crisis_canonical above."""
     result = _execute(GET_LOCATION_CANONICAL, {"id": location_id})
     return result.get("location")
+
+
+def get_situation_canonical(situation_analysis_id: str) -> dict | None:
+    """Fetch a situation analysis by id and project it to its translatable
+    prose (summary text, risk/hazard/displacement bullets, sector prose,
+    change notes). Numbers, enums, ids and sources are dropped so the
+    translator only ever sees prose — see providers/situation_prose.py.
+
+    Same pipeline-language ('en') invariant as get_crisis_canonical: the
+    `data` field is overlaid per-locale by the resolver, so this returns
+    canonical English only while the pipeline user's language is 'en'.
+    """
+    result = _execute(GET_SITUATION_CANONICAL, {"id": situation_analysis_id})
+    row = result.get("situationAnalysisById")
+    if not row:
+        return None
+    return extract_situation_prose(row.get("data") or {})
 
 
 # ─── Translations ─────────────────────────────────────────────────────────────

@@ -27,6 +27,18 @@ HASH_FIELDS: dict[str, tuple[str, ...]] = {
     "event":    ("title", "description"),
     "crisis":   ("title", "summary", "scenarios", "needs"),
     "location": ("name",),
+    # Situation-analysis prose components. The canonical passed for this type is
+    # the PROSE PROJECTION (providers/situation_prose.py → extract_situation_prose),
+    # not the raw payload, so these keys hash the prose-only sub-structures. Keep
+    # aligned with PROSE_COMPONENTS there.
+    "situationAnalysis": (
+        "ai_summary",
+        "context_risks",
+        "hazards_and_vulnerabilities",
+        "displacement",
+        "sectors",
+        "changes",
+    ),
 }
 
 
