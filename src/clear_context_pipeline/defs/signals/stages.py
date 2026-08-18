@@ -42,6 +42,7 @@ from clear_context_pipeline.providers.clear_api import (
     get_event_canonical,
     get_location_canonical,
     mark_signals_processed,
+    mark_translated,
     pending_signals,
     pending_translations,
 )
@@ -49,6 +50,8 @@ from clear_context_pipeline.providers.event import group_signal
 from clear_context_pipeline.providers.redis_lock import redis_lock
 from clear_context_pipeline.providers.signal import extract_population_affected_from_text
 from clear_context_pipeline.providers.translate import (
+    LOCKED,
+    TRANSLATED,
     configured_target_locales,
     translate_and_upsert,
 )
@@ -72,16 +75,19 @@ _INGEST_DEPS = [f"raw_{c.source}" for c in CONNECTORS if c.polled]
 
 def _project(created: dict):
     """Rehydrate + project a NEW signal via its source connector.
-    Returns (connector, SignalView) or None to skip (unknown/ingest-only source,
-    or a polled signal with no lake blob — e.g. a legacy Celery row)."""
+    Returns ``(connector, SignalView)`` on success, or a *permanent-skip reason*
+    string that the caller marks out of the queue (never leaves it NEW forever):
+      - ``"unknown_source"`` — source not in the drained registry
+      - ``"no_blob"``        — polled signal with no rawS3Key (legacy Celery row)
+    """
     source_name = (created.get("source") or {}).get("name")
     connector = CONNECTORS_BY_SOURCE.get(source_name or "")
     if connector is None or source_name not in DRAINED_SOURCES:
-        return None
+        return "unknown_source"
     if connector.polled:
         key = created.get("rawS3Key")
         if not key:
-            return None
+            return "no_blob"
         s3 = lake.s3_client()
         body = s3.get_object(Bucket=settings.s3_bucket, Key=key)["Body"].read()
         record = connector.parse(body)
@@ -134,27 +140,39 @@ def _group(view: SignalView, created: dict) -> dict | None:
     )
 
 
+# Per-signal drain outcomes. A signal must NOT sit at NEW forever, or — since
+# pendingSignals is oldest-first with no offset — a batch of permanently-stuck
+# rows at the queue head stalls everything behind it (acute at cutover, when every
+# legacy Celery row lacks rawS3Key). So only genuinely-transient outcomes leave a
+# signal NEW; permanent ones are marked terminal and leave the queue.
+_PROCESSED = "processed"        # classified + grouped → mark PROCESSED
+_REQUEUE = "requeue"           # transient (lock contention) → leave NEW, retry next run
+_DROP_DONE = "drop_done"       # legacy no-blob row (already processed by Celery) → mark PROCESSED
+_DROP_FAILED = "drop_failed"   # unknown/undrained source → mark FAILED (anomaly)
+
+
 def _process_one_signal(created: dict) -> str:
     projected = _project(created)
-    if projected is None:
-        return "skipped"
+    if isinstance(projected, str):
+        # Permanent skip — mark it out of the queue so it can't poison the head.
+        return _DROP_DONE if projected == "no_blob" else _DROP_FAILED
     connector, view = projected
     lock_key = f"signal:{connector.source}:{view.external_id}"
     with redis_lock(lock_key, ttl_seconds=_SIGNAL_LOCK_TTL_SECONDS, wait_seconds=0) as acquired:
         if not acquired:
-            return "skipped"
+            return _REQUEUE  # a peer holds it (or is processing it) — leave NEW
         event = _group(view, created)
         if event:
             _enqueue_translations("event", event["id"])
             loc_id = _event_location_id(created)
             if loc_id:
                 _enqueue_translations("location", loc_id)
-        return "processed"
+        return _PROCESSED
 
 
 def _drain_signals(context) -> dg.MaterializeResult:
     """Drain NEW signals from ALL sources, oldest-first, in bounded batches."""
-    processed = skipped = failed = 0
+    processed = dropped = requeued = failed = 0
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
         if not batch:
@@ -169,18 +187,40 @@ def _drain_signals(context) -> dg.MaterializeResult:
                 failed_ids.append(created["id"])
                 failed += 1
                 continue
-            if outcome == "processed":
+            if outcome == _PROCESSED:
                 done_ids.append(created["id"])
                 processed += 1
-            else:
-                skipped += 1
+            elif outcome == _DROP_DONE:
+                done_ids.append(created["id"])  # mark PROCESSED — leaves the queue
+                dropped += 1
+            elif outcome == _DROP_FAILED:
+                failed_ids.append(created["id"])  # mark FAILED — leaves the queue
+                failed += 1
+            else:  # _REQUEUE — transient, stays NEW for the next run
+                requeued += 1
         mark_signals_processed(done_ids, "PROCESSED")
         mark_signals_processed(failed_ids, "FAILED")
+        # Cost guardrail: cap LLM spend per run (each processed signal makes a
+        # rewrite call). The remainder stays NEW and drains on the next run.
+        if processed >= settings.signal_max_signals_per_run:
+            context.log.warning(
+                "[classify_group] hit per-run cap of %d processed signals — "
+                "stopping; remainder drains next run", settings.signal_max_signals_per_run,
+            )
+            break
+        # Stop only when the batch advanced NOTHING — i.e. every row was a
+        # transient requeue (lock contention). Permanent drops go into done/failed,
+        # so a cutover backlog of legacy no-blob rows drains instead of deadlocking.
         if not done_ids and not failed_ids:
             break
 
-    context.log.info("[classify_group] processed=%d skipped=%d failed=%d", processed, skipped, failed)
-    return dg.MaterializeResult(metadata={"processed": processed, "skipped": skipped, "failed": failed})
+    context.log.info(
+        "[classify_group] processed=%d dropped=%d requeued=%d failed=%d",
+        processed, dropped, requeued, failed,
+    )
+    return dg.MaterializeResult(
+        metadata={"processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed}
+    )
 
 
 @dg.asset(
@@ -214,19 +254,26 @@ def alert(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         made_progress = False
         for event in events:
             try:
-                # Suppress alerts for backdated events (replay/backfill).
-                if is_stale_signal(event.get("validFrom")):
+                # Staleness gates on the event's LATEST-signal time, not validFrom
+                # (first-signal): a long-running event that receives a fresh severe
+                # signal today must still alert. A truly stale event is suppressed by
+                # creating an ARCHIVED alert — that removes it from eventsPendingAlert
+                # (which excludes events with any alert) without an email fan-out, so
+                # it can't re-queue forever and stall genuinely-new alerts behind it.
+                stale_ts = event.get("lastSignalCreatedAt") or event.get("validFrom")
+                if is_stale_signal(stale_ts):
+                    escalate_to_alert(event, status="archived")
                     suppressed += 1
-                    continue
-                escalate_to_alert(event)
+                else:
+                    escalate_to_alert(event)
+                    alerted += 1
             except Exception:  # noqa: BLE001 — isolate one event's failure
                 context.log.exception("[alert] event %s failed", event.get("id"))
                 failed += 1
                 continue
-            alerted += 1
-            made_progress = True  # this event now has an alert → leaves the queue
-        # A batch that produced no new alerts is stale-only — stop (those events
-        # keep re-appearing in eventsPendingAlert but must not spin the loop).
+            made_progress = True  # this event now has an alert row → leaves the queue
+        # Terminate only when a batch produced no alert rows at all (every event
+        # errored). Suppressions now also create rows, so a stale-heavy head drains.
         if not made_progress:
             break
 
@@ -253,42 +300,79 @@ _CANONICAL_FETCH = {
     description="Drain the translation queue → translate entity fields into target locales → upsertTranslations.",
 )
 def translate(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    translated = skipped = failed = 0
+    return _drain_translations(context)
+
+
+def _drain_translations(context) -> dg.MaterializeResult:
+    translated = cleared = requeued = failed = 0
+    seen: set[tuple[str, str]] = set()  # entities attempted this run — never re-invoke
     for _ in range(_MAX_BATCHES):
         queue = pending_translations(first=_BATCH_SIZE)
         if not queue:
             break
         # Collapse per-(entity, locale) rows to one translate call per entity —
         # translate_and_upsert handles every configured locale + clears the rows.
-        entities: dict[tuple[str, str], None] = {}
+        entities: dict[tuple[str, str], set[str]] = {}
         for item in queue:
-            entities[(item["entityType"], item["entityId"])] = None
+            entities.setdefault((item["entityType"], item["entityId"]), set()).add(item["locale"])
 
         made_progress = False
-        for entity_type, entity_id in entities:
+        for (entity_type, entity_id), locales in entities.items():
+            if (entity_type, entity_id) in seen:
+                continue  # already attempted this run — don't refetch / re-call the model
+            seen.add((entity_type, entity_id))
+
             fetch = _CANONICAL_FETCH.get(entity_type)
             if fetch is None:
-                context.log.warning("[translate] unknown entityType %r — skipping", entity_type)
-                skipped += 1
+                # Unknown entityType shouldn't be enqueued — drop it so it can't
+                # poison the oldest-first queue head.
+                context.log.warning("[translate] unknown entityType %r — dropping", entity_type)
+                _clear_translation_rows(entity_type, entity_id, locales)
+                cleared += 1
+                made_progress = True
                 continue
             try:
                 canonical = fetch(entity_id)
                 if canonical is None:
-                    skipped += 1
+                    # Entity deleted / not found — drop its queue rows.
+                    _clear_translation_rows(entity_type, entity_id, locales)
+                    cleared += 1
+                    made_progress = True
                     continue
-                result = translate_and_upsert(entity_type, entity_id, canonical)
+                outcome = translate_and_upsert(entity_type, entity_id, canonical)
             except Exception:  # noqa: BLE001 — isolate one entity's failure
                 context.log.exception("[translate] %s %s failed", entity_type, entity_id)
                 failed += 1
                 continue
-            if result:
-                translated += 1
-            made_progress = True  # upsert/skip both clear the queue rows
+            if outcome == LOCKED:
+                requeued += 1  # a peer holds it — rows stay queued, NOT progress
+            else:
+                # TRANSLATED / NOOP / UNPARSEABLE all cleared the rows.
+                if outcome == TRANSLATED:
+                    translated += 1
+                else:
+                    cleared += 1
+                made_progress = True
+        # Stop only when a batch cleared nothing — every entity was locked
+        # (transient) or already seen this run.
         if not made_progress:
             break
 
-    context.log.info("[translate] translated=%d skipped=%d failed=%d", translated, skipped, failed)
-    return dg.MaterializeResult(metadata={"translated": translated, "skipped": skipped, "failed": failed})
+    context.log.info(
+        "[translate] translated=%d cleared=%d requeued=%d failed=%d",
+        translated, cleared, requeued, failed,
+    )
+    return dg.MaterializeResult(
+        metadata={"translated": translated, "cleared": cleared, "requeued": requeued, "failed": failed}
+    )
+
+
+def _clear_translation_rows(entity_type: str, entity_id: str, locales: set[str]) -> None:
+    for locale in locales:
+        try:
+            mark_translated(entity_type, entity_id, locale)
+        except Exception:  # noqa: BLE001 — queue cleanup must not fail the drain
+            pass
 
 
 # ── manual-signal trigger ─────────────────────────────────────────────────────

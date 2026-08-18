@@ -1970,6 +1970,7 @@ query EventsPendingAlert($first: Int, $minSeverity: Int) {
     populationAffected
     validFrom
     validTo
+    lastSignalCreatedAt
     originLocation { id name level ancestorIds }
     destinationLocation { id name level ancestorIds }
     generalLocation { id name level ancestorIds }

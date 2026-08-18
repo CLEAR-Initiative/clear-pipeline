@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     acled_password: str = ""  # API key
     acled_countries: str = "Sudan,Afghanistan,Venezuela"  # Comma-separated; ACLED spelling
     acled_poll_interval_minutes: int = 60
+    # ACLED publishes in weekly batches where event_date lags publication. The poll
+    # overscans its (event_date-filtered) query window by this many days so
+    # late-published-but-earlier-dated events aren't filtered out forever; the seen
+    # set + clear-api idempotency dedup the overlap.
+    acled_publication_lag_days: int = 14
     acled_source_name: str = "acled"
     acled_token_ttl: int = 23 * 3600  # 23 hours (valid 24h)
 
@@ -139,10 +144,15 @@ class Settings(BaseSettings):
     sentry_env: str = "development"
     log_level: str = "INFO"
 
-    # Insights dashboard (LLM call telemetry — see clear-pipeline-insights repo)
-    insights_api_url: str = "https://clear-pipeline-insights.vercel.app"
-    insights_ingest_token: str = ""  # empty disables telemetry
-    pipeline_env: str = ""  # empty → derived as local-{whoami} at runtime
+    # NOTE: the clear-pipeline `insights` per-Claude-call telemetry is intentionally
+    # NOT wired in the Dagster port — LLM calls go through providers/llm.py, which
+    # has no insights hook. Call-level telemetry is dropped for the signal pipeline;
+    # a per-run guardrail (below) bounds spend instead.
+
+    # Cost guardrail: a single classify_group drain run processes at most this many
+    # signals (each grouped signal makes one rewrite LLM call). Prevents a runaway
+    # run — up to _MAX_BATCHES * _BATCH_SIZE = 10k signals — from an unbounded spend.
+    signal_max_signals_per_run: int = 2000
 
     # Suppress alert escalation (and the email fan-out it triggers) when the
     # signal's publishedAt is older than this many hours. Backdated Dataminr

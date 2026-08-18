@@ -107,13 +107,13 @@ def test_project_manual_from_signal_row():
     assert view.location_name == "Khartoum"
 
 
-def test_project_polled_without_blob_is_skipped():
-    # Dataminr signal with no rawS3Key → not ours (e.g. legacy Celery row).
-    assert stages._project({"id": "s1", "source": {"name": "dataminr"}}) is None
+def test_project_polled_without_blob_returns_no_blob():
+    # Dataminr signal with no rawS3Key → permanent skip reason (legacy Celery row).
+    assert stages._project({"id": "s1", "source": {"name": "dataminr"}}) == "no_blob"
 
 
-def test_project_unknown_source_is_skipped():
-    assert stages._project({"id": "x", "source": {"name": "mystery"}}) is None
+def test_project_unknown_source_returns_reason():
+    assert stages._project({"id": "x", "source": {"name": "mystery"}}) == "unknown_source"
 
 
 # ── classify_group drain-loop control flow ───────────────────────────────────
@@ -124,7 +124,7 @@ def test_drain_marks_processed_and_terminates_on_empty():
     with (
         patch.object(stages, "pending_signals", side_effect=_batched(batches)),
         patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
-        patch.object(stages, "_process_one_signal", return_value="processed"),
+        patch.object(stages, "_process_one_signal", return_value=stages._PROCESSED),
     ):
         result = _run()
 
@@ -132,24 +132,48 @@ def test_drain_marks_processed_and_terminates_on_empty():
     assert result.metadata["processed"] == 2
 
 
-def test_drain_stops_on_skip_only_batch_no_infinite_loop():
+def test_drain_all_requeue_stops_without_marking():
+    # Every row is a transient requeue (lock contention) — stays NEW, nothing marked.
     with (
         patch.object(stages, "pending_signals", side_effect=lambda first: [{"id": "s1"}]),
         patch.object(stages, "mark_signals_processed") as mark,
-        patch.object(stages, "_process_one_signal", return_value="skipped"),
+        patch.object(stages, "_process_one_signal", return_value=stages._REQUEUE),
     ):
         result = _run()
 
-    assert result.metadata["skipped"] == 1
+    assert result.metadata["requeued"] == 1
     for call in mark.call_args_list:
         assert call.args[0] == []  # nothing flipped; loop still terminated
+
+
+def test_drain_legacy_no_blob_backlog_does_not_deadlock():
+    # The cutover bug: the queue head is all legacy no-blob rows. They must be
+    # marked PROCESSED (leave the queue) so a real signal behind them still drains,
+    # instead of an all-skip first batch breaking the loop forever.
+    marked: list[tuple[str, list[str]]] = []
+    batches = [[{"id": "legacy1"}, {"id": "legacy2"}], [{"id": "real"}], []]
+
+    def outcome(created):
+        return stages._PROCESSED if created["id"] == "real" else stages._DROP_DONE
+
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched(batches)),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
+        patch.object(stages, "_process_one_signal", side_effect=outcome),
+    ):
+        result = _run()
+
+    assert ("PROCESSED", ["legacy1", "legacy2"]) in marked  # drops leave the queue
+    assert ("PROCESSED", ["real"]) in marked                # signal behind them drained
+    assert result.metadata["dropped"] == 2
+    assert result.metadata["processed"] == 1
 
 
 def test_drain_marks_failed_signals_and_keeps_going():
     def process(created):
         if created["id"] == "bad":
             raise RuntimeError("boom")
-        return "processed"
+        return stages._PROCESSED
 
     marked: list[tuple[str, list[str]]] = []
     batches = [[{"id": "ok"}, {"id": "bad"}], []]
@@ -164,6 +188,43 @@ def test_drain_marks_failed_signals_and_keeps_going():
     assert ("FAILED", ["bad"]) in marked
     assert result.metadata["processed"] == 1
     assert result.metadata["failed"] == 1
+
+
+# ── translate drain — no repeated LLM calls on a stuck entity ────────────────
+
+def test_translate_unparseable_entity_invoked_once_per_run():
+    from clear_context_pipeline.providers import translate as tp
+
+    calls = {"n": 0}
+
+    def fake_tu(entity_type, entity_id, canonical):
+        calls["n"] += 1
+        return tp.UNPARSEABLE  # rows cleared inside translate_and_upsert
+
+    # pending_translations keeps returning the same row; without the per-run `seen`
+    # guard the loop would re-invoke the model _MAX_BATCHES times.
+    row = {"entityType": "event", "entityId": "e1", "locale": "ar"}
+    with (
+        patch.object(stages, "pending_translations", side_effect=lambda first: [row]),
+        patch.dict(stages._CANONICAL_FETCH, {"event": lambda eid: {"title": "t", "description": "d"}}),
+        patch.object(stages, "translate_and_upsert", side_effect=fake_tu),
+    ):
+        result = stages._drain_translations(MagicMock())
+
+    assert calls["n"] == 1  # invoked once, not 50×
+    assert result.metadata["cleared"] == 1
+
+
+def test_translate_unknown_entity_type_is_dropped():
+    with (
+        patch.object(stages, "pending_translations",
+                     side_effect=lambda first: [{"entityType": "widget", "entityId": "w1", "locale": "ar"}]),
+        patch.object(stages, "mark_translated") as mark,
+    ):
+        result = stages._drain_translations(MagicMock())
+
+    mark.assert_called_with("widget", "w1", "ar")  # row cleared so it can't poison the queue
+    assert result.metadata["cleared"] == 1
 
 
 # ── translation-hash helper (must agree with clear-api's TS helper) ──────────

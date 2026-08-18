@@ -192,33 +192,38 @@ def fetch_gdacs_events(since: datetime | None = None) -> list[dict]:
 
     logger.info("[GDACS] Total raw events across all countries: %d", len(all_raw))
 
-    # Parse and deduplicate
+    # Parse + dedup. Seen-set is READ here only; marked (mark_seen) after
+    # createSignal via the connector's post_create, and the watermark is advanced
+    # by the ingest asset after a clean batch — so a record whose persistence
+    # fails stays un-seen + inside the window and the next poll re-fetches it.
     events: list[dict] = []
     parse_failed = 0
     deduped = 0
+    batch_ids: set[str] = set()
     for raw in all_raw:
         parsed = _parse_event(raw)
         if not parsed:
             parse_failed += 1
             continue
 
-        dedup_key = f"gdacs:seen:{parsed['gdacs_id']}"
-        if _redis.exists(dedup_key):
+        gdacs_id = parsed["gdacs_id"]
+        if gdacs_id in batch_ids or _redis.exists(f"gdacs:seen:{gdacs_id}"):
             deduped += 1
             continue
-
-        _redis.setex(dedup_key, settings.dedup_ttl_hours * 3600, "1")
+        batch_ids.add(gdacs_id)
         events.append(parsed)
-
-    if events:
-        set_last_synced(now)
-        logger.info("[GDACS] Updated last_synced to %s", now.isoformat())
 
     logger.info(
         "[GDACS] Result: %d new events (parse_failed=%d, already_seen=%d) out of %d raw",
         len(events), parse_failed, deduped, len(all_raw),
     )
     return events
+
+
+def mark_seen(gdacs_id: str) -> None:
+    """Mark an event ingested (Redis seen-set) — called only after createSignal
+    is confirmed, so a failed persistence leaves the event eligible for re-poll."""
+    _redis.setex(f"gdacs:seen:{gdacs_id}", settings.dedup_ttl_hours * 3600, "1")
 
 
 def get_last_synced() -> datetime | None:

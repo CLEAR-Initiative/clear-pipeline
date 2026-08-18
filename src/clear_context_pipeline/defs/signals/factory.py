@@ -18,7 +18,7 @@ No ``from __future__ import annotations`` — Dagster inspects the ``context``
 annotation on the ingest asset.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import dagster as dg
 
@@ -45,13 +45,17 @@ def build_source_assets(connector: SignalSource) -> list:
         description=f"Poll {src} → write raw blobs to the S3 lake + createSignal(status=NEW).",
     )
     def _ingest(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+        # Timestamp captured BEFORE polling — the watermark is advanced to this
+        # only after a clean batch, so nothing published during the poll is skipped.
+        poll_started = datetime.now(UTC)
+
         since = connector.last_synced()
         if since is None:
             latest = get_latest_signal_timestamp()
             if latest:
                 since = datetime.fromisoformat(latest.replace("Z", "+00:00"))
 
-        records = connector.poll(since)  # advances the watermark internally
+        records = connector.poll(since)
         if not records:
             context.log.info("[%s] no new signals", src)
             return dg.MaterializeResult(metadata={"signals_created": 0})
@@ -59,22 +63,39 @@ def build_source_assets(connector: SignalSource) -> list:
         s3 = lake.s3_client()
         bucket = settings.s3_bucket
         api_source_id = connector.api_source_id()
-        created = 0
+        created = failed = 0
         for record in records:
-            key = lake.raw_key(
-                src, connector.published_at(record), connector.external_id(record)
-            )
-            lake.write_raw(s3, bucket, key, connector.raw_bytes(record))
-            input_data = connector.to_signal_input(record, api_source_id)
-            input_data["rawS3Key"] = key
-            create_signal(input_data)
-            # Post-create hook (idempotent): darfur24 marks the article seen only
-            # after the signal is confirmed; no-op for the others.
-            connector.post_create(record)
-            created += 1
+            # Per-record isolation: one bad record (a 4xx createSignal, a geoparser
+            # blow-up in to_signal_input) must NOT abort the batch and strand the
+            # rest. seen-marking (post_create) happens only AFTER createSignal, so a
+            # failed record stays re-pollable; clear-api's (sourceId, externalId)
+            # upsert makes the re-fetch idempotent.
+            try:
+                key = lake.raw_key(
+                    src, connector.published_at(record), connector.external_id(record)
+                )
+                lake.write_raw(s3, bucket, key, connector.raw_bytes(record))
+                input_data = connector.to_signal_input(record, api_source_id)
+                input_data["rawS3Key"] = key
+                create_signal(input_data)
+                connector.post_create(record)
+                created += 1
+            except Exception:  # noqa: BLE001 — isolate one record's failure
+                context.log.exception("[%s] failed to ingest a record", src)
+                failed += 1
 
-        context.log.info("[%s] created %d signals", src, created)
-        return dg.MaterializeResult(metadata={"signals_created": created})
+        # Advance the watermark ONLY when every record persisted. On any failure we
+        # leave it, so the next poll re-fetches the whole window and retries the
+        # failed records (idempotent) instead of skipping past them.
+        if failed == 0 and created:
+            connector.set_watermark(poll_started)
+        elif failed:
+            context.log.warning(
+                "[%s] %d record(s) failed — watermark held for retry next poll", src, failed
+            )
+
+        context.log.info("[%s] created %d signals (failed %d)", src, created, failed)
+        return dg.MaterializeResult(metadata={"signals_created": created, "failed": failed})
 
     ingest_job = dg.define_asset_job(name=f"{src}_ingest", selection=[_ingest])
     poll_sensor = build_poll_sensor(

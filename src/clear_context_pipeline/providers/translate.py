@@ -165,30 +165,41 @@ def configured_target_locales() -> list[str]:
     return [code for code in parsed if code != "en"]
 
 
+# translate_and_upsert outcomes. The translate stage relies on these to know
+# whether the entity's queue rows were CLEARED (so the row can't re-drain and
+# re-invoke the paid LLM every run). Only LOCKED leaves rows queued — and a peer
+# holds the lock, so it will clear them.
+TRANSLATED = "translated"    # LLM ran + upsert → rows cleared
+NOOP = "noop"                # nothing stale (or disabled) → rows cleared
+UNPARSEABLE = "unparseable"  # model output unusable → rows cleared (dropped) so it can't re-loop
+LOCKED = "locked"            # a peer holds the lock → rows left queued (transient)
+
+
 def translate_and_upsert(
     entity_type: str,
     entity_id: str,
     canonical: dict[str, Any],
-) -> dict | None:
+) -> str:
     """Translate ``canonical`` into every configured target locale and upsert via
     clear-api ``upsertTranslations`` (which clears the queue rows). Skips the LLM
-    entirely when translation is disabled, every locale is already current, or the
-    stale-field union is empty. Returns a summary dict (or None when nothing to do).
+    when translation is disabled or every locale is already current.
 
-    A short-TTL Redis dedup lock keeps two concurrent drains off the same entity.
+    Returns one of ``TRANSLATED`` / ``NOOP`` / ``UNPARSEABLE`` / ``LOCKED`` — the
+    stage treats everything except ``LOCKED`` as "rows cleared". A short-TTL Redis
+    dedup lock keeps two concurrent drains off the same entity.
     """
     target_locales = configured_target_locales()
     if not target_locales:
-        return None
+        return NOOP
 
     lock_key = f"translate:{entity_type}:{entity_id}"
     with redis_lock(lock_key, ttl_seconds=_TRANSLATE_LOCK_TTL_SECONDS, wait_seconds=0) as acquired:
         if not acquired:
             logger.info(
-                "[TRANSLATE] %s %s: another worker holds the lock — skipping",
+                "[TRANSLATE] %s %s: another worker holds the lock — leaving queued",
                 entity_type, entity_id,
             )
-            return None
+            return LOCKED
         return _translate_and_upsert_locked(entity_type, entity_id, canonical)
 
 
@@ -196,10 +207,10 @@ def _translate_and_upsert_locked(
     entity_type: str,
     entity_id: str,
     canonical: dict[str, Any],
-) -> dict | None:
+) -> str:
     target_locales = configured_target_locales()
     if not target_locales:
-        return None
+        return NOOP
 
     fresh_hashes = compute_source_hashes(entity_type, canonical)
     stored = {
@@ -220,11 +231,8 @@ def _translate_and_upsert_locked(
             "[TRANSLATE] %s %s: all %d locale(s) current — skipping model",
             entity_type, entity_id, len(target_locales),
         )
-        # Nothing to translate, but clear any lingering queue rows so the entity
-        # doesn't re-drain forever.
-        for locale in target_locales:
-            clear_api.mark_translated(entity_type, entity_id, locale)
-        return None
+        _clear_queue(entity_type, entity_id, target_locales)
+        return NOOP
 
     union_fields = sorted({f for fields in per_locale_stale.values() for f in fields})
     translated = translate_entity(
@@ -235,7 +243,12 @@ def _translate_and_upsert_locked(
         entity_id=entity_id,
     )
     if not translated:
-        return None
+        # Model output was unusable. Clear the queue rows so this entity can't
+        # re-drain and re-invoke the (paid) model on every run — for events that's
+        # harmless (re-enqueued on the next group); the alternative is a poisoned
+        # queue head that stalls all translation. Logged as an error above.
+        _clear_queue(entity_type, entity_id, target_locales)
+        return UNPARSEABLE
 
     # Merge fresh translations over stored data so fields this pass didn't
     # refresh keep their previous translations. source_hashes always overwrite.
@@ -250,16 +263,21 @@ def _translate_and_upsert_locked(
         })
 
     if not upsert_rows:
-        return None
+        _clear_queue(entity_type, entity_id, target_locales)
+        return NOOP
 
     clear_api.upsert_translations(entity_type, entity_id, upsert_rows)
     logger.info(
         "[TRANSLATE] %s %s: wrote %d locale(s), %d field(s) max",
         entity_type, entity_id, len(upsert_rows), len(union_fields),
     )
-    return {
-        "entity_type": entity_type,
-        "entity_id": entity_id,
-        "locales_written": list(translated.keys()),
-        "fields_translated": union_fields,
-    }
+    return TRANSLATED
+
+
+def _clear_queue(entity_type: str, entity_id: str, locales: list[str]) -> None:
+    """Remove an entity's rows from the translation queue (best-effort)."""
+    for locale in locales:
+        try:
+            clear_api.mark_translated(entity_type, entity_id, locale)
+        except Exception:  # noqa: BLE001 — queue cleanup must not fail the drain
+            pass

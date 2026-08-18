@@ -305,7 +305,13 @@ def fetch_acled_events(since: datetime | None = None) -> list[dict]:
         logger.info("[ACLED] No 'since' provided, using initial lookback of %d days", settings.initial_lookback_days)
 
     now = datetime.now(UTC)
-    start_date = since.strftime("%Y-%m-%d")
+    # ACLED releases data in weekly batches where `event_date` lags publication by
+    # days, and the server-side filter is on `event_date` — so an event published
+    # after our watermark but DATED before it would be filtered out forever.
+    # Overscan the window by the publication lag; the Redis seen-set + clear-api's
+    # (sourceId, externalId) idempotency dedup the re-fetched rows.
+    query_since = since - timedelta(days=settings.acled_publication_lag_days)
+    start_date = query_since.strftime("%Y-%m-%d")
     end_date = now.strftime("%Y-%m-%d")
 
     logger.info("[ACLED] Fetch window: %s → %s", start_date, end_date)
@@ -326,33 +332,40 @@ def fetch_acled_events(since: datetime | None = None) -> list[dict]:
 
     logger.info("[ACLED] Total raw events across all countries: %d", len(all_raw))
 
-    # Parse and deduplicate
+    # Parse + dedup. The seen-set is only READ here — it is MARKED (mark_seen)
+    # after createSignal succeeds (via the connector's post_create), and the
+    # watermark is advanced by the ingest asset after a clean batch. That way a
+    # record whose persistence fails stays un-seen and inside the poll window, so
+    # the next poll re-fetches it instead of losing it (clear-api's
+    # (sourceId, externalId) upsert dedups the re-fetch).
     events: list[dict] = []
     parse_failed = 0
     deduped = 0
+    batch_ids: set[str] = set()
     for raw in all_raw:
         parsed = _parse_event(raw)
         if not parsed:
             parse_failed += 1
             continue
 
-        dedup_key = f"acled:seen:{parsed['acled_id']}"
-        if _redis.exists(dedup_key):
+        acled_id = parsed["acled_id"]
+        if acled_id in batch_ids or _redis.exists(f"acled:seen:{acled_id}"):
             deduped += 1
             continue
-
-        _redis.setex(dedup_key, settings.dedup_ttl_hours * 3600, "1")
+        batch_ids.add(acled_id)
         events.append(parsed)
-
-    if events:
-        set_last_synced(now)
-        logger.info("[ACLED] Updated last_synced to %s", now.isoformat())
 
     logger.info(
         "[ACLED] Result: %d new events (parse_failed=%d, already_seen=%d) out of %d raw",
         len(events), parse_failed, deduped, len(all_raw),
     )
     return events
+
+
+def mark_seen(acled_id: str) -> None:
+    """Mark an event ingested (Redis seen-set) — called only after createSignal
+    is confirmed, so a failed persistence leaves the event eligible for re-poll."""
+    _redis.setex(f"acled:seen:{acled_id}", settings.dedup_ttl_hours * 3600, "1")
 
 
 def get_last_synced() -> datetime | None:

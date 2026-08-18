@@ -240,3 +240,12 @@ run by hand, not on any schedule, and are not migrated.
   **shadow/dual-run** against Celery and diff before cutover (§7).
 - **Insights overlap** — pipeline-insights owns *per-Claude-call* telemetry; Dagster owns *run/asset*
   lineage. Complementary, not redundant — do not rebuild call-level telemetry in Dagster.
+
+  > **Port deviation (2026-08):** clear-pipeline's `call_claude()` chokepoint (which fed
+  > pipeline-insights) is NOT carried into the Dagster port — signal-pipeline LLM calls go through
+  > the shared `providers/llm.py`, which has no insights hook. **Call-level telemetry is dropped for
+  > the signal pipeline**; the dead `insights_*` settings were removed. If per-call telemetry is
+  > wanted later, add one reporting hook in `providers/llm.py` (the single chokepoint) rather than at
+  > each call site. In the meantime, LLM spend is bounded by a per-run guardrail
+  > (`signal_max_signals_per_run`, enforced in `classify_group`) — the counterpart to the KB
+  > pipeline's `KB_MAX_COST_USD_PER_RUN`.

@@ -264,8 +264,10 @@ def _fetch_signals_current(since: datetime) -> list[DataminrSignal]:
         logger.warning("[DATAMINR] Hit max page cap (%d), some older signals may be missed", settings.max_pages_per_poll)
 
     if latest_seen:
-        set_last_synced(latest_seen)
-        logger.info("[DATAMINR] Updated last_synced to %s", latest_seen.isoformat())
+        # Watermark is advanced by the ingest asset AFTER signals are persisted
+        # (see factory.py), not here — so a mid-batch failure can't strand
+        # un-created signals behind an advanced watermark.
+        logger.info("[DATAMINR] latest alert seen: %s (watermark advanced post-persist)", latest_seen.isoformat())
 
     logger.info("[DATAMINR] Fetched %d new signals from current API (across %d pages)", len(all_signals), page)
     return all_signals
@@ -439,8 +441,8 @@ def _fetch_signals_legacy(since: datetime) -> list[DataminrSignal]:
         cursor_from = cursor_to
 
     if latest_seen:
-        set_last_synced(latest_seen)
-        logger.info("[DATAMINR] Updated last_synced to %s (legacy)", latest_seen.isoformat())
+        # Watermark advanced post-persist by the ingest asset (see factory.py).
+        logger.info("[DATAMINR] latest alert seen: %s (legacy; watermark advanced post-persist)", latest_seen.isoformat())
 
     logger.info("[DATAMINR] Fetched %d new signals from legacy API (across %d pages)", len(all_signals), page)
     return all_signals

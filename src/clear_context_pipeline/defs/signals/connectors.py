@@ -129,9 +129,16 @@ class PollSource(SignalSource, Protocol):
         """Read the poll watermark (None = resume / initial lookback)."""
         ...
 
+    def set_watermark(self, ts: datetime) -> None:
+        """Advance the poll watermark. Called by the ingest asset AFTER a clean
+        batch (all records persisted) — never inside ``poll`` — so a partial
+        failure can't strand un-created records behind an advanced watermark."""
+        ...
+
     def post_create(self, record: Any) -> None:
-        """Optional per-record hook after ``createSignal`` succeeds (e.g. darfur24
-        marks the article seen only once the signal is confirmed). No-op default."""
+        """Per-record hook after ``createSignal`` succeeds — marks the record seen
+        in the source's dedup set so a failed persistence leaves it re-pollable.
+        No-op for sources with no seen-set (Dataminr uses the watermark alone)."""
         ...
 
     def parse(self, raw: bytes) -> Any:
@@ -181,8 +188,11 @@ class DataminrConnector:
     def last_synced(self) -> datetime | None:
         return dataminr.get_last_synced()
 
+    def set_watermark(self, ts: datetime) -> None:
+        dataminr.set_last_synced(ts)
+
     def post_create(self, record: Any) -> None:
-        return None
+        return None  # Dataminr dedups via the watermark — no seen-set to mark
 
     def parse(self, raw: bytes) -> dataminr.DataminrSignal:
         return dataminr.DataminrSignal.model_validate_json(raw)
@@ -264,8 +274,11 @@ class ACLEDConnector:
     def last_synced(self) -> datetime | None:
         return acled.get_last_synced()
 
+    def set_watermark(self, ts: datetime) -> None:
+        acled.set_last_synced(ts)
+
     def post_create(self, record: Any) -> None:
-        return None
+        acled.mark_seen(record["acled_id"])  # only after createSignal confirmed
 
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
@@ -315,8 +328,11 @@ class GDACSConnector:
     def last_synced(self) -> datetime | None:
         return gdacs.get_last_synced()
 
+    def set_watermark(self, ts: datetime) -> None:
+        gdacs.set_last_synced(ts)
+
     def post_create(self, record: Any) -> None:
-        return None
+        gdacs.mark_seen(record["gdacs_id"])  # only after createSignal confirmed
 
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
@@ -386,6 +402,9 @@ class Darfur24Connector:
 
     def last_synced(self) -> datetime | None:
         return darfur24.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        darfur24.set_last_synced(ts)  # informational only — RSS has no time window
 
     def post_create(self, record: Any) -> None:
         # Mark seen ONLY after createSignal confirmed the signal (expo-383).
