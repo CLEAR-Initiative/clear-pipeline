@@ -1,8 +1,8 @@
 """Tests for the deterministic helpers in the situation-analysis path.
 
 Covers:
-  - `_field_value`, `_dig` shims that hoist QualityEnvelope values out
-    of an aggregated-datapoints blob.
+  - `_field_range`, `_dig` shims that hoist QualityEnvelope value + band
+    out of an aggregated-datapoints blob.
   - `_build_datapoints` - Component 1's deterministic assembly.
   - `_build_sources` - Component 7's chronological source ordering.
   - `fetch_rag_context` - RAG search wrapper: dedup, formatting,
@@ -21,7 +21,7 @@ from clear_context_pipeline.defs.situation.generate import (
     _build_sources,
     _calendar_year_window,
     _fetch_report_meta,
-    _field_value,
+    _field_range,
     _previous_window,
     _resolve_comparison,
 )
@@ -34,33 +34,57 @@ from clear_context_pipeline.defs.situation.schemas import Source
 
 
 # ────────────────────────────────────────────────────────────────────
-# _field_value - safe QualityEnvelope value extraction
+# _field_range - safe QualityEnvelope value + band extraction (ADR-0007)
 # ────────────────────────────────────────────────────────────────────
 
 
-class TestFieldValue:
-    def test_extracts_numeric_value(self):
-        data = {"idp_stock": {"value": 45000, "unit": "people"}}
-        assert _field_value(data, "idp_stock") == 45000.0
+class TestFieldRange:
+    def test_extracts_value_and_band(self):
+        data = {"idp_stock": {
+            "value": 45000, "value_low": 40000, "value_high": 52000,
+            "range_width": 12000, "bias": "underreport",
+            "quality_score": 0.7, "unit": "people",
+        }}
+        rf = _field_range(data, "idp_stock")
+        assert rf.value == 45000.0
+        assert rf.low == 40000.0
+        assert rf.high == 52000.0
+        assert rf.range_width == 12000.0
+        assert rf.bias == "underreport"
+        assert rf.confidence == 0.7
 
     def test_coerces_int_to_float(self):
-        # Value should ALWAYS be float - the caller decides truncation.
-        assert _field_value({"x": {"value": 42}}, "x") == 42.0
-        assert isinstance(_field_value({"x": {"value": 42}}, "x"), float)
+        # Values should ALWAYS be float - the caller decides truncation.
+        rf = _field_range({"x": {"value": 42}}, "x")
+        assert rf.value == 42.0
+        assert isinstance(rf.value, float)
+
+    def test_exact_source_figure_has_zero_width_band(self):
+        # An exact API figure with no spread: low == high == value.
+        rf = _field_range({"x": {"value": 100, "value_low": 100, "value_high": 100}}, "x")
+        assert rf.value == 100.0 and rf.low == 100.0 and rf.high == 100.0
+
+    def test_band_survives_when_point_value_missing(self):
+        # A field carrying only [low, high] still yields a RangeFigure.
+        rf = _field_range({"x": {"value_low": 10, "value_high": 30}}, "x")
+        assert rf is not None
+        assert rf.value is None and rf.low == 10.0 and rf.high == 30.0
 
     def test_returns_none_for_missing_field(self):
-        assert _field_value({"other": {"value": 5}}, "idp_stock") is None
+        assert _field_range({"other": {"value": 5}}, "idp_stock") is None
 
     def test_returns_none_for_non_dict_field(self):
         # Set-union fields carry {"values": [...]} not {"value": N}.
         # A caller mistakenly reading them as numeric must get None.
-        assert _field_value({"event_types": {"values": ["conflict"]}}, "event_types") is None
+        assert _field_range({"event_types": {"values": ["conflict"]}}, "event_types") is None
 
-    def test_returns_none_when_value_is_null(self):
-        assert _field_value({"x": {"value": None}}, "x") is None
+    def test_returns_none_when_all_numbers_null(self):
+        assert _field_range({"x": {"value": None}}, "x") is None
 
-    def test_returns_none_for_uncoercible_value(self):
-        assert _field_value({"x": {"value": "not-a-number"}}, "x") is None
+    def test_ignores_uncoercible_value(self):
+        # A stray non-numeric value must not raise; it just drops to None.
+        rf = _field_range({"x": {"value": "not-a-number"}}, "x")
+        assert rf is None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -216,13 +240,13 @@ class TestBuildDatapoints:
             },
         }
         dp = _build_datapoints(aggregated)
-        assert dp.population_displaced == 6_500_000.0
-        assert dp.population_in_need == 25_000_000.0  # from overall_pin
+        assert dp.population_displaced.value == 6_500_000.0
+        assert dp.population_in_need.value == 25_000_000.0  # from overall_pin
         # Population Affected is a distinct, wider figure than PIN.
-        assert dp.population_affected == 30_000_000.0  # from overall_affected
-        assert dp.returnees == 200_000.0
-        assert dp.funding_required_usd == 2_500_000_000.0
-        assert dp.funding_received_usd == 1_100_000_000.0
+        assert dp.population_affected.value == 30_000_000.0  # from overall_affected
+        assert dp.returnees.value == 200_000.0
+        assert dp.funding_required_usd.value == 2_500_000_000.0
+        assert dp.funding_received_usd.value == 1_100_000_000.0
         # number_of_events is currently a proxy for reportCount - the
         # doc comment on the helper explains this approximation.
         assert dp.number_of_events == 42
@@ -237,7 +261,7 @@ class TestBuildDatapoints:
             "data": {"idp_stock": {"value": 100000}},
         }
         dp = _build_datapoints(aggregated)
-        assert dp.population_displaced == 100000.0
+        assert dp.population_displaced.value == 100000.0
         assert dp.population_in_need is None
         assert dp.population_affected is None
         assert dp.returnees is None
