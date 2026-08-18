@@ -40,18 +40,21 @@ LOCALE_LABELS: dict[str, str] = {
 TRANSLATION_PROMPT_VERSION = "v1"
 
 # Nested crisis translations (needs, scenarios) blow past small caps; non-Latin
-# scripts inflate output tokens ~1.5–2x. 16384 covers 2 locales × the heaviest
-# crisis we emit.
-_TRANSLATE_MAX_TOKENS = 16384
+# scripts inflate output tokens ~1.5–2x. Situation-analysis prose (summary +
+# 8 risk domains + hazards + displacement + 6 sectors + change notes) is far
+# larger than any crisis, so this cap covers a few locales × the heaviest
+# situation payload. If a payload ever truncates, `_parse_json` fails and the
+# drain re-queues it — it never corrupts a partial write.
+_TRANSLATE_MAX_TOKENS = 32768
 
 
 def _system_prompt() -> str:
     return (
         "You are a professional translator for humanitarian crisis content "
         "produced by the Norwegian Refugee Council (NRC). You will be given "
-        "a JSON object describing one entity (an event, a crisis, or an "
-        "admin location) and asked to translate selected fields into one or "
-        "more target languages.\n"
+        "a JSON object describing one entity (an event, a crisis, an admin "
+        "location, or a country situation analysis) and asked to translate "
+        "selected fields into one or more target languages.\n"
         "\n"
         "Rules:\n"
         "- Preserve every JSON key exactly. Only translate string values.\n"

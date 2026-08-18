@@ -43,6 +43,7 @@ from clear_context_pipeline.providers.clear_api import (
     get_crisis_canonical,
     get_event_canonical,
     get_location_canonical,
+    get_situation_canonical,
     mark_signals_processed,
     mark_translated,
     pending_signals,
@@ -333,6 +334,7 @@ _CANONICAL_FETCH = {
     "event": get_event_canonical,
     "crisis": get_crisis_canonical,
     "location": get_location_canonical,
+    "situationAnalysis": get_situation_canonical,
 }
 
 
