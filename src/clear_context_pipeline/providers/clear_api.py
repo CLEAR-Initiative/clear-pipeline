@@ -292,8 +292,19 @@ def _execute(
             result = resp.json()
 
             if "errors" in result:
-                logger.error("clear-api GraphQL errors: %s", result["errors"])
-                raise RuntimeError(f"clear-api GraphQL errors: {result['errors']}")
+                errs = result["errors"]
+                err_text = str(errs)
+                # A schema/version mismatch — e.g. the signal-drain endpoints from
+                # clear-api PR #127 not yet deployed — is PERMANENT, not transient.
+                # Raise a clear, non-retryable error instead of retrying every
+                # sensor tick with a generic message.
+                if any(m in err_text for m in ("Cannot query field", "Unknown argument", "Unknown type")):
+                    raise ClearApiError(
+                        "clear-api schema mismatch — is clear-api PR #127 (signal/crisis/"
+                        f"translation drain + eventsPendingAlert) deployed? {err_text[:300]}"
+                    )
+                logger.error("clear-api GraphQL errors: %s", errs)
+                raise RuntimeError(f"clear-api GraphQL errors: {errs}")
 
             return result["data"]
 
@@ -1259,7 +1270,12 @@ def update_signal_location(signal_id: str, location_id: str) -> dict:
 
 
 def create_event(input_data: dict) -> dict:
-    result = _execute(CREATE_EVENT, {"input": input_data})
+    # retries=1: createEvent has no idempotency key (unlike createSignal's
+    # (sourceId, externalId)), so a retry after a timeout that actually committed
+    # would mint a duplicate event. Fail fast instead — the drain re-processes the
+    # signal on the next run, and group_signal's "already linked" short-circuit
+    # dedups once the link is visible.
+    result = _execute(CREATE_EVENT, {"input": input_data}, retries=1)
     return result["createEvent"]
 
 

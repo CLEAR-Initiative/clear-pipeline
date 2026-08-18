@@ -81,46 +81,16 @@ class Settings(BaseSettings):
     logie_bridges_url: str = "https://gis.logcluster.org/server/rest/services/LogIE/wld_trs_bridges_b_w_viewer/FeatureServer/0"
     logistics_iso3: str = "SDN,AFG,VEN"
 
-    # Anthropic
+    # Anthropic — signal-pipeline LLM calls go through providers/llm.py (the
+    # LLM_<ROLE>_* env vars), NOT these settings. The old per-stage claude_model_*
+    # overrides + the v1/Claude path were removed in the Dagster port.
     anthropic_api_key: str = ""
-    # Default model — used unless a per-stage override below is set.
-    claude_model: str = "claude-sonnet-4-6"
 
-    # Per-stage model overrides. Lighter stages (boolean / NER / pattern
-    # matching) default to Haiku; user-facing narrative stages stay on the
-    # default model. Each can be flipped via env without code changes.
-    #
-    #   classify   — v1 signal classification (taxonomy lookup + severity)
-    #   group      — v1 add-vs-create event clustering decision
-    #   assess     — v1 alert-worthiness boolean
-    #   rewrite    — v2 event title/description (USER-FACING)
-    #   crisis     — crisis narrative (USER-FACING, less frequent)
-    #   location   — text → location-name extraction (NER)
-    claude_model_classify: str = "claude-haiku-4-5-20251001"
-    claude_model_group: str = ""  # "" → falls back to claude_model
-    claude_model_assess: str = "claude-haiku-4-5-20251001"
-    claude_model_rewrite: str = ""  # falls back to claude_model
-    claude_model_crisis: str = ""  # falls back to claude_model
-    claude_model_location: str = "claude-haiku-4-5-20251001"
-    # Translation is mostly mechanical (string-to-string with structure
-    # preservation) — Haiku handles it well at ~10x the price advantage.
-    claude_model_translate: str = "claude-haiku-4-5-20251001"
-    # Ground-intel (WhatsApp signal pipeline). Message triage is a batched
-    # 4-way label task — Haiku territory, like classify/assess. Threading is
-    # a cross-message clustering judgement — stays on the default model.
-    claude_model_ground_classify: str = "claude-haiku-4-5-20251001"
-    claude_model_ground_thread: str = ""  # "" → falls back to claude_model
-
-    # Translation — comma-separated BCP-47 codes. 'en' is the canonical
-    # source and is never a target. Empty string disables translation
-    # entirely, which is the safe default until management says go.
+    # Translation — comma-separated BCP-47 codes. 'en' is the canonical source and
+    # is never a target. Empty string disables translation entirely. Default on.
     target_locales: str = "ar,fr"
 
-    # Celery
-    celery_broker_url: str = "redis://localhost:6379/0"
-
     # Pipeline
-    poll_interval_seconds: int = 15
     initial_lookback_days: int = 7
     relevance_threshold: float = 0.5
     dedup_ttl_hours: int = 48

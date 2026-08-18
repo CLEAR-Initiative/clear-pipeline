@@ -22,6 +22,8 @@ No ``from __future__ import annotations`` — Dagster inspects the ``context``
 annotation on assets.
 """
 
+import logging
+
 import dagster as dg
 import redis
 
@@ -58,10 +60,14 @@ from clear_context_pipeline.providers.translate import (
 from clear_context_pipeline.signals.config import settings
 
 _redis = redis.from_url(settings.redis_url)
+logger = logging.getLogger(__name__)
 
 _SIGNAL_LOCK_TTL_SECONDS = 360
 _MAX_BATCHES = 50
 _BATCH_SIZE = 200
+# Bound per-signal retries so a transient failure (S3 blip, clear-api 5xx) is
+# retried instead of dropped, but a persistently-bad signal still leaves the queue.
+_MAX_SIGNAL_ATTEMPTS = 5
 _ALERT_MIN_SEVERITY = 4  # events at/above this with no alert surface in eventsPendingAlert
 
 _EAGER = dg.AutomationCondition.eager()
@@ -113,8 +119,11 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
     for locale in configured_target_locales():
         try:
             enqueue_translation(entity_type, entity_id, locale)
-        except Exception:  # noqa: BLE001 — translation enqueue must never fail grouping
-            pass
+        except Exception:  # noqa: BLE001 — enqueue must never fail grouping, but log the loss
+            logger.warning(
+                "[classify_group] enqueue_translation failed for %s %s (%s) — translation skipped",
+                entity_type, entity_id, locale, exc_info=True,
+            )
 
 
 def _group(view: SignalView, created: dict) -> dict | None:
@@ -127,12 +136,14 @@ def _group(view: SignalView, created: dict) -> dict | None:
         return None
 
     actual_pop = extract_population_affected_from_text(
-        view.title, created.get("title"), created.get("description"),
+        view.title, view.description, created.get("description"),
     )
     return group_signal(
         signal_id=created["id"],
         signal_title=view.title,
-        signal_description=created.get("title"),
+        # The real prose description — NOT the title. `view.description` is what the
+        # relevance classifier above saw, so grouping stays consistent with it.
+        signal_description=view.description,
         signal_timestamp=view.timestamp,
         classification=classification,
         created_signal=created,
@@ -170,8 +181,28 @@ def _process_one_signal(created: dict) -> str:
         return _PROCESSED
 
 
+_DRAIN_LOCK_TTL_SECONDS = 3600  # generous; a normal drain finishes in seconds
+
+
 def _drain_signals(context) -> dg.MaterializeResult:
-    """Drain NEW signals from ALL sources, oldest-first, in bounded batches."""
+    """Drain NEW signals from ALL sources under a single-flight lock.
+
+    classify_group is triggered by BOTH eager automation (4 ingest assets) and the
+    interval sensor, so runs would otherwise overlap whenever a drain takes longer
+    than the sensor interval. Overlapping drains, combined with batch-level status
+    marking, let a second run re-group a signal off a stale ``pending_signals``
+    snapshot (double-counted casualties). A global drain lock makes runs serial;
+    a skipped run is harmless — the holder drains the whole queue, and the next
+    trigger re-runs. The per-signal lock + group_signal's "already linked"
+    short-circuit remain the backstop for the rare TTL-expiry case."""
+    with redis_lock("classify_group:drain", ttl_seconds=_DRAIN_LOCK_TTL_SECONDS, wait_seconds=0) as acquired:
+        if not acquired:
+            context.log.info("[classify_group] another drain holds the lock — skipping this run")
+            return dg.MaterializeResult(metadata={"skipped_concurrent": True})
+        return _drain_signals_locked(context)
+
+
+def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = 0
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
@@ -183,9 +214,24 @@ def _drain_signals(context) -> dg.MaterializeResult:
             try:
                 outcome = _process_one_signal(created)
             except Exception:  # noqa: BLE001 — isolate one signal's failure
-                context.log.exception("[classify_group] signal %s failed", created.get("id"))
-                failed_ids.append(created["id"])
-                failed += 1
+                # Transient (S3/clear-api blip) vs persistent: retry up to
+                # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely
+                # bad signal still leaves the queue instead of poisoning the head.
+                sid = created["id"]
+                attempts = _redis.incr(f"signal:attempts:{sid}")
+                _redis.expire(f"signal:attempts:{sid}", 86400)
+                if attempts >= _MAX_SIGNAL_ATTEMPTS:
+                    context.log.exception(
+                        "[classify_group] signal %s failed %d× — marking FAILED", sid, attempts
+                    )
+                    failed_ids.append(sid)
+                    failed += 1
+                else:
+                    context.log.warning(
+                        "[classify_group] signal %s failed (attempt %d/%d) — leaving NEW for retry",
+                        sid, attempts, _MAX_SIGNAL_ATTEMPTS,
+                    )
+                    requeued += 1
                 continue
             if outcome == _PROCESSED:
                 done_ids.append(created["id"])

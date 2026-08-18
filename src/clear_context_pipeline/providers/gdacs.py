@@ -105,8 +105,10 @@ def _parse_event(raw: dict) -> dict | None:
         "event_type": event_type,
         "glide_type": glide_type,
         "glide": glide,
-        "lat": float(lat) if lat else None,
-        "lng": float(lng) if lng else None,
+        # `if lat` would drop coordinates exactly on the equator / prime meridian
+        # (0/0.0/"0"); test for presence, not truthiness.
+        "lat": float(lat) if lat not in (None, "") else None,
+        "lng": float(lng) if lng not in (None, "") else None,
         "country": country,
         "iso3": iso3,
         "from_date": from_date,

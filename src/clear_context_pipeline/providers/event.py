@@ -597,10 +597,14 @@ def group_signal(
             resolved_stats=resolved_stats,
         )
 
-    # ttl_seconds = 30 is enough to cover worst-case Claude rewrite latency.
-    # wait_seconds = 20 gives the first worker plenty of room to finish and
-    # invalidate the cache before we re-read it.
-    with redis_lock(lock_key, ttl_seconds=30, wait_seconds=20) as acquired:
+    # The critical section runs create/update_event (up to 3×60s) + the rewrite
+    # LLM call (90s × tenacity retries) — several minutes worst case. ttl_seconds
+    # must exceed that or the lock expires mid-section and a concurrent worker
+    # creates a duplicate event for the same (admin2, level_2) — the exact race the
+    # lock prevents. 360s matches the per-signal lock TTL and the drain's step
+    # budget. wait_seconds = 20 still lets a fast first worker finish + invalidate
+    # the cache before the next re-reads it.
+    with redis_lock(lock_key, ttl_seconds=360, wait_seconds=20) as acquired:
         if not acquired:
             logger.warning(
                 "[GROUPING] Could not acquire %s within deadline — "

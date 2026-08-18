@@ -104,15 +104,28 @@ in clear-api. `createSignal` stores an **S3 pointer** instead of the raw blob. T
 most important boundary: do not model events/alerts/crises as lake assets — they are stateful,
 order-dependent transactional entities.
 
-**D2 — Poll assets are the only scheduled components; materialize-on-nonempty.**
-One ingest asset per source, on a schedule (or a sensor with a cursor). It writes raw to S3 and
-creates signals, and **only materializes `raw_<source>` when there is new data** so downstream
-does not fire on empty polls. Polling is irreducibly periodic (these are pull APIs); if a source
-ever offers a webhook/stream, that source drops the poll and becomes push-driven.
+**D2 — Poll assets are the only scheduled components.**
+One ingest asset per source, driven by a sensor with a cursor-editable interval. It writes raw to
+S3 and creates signals. Polling is irreducibly periodic (these are pull APIs); if a source ever
+offers a webhook/stream, that source drops the poll and becomes push-driven.
 
-**D3 — Downstream is event-driven via `AutomationCondition.eager()`.**
-Every asset below the poll layer runs *only* when its upstream produced something new. No fixed
-pipeline schedule; empty poll → zero downstream cost (no LLM spend).
+> **As shipped:** `raw_<source>` materializes on *every* tick (Dagster assets always emit a
+> `MaterializeResult`), so the eager `classify_group → alert → translate` chain fires on empty polls
+> too — but each stage drains a queue that's empty and returns immediately, with **no LLM spend**.
+> The cost claim ("empty poll → zero LLM cost") holds; the earlier "only materializes on new data /
+> downstream does not fire" wording did not. Run *count* is therefore ~one drain per source tick
+> plus its eager children (not "~24–48/day") — cheap no-op runs, but noisier in the run list than
+> §9 implied. If that noise matters, gate the eager condition on a non-empty result later.
+
+**D3 — Downstream is event-driven via `AutomationCondition.eager()`, plus a single-flight sensor.**
+Every asset below the poll layer runs when an upstream materializes. classify_group is also ticked
+by an interval sensor (to drain analyst `manual` signals, which have no ingest asset) and is
+guarded by a global drain lock so overlapping runs can't double-process. Empty queue → immediate
+no-op, no LLM spend.
+
+> **Cutover:** the shipped strategy is **big-bang** (build all sources, test locally, stop Celery,
+> flip the STOPPED sensors on). The shadow/dual-run described in §7/§9 was an earlier option and is
+> NOT what ships — treat those sections as superseded by the big-bang header.
 
 **D4 — Queue-drain over durable status, NOT "latest asset value".**
 With unpartitioned eager assets, if two polls land before downstream runs, Dagster would

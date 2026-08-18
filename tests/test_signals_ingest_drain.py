@@ -29,7 +29,9 @@ from clear_context_pipeline.providers.translation_hash import (
 
 
 def _run():
-    return stages._drain_signals(MagicMock())
+    # Call the inner drain directly — the outer _drain_signals wraps it in a
+    # single-flight Redis lock, which these mocked tests don't exercise.
+    return stages._drain_signals_locked(MagicMock())
 
 
 def _batched(batches):
@@ -169,7 +171,25 @@ def test_drain_legacy_no_blob_backlog_does_not_deadlock():
     assert result.metadata["processed"] == 1
 
 
-def test_drain_marks_failed_signals_and_keeps_going():
+def test_drain_transient_failure_requeues_not_failed():
+    # First failure (attempt 1) → requeue (leave NEW) so a transient blip isn't a
+    # permanent drop. Nothing is marked.
+    marked: list[tuple[str, list[str]]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "x"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
+        patch.object(stages, "_process_one_signal", side_effect=RuntimeError("boom")),
+        patch.object(stages._redis, "incr", return_value=1),
+        patch.object(stages._redis, "expire"),
+    ):
+        result = _run()
+
+    assert result.metadata["requeued"] == 1
+    assert result.metadata["failed"] == 0
+    assert all(ids == [] for _status, ids in marked)  # nothing marked terminal
+
+
+def test_drain_marks_failed_after_max_attempts_and_keeps_going():
     def process(created):
         if created["id"] == "bad":
             raise RuntimeError("boom")
@@ -181,11 +201,13 @@ def test_drain_marks_failed_signals_and_keeps_going():
         patch.object(stages, "pending_signals", side_effect=_batched(batches)),
         patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
         patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages._redis, "incr", return_value=stages._MAX_SIGNAL_ATTEMPTS),
+        patch.object(stages._redis, "expire"),
     ):
         result = _run()
 
-    assert ("PROCESSED", ["ok"]) in marked
-    assert ("FAILED", ["bad"]) in marked
+    assert ("PROCESSED", ["ok"]) in marked          # good signal still drained
+    assert ("FAILED", ["bad"]) in marked            # bad one FAILED at max attempts
     assert result.metadata["processed"] == 1
     assert result.metadata["failed"] == 1
 

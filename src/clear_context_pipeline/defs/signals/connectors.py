@@ -160,7 +160,7 @@ def _first_location_name(created: dict) -> str | None:
 # Dataminr — real-time alert feed (polled + drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class DataminrConnector:
-    source = "dataminr"
+    source = settings.dataminr_source_name  # consistent with the drain's dispatch key
     polled = True
     drained = True
     poll_interval_minutes = settings.dataminr_poll_interval_minutes
@@ -178,9 +178,9 @@ class DataminrConnector:
         return record.model_dump_json().encode("utf-8")
 
     def api_source_id(self) -> str:
-        from clear_context_pipeline.providers.clear_api import get_dataminr_source_id
+        from clear_context_pipeline.providers.clear_api import get_source_id_by_name
 
-        return get_dataminr_source_id()
+        return get_source_id_by_name(settings.dataminr_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
         return build_signal_input(record, api_source_id)
@@ -208,7 +208,8 @@ class DataminrConnector:
             external_id=record.alertId,
             title=record.headline,
             timestamp=record.alertTimestamp,
-            description=created.get("title"),
+            # The prose description (subHeadline / liveBrief text), not the headline.
+            description=created.get("description") or created.get("title"),
             location_name=loc.name if loc else None,
             url=record.publicPost.href if record.publicPost else None,
             lat=lat,

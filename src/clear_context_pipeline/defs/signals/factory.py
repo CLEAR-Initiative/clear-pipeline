@@ -25,7 +25,7 @@ import dagster as dg
 from clear_context_pipeline.defs.signals import lake
 from clear_context_pipeline.defs.signals.connectors import SignalSource
 from clear_context_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_context_pipeline.providers.clear_api import create_signal, get_latest_signal_timestamp
+from clear_context_pipeline.providers.clear_api import create_signal
 from clear_context_pipeline.signals.config import settings
 
 
@@ -49,12 +49,12 @@ def build_source_assets(connector: SignalSource) -> list:
         # only after a clean batch, so nothing published during the poll is skipped.
         poll_started = datetime.now(UTC)
 
+        # No cross-source fallback: when this source has no watermark (first run,
+        # or Redis was wiped), pass since=None so its poll uses ITS OWN initial
+        # lookback. Seeding from the GLOBAL latest-signal timestamp would make a
+        # newly-enabled source (e.g. ACLED after Dataminr has run) skip its entire
+        # backfill history.
         since = connector.last_synced()
-        if since is None:
-            latest = get_latest_signal_timestamp()
-            if latest:
-                since = datetime.fromisoformat(latest.replace("Z", "+00:00"))
-
         records = connector.poll(since)
         if not records:
             context.log.info("[%s] no new signals", src)
