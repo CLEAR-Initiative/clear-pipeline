@@ -50,6 +50,7 @@ from clear_context_pipeline.defs.situation.schemas import (
     Datapoints,
     DatapointsEnvelope,
     DivergenceSignal,
+    RangeFigure,
     SituationAnalysisPayload,
     Source,
     Sources,
@@ -216,20 +217,41 @@ def _resolve_comparison(
     return None
 
 
-def _field_value(data: dict[str, Any], label: str) -> float | None:
-    """Read the `value` off a QualityEnvelope-shaped field. Returns
-    None for missing keys, null fields, or set-union-shaped fields
-    (which don't carry a numeric value)."""
+def _coerce_float(raw: Any) -> float | None:
+    """Best-effort float coercion that swallows the untyped-JSONB hazards
+    (None, strings, set-union shapes) instead of raising — `_build_datapoints`
+    runs outside the fetch try/except, so a stray value must not fail the run."""
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _field_range(data: dict[str, Any], label: str) -> RangeFigure | None:
+    """Project a QualityEnvelope-shaped field into a RangeFigure (ADR-0007):
+    the point `value` plus its honest error bar `[value_low, value_high]`,
+    `range_width`, the projection `bias`, and a `quality_score` confidence.
+    Returns None for missing keys, null fields, or set-union-shaped fields
+    (which carry no numeric value/band)."""
     field = data.get(label)
     if not isinstance(field, dict):
         return None
-    value = field.get("value")
-    if value is None:
+    value = _coerce_float(field.get("value"))
+    low = _coerce_float(field.get("value_low"))
+    high = _coerce_float(field.get("value_high"))
+    if value is None and low is None and high is None:
         return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    bias = field.get("bias")
+    return RangeFigure(
+        value=value,
+        low=low,
+        high=high,
+        range_width=_coerce_float(field.get("range_width")),
+        bias=bias if isinstance(bias, str) else None,
+        confidence=_coerce_float(field.get("quality_score")),
+    )
 
 
 def _stock_flow_estimate(raw: Any) -> Optional[StockFlowEstimate]:
@@ -267,7 +289,7 @@ def _collect_divergences(data: dict[str, Any]) -> list[DivergenceSignal]:
         # `_build_datapoints` runs outside the fetch try/except and the weekly
         # asset has no per-country guard, so one bad value would fail the run for
         # EVERY country and window. Skip the malformed signal instead (#30),
-        # matching `_field_value`'s (TypeError, ValueError)-swallowing posture.
+        # matching `_coerce_float`'s (TypeError, ValueError)-swallowing posture.
         try:
             signal = DivergenceSignal(
                 field=label,
@@ -303,15 +325,15 @@ def _build_datapoints(aggregated: dict[str, Any] | None) -> Datapoints:
     number_of_events = int(aggregated.get("reportCount") or 0)
 
     return Datapoints(
-        population_displaced=_field_value(data, _LABEL_POPULATION_DISPLACED),
-        population_in_need=_field_value(data, _LABEL_POPULATION_IN_NEED),
-        population_affected=_field_value(data, _LABEL_POPULATION_AFFECTED),
-        returnees=_field_value(data, _LABEL_RETURNEES),
-        new_displacements=_field_value(data, _LABEL_NEW_DISPLACEMENTS),
-        new_returns=_field_value(data, _LABEL_NEW_RETURNS),
+        population_displaced=_field_range(data, _LABEL_POPULATION_DISPLACED),
+        population_in_need=_field_range(data, _LABEL_POPULATION_IN_NEED),
+        population_affected=_field_range(data, _LABEL_POPULATION_AFFECTED),
+        returnees=_field_range(data, _LABEL_RETURNEES),
+        new_displacements=_field_range(data, _LABEL_NEW_DISPLACEMENTS),
+        new_returns=_field_range(data, _LABEL_NEW_RETURNS),
         number_of_events=number_of_events,
-        funding_required_usd=_field_value(data, _LABEL_FUNDING_REQUIRED),
-        funding_received_usd=_field_value(data, _LABEL_FUNDING_RECEIVED),
+        funding_required_usd=_field_range(data, _LABEL_FUNDING_REQUIRED),
+        funding_received_usd=_field_range(data, _LABEL_FUNDING_RECEIVED),
         estimated_current_displacement=_stock_flow_estimate(current_totals.get("displacement")),
         estimated_current_returns=_stock_flow_estimate(current_totals.get("returns")),
         divergences=_collect_divergences(data),
