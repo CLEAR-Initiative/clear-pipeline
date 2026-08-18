@@ -1975,8 +1975,8 @@ def mark_translated(entity_type: str, entity_id: str, locale: str) -> bool:
 # ─── Events pending alert (the durable stage between grouping & alert) ─────────
 
 EVENTS_PENDING_ALERT = """
-query EventsPendingAlert($first: Int, $minSeverity: Int) {
-  eventsPendingAlert(first: $first, minSeverity: $minSeverity) {
+query EventsPendingAlert($first: Int, $minSeverity: Int, $maxAgeHours: Int) {
+  eventsPendingAlert(first: $first, minSeverity: $minSeverity, maxAgeHours: $maxAgeHours) {
     id
     title
     description
@@ -1995,10 +1995,14 @@ query EventsPendingAlert($first: Int, $minSeverity: Int) {
 """
 
 
-def events_pending_alert(first: int = 100, min_severity: int = 4) -> list[dict]:
-    """Events with severity >= ``min_severity`` that have no alert yet,
-    oldest-first — the alert stage's queue."""
+def events_pending_alert(
+    first: int = 100, min_severity: int = 4, max_age_hours: int = 48
+) -> list[dict]:
+    """Events with severity >= ``min_severity``, no alert yet, and a signal within
+    the last ``max_age_hours`` (real-world time) — the alert stage's queue. The age
+    bound keeps historical backlog / backdated backfill out of alerting; 0 disables it."""
     result = _execute(
-        EVENTS_PENDING_ALERT, {"first": first, "minSeverity": min_severity}
+        EVENTS_PENDING_ALERT,
+        {"first": first, "minSeverity": min_severity, "maxAgeHours": max_age_hours},
     )
     return result.get("eventsPendingAlert") or []

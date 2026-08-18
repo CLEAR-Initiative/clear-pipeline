@@ -35,7 +35,7 @@ from clear_context_pipeline.defs.signals.connectors import (
     SignalView,
 )
 from clear_context_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_context_pipeline.providers.alert import escalate_to_alert, is_stale_signal
+from clear_context_pipeline.providers.alert import escalate_to_alert
 from clear_context_pipeline.providers.classify import classify_locally
 from clear_context_pipeline.providers.clear_api import (
     enqueue_translation,
@@ -292,39 +292,37 @@ def classify_group(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     description="Drain events pending alert (severity>=4, no alert yet) → escalate to alerts.",
 )
 def alert(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    alerted = suppressed = failed = 0
+    # Staleness is enforced at the QUERY: eventsPendingAlert only returns events
+    # whose latest signal is within alert_max_signal_age_hours, so the historical
+    # backlog and backdated backfill (old ACLED events replayed on ingest) never
+    # surface here — they're grouped into their event but not alerted. Every event
+    # this returns is recent + severe → publish an alert. No archived-suppression
+    # path (creating an alert row, even archived, still fanned out emails).
+    alerted = failed = 0
     for _ in range(_MAX_BATCHES):
-        events = events_pending_alert(first=_BATCH_SIZE, min_severity=_ALERT_MIN_SEVERITY)
+        events = events_pending_alert(
+            first=_BATCH_SIZE,
+            min_severity=_ALERT_MIN_SEVERITY,
+            max_age_hours=settings.alert_max_signal_age_hours,
+        )
         if not events:
             break
         made_progress = False
         for event in events:
             try:
-                # Staleness gates on the event's LATEST-signal time, not validFrom
-                # (first-signal): a long-running event that receives a fresh severe
-                # signal today must still alert. A truly stale event is suppressed by
-                # creating an ARCHIVED alert — that removes it from eventsPendingAlert
-                # (which excludes events with any alert) without an email fan-out, so
-                # it can't re-queue forever and stall genuinely-new alerts behind it.
-                stale_ts = event.get("lastSignalCreatedAt") or event.get("validFrom")
-                if is_stale_signal(stale_ts):
-                    escalate_to_alert(event, status="archived")
-                    suppressed += 1
-                else:
-                    escalate_to_alert(event)
-                    alerted += 1
+                escalate_to_alert(event)  # published
             except Exception:  # noqa: BLE001 — isolate one event's failure
                 context.log.exception("[alert] event %s failed", event.get("id"))
                 failed += 1
                 continue
-            made_progress = True  # this event now has an alert row → leaves the queue
-        # Terminate only when a batch produced no alert rows at all (every event
-        # errored). Suppressions now also create rows, so a stale-heavy head drains.
+            alerted += 1
+            made_progress = True  # this event now has an alert → leaves the queue
+        # Terminate when a batch produced no new alerts (every event errored).
         if not made_progress:
             break
 
-    context.log.info("[alert] alerted=%d suppressed=%d failed=%d", alerted, suppressed, failed)
-    return dg.MaterializeResult(metadata={"alerted": alerted, "suppressed": suppressed, "failed": failed})
+    context.log.info("[alert] alerted=%d failed=%d", alerted, failed)
+    return dg.MaterializeResult(metadata={"alerted": alerted, "failed": failed})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
