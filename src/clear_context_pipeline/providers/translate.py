@@ -35,6 +35,7 @@ _TRANSLATE_LOCK_TTL_SECONDS = 360  # 6 min
 LOCALE_LABELS: dict[str, str] = {
     "ar": "Arabic (Modern Standard, MSA)",
     "fr": "French",
+    "es": "Spanish (Latin American)",
 }
 
 TRANSLATION_PROMPT_VERSION = "v1"
