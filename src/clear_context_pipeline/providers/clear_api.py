@@ -292,8 +292,19 @@ def _execute(
             result = resp.json()
 
             if "errors" in result:
-                logger.error("clear-api GraphQL errors: %s", result["errors"])
-                raise RuntimeError(f"clear-api GraphQL errors: {result['errors']}")
+                errs = result["errors"]
+                err_text = str(errs)
+                # A schema/version mismatch — e.g. the signal-drain endpoints from
+                # clear-api PR #127 not yet deployed — is PERMANENT, not transient.
+                # Raise a clear, non-retryable error instead of retrying every
+                # sensor tick with a generic message.
+                if any(m in err_text for m in ("Cannot query field", "Unknown argument", "Unknown type")):
+                    raise ClearApiError(
+                        "clear-api schema mismatch — is clear-api PR #127 (signal/crisis/"
+                        f"translation drain + eventsPendingAlert) deployed? {err_text[:300]}"
+                    )
+                logger.error("clear-api GraphQL errors: %s", errs)
+                raise RuntimeError(f"clear-api GraphQL errors: {errs}")
 
             return result["data"]
 
@@ -783,3 +794,1211 @@ def _require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing env var {name}. Set it in .env or export it.")
     return value
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Signal / event / alert / crisis operations (ported from clear-pipeline).
+# Ported callers catch GraphQLClientError; it is the same as ClearApiError.
+# ═══════════════════════════════════════════════════════════════════════════
+
+GraphQLClientError = ClearApiError
+
+# ─── Mutations ────────────────────────────────────────────────────────────────
+
+CREATE_SIGNAL = """
+mutation CreateSignal($input: CreateSignalInput!) {
+  createSignal(input: $input) {
+    id
+    title
+    severity
+    casualties
+    externalId
+    publishedAt
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+    # If the API returned an existing row (idempotent ingest), it may
+    # already be linked to an event from a prior run. group_signal uses
+    # this to short-circuit — a signal that already has an event must not
+    # spawn another one.
+    events { id title types severity casualties populationAffected }
+  }
+}
+"""
+
+UPDATE_SIGNAL_SEVERITY = """
+mutation UpdateSignalSeverity($id: String!, $severity: Int!) {
+  updateSignalSeverity(id: $id, severity: $severity) {
+    id
+    severity
+  }
+}
+"""
+
+UPDATE_SIGNAL_GEOPARSED_DATA = """
+mutation UpdateSignalGeoparsedData($id: String!, $geoparsedData: JSON!) {
+  updateSignalGeoparsedData(id: $id, geoparsedData: $geoparsedData) {
+    id
+  }
+}
+"""
+
+UPDATE_SIGNAL_LOCATION = """
+mutation UpdateSignalLocation($id: String!, $locationId: String!) {
+  updateSignalLocation(id: $id, locationId: $locationId) {
+    id
+  }
+}
+"""
+
+CREATE_EVENT = """
+mutation CreateEvent($input: CreateEventInput!) {
+  createEvent(input: $input) {
+    id
+    title
+    types
+  }
+}
+"""
+
+UPDATE_EVENT = """
+mutation UpdateEvent($id: String!, $input: UpdateEventInput!) {
+  updateEvent(id: $id, input: $input) {
+    id
+    title
+  }
+}
+"""
+
+CREATE_ALERT = """
+mutation CreateAlert($input: CreateAlertInput!) {
+  createAlert(input: $input) {
+    id
+    status
+  }
+}
+"""
+
+ESCALATE_EVENT = """
+mutation EscalateEvent($eventId: String!, $userId: String!) {
+  escalateEvent(eventId: $eventId, userId: $userId) {
+    id
+    isCrisis
+    validFrom
+    validTo
+  }
+}
+"""
+
+NOTIFY_ALERT_SUBSCRIBERS = """
+mutation NotifyAlertSubscribers($input: AlertNotifyInput!) {
+  notifyAlertSubscribers(input: $input)
+}
+"""
+
+NOTIFY_ALERT_DIGEST = """
+mutation NotifyAlertDigest($input: AlertDigestInput!) {
+  notifyAlertDigest(input: $input)
+}
+"""
+
+UPDATE_LOCATION_GEOMETRY = """
+mutation UpdateLocationGeometry($id: String!, $geometry: GeoJSON!) {
+  updateLocationGeometry(id: $id, geometry: $geometry) { id }
+}
+"""
+
+UPDATE_LOCATION_POPULATION = """
+mutation UpdateLocationPopulation($id: String!, $population: String!) {
+  updateLocationPopulation(id: $id, population: $population) { id population }
+}
+"""
+
+UPDATE_LOCATION = """
+mutation UpdateLocation($id: String!, $input: UpdateLocationInput!) {
+  updateLocation(id: $id, input: $input) { id pCode name }
+}
+"""
+
+CREATE_LOCATION = """
+mutation CreateLocation($input: CreateLocationInput!) {
+  createLocation(input: $input) { id name level pCode }
+}
+"""
+
+ARCHIVE_STALE_ALERTS = """
+mutation ArchiveStaleAlerts($olderThanDays: Int) {
+  archiveStaleAlerts(olderThanDays: $olderThanDays) { alertsArchived }
+}
+"""
+
+UPDATE_CRISIS_POPULATION = """
+mutation UpdateCrisisPopulation($id: String!, $input: UpdateCrisisPopulationInput!) {
+  updateCrisisPopulation(id: $id, input: $input) {
+    id
+    populationAffected
+    populationInArea
+  }
+}
+"""
+
+SET_CRISIS_NEEDS_ANALYSIS = """
+mutation SetCrisisNeedsAnalysis(
+  $id: String!,
+  $generalSummary: [String!]!,
+  $sector: JSON!,
+) {
+  setCrisisNeedsAnalysis(
+    id: $id,
+    generalSummary: $generalSummary,
+    sector: $sector,
+  ) {
+    id
+  }
+}
+"""
+
+GET_LOCATION_WITH_GEOMETRY = """
+query LocationWithGeometry($id: String!) {
+  location(id: $id) {
+    id
+    name
+    level
+    population
+    geometry
+    parent { id name level }
+  }
+}
+"""
+
+GET_LOCATIONS_BY_LEVEL = """
+query LocationsByLevel($level: Int!) {
+  locations(level: $level) {
+    id
+    name
+    level
+    pCode
+    population
+  }
+}
+"""
+
+GET_EVENT_FOR_CRISIS = """
+query EventForCrisis($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    severity
+    populationAffected
+    originLocation { name metadata { type data } }
+    destinationLocation { name metadata { type data } }
+    generalLocation { name metadata { type data } }
+  }
+}
+"""
+
+GET_EVENT_WITH_SIGNALS = """
+query EventWithSignals($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    severity
+    casualties
+    populationAffected
+    signals {
+      id
+      title
+      description
+      severity
+      casualties
+      publishedAt
+      source { id name type }
+    }
+  }
+}
+"""
+
+GET_LOCATION_METADATA = """
+query LocationMetadata($locationId: String!, $type: String) {
+  locationMetadata(locationId: $locationId, type: $type) {
+    id
+    type
+    data
+    validFrom
+    validTo
+  }
+}
+"""
+
+UPSERT_LOCATION_METADATA = """
+mutation UpsertLocationMetadata($input: UpsertLocationMetadataInput!) {
+  upsertLocationMetadata(input: $input) { id type data updatedAt }
+}
+"""
+
+UPSERT_LOCATION_METADATA_BATCH = """
+mutation UpsertLocationMetadataBatch($inputs: [UpsertLocationMetadataInput!]!) {
+  upsertLocationMetadataBatch(inputs: $inputs) { id type }
+}
+"""
+
+ALL_LOCATION_METADATA = """
+query AllLocationMetadata($type: String!) {
+  allLocationMetadata(type: $type) {
+    id
+    type
+    data
+    location { id name pCode }
+  }
+}
+"""
+
+GET_RECENT_ALERTS = """
+query RecentAlerts {
+  alerts(status: published) {
+    id
+    status
+    event {
+      id
+      firstSignalCreatedAt
+    }
+  }
+}
+"""
+
+# ─── Queries ──────────────────────────────────────────────────────────────────
+
+GET_SIGNAL = """
+query Signal($id: String!) {
+  signal(id: $id) {
+    id
+    title
+    severity
+    casualties
+    externalId
+    publishedAt
+    # Resolved location objects with the fields resolve_signal_admin2
+    # needs (id / level / ancestorIds). The manual-signal pipeline uses
+    # this to look up the location the user picked in the UI so
+    # event_grouping_v2 can key on the correct admin-2 district instead
+    # of falling through to isolated-event behaviour.
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+    # Same short-circuit rationale as CREATE_SIGNAL: if the signal is
+    # already linked to an event from a prior run, group_signal
+    # returns that event instead of re-clustering.
+    events { id title types severity casualties populationAffected }
+  }
+}
+"""
+
+GET_LATEST_SIGNAL = """
+query LatestSignal {
+  signals {
+    id
+    publishedAt
+  }
+}
+"""
+
+GET_EVENTS = """
+query Events {
+  events {
+    id
+    title
+    description
+    types
+    severity
+    casualties
+    populationAffected
+    rank
+    validFrom
+    validTo
+    firstSignalCreatedAt
+    lastSignalCreatedAt
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+    alerts { id status }
+  }
+}
+"""
+
+GET_LOCATIONS = """
+query Locations {
+  locations {
+    id
+    name
+    level
+    parent { id name }
+  }
+}
+"""
+
+GET_DATA_SOURCES = """
+query DataSources {
+  dataSources {
+    id
+    name
+  }
+}
+"""
+
+GET_DISASTER_TYPES = """
+query DisasterTypes {
+  disasterTypes {
+    id
+    disasterType
+    disasterClass
+    glideNumber
+    level1
+    level2
+    idType
+  }
+}
+"""
+
+
+# GraphQLClientError is re-exported from providers.clear_api (ClearApiError) — see
+# the header import. The shared _execute raises it on 4xx (non-retryable).
+
+
+# ─── Dagster drain (clear-api #467 — durable status markers) ──────────────────
+
+# Signals awaiting downstream processing (status = NEW), oldest-first. The
+# selection mirrors CREATE_SIGNAL so the drain feeds the SAME classify→group→
+# alert code the Celery path uses. Raw payload stays in S3 (rawS3Key).
+PENDING_SIGNALS = """
+query PendingSignals($first: Int, $source: String) {
+  pendingSignals(first: $first, source: $source) {
+    id
+    externalId
+    title
+    description
+    severity
+    casualties
+    publishedAt
+    status
+    rawS3Key
+    source { id name }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+    events { id title types severity casualties populationAffected }
+  }
+}
+"""
+
+MARK_SIGNALS_PROCESSED = """
+mutation MarkSignalsProcessed($ids: [String!]!, $status: SignalStatus) {
+  markSignalsProcessed(ids: $ids, status: $status)
+}
+"""
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
+
+def create_signal(input_data: dict) -> dict:
+    result = _execute(CREATE_SIGNAL, {"input": input_data})
+    return result["createSignal"]
+
+
+def pending_signals(first: int = 100, source: str | None = None) -> list[dict]:
+    """Signals awaiting downstream processing (status = NEW), oldest-first — the
+    Dagster event-driven drain (clear-api #467). ``source`` filters by DataSource
+    name (e.g. "dataminr"). Returns [] when nothing is pending."""
+    variables: dict = {"first": first}
+    if source is not None:
+        variables["source"] = source
+    result = _execute(PENDING_SIGNALS, variables)
+    return result["pendingSignals"]
+
+
+def mark_signals_processed(ids: list[str], status: str = "PROCESSED") -> int:
+    """Mark signals done for the drain — PROCESSED (default) or FAILED. Returns
+    the number of rows updated. Idempotent (clear-api #467)."""
+    if not ids:
+        return 0
+    result = _execute(MARK_SIGNALS_PROCESSED, {"ids": ids, "status": status})
+    return result["markSignalsProcessed"]
+
+
+def get_signal(signal_id: str) -> dict | None:
+    """Fetch an existing signal with its resolved origin/general/destination
+    locations. Used by the manual-signal pipeline path where the signal
+    is created API-side (with the location the user picked in the UI)
+    before the Celery task runs — event_grouping_v2 needs the location
+    to key on the admin-2 district."""
+    result = _execute(GET_SIGNAL, {"id": signal_id})
+    return result.get("signal")
+
+
+def update_signal_severity(signal_id: str, severity: int) -> dict:
+    """Update a signal's severity score (1-5)."""
+    result = _execute(UPDATE_SIGNAL_SEVERITY, {"id": signal_id, "severity": severity})
+    return result["updateSignalSeverity"]
+
+
+def update_signal_geoparsed_data(signal_id: str, geoparsed_data: dict) -> dict:
+    """Attach the geoparser's structured result to an existing signal.
+    Used by the manual-signal pipeline path, where the signal is created
+    before the geoparser has run."""
+    result = _execute(
+        UPDATE_SIGNAL_GEOPARSED_DATA,
+        {"id": signal_id, "geoparsedData": geoparsed_data},
+    )
+    return result["updateSignalGeoparsedData"]
+
+
+def update_signal_location(signal_id: str, location_id: str) -> dict:
+    """Set an existing signal's `generalLocation`. Used by the manual-signal
+    pipeline path when the user didn't pick a location and the geoparser
+    resolved a landmark — we promote the landmark to an L4 and wire the
+    signal to it so downstream event grouping can key on the correct
+    admin-2 district."""
+    result = _execute(
+        UPDATE_SIGNAL_LOCATION,
+        {"id": signal_id, "locationId": location_id},
+    )
+    return result["updateSignalLocation"]
+
+
+def create_event(input_data: dict) -> dict:
+    # retries=1: createEvent has no idempotency key (unlike createSignal's
+    # (sourceId, externalId)), so a retry after a timeout that actually committed
+    # would mint a duplicate event. Fail fast instead — the drain re-processes the
+    # signal on the next run, and group_signal's "already linked" short-circuit
+    # dedups once the link is visible.
+    result = _execute(CREATE_EVENT, {"input": input_data}, retries=1)
+    return result["createEvent"]
+
+
+def update_event(event_id: str, input_data: dict) -> dict:
+    result = _execute(UPDATE_EVENT, {"id": event_id, "input": input_data})
+    return result["updateEvent"]
+
+
+def escalate_event(event_id: str, user_id: str) -> dict:
+    """Escalate an event to an alert and record the user escalation."""
+    result = _execute(ESCALATE_EVENT, {"eventId": event_id, "userId": user_id})
+    return result["escalateEvent"]
+
+
+def create_alert(input_data: dict) -> dict:
+    result = _execute(CREATE_ALERT, {"input": input_data})
+    return result["createAlert"]
+
+
+def notify_alert_subscribers(alert_id: str) -> int:
+    """Notify immediate subscribers of an alert. Returns notification count."""
+    result = _execute(NOTIFY_ALERT_SUBSCRIBERS, {"input": {"alertId": alert_id}})
+    return result["notifyAlertSubscribers"]
+
+
+def notify_alert_digest(alert_ids: list[str], frequency: str) -> int:
+    """Send digest notifications for alerts. Returns notification count."""
+    result = _execute(NOTIFY_ALERT_DIGEST, {"input": {"alertIds": alert_ids, "frequency": frequency}})
+    return result["notifyAlertDigest"]
+
+
+def get_published_alerts() -> list[dict]:
+    """Get all published alerts."""
+    result = _execute(GET_RECENT_ALERTS)
+    return result.get("alerts", [])
+
+
+def get_latest_signal_timestamp() -> str | None:
+    """Get the publishedAt of the most recent signal, or None if no signals exist."""
+    result = _execute(GET_LATEST_SIGNAL)
+    signals = result.get("signals", [])
+    if not signals:
+        return None
+    # Find the most recent by publishedAt
+    return max(signals, key=lambda s: s["publishedAt"])["publishedAt"]
+
+
+def get_events() -> list[dict]:
+    result = _execute(GET_EVENTS)
+    return result.get("events", [])
+
+
+def get_locations() -> list[dict]:
+    result = _execute(GET_LOCATIONS)
+    return result.get("locations", [])
+
+
+def get_data_sources() -> list[dict]:
+    result = _execute(GET_DATA_SOURCES)
+    return result.get("dataSources", [])
+
+
+def get_disaster_types() -> list[dict]:
+    result = _execute(GET_DISASTER_TYPES)
+    return result.get("disasterTypes", [])
+
+
+_source_id_cache: dict[str, str] = {}
+
+
+def get_source_id_by_name(name: str) -> str:
+    """Resolve a clear-api ``DataSource`` id by name (cached per process).
+
+    Raises if the source row is absent — every connector's ingest depends on
+    the matching ``data_sources`` row existing (same contract the Celery
+    ``_get_<source>_source_id`` helpers enforced)."""
+    cached = _source_id_cache.get(name)
+    if cached is not None:
+        return cached
+    for src in get_data_sources():
+        if src["name"] == name:
+            _source_id_cache[name] = src["id"]
+            return src["id"]
+    raise RuntimeError(
+        f"Data source '{name}' not found in CLEAR API. "
+        "Ensure it exists in the data_sources table."
+    )
+
+
+def get_dataminr_source_id() -> str:
+    """Find the dataminr data source ID from the CLEAR API."""
+    return get_source_id_by_name(os.environ.get("DATAMINR_SOURCE_NAME", "dataminr"))
+
+
+# ─── Population / Geometry helpers ────────────────────────────────────────────
+
+
+def get_location_with_geometry(location_id: str) -> dict | None:
+    result = _execute(GET_LOCATION_WITH_GEOMETRY, {"id": location_id})
+    return result.get("location")
+
+
+def update_location_geometry(location_id: str, geometry: dict) -> dict:
+    result = _execute(
+        UPDATE_LOCATION_GEOMETRY,
+        {"id": location_id, "geometry": geometry},
+    )
+    return result["updateLocationGeometry"]
+
+
+def update_location_population(location_id: str, population: int) -> dict:
+    result = _execute(
+        UPDATE_LOCATION_POPULATION,
+        {"id": location_id, "population": str(population)},
+    )
+    return result["updateLocationPopulation"]
+
+
+def update_location(location_id: str, **fields) -> dict:
+    """Update a location's scalar fields (pCode, name, geoId, osmId, level, parentId).
+    Only fields passed are changed."""
+    result = _execute(
+        UPDATE_LOCATION,
+        {"id": location_id, "input": fields},
+    )
+    return result["updateLocation"]
+
+
+def create_location(name: str, level: int, **fields) -> dict:
+    """Create a new location (geometry defaults to POINT(0 0); set via
+    update_location_geometry afterwards)."""
+    payload = {"name": name, "level": level, **fields}
+    result = _execute(CREATE_LOCATION, {"input": payload})
+    return result["createLocation"]
+
+
+def archive_stale_alerts(older_than_days: int = 14) -> int:
+    """Archive alerts whose event.lastSignalCreatedAt is older than N days.
+    Returns the number of rows affected."""
+    result = _execute(ARCHIVE_STALE_ALERTS, {"olderThanDays": older_than_days})
+    return int(result["archiveStaleAlerts"]["alertsArchived"])
+
+
+def set_crisis_needs_analysis(
+    crisis_id: str,
+    *,
+    general_summary: list[str],
+    sector: dict,
+) -> dict:
+    """Merge an LLM-generated SAF needs analysis into the crisis's `needs`
+    JSONB. Server-side JSONB `||` merge overwrites `generalSummary` and
+    `sector` keys only — other keys on `needs` stay intact.
+
+    `general_summary` is the 4-bullet array produced by the
+    `CrisisNeedsAnalysis` Pydantic model; the GraphQL mutation accepts
+    `[String!]!`."""
+    result = _execute(
+        SET_CRISIS_NEEDS_ANALYSIS,
+        {
+            "id": crisis_id,
+            "generalSummary": general_summary,
+            "sector": sector,
+        },
+    )
+    return result["setCrisisNeedsAnalysis"]
+
+
+def update_crisis_population(
+    crisis_id: str,
+    population_affected: int | None = None,
+    population_in_area: int | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+    scenarios: dict | None = None,
+) -> dict:
+    input_data: dict = {}
+    if population_affected is not None:
+        input_data["populationAffected"] = str(population_affected)
+    if population_in_area is not None:
+        input_data["populationInArea"] = str(population_in_area)
+    if title is not None:
+        input_data["title"] = title
+    if summary is not None:
+        input_data["summary"] = summary
+    if scenarios is not None:
+        input_data["scenarios"] = scenarios
+    result = _execute(
+        UPDATE_CRISIS_POPULATION,
+        {"id": crisis_id, "input": input_data},
+    )
+    return result["updateCrisisPopulation"]
+
+
+def get_event_for_crisis(event_id: str) -> dict | None:
+    result = _execute(GET_EVENT_FOR_CRISIS, {"id": event_id})
+    return result.get("event")
+
+
+def get_event_with_signals(event_id: str) -> dict | None:
+    """Fetch an event plus all its linked signals. Used by the rewrite pass
+    of the new grouping algorithm."""
+    result = _execute(GET_EVENT_WITH_SIGNALS, {"id": event_id})
+    return result.get("event")
+
+
+def get_location_metadata(location_id: str, type_: str | None = None) -> list[dict]:
+    """Return all locationMetadata rows for a location, optionally filtered by type."""
+    variables: dict = {"locationId": location_id}
+    if type_ is not None:
+        variables["type"] = type_
+    result = _execute(GET_LOCATION_METADATA, variables)
+    return result.get("locationMetadata", []) or []
+
+
+def upsert_location_metadata(location_id: str, type_: str, data: dict) -> dict:
+    """Create or update a location's metadata entry for a given type."""
+    result = _execute(
+        UPSERT_LOCATION_METADATA,
+        {"input": {"locationId": location_id, "type": type_, "data": data}},
+    )
+    return result["upsertLocationMetadata"]
+
+
+def get_all_location_metadata(type_: str) -> list[dict]:
+    """Return every locationMetadata row of a given type across all locations."""
+    result = _execute(ALL_LOCATION_METADATA, {"type": type_})
+    return result.get("allLocationMetadata", []) or []
+
+
+# ─── Nominatim geocoder cache ─────────────────────────────────────────────
+
+GET_NOMINATIM_CACHE_ENTRY = """
+query NominatimCacheEntry($queryHash: String!) {
+  nominatimCacheEntry(queryHash: $queryHash) {
+    id
+    queryHash
+    query
+    endpoint
+    responseJson
+    status
+    fetchedAt
+    expiresAt
+  }
+}
+"""
+
+UPSERT_NOMINATIM_CACHE = """
+mutation UpsertNominatimCache($input: UpsertNominatimCacheInput!) {
+  upsertNominatimCache(input: $input) {
+    id
+    queryHash
+    status
+    expiresAt
+  }
+}
+"""
+
+
+def get_nominatim_cache_entry(query_hash: str) -> dict | None:
+    """Read a cached Nominatim response by query hash. Returns None when the
+    entry is missing or expired (the API filters expired rows server-side)."""
+    result = _execute(GET_NOMINATIM_CACHE_ENTRY, {"queryHash": query_hash})
+    return result.get("nominatimCacheEntry")
+
+
+def upsert_nominatim_cache(
+    *,
+    query_hash: str,
+    query: str,
+    endpoint: str,
+    response_json: dict | list,
+    status: str,
+    ttl_seconds: int,
+) -> dict:
+    """Write a Nominatim response to the cache. `status` is one of
+    'ok' / 'no_result' / 'error'. The server computes expires_at from
+    ttl_seconds."""
+    result = _execute(
+        UPSERT_NOMINATIM_CACHE,
+        {
+            "input": {
+                "queryHash": query_hash,
+                "query": query,
+                "endpoint": endpoint,
+                "responseJson": response_json,
+                "status": status,
+                "ttlSeconds": ttl_seconds,
+            }
+        },
+    )
+    return result["upsertNominatimCache"]
+
+
+# ─── Geoparser L4 promotion ────────────────────────────────────────────────
+
+FIND_OR_CREATE_LANDMARK_L4 = """
+mutation FindOrCreateLandmarkL4($input: FindOrCreateLandmarkL4Input!) {
+  findOrCreateLandmarkL4(input: $input) {
+    locationId
+    reused
+    pointType
+    abortedReason
+  }
+}
+"""
+
+
+def find_or_create_landmark_l4(
+    *,
+    name: str,
+    lat: float,
+    lng: float,
+    kind: str,
+    source_lat: float | None = None,
+    source_lng: float | None = None,
+) -> dict:
+    """Promote a geoparsed candidate into a reusable L4 location.
+
+    Returns the resolver result:
+      { locationId: str|None, reused: bool, pointType: str|None,
+        abortedReason: "different_a2"|None }
+
+    When abortedReason is set, the caller should fall back to source coords
+    (no L4 promotion) — the candidate's A2 didn't match the source's A2 and
+    promoting would mis-attribute the signal.
+    """
+    payload: dict = {
+        "name": name,
+        "lat": lat,
+        "lng": lng,
+        "kind": kind,
+    }
+    if source_lat is not None:
+        payload["sourceLat"] = source_lat
+    if source_lng is not None:
+        payload["sourceLng"] = source_lng
+    result = _execute(FIND_OR_CREATE_LANDMARK_L4, {"input": payload})
+    return result["findOrCreateLandmarkL4"]
+
+
+RESOLVE_GAZETTEER_LOCATION = """
+query ResolveGazetteerLocation($name: String!, $countryCode: String, $minSimilarity: Float) {
+  resolveGazetteerLocation(name: $name, countryCode: $countryCode, minSimilarity: $minSimilarity) {
+    geonamesId
+    name
+    latitude
+    longitude
+    featureClass
+    featureCode
+    countryCode
+    population
+    score
+    exact
+  }
+}
+"""
+
+
+def resolve_gazetteer_location(
+    name: str,
+    *,
+    country_code: str | None = None,
+    min_similarity: float | None = None,
+) -> dict | None:
+    """Resolve a place name against clear-api's offline GeoNames gazetteer.
+
+    Returns the GazetteerHit dict (latitude/longitude, featureClass, score,
+    exact, …) or None when nothing matches. The hybrid geoparser's first,
+    offline tier; LocationIQ is the fallback for landmarks/POIs it lacks.
+    """
+    variables: dict = {"name": name}
+    if country_code is not None:
+        variables["countryCode"] = country_code
+    if min_similarity is not None:
+        variables["minSimilarity"] = min_similarity
+    # retries=1 (single attempt, no backoff): this tier is best-effort with a
+    # LocationIQ fallback, so a transient clear-api error must not stall the
+    # Celery worker through ~6s of retry sleeps before the fallback runs.
+    data = _execute(RESOLVE_GAZETTEER_LOCATION, variables, retries=1)
+    return data.get("resolveGazetteerLocation")
+
+
+GET_CRISIS_CANONICAL = """
+query CrisisCanonical($id: String!) {
+  crisis(id: $id) {
+    id
+    title
+    summary
+    scenarios
+    needs
+  }
+}
+"""
+
+GET_EVENT_CANONICAL = """
+query EventCanonical($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+  }
+}
+"""
+
+GET_LOCATION_CANONICAL = """
+query LocationCanonical($id: String!) {
+  location(id: $id) {
+    id
+    name
+  }
+}
+"""
+
+
+def get_crisis_canonical(crisis_id: str) -> dict | None:
+    """Fetch only the four translatable fields of a crisis. Used by the
+    translation step in tasks/crisis.py to feed Claude the current
+    canonical English text after all in-task writes have committed.
+
+    Relies on the pipeline user's language being 'en' so the resolver
+    overlay short-circuits and returns canonical values — if that ever
+    changes, swap to an explicit `Accept-Language: en` header in
+    `_execute`.
+    """
+    result = _execute(GET_CRISIS_CANONICAL, {"id": crisis_id})
+    return result.get("crisis")
+
+
+def get_event_canonical(event_id: str) -> dict | None:
+    """Fetch the two translatable fields of an event (title,
+    description). Same pipeline-language invariant as
+    get_crisis_canonical above."""
+    result = _execute(GET_EVENT_CANONICAL, {"id": event_id})
+    return result.get("event")
+
+
+def get_location_canonical(location_id: str) -> dict | None:
+    """Fetch the one translatable field of a location (name). Same
+    pipeline-language invariant as get_crisis_canonical above."""
+    result = _execute(GET_LOCATION_CANONICAL, {"id": location_id})
+    return result.get("location")
+
+
+# ─── Translations ─────────────────────────────────────────────────────────────
+
+GET_TRANSLATIONS = """
+query Translations($entityType: String!, $entityId: String!) {
+  translations(entityType: $entityType, entityId: $entityId) {
+    locale
+    data
+    sourceHashes
+  }
+}
+"""
+
+UPSERT_TRANSLATIONS = """
+mutation UpsertTranslations($input: UpsertTranslationsInput!) {
+  upsertTranslations(input: $input) {
+    entityType
+    entityId
+    locales
+  }
+}
+"""
+
+GET_ENTITIES_MISSING_TRANSLATION = """
+query EntitiesMissingTranslation($entityType: String!, $locale: String!) {
+  entitiesMissingTranslation(entityType: $entityType, locale: $locale)
+}
+"""
+
+
+def get_translations(entity_type: str, entity_id: str) -> list[dict]:
+    """Fetch every translation row currently stored for the entity.
+    Returns an empty list when nothing has been written yet (cold start).
+    Admin/pipeline auth required at the API.
+    """
+    result = _execute(
+        GET_TRANSLATIONS,
+        {"entityType": entity_type, "entityId": entity_id},
+    )
+    return result.get("translations") or []
+
+
+def get_entities_missing_translation(
+    entity_type: str,
+    locale: str,
+) -> list[str]:
+    """IDs of entities (of `entity_type`) that have no translation row
+    for `locale`. Lets the backfill driver dispatch only entities the
+    worker would actually translate, skipping the noisy "all current"
+    path inside translate_and_upsert. Stale rows (row exists with
+    out-of-date hashes) are NOT returned — they're rare and handled
+    by per-entity enrichment hooks.
+    """
+    result = _execute(
+        GET_ENTITIES_MISSING_TRANSLATION,
+        {"entityType": entity_type, "locale": locale},
+    )
+    return result.get("entitiesMissingTranslation") or []
+
+
+# ─── Ground intel (WhatsApp signal pipeline) ──────────────────────────────
+# Staging-tier surface owned by clear-api (groundSources / groundThreads /
+# groundMessages). Message text arrives already redacted (phone numbers
+# stripped at persistence); senderRef is pseudonymous.
+
+GROUND_MESSAGES_FOR_CLASSIFICATION = """
+query GroundMessagesForClassification($groundSourceId: String!, $limit: Int) {
+  groundMessagesForClassification(groundSourceId: $groundSourceId, limit: $limit) {
+    id
+    text
+    sentAt
+    senderRef
+    hasMedia
+    classification
+    threadId
+  }
+}
+"""
+
+UPSERT_GROUND_MESSAGE_CLASSIFICATIONS = """
+mutation UpsertGroundMessageClassifications(
+  $inputs: [GroundMessageClassificationInput!]!
+) {
+  upsertGroundMessageClassifications(inputs: $inputs)
+}
+"""
+
+
+def ground_messages_for_classification(
+    ground_source_id: str,
+    limit: int | None = None,
+) -> list[dict]:
+    """Fetch a ground source's messages awaiting classification/threading.
+
+    The server scopes the result to the source and orders by sentAt; rows
+    carry `classification` / `threadId` as null until this pipeline fills
+    them in.
+    """
+    variables: dict = {"groundSourceId": ground_source_id}
+    if limit is not None:
+        variables["limit"] = limit
+    result = _execute(GROUND_MESSAGES_FOR_CLASSIFICATION, variables)
+    return result.get("groundMessagesForClassification") or []
+
+
+def upsert_ground_message_classifications(inputs: list[dict]) -> int:
+    """Write classifications back to clear-api. Each input row must shape as
+    {messageId, classification, uncertaintyMarker} — uncertaintyMarker may
+    be None when the contributor attached no uncertainty tag. The server
+    returns a scalar count of upserted rows."""
+    if not inputs:
+        return 0
+    result = _execute(UPSERT_GROUND_MESSAGE_CLASSIFICATIONS, {"inputs": inputs})
+    return result.get("upsertGroundMessageClassifications") or 0
+
+
+GROUND_THREADS_FOR_SOURCE = """
+query GroundThreadsForSource($groundSourceId: String!, $states: [String!]) {
+  groundThreadsForSource(groundSourceId: $groundSourceId, states: $states) {
+    id
+    title
+    lifecycleState
+    reviewState
+    messageIds
+  }
+}
+"""
+
+
+def ground_threads_for_source(
+    ground_source_id: str,
+    states: list[str] | None = None,
+) -> list[dict]:
+    """Fetch a source's existing incident threads.
+
+    Used before the threading stage so a later run can APPEND to a thread
+    created by an earlier run (a correction or retraction that arrives
+    after its incident was threaded) instead of minting an orphan thread.
+    `states` optionally filters by lifecycle state.
+    """
+    variables: dict = {"groundSourceId": ground_source_id}
+    if states is not None:
+        variables["states"] = states
+    result = _execute(GROUND_THREADS_FOR_SOURCE, variables)
+    return result.get("groundThreadsForSource") or []
+
+
+UPSERT_GROUND_THREADS = """
+mutation UpsertGroundThreads($inputs: [GroundThreadUpsertInput!]!) {
+  upsertGroundThreads(inputs: $inputs)
+}
+"""
+
+
+def upsert_ground_threads(inputs: list[dict]) -> list[str | None]:
+    """Create/update incident threads and attach their messages. Each input
+    row shapes as {groundSourceId, title, lifecycleState, messageIds} plus
+    an optional threadId — when threadId is set, the server APPENDS the
+    messageIds to that existing (non-promoted) thread and updates its
+    lifecycleState/title instead of creating a new thread. Returns thread
+    ids index-aligned with `inputs` (entries may be null for rejected rows).
+    """
+    if not inputs:
+        return []
+    result = _execute(UPSERT_GROUND_THREADS, {"inputs": inputs})
+    return result.get("upsertGroundThreads") or []
+
+
+def upsert_translations(
+    entity_type: str,
+    entity_id: str,
+    translations: list[dict],
+) -> dict:
+    """Write/replace per-locale translation rows. Each entry in
+    `translations` must shape as:
+        {"locale": "ar", "data": {...}, "sourceHashes": {field: "sha256:..."}}
+
+    Mirrors clear-api's UpsertTranslationsInput exactly. The mutation
+    runs the per-locale upserts in a single DB transaction so a partial
+    failure can't leave the entity with some locales written and others
+    missing.
+    """
+    result = _execute(
+        UPSERT_TRANSLATIONS,
+        {
+            "input": {
+                "entityType": entity_type,
+                "entityId": entity_id,
+                "translations": translations,
+            }
+        },
+    )
+    return result["upsertTranslations"]
+
+
+# ─── Translation queue (the durable stage between entity creation & translate) ─
+
+PENDING_TRANSLATIONS = """
+query PendingTranslations($first: Int, $entityType: String, $locale: String) {
+  pendingTranslations(first: $first, entityType: $entityType, locale: $locale) {
+    entityType
+    entityId
+    locale
+  }
+}
+"""
+
+ENQUEUE_TRANSLATION = """
+mutation EnqueueTranslation($entityType: String!, $entityId: String!, $locale: String!) {
+  enqueueTranslation(entityType: $entityType, entityId: $entityId, locale: $locale) {
+    entityType
+    entityId
+    locale
+  }
+}
+"""
+
+MARK_TRANSLATED = """
+mutation MarkTranslated($entityType: String!, $entityId: String!, $locale: String!) {
+  markTranslated(entityType: $entityType, entityId: $entityId, locale: $locale)
+}
+"""
+
+
+def pending_translations(
+    first: int = 200, entity_type: str | None = None, locale: str | None = None
+) -> list[dict]:
+    """Drain the translation queue oldest-first (optionally filtered by
+    entityType/locale). Each row is {entityType, entityId, locale}."""
+    result = _execute(
+        PENDING_TRANSLATIONS,
+        {"first": first, "entityType": entity_type, "locale": locale},
+    )
+    return result.get("pendingTranslations") or []
+
+
+def enqueue_translation(entity_type: str, entity_id: str, locale: str) -> dict:
+    """Enqueue an entity for (re)translation at a locale (idempotent per
+    entityType/entityId/locale)."""
+    return _execute(
+        ENQUEUE_TRANSLATION,
+        {"entityType": entity_type, "entityId": entity_id, "locale": locale},
+    )["enqueueTranslation"]
+
+
+def mark_translated(entity_type: str, entity_id: str, locale: str) -> bool:
+    """Remove an entity/locale from the queue. ``upsert_translations`` already
+    clears the row on write, so this is only needed for explicit drops."""
+    return _execute(
+        MARK_TRANSLATED,
+        {"entityType": entity_type, "entityId": entity_id, "locale": locale},
+    )["markTranslated"]
+
+
+# ─── Events pending alert (the durable stage between grouping & alert) ─────────
+
+EVENTS_PENDING_ALERT = """
+query EventsPendingAlert($first: Int, $minSeverity: Int) {
+  eventsPendingAlert(first: $first, minSeverity: $minSeverity) {
+    id
+    title
+    description
+    types
+    severity
+    casualties
+    populationAffected
+    validFrom
+    validTo
+    lastSignalCreatedAt
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
+
+def events_pending_alert(first: int = 100, min_severity: int = 4) -> list[dict]:
+    """Events with severity >= ``min_severity`` that have no alert yet,
+    oldest-first — the alert stage's queue."""
+    result = _execute(
+        EVENTS_PENDING_ALERT, {"first": first, "minSeverity": min_severity}
+    )
+    return result.get("eventsPendingAlert") or []

@@ -1,0 +1,746 @@
+{
+  "abduction / forced disappearance": {
+    "event_count": 510,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 24407.0,
+      "min": 0.0,
+      "q25": 9074.0,
+      "q75": 39445.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 48935.0,
+      "min": 2.0,
+      "q25": 13640.0,
+      "q75": 103626.0
+    },
+    "population_5km": {
+      "max": 1463773.0,
+      "median": 62170.0,
+      "min": 4.0,
+      "q25": 17876.0,
+      "q75": 172215.0
+    }
+  },
+  "agreement": {
+    "event_count": 105,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 21829.0,
+      "min": 9.0,
+      "q25": 8778.0,
+      "q75": 41795.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 68687.0,
+      "min": 6.0,
+      "q25": 10098.0,
+      "q75": 113665.0
+    },
+    "population_5km": {
+      "max": 1463773.0,
+      "median": 77736.0,
+      "min": 486.0,
+      "q25": 13585.0,
+      "q75": 342391.0
+    }
+  },
+  "air / drone strike": {
+    "event_count": 1738,
+    "fatalities": {
+      "max": 100,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 25794.0,
+      "min": 0.0,
+      "q25": 11207.0,
+      "q75": 37048.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 48935.0,
+      "min": 2.0,
+      "q25": 20121.0,
+      "q75": 91873.0
+    },
+    "population_5km": {
+      "max": 1463773.0,
+      "median": 61013.0,
+      "min": 23.0,
+      "q25": 23922.0,
+      "q75": 134074.0
+    }
+  },
+  "armed clash": {
+    "event_count": 4811,
+    "fatalities": {
+      "max": 520,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 4.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 23532.0,
+      "min": 0.0,
+      "q25": 9134.0,
+      "q75": 39350.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 40551.0,
+      "min": 0.0,
+      "q25": 12084.0,
+      "q75": 102426.0
+    },
+    "population_5km": {
+      "max": 1476031.0,
+      "median": 50312.0,
+      "min": 0.0,
+      "q25": 16857.0,
+      "q75": 158485.0
+    }
+  },
+  "arrests": {
+    "event_count": 80,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 79301.0,
+      "median": 26837.5,
+      "min": 0.0,
+      "q25": 10175.5,
+      "q75": 55728.0
+    },
+    "population_2km": {
+      "max": 262408.0,
+      "median": 88429.0,
+      "min": 0.0,
+      "q25": 28630.0,
+      "q75": 141474.0
+    },
+    "population_5km": {
+      "max": 806555.0,
+      "median": 185365.0,
+      "min": 1.0,
+      "q25": 41243.25,
+      "q75": 408390.25
+    }
+  },
+  "attack": {
+    "event_count": 3277,
+    "fatalities": {
+      "max": 200,
+      "median": 1.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 2.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 7986.5,
+      "min": 0.0,
+      "q25": 1450.5,
+      "q75": 26996.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 12787.5,
+      "min": 0.0,
+      "q25": 2031.25,
+      "q75": 65020.0
+    },
+    "population_5km": {
+      "max": 1608345.0,
+      "median": 17528.0,
+      "min": 1.0,
+      "q25": 3740.0,
+      "q75": 94108.0
+    }
+  },
+  "change to group / activity": {
+    "event_count": 1017,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 23525.0,
+      "min": 0.0,
+      "q25": 9074.0,
+      "q75": 52051.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 68687.0,
+      "min": 0.0,
+      "q25": 10098.0,
+      "q75": 141496.0
+    },
+    "population_5km": {
+      "max": 1476031.0,
+      "median": 106993.0,
+      "min": 1.0,
+      "q25": 17876.0,
+      "q75": 364630.0
+    }
+  },
+  "chemical weapon": {
+    "event_count": 2,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 7704.0,
+      "median": 5508.0,
+      "min": 3312.0,
+      "q25": 4410.0,
+      "q75": 6606.0
+    },
+    "population_2km": {
+      "max": 23887.0,
+      "median": 16037.5,
+      "min": 8188.0,
+      "q25": 12112.75,
+      "q75": 19962.25
+    },
+    "population_5km": {
+      "max": 47839.0,
+      "median": 37696.5,
+      "min": 27554.0,
+      "q25": 32625.25,
+      "q75": 42767.75
+    }
+  },
+  "disrupted weapons use": {
+    "event_count": 154,
+    "fatalities": {
+      "max": 9,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 23557.5,
+      "min": 0.0,
+      "q25": 9556.25,
+      "q75": 41474.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 68687.0,
+      "min": 0.0,
+      "q25": 15380.5,
+      "q75": 129653.5
+    },
+    "population_5km": {
+      "max": 1476031.0,
+      "median": 128112.5,
+      "min": 3.0,
+      "q25": 29568.0,
+      "q75": 534328.25
+    }
+  },
+  "excessive force against protesters": {
+    "event_count": 256,
+    "fatalities": {
+      "max": 11,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 1.0
+    },
+    "population_1km": {
+      "max": 109924.0,
+      "median": 38454.0,
+      "min": 0.0,
+      "q25": 19166.0,
+      "q75": 42911.75
+    },
+    "population_2km": {
+      "max": 355882.0,
+      "median": 111029.0,
+      "min": 0.0,
+      "q25": 69537.0,
+      "q75": 153254.0
+    },
+    "population_5km": {
+      "max": 1360849.0,
+      "median": 469004.5,
+      "min": 3.0,
+      "q25": 278210.0,
+      "q75": 616401.0
+    }
+  },
+  "government regains territory": {
+    "event_count": 196,
+    "fatalities": {
+      "max": 110,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 3.0
+    },
+    "population_1km": {
+      "max": 112983.0,
+      "median": 15106.0,
+      "min": 1.0,
+      "q25": 3593.5,
+      "q75": 28502.0
+    },
+    "population_2km": {
+      "max": 366144.0,
+      "median": 19401.0,
+      "min": 1.0,
+      "q25": 5518.5,
+      "q75": 62939.0
+    },
+    "population_5km": {
+      "max": 1463556.0,
+      "median": 21605.5,
+      "min": 17.0,
+      "q25": 7516.0,
+      "q75": 90598.75
+    }
+  },
+  "grenade": {
+    "event_count": 10,
+    "fatalities": {
+      "max": 9,
+      "median": 1.5,
+      "min": 0,
+      "q25": 0.25,
+      "q75": 4.25
+    },
+    "population_1km": {
+      "max": 69167.0,
+      "median": 32939.5,
+      "min": 14787.0,
+      "q25": 23016.25,
+      "q75": 47766.25
+    },
+    "population_2km": {
+      "max": 234192.0,
+      "median": 91703.0,
+      "min": 20008.0,
+      "q25": 49895.75,
+      "q75": 134612.5
+    },
+    "population_5km": {
+      "max": 365107.0,
+      "median": 168735.5,
+      "min": 21466.0,
+      "q25": 76913.5,
+      "q75": 297075.75
+    }
+  },
+  "headquarters or base established": {
+    "event_count": 5,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 70460.0,
+      "median": 39545.0,
+      "min": 2633.0,
+      "q25": 28424.0,
+      "q75": 70460.0
+    },
+    "population_2km": {
+      "max": 238801.0,
+      "median": 39545.0,
+      "min": 8595.0,
+      "q25": 30569.0,
+      "q75": 238801.0
+    },
+    "population_5km": {
+      "max": 401211.0,
+      "median": 39545.0,
+      "min": 25945.0,
+      "q25": 30569.0,
+      "q75": 401211.0
+    }
+  },
+  "looting / property destruction": {
+    "event_count": 967,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 10773.0,
+      "min": 0.0,
+      "q25": 2388.0,
+      "q75": 33188.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 18519.0,
+      "min": 0.0,
+      "q25": 3246.5,
+      "q75": 76214.0
+    },
+    "population_5km": {
+      "max": 1476031.0,
+      "median": 23265.0,
+      "min": 1.0,
+      "q25": 6862.5,
+      "q75": 112954.0
+    }
+  },
+  "mob violence": {
+    "event_count": 52,
+    "fatalities": {
+      "max": 5,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 1.0
+    },
+    "population_1km": {
+      "max": 112983.0,
+      "median": 18836.5,
+      "min": 42.0,
+      "q25": 3457.5,
+      "q75": 30639.75
+    },
+    "population_2km": {
+      "max": 366144.0,
+      "median": 70486.0,
+      "min": 91.0,
+      "q25": 10221.75,
+      "q75": 111122.0
+    },
+    "population_5km": {
+      "max": 1463556.0,
+      "median": 128704.0,
+      "min": 1841.0,
+      "q25": 16780.25,
+      "q75": 420145.0
+    }
+  },
+  "non-state actor overtakes territory": {
+    "event_count": 116,
+    "fatalities": {
+      "max": 1000,
+      "median": 1.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 10.0
+    },
+    "population_1km": {
+      "max": 112983.0,
+      "median": 10602.0,
+      "min": 0.0,
+      "q25": 3186.0,
+      "q75": 26879.0
+    },
+    "population_2km": {
+      "max": 366144.0,
+      "median": 19657.0,
+      "min": 3.0,
+      "q25": 4576.0,
+      "q75": 65072.0
+    },
+    "population_5km": {
+      "max": 1463556.0,
+      "median": 24270.5,
+      "min": 98.0,
+      "q25": 7892.0,
+      "q75": 90598.75
+    }
+  },
+  "non-violent transfer of territory": {
+    "event_count": 161,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112983.0,
+      "median": 5536.0,
+      "min": 0.0,
+      "q25": 1597.0,
+      "q75": 17806.0
+    },
+    "population_2km": {
+      "max": 366144.0,
+      "median": 11003.0,
+      "min": 0.0,
+      "q25": 2106.0,
+      "q75": 31946.0
+    },
+    "population_5km": {
+      "max": 1463556.0,
+      "median": 15209.0,
+      "min": 3.0,
+      "q25": 3605.0,
+      "q75": 36297.0
+    }
+  },
+  "other": {
+    "event_count": 644,
+    "fatalities": {
+      "max": 1,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 19281.5,
+      "min": 0.0,
+      "q25": 8410.75,
+      "q75": 38703.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 44294.5,
+      "min": 0.0,
+      "q25": 10047.75,
+      "q75": 128492.0
+    },
+    "population_5km": {
+      "max": 1702223.0,
+      "median": 63912.0,
+      "min": 48.0,
+      "q25": 14631.5,
+      "q75": 319632.0
+    }
+  },
+  "peaceful protest": {
+    "event_count": 3106,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 33009.0,
+      "min": 0.0,
+      "q25": 19088.0,
+      "q75": 56253.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 111029.0,
+      "min": 0.0,
+      "q25": 69537.0,
+      "q75": 153254.0
+    },
+    "population_5km": {
+      "max": 1608345.0,
+      "median": 325589.0,
+      "min": 3.0,
+      "q25": 125321.0,
+      "q75": 581637.0
+    }
+  },
+  "protest with intervention": {
+    "event_count": 403,
+    "fatalities": {
+      "max": 0,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 111480.0,
+      "median": 39847.0,
+      "min": 301.0,
+      "q25": 22333.0,
+      "q75": 45487.0
+    },
+    "population_2km": {
+      "max": 361139.0,
+      "median": 111029.0,
+      "min": 951.0,
+      "q25": 93873.0,
+      "q75": 153254.0
+    },
+    "population_5km": {
+      "max": 1608345.0,
+      "median": 487646.0,
+      "min": 1633.0,
+      "q25": 278210.0,
+      "q75": 636538.0
+    }
+  },
+  "remote explosive / landmine / ied": {
+    "event_count": 54,
+    "fatalities": {
+      "max": 52,
+      "median": 2.0,
+      "min": 0,
+      "q25": 1.0,
+      "q75": 4.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 22897.0,
+      "min": 0.0,
+      "q25": 3587.0,
+      "q75": 67963.5
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 45382.0,
+      "min": 1.0,
+      "q25": 4710.5,
+      "q75": 206107.25
+    },
+    "population_5km": {
+      "max": 1702223.0,
+      "median": 74079.0,
+      "min": 41.0,
+      "q25": 5993.5,
+      "q75": 348964.0
+    }
+  },
+  "sexual violence": {
+    "event_count": 318,
+    "fatalities": {
+      "max": 200,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 112995.0,
+      "median": 22997.0,
+      "min": 0.0,
+      "q25": 9074.0,
+      "q75": 39847.0
+    },
+    "population_2km": {
+      "max": 366184.0,
+      "median": 44184.0,
+      "min": 1.0,
+      "q25": 9450.0,
+      "q75": 110328.5
+    },
+    "population_5km": {
+      "max": 1463773.0,
+      "median": 58606.5,
+      "min": 41.0,
+      "q25": 13050.0,
+      "q75": 171177.75
+    }
+  },
+  "shelling / artillery / missile attack": {
+    "event_count": 1538,
+    "fatalities": {
+      "max": 83,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 1.0
+    },
+    "population_1km": {
+      "max": 112983.0,
+      "median": 24533.0,
+      "min": 17.0,
+      "q25": 13627.0,
+      "q75": 39057.0
+    },
+    "population_2km": {
+      "max": 366144.0,
+      "median": 48461.0,
+      "min": 73.0,
+      "q25": 23525.0,
+      "q75": 91873.0
+    },
+    "population_5km": {
+      "max": 1463556.0,
+      "median": 64000.0,
+      "min": 399.0,
+      "q25": 23826.0,
+      "q75": 137686.0
+    }
+  },
+  "violent demonstration": {
+    "event_count": 218,
+    "fatalities": {
+      "max": 8,
+      "median": 0.0,
+      "min": 0,
+      "q25": 0.0,
+      "q75": 0.0
+    },
+    "population_1km": {
+      "max": 111480.0,
+      "median": 25182.0,
+      "min": 24.0,
+      "q25": 18507.0,
+      "q75": 43996.0
+    },
+    "population_2km": {
+      "max": 361139.0,
+      "median": 106985.0,
+      "min": 105.0,
+      "q25": 69537.0,
+      "q75": 137976.5
+    },
+    "population_5km": {
+      "max": 1608345.0,
+      "median": 366005.0,
+      "min": 403.0,
+      "q25": 112840.0,
+      "q75": 547339.0
+    }
+  }
+}

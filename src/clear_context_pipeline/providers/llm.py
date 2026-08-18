@@ -67,7 +67,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-LLMRole = Literal["context", "extraction", "datapoints", "narrative"]
+LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate"]
 
 # Per-request timeout (seconds). A flaky/hung model must fail FAST so it can be
 # retried or fall back — never block the pipeline. 600s (the old value) let a
@@ -103,6 +103,13 @@ _FALLBACK_ERRORS: tuple[type[BaseException], ...] = (
 _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     "datapoints": "extraction",
     "narrative": "extraction",
+    # Signals (classify v1 / group / assess / rewrite) reuse the extraction
+    # role's creds unless a dedicated LLM_SIGNAL_* block is set — so the ported
+    # pipeline runs with the env that's already configured.
+    "signal": "extraction",
+    # Translation reuses extraction (haiku) unless LLM_TRANSLATE_* is set —
+    # matching clear-pipeline's claude_model_translate = haiku.
+    "translate": "extraction",
 }
 
 # Pydantic bound so `complete_structured` returns the exact subclass the
