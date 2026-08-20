@@ -24,6 +24,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from clear_context_pipeline.providers.classify import (
+    coerce_event_types,
+    level2_values,
+)
+
+# The disaster_types level_2 vocabulary, rendered once for the event_types prompt.
+# Same taxonomy the signal classifier picks from, so a report's extracted event
+# types line up with the events' own type_level_2.
+_EVENT_TYPE_TAXONOMY = ", ".join(level2_values())
+
 # Schema versions:
 #   v1 — pre-launch baseline: Figure Scope on NumericField
 #        (scope_location_name + scope_location_id) and
@@ -455,9 +465,12 @@ class TimingAndScope(BaseModel):
     event_types: list[str] = Field(
         default_factory=list,
         description=(
-            "Free-text tags for the events / crises the report covers "
-            "(e.g. 'conflict', 'flood', 'displacement', 'disease-outbreak'). "
-            "Multi-hazard reports return multiple tags."
+            "The hazard/event types the report covers, chosen ONLY from the "
+            "disaster_types level_2 taxonomy below. Emit the exact label; return "
+            "an empty list rather than inventing a tag. These are event TYPES, not "
+            "consequences or activities — never 'displacement', 'search-and-rescue', "
+            "'humanitarian crisis'. Multi-hazard reports return multiple. Allowed "
+            f"values: {_EVENT_TYPE_TAXONOMY}."
         ),
     )
     active_clusters: list[str] = Field(
@@ -473,6 +486,14 @@ class TimingAndScope(BaseModel):
     # runs the type check so the whole domain doesn't fail.
     _tolerate_locations = field_validator("locations", mode="before")(
         _tolerate_stringified_json,
+    )
+
+    # Constrain event_types to the disaster_types level_2 taxonomy and DROP
+    # off-taxonomy tags — these feed the incident-key in aggregation, so a free-text
+    # 'displacement'/'search-and-rescue' would fragment incidents that the events'
+    # type_level_2 keeps together.
+    _coerce_event_types = field_validator("event_types", mode="before")(
+        coerce_event_types,
     )
 
 

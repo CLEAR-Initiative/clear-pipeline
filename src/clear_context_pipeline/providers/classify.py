@@ -366,6 +366,71 @@ def code_to_level3_map() -> dict[str, str]:
             out[code] = l3
     return out
 
+
+# ── Level-2 event-type vocabulary (shared with KB enrichment + datapoints) ────
+#
+# The `disaster_types` table's level_2 column is the ONE authoritative event-type
+# vocabulary. `event_categories.json` is the pipeline's local mirror of it; the
+# signal classifier already picks a `type_level_2` from it. These helpers expose
+# the same level_2 set (+ a coercion) so the LLM extraction paths (enrich.py,
+# datapoints) stop emitting free-text tags like 'displacement' / 'search-and-rescue'
+# that aren't event types.
+
+# Safe synonym map for LLM tags that unambiguously mean a level_2 label but aren't
+# spelled exactly. Anything neither a level_2 value nor here is DROPPED.
+_EVENT_TYPE_ALIASES: dict[str, str] = {
+    "wildfire": "wild fire",
+    "wildfires": "wild fire",
+    "wild-fire": "wild fire",
+    "bushfire": "wild fire",
+    "landslide": "land slide",
+    "mudslide": "mud slide",
+    "flashflood": "flash flood",
+    "flash-flood": "flash flood",
+    "quake": "earthquake",
+    "cyclone": "tropical cyclone",
+    "hurricane": "tropical cyclone",
+    "typhoon": "tropical cyclone",
+    "outbreak": "epidemic",
+    "disease outbreak": "epidemic",
+    "disease-outbreak": "epidemic",
+    "disease": "epidemic",
+    "protest": "protests",
+    "riot": "riots",
+    "avalanche": "snow avalanche",
+    "eruption": "volcano",
+    "volcanic eruption": "volcano",
+}
+
+
+def level2_values() -> list[str]:
+    """Sorted distinct disaster_types level_2 labels — the authoritative event-type
+    vocabulary, mirrored from `event_categories.json` (== clear-api disaster_types
+    level_2). Shared by signal classification, KB enrichment, and datapoint extraction."""
+    return sorted({
+        str(row["type_level_2"]).strip().lower()
+        for row in _load_taxonomy()
+        if row.get("type_level_2")
+    })
+
+
+def coerce_event_types(values: object) -> object:
+    """Map LLM-emitted event-type tags onto the level_2 taxonomy, DROPPING anything
+    off-taxonomy. Lowercased, aliased, deduped, order-preserving — so a stray tag
+    ('displacement', 'search-and-rescue', …) never becomes a bogus event type.
+    A non-list is returned unchanged so pydantic reports it as it would today."""
+    if not isinstance(values, list):
+        return values
+    valid = set(level2_values())
+    out: list[str] = []
+    for item in values:
+        key = str(item).strip().lower()
+        canon = key if key in valid else _EVENT_TYPE_ALIASES.get(key)
+        if canon and canon in valid and canon not in out:
+            out.append(canon)
+    return out
+
+
 # ── classify_locally (v2 entry point) ────────────────────────────────────────
 
 DEFAULT_FALLBACK_SEVERITY = 3  # used when source didn't supply one
