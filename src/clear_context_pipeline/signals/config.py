@@ -59,6 +59,19 @@ class Settings(BaseSettings):
     # CLEAR API (expo-385).
     darfur24_default_country: str = "Sudan"
 
+    # IDMC IDU (Internal Displacement Updates, via the Helix Tools API). The
+    # endpoint requires a registered `client_id` (query param) — request one
+    # via IDMC; empty disables the poll. It has no server-side filter/
+    # pagination: every poll fetches the entire global dataset and filters to
+    # these countries + displacement types client-side. `idmc_countries` is
+    # ISO3 (matches the `iso3` field on IDU rows), unlike ACLED/GDACS's
+    # country-name lists.
+    idmc_client_id: str = ""
+    idmc_countries: str = "SDN,AFG,VEN"
+    idmc_allowed_types: str = "Conflict,Disaster"
+    idmc_source_name: str = "idmc"
+    idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
+
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
     # a drain sensor checks for pending manual signals every N minutes (low so

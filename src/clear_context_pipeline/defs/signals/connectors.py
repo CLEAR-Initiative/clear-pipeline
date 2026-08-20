@@ -16,6 +16,7 @@ capability flags:
   │ acled      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
+  │ idmc       │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
 
@@ -41,7 +42,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_context_pipeline.providers import acled, darfur24, dataminr, gdacs
+from clear_context_pipeline.providers import acled, darfur24, dataminr, gdacs, idmc
 from clear_context_pipeline.providers.signal import build_signal_input
 from clear_context_pipeline.signals.config import settings
 
@@ -426,6 +427,67 @@ class Darfur24Connector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# IDMC IDU — internal displacement updates (polled + drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class IDMCConnector:
+    """IDU has no server-side filter or pagination — one poll fetches the
+    entire global dataset and filters to configured countries/displacement
+    types client-side, deduplicating on (id, content hash) rather than id
+    alone so a revised figure (same id, changed role/figure/dates) is
+    detected and re-submitted instead of silently skipped. See
+    ``providers/idmc.py`` for the fetch/dedup mechanics."""
+
+    source = settings.idmc_source_name
+    polled = True
+    drained = True
+    poll_interval_minutes = settings.idmc_poll_interval_minutes
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        return idmc.fetch_idu_records(since=since)
+
+    def external_id(self, record: Any) -> str:
+        return record["idu_id"]
+
+    def published_at(self, record: Any) -> str:
+        return record.get("created_at") or ""
+
+    def raw_bytes(self, record: Any) -> bytes:
+        return json.dumps(record).encode("utf-8")
+
+    def api_source_id(self) -> str:
+        from clear_context_pipeline.providers.clear_api import get_source_id_by_name
+
+        return get_source_id_by_name(settings.idmc_source_name)
+
+    def to_signal_input(self, record: Any, api_source_id: str) -> dict:
+        return idmc.build_idmc_signal_input(record, api_source_id)
+
+    def last_synced(self) -> datetime | None:
+        return idmc.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        idmc.set_last_synced(ts)
+
+    def post_create(self, record: Any) -> None:
+        idmc.mark_seen(record["idu_id"], record["content_hash"])  # only after createSignal confirmed
+
+    def parse(self, raw: bytes) -> dict:
+        return json.loads(raw)
+
+    def project(self, record: dict, created: dict) -> SignalView:
+        return SignalView(
+            external_id=record["idu_id"],
+            title=record["title"],
+            timestamp=created.get("publishedAt") or record.get("created_at") or "",
+            description=record.get("description"),
+            location_name=record.get("locations_name") or _first_location_name(created),
+            url=record.get("source_url"),
+            lat=record.get("lat"),
+            lng=record.get("lng"),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
@@ -457,6 +519,7 @@ CONNECTORS: list[SignalSource] = [
     ACLEDConnector(),
     GDACSConnector(),
     Darfur24Connector(),
+    IDMCConnector(),
     ManualConnector(),
 ]
 
