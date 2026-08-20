@@ -44,6 +44,10 @@ from clear_context_pipeline.providers import (
     load_guardrails,
     make_llm_provider,
 )
+from clear_context_pipeline.providers.classify import (
+    coerce_event_types,
+    level2_values,
+)
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
@@ -115,14 +119,23 @@ class ExtractedParameters(BaseModel):
     event_types: list[str] = Field(
         default_factory=list,
         description=(
-            "Disaster / event categories — free-text tags like 'conflict', "
-            "'flood', 'displacement'; GLIDE codes when known"
+            "Disaster/event categories the chunk discusses, drawn ONLY from the "
+            "disaster_types level_2 taxonomy (listed in the system prompt). "
+            "Off-taxonomy tags are dropped."
         ),
     )
     need_sectors: list[SafSector] = Field(
         default_factory=list,
         description="NRC SAF sectors the chunk discusses",
     )
+
+    @field_validator("event_types", mode="before")
+    @classmethod
+    def _coerce_event_types(cls, v: object) -> object:
+        """Constrain to the disaster_types level_2 taxonomy and DROP off-taxonomy
+        tags — the LLM otherwise emits consequences/activities ('displacement',
+        'search-and-rescue') that aren't event types. Same posture as sectors."""
+        return coerce_event_types(v)
 
     @field_validator("need_sectors", mode="before")
     @classmethod
@@ -157,6 +170,12 @@ CONTEXT_SYSTEM = (
 )
 
 
+# The disaster_types level_2 vocabulary, rendered once for the prompt. This is
+# the same taxonomy the signal classifier picks from — keeps KB event_types
+# consistent with the events' own type_level_2.
+_EVENT_TYPE_TAXONOMY = ", ".join(level2_values())
+
+
 EXTRACTION_SYSTEM = (
     "You are an information extractor for humanitarian sitreps produced by "
     "the Norwegian Refugee Council (NRC). Given one chunk of a report, emit "
@@ -168,9 +187,13 @@ EXTRACTION_SYSTEM = (
     "- `time_range_start` / `time_range_end` — dates the chunk describes "
     "  events for, in ISO YYYY-MM-DD form. Leave null when the chunk is "
     "  reference material without a specific window.\n"
-    "- `event_types` — categorical tags for the events discussed: 'conflict', "
-    "  'flood', 'displacement', 'disease outbreak', etc. Include GLIDE codes "
-    "  only when the chunk cites one explicitly.\n"
+    "- `event_types` — the hazard/event categories the chunk discusses, chosen "
+    "  ONLY from this fixed taxonomy (the disaster_types level_2 set). Emit the "
+    "  exact label; if nothing fits, return an empty list rather than inventing "
+    "  a tag. These are hazard/event TYPES, not their consequences or response "
+    "  activities — never emit things like 'displacement', 'search-and-rescue', "
+    "  'humanitarian crisis', or 'evacuation'. Allowed values:\n"
+    f"    {_EVENT_TYPE_TAXONOMY}.\n"
     "- `need_sectors` — must be drawn from the NRC SAF taxonomy: Shelter, "
     "  WASH, Protection, Health, Food Security, Education. Emit only sectors "
     "  the chunk directly discusses (not the whole report's default set)."
