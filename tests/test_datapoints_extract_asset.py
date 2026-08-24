@@ -62,7 +62,9 @@ def _canned_domain_output(domain_name: str):
             reporting_period_end="2026-07-06",
             reporting_period_confidence="reported",
             locations=[LocationRef(pcode="SD0701", name="Kordofan", admin_level=1)],
-            event_types=["conflict", "displacement"],
+            # 'flood' is a valid disaster_types level_2; 'displacement' is off-taxonomy
+            # and must be dropped by the event_types coercion.
+            event_types=["flood", "displacement"],
             active_clusters=["Protection", "WASH"],
         )
     if domain_name == "casualties":
@@ -221,8 +223,9 @@ class TestExtractionAsset:
         assert upsert_kwargs["total_affected"] == 100000
         # Locations resolved (dedup'd across the many refs).
         assert upsert_kwargs["location_ids"] == ["loc-kordofan"]
-        # Event types + reporting period passed through from timing.
-        assert upsert_kwargs["event_types"] == ["conflict", "displacement"]
+        # Event types constrained to the disaster_types level_2 taxonomy:
+        # 'flood' passes through, off-taxonomy 'displacement' is dropped.
+        assert upsert_kwargs["event_types"] == ["flood"]
         assert upsert_kwargs["reporting_period_end"] == "2026-07-06"
         # Extraction summary returned.
         assert len(result) == 1

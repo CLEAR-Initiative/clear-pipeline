@@ -29,6 +29,18 @@ dependencies = [
     "httpx>=0.27", # GraphQL client for clear-api — all DB access routes through the API,
     # matching clear-pipeline's pattern (no direct psycopg writes from Dagster)
     "pypdf>=4", # lighter fallback extractor when pdfplumber OOMs on graphics-dense PDFs
+    # ── Signal pipeline (ported from clear-pipeline, Celery→Dagster consolidation) ──
+    "pydantic-settings>=2.7", # the ported signal domain's config (src.config → signals.config)
+    "redis>=5.0", # dedup locks, classification cache, watermarks (signal drain)
+    "sentence-transformers>=3.0", # local event classifier / grouping
+    # Direct (not just transitive via sentence-transformers) so the CPU-index
+    # override in [tool.uv.sources] applies — see the note at the end of the file.
+    "torch>=2.13",
+    "rapidfuzz>=3.10", # lexical event grouping
+    "rasterio>=1.3", # population raster reads (populationAffected)
+    "shapely>=2.0", # geometry ops for population + grouping
+    "numpy>=1.26", # raster/vector math
+    "psycopg[binary]>=3.3.4",
 ]
 
 [dependency-groups]
@@ -68,3 +80,19 @@ registry_modules = [
 ]
 
 
+
+# CPU-only torch. sentence-transformers pulls torch transitively, and the default
+# Linux build declares the full CUDA stack (cuda-toolkit: cupti, cublas, cudart,
+# … — several GB). That bloats the image and overflows the deploy host's disk on
+# layer extraction ("no space left on device"). The CPU wheel has none of it and
+# the classifier runs on CPU anyway. Route torch to PyTorch's CPU index.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+# Linux only: that's where the default build declares the CUDA stack (and where
+# the deploy runs). On macOS the PyPI wheel is already CPU/MPS with no CUDA, and
+# there's no `+cpu` variant, so leave it on PyPI there.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]

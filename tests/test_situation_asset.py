@@ -284,7 +284,7 @@ class TestGenerateAndUpsertForCountryYear:
         assert result["generated_by_model"].startswith("deterministic:")
         # Deterministic components ARE populated (datapoints, sources).
         payload = mock_upsert.call_args.kwargs["data"]
-        assert payload["datapoints"]["population_displaced"] == 6_500_000.0
+        assert payload["datapoints"]["population_displaced"]["value"] == 6_500_000.0
         # Narrative components stay at empty defaults.
         assert payload["ai_summary"]["text"] == ""
         assert payload["hazards_and_vulnerabilities"]["hazards"] == []
@@ -350,7 +350,7 @@ class TestGenerateAndUpsertForCountryYear:
         }
 
         # 2. Datapoints hoisted correctly.
-        assert payload["datapoints"]["population_displaced"] == 6_500_000.0
+        assert payload["datapoints"]["population_displaced"]["value"] == 6_500_000.0
         assert payload["datapoints"]["envelope"]["report_count"] == 10
 
         # 3. Sources chronological (r-2 July → r-3 April → r-1 January).
@@ -514,9 +514,9 @@ def test_build_datapoints_surfaces_current_totals_flows_and_divergences():
         },
     }
     dp = _build_datapoints(aggregated)
-    assert dp.population_displaced == 100000
-    assert dp.new_displacements == 8000
-    assert dp.new_returns == 1500
+    assert dp.population_displaced.value == 100000
+    assert dp.new_displacements.value == 8000
+    assert dp.new_returns.value == 1500
     assert dp.estimated_current_displacement is not None
     assert dp.estimated_current_displacement.total == 108000
     assert dp.estimated_current_displacement.flow_count == 2

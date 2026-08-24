@@ -22,7 +22,10 @@ from pydantic import BaseModel, Field
 # v2: sourced narrative components carry `contributing_sources`
 # (report_id -> [generated lines that report contributed to]) for in-line
 # citation in the dashboard, alongside the coarse `source_report_ids`.
-SCHEMA_VERSION = "v2"
+# v3: numeric headline datapoints carry the full range envelope
+# (value + low/high + range_width + bias + confidence) instead of a flattened
+# point — stops discarding the ADR-0007 band the aggregate already carries.
+SCHEMA_VERSION = "v3"
 
 Severity = Literal["low", "medium", "high", "critical"]
 
@@ -82,33 +85,52 @@ class DivergenceSignal(BaseModel):
     pct_diff: float
 
 
+class RangeFigure(BaseModel):
+    """A headline figure as a RANGE, not a point (clear-context-pipeline ADR-0007).
+
+    `value` is the projected point estimate; `[low, high]` is the honest error bar
+    (the aggregate's `value_low`/`value_high`); `range_width` = high − low, a
+    first-class uncertainty signal; `bias` tells the consumer which way to project
+    the band to a single headline at the display edge (``overreport`` → low,
+    ``underreport`` → high, ``neutral`` → midpoint); `confidence` is the field's
+    data-quality signal. All nullable — a field with no data is all-None; an exact
+    source figure has ``low == high == value``."""
+    value: Optional[float] = None
+    low: Optional[float] = None
+    high: Optional[float] = None
+    range_width: Optional[float] = None
+    bias: Optional[str] = None  # "overreport" | "underreport" | "neutral"
+    confidence: Optional[float] = None
+
+
 class Datapoints(BaseModel):
     """Deterministic headline numbers hoisted from the yearly × A0
-    aggregated_datapoint bucket. Each field is nullable - a country-
-    year with no ingested reports has all-null values but the
-    envelope still records the fact of zero contributing sources."""
-    population_displaced: Optional[float] = None
+    aggregated_datapoint bucket. Each numeric field is a nullable RangeFigure - a
+    country-year with no ingested reports has all-None figures but the envelope
+    still records the fact of zero contributing sources."""
+    population_displaced: Optional[RangeFigure] = None
     # People in Need - the assessed subset requiring humanitarian
     # assistance. NOT Population Affected: the two are extracted and
     # surfaced separately (population_affected below). See CONTEXT.md and
     # docs/adr/0001-affected-extracted-not-sourced-from-events.md.
-    population_in_need: Optional[float] = None
+    population_in_need: Optional[RangeFigure] = None
     # Population Affected - the wider circle of everyone the crisis
     # touched, a superset of People in Need. Extracted from reports,
     # Max-aggregated, and sparse. Distinct from population_in_need.
-    population_affected: Optional[float] = None
+    population_affected: Optional[RangeFigure] = None
     # Cumulative returnee STOCK (returned to date) — sourced from the
     # `returnee_stock` aggregate (ADR-0005 §4a split `returnees` into stock +
     # flow); the field name is kept for downstream/narrative stability.
-    returnees: Optional[float] = None
+    returnees: Optional[RangeFigure] = None
     # Period-increment FLOWS (additive) that accrue on top of the stocks.
     # `new_returns` was previously unused; surfaced alongside `new_displacements`
     # for the stock+flow current-total narrative (ADR-0006 §4).
-    new_displacements: Optional[float] = None
-    new_returns: Optional[float] = None
+    new_displacements: Optional[RangeFigure] = None
+    new_returns: Optional[RangeFigure] = None
+    # Count of contributing reports — a plain integer, not a range.
     number_of_events: int = 0
-    funding_required_usd: Optional[float] = None
-    funding_received_usd: Optional[float] = None
+    funding_required_usd: Optional[RangeFigure] = None
+    funding_received_usd: Optional[RangeFigure] = None
     # Estimated current totals (ADR-0006 §4): latest authoritative stock + the
     # flows since its T₀. Read from the aggregated_datapoint's
     # `estimatedCurrentTotals` field.

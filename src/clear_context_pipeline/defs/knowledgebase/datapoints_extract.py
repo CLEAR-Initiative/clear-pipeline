@@ -48,6 +48,7 @@ from clear_context_pipeline.providers import (
     load_guardrails,
     make_llm_provider,
 )
+from clear_context_pipeline.providers.classify import coerce_event_types
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
@@ -784,7 +785,10 @@ def extract_datapoints_for_one_report(
     )
 
     timing = merged.get("timing_and_scope") or {}
-    event_types = list(dict.fromkeys(timing.get("event_types") or []))
+    # Constrain to the disaster_types level_2 taxonomy (drops off-taxonomy tags,
+    # dedupes). The schema validator already coerces on parse; re-applied here
+    # because this is the value written to clear-api + the incident key.
+    event_types = coerce_event_types(timing.get("event_types") or [])
 
     total_killed = _num_or_none(_dig(merged, "casualties", "killed", "total"))
     total_displaced = _num_or_none(_dig(merged, "displacement", "idp_stock"))
