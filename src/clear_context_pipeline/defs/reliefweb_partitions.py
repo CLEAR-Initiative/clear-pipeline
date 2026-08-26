@@ -80,3 +80,9 @@ def enriched_prefix(iso3: str) -> str:
 
 def datapoints_prefix(iso3: str) -> str:
     return f"reliefweb/kb/datapoints/{iso3}/{FORMAT_SLUG}"
+
+
+def figures_prefix(iso3: str) -> str:
+    """Cropped figure images (infographic capture) live under their own `kb/*`
+    segment, parallel to text/chunks/enriched/datapoints."""
+    return f"reliefweb/kb/figures/{iso3}/{FORMAT_SLUG}"

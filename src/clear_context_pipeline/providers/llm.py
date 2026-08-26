@@ -48,6 +48,7 @@ Retry semantics:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -67,7 +68,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate"]
+LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision"]
 
 # Per-request timeout (seconds). A flaky/hung model must fail FAST so it can be
 # retried or fall back — never block the pipeline. 600s (the old value) let a
@@ -110,6 +111,9 @@ _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     # Translation reuses extraction (haiku) unless LLM_TRANSLATE_* is set —
     # matching clear-pipeline's claude_model_translate = haiku.
     "translate": "extraction",
+    # Figure transcription (infographic capture) reuses extraction (haiku, which
+    # is vision-capable) unless a dedicated LLM_VISION_* block is set.
+    "vision": "extraction",
 }
 
 # Pydantic bound so `complete_structured` returns the exact subclass the
@@ -160,6 +164,7 @@ class LLMProvider(Protocol):
         schema: type[TModel],
         max_tokens: int = 1024,
         cache_key: str | None = None,
+        images: list[tuple[str, bytes]] | None = None,
     ) -> TModel:
         """Call the model and return an instance of ``schema``.
 
@@ -178,6 +183,10 @@ class LLMProvider(Protocol):
                         ``system`` block is cached under this key so
                         subsequent calls with the same key skip the
                         prefix cost.
+            images:     optional ``(media_type, png_bytes)`` blocks prepended
+                        to the user turn for vision transcription. Only the
+                        Anthropic provider supports these; OpenAI-compatible
+                        providers raise if any are passed.
         """
         ...
 
@@ -188,6 +197,7 @@ class LLMProvider(Protocol):
         user: str,
         max_tokens: int = 1024,
         cache_key: str | None = None,
+        images: list[tuple[str, bytes]] | None = None,
     ) -> str:
         """Call the model and return its raw text response (stripped).
 
@@ -244,6 +254,7 @@ class AnthropicProvider:
         schema: type[TModel],
         max_tokens: int = 1024,
         cache_key: str | None = None,
+        images: list[tuple[str, bytes]] | None = None,
     ) -> TModel:
         # `system` accepts either a string or a list of content blocks;
         # the list form is what unlocks per-block cache_control. We
@@ -263,6 +274,8 @@ class AnthropicProvider:
                 self.role, cache_key,
             )
 
+        # Vision transcription (infographic capture): `images` prepends the
+        # cropped figure(s) as base64 blocks before the text instruction.
         tool = _pydantic_to_anthropic_tool(schema)
         response = self._client.messages.create(
             model=self.model,
@@ -270,7 +283,7 @@ class AnthropicProvider:
             system=system_blocks,
             tools=[tool],
             tool_choice={"type": "tool", "name": tool["name"]},
-            messages=[{"role": "user", "content": user}],
+            messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
 
         for block in response.content:
@@ -302,6 +315,7 @@ class AnthropicProvider:
         user: str,
         max_tokens: int = 1024,
         cache_key: str | None = None,
+        images: list[tuple[str, bytes]] | None = None,
     ) -> str:
         system_blocks: list[dict[str, Any]] = [{"type": "text", "text": system}]
         if cache_key is not None:
@@ -310,12 +324,33 @@ class AnthropicProvider:
             model=self.model,
             max_tokens=max_tokens,
             system=system_blocks,
-            messages=[{"role": "user", "content": user}],
+            messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
         text = _strip_code_fence("".join(getattr(b, "text", "") for b in response.content))
         if not text:
             raise EmptyResponseError(f"empty text response from {self.model}")
         return text
+
+
+def _anthropic_user_content(user: str, images: list[tuple[str, bytes]] | None) -> Any:
+    """Build the Anthropic user-turn content. Plain text calls send `user` as a
+    bare string; vision calls (infographic capture) prepend each image as a
+    base64 block before the text instruction."""
+    if not images:
+        return user
+    content: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.standard_b64encode(data).decode("ascii"),
+            },
+        }
+        for media_type, data in images
+    ]
+    content.append({"type": "text", "text": user})
+    return content
 
 
 def _pydantic_to_anthropic_tool(schema: type[BaseModel]) -> dict[str, Any]:
@@ -427,11 +462,19 @@ class OpenAICompatibleProvider:
         schema: type[TModel],
         max_tokens: int = 1024,
         cache_key: str | None = None,
+        images: list[tuple[str, bytes]] | None = None,
     ) -> TModel:
         # cache_key is intentionally unused today — most OSS-hosted
         # providers don't expose caching yet. Kept in the signature so
         # switching back and forth doesn't touch call sites.
         del cache_key
+        # Vision transcription is Anthropic-only in v1. Fail loudly rather than
+        # silently dropping the image and transcribing an empty prompt.
+        if images:
+            raise NotImplementedError(
+                "image input is only supported by the Anthropic provider; "
+                "set LLM_VISION_* (or LLM_EXTRACTION_*) to an Anthropic model",
+            )
 
         response_format: dict[str, Any]
         if self._json_schema_mode:
@@ -508,10 +551,16 @@ class OpenAICompatibleProvider:
         user: str,
         max_tokens: int = 1024,
         cache_key: str | None = None,
+        images: list[tuple[str, bytes]] | None = None,
     ) -> str:
         # No response_format — plain chat completion. No JSON to parse, so any
         # chat model works regardless of structured-output support.
         del cache_key  # not cached on OSS routes yet (see complete_structured)
+        if images:
+            raise NotImplementedError(
+                "image input is only supported by the Anthropic provider; "
+                "set LLM_VISION_* (or LLM_EXTRACTION_*) to an Anthropic model",
+            )
         raw = self._client.chat.completions.create(
             model=self.model,
             max_tokens=max_tokens,
