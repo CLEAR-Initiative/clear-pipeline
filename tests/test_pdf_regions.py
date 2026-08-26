@@ -85,6 +85,15 @@ def test_vector_only_page_falls_back_to_full_page():
     assert len(regions) == 1 and regions[0].is_full_page
 
 
+def test_vector_only_chart_amid_prose_falls_back_to_full_page():
+    # A drawn (vector) chart on a prose-heavy page (≥250 chars) — no embedded
+    # image, no ruled table to bbox. Per-region has nothing to crop, so §6A wants
+    # a whole-page fallback rather than dropping the figure. Regression for #46-B.
+    page = _Page(text=PROSE, rects=150, lines=150)  # PROSE is ~1000 chars
+    regions = detect_figure_regions(page)
+    assert regions == [FigureRegion(bbox=(0.0, 0.0, 600.0, 800.0), kind_hint="page", is_full_page=True)]
+
+
 def test_pad_bbox_expands_and_clamps():
     padded = pad_bbox((100, 100, 300, 300), 600, 800, frac=0.05)
     assert padded == (70.0, 60.0, 330.0, 340.0)

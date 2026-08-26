@@ -18,6 +18,7 @@ dropping the figure.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -25,11 +26,13 @@ from clear_context_pipeline.providers.llm import make_llm_provider
 
 logger = logging.getLogger(__name__)
 
-# Final figure kinds. Superset-aligned with clear-api's VALID_KINDS on
-# upsertReportFigures — keep the two in sync. "logo"/"decorative" are NOT here:
-# region detection already drops those, and the model is told to pick the
-# closest real kind rather than emit a junk one.
-FigureKind = str  # one of: chart | map | table | infographic | photo
+# Final figure kinds. MUST stay in lockstep with clear-api's VALID_KINDS on
+# upsertReportFigures (reportFigure.resolver.ts) — a kind outside that set 400s
+# the figures write. Declaring it a Literal (not a bare str) puts the enum into
+# the vision tool's input schema, so the model is grammar-constrained to emit a
+# valid kind rather than inventing "logo"/"diagram"/"other". "logo"/"decorative"
+# are deliberately absent: region detection drops those upstream.
+FigureKind = Literal["chart", "map", "table", "infographic", "photo"]
 
 
 class FigureRow(BaseModel):
@@ -178,6 +181,17 @@ def transcribe_figure(
             max_tokens=max_tokens,
             images=[(media_type, png_bytes)],
         )
+    except NotImplementedError:
+        # The resolved `vision` provider can't take image input (an
+        # openai_compat/Ollama backend). That's a CONFIG error, not a transient
+        # one: EVERY figure will null out. Log loudly so an all-null capture run
+        # is diagnosable instead of looking successful. Point at the fix.
+        logger.error(
+            "[VISION] the resolved 'vision' provider does not support image input "
+            "(openai_compat/Ollama). All figure transcriptions will be null. Set "
+            "LLM_VISION_* (or LLM_NARRATIVE_*, the fallback) to an Anthropic model.",
+        )
+        return None
     except Exception as exc:  # noqa: BLE001 — best-effort; never fail the asset
         logger.warning(
             "[VISION] figure transcription failed (kind_hint=%s): %s",

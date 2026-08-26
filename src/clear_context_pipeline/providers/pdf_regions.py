@@ -89,7 +89,13 @@ def detect_figure_regions(page) -> list[FigureRegion]:
         graphic_area = sum(_area(_image_bbox(im)) for im in images)
         graphic_area += sum(_area(tuple(t.bbox)) for t in tables)
         coverage = graphic_area / parea
-        if coverage >= _COMPOSITE_COVERAGE or text_len < _MIN_TEXT_CHARS:
+        # Vector-only page: `has_graphic` was true via dense vector primitives
+        # (a drawn chart/map) but there's NO embedded image and NO ruled table to
+        # bound — so per-region detection below has nothing to crop and would drop
+        # the figure. Fall back to the whole page (spec §6A's ~5% vector-only case,
+        # which the prose+chart page hits when text_len ≥ _MIN_TEXT_CHARS).
+        vector_only = not images and not tables
+        if coverage >= _COMPOSITE_COVERAGE or text_len < _MIN_TEXT_CHARS or vector_only:
             return [FigureRegion(bbox=page_bbox, kind_hint="page", is_full_page=True)]
 
         regions: list[FigureRegion] = []

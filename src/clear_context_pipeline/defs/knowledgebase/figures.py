@@ -132,26 +132,41 @@ def _capture_pdf(
     remaining: int,
 ) -> tuple[list[dict], int]:
     """Detect + render + transcribe every figure in one PDF. Returns
-    ``(figures, page_count)`` — the raw per-figure dicts (image already uploaded
-    to S3, transcription attached but NOT yet enriched) and the PDF's page count
-    (so the caller can advance the page offset without re-opening the file).
-    Per-page best-effort: one bad page contributes nothing rather than aborting
-    the report. ``page_offset`` keeps ``pageNumber`` aligned with pdf_text's
-    concatenated stream across a report's multiple PDFs."""
+    ``(figures, n_nonempty_pages)`` — the raw per-figure dicts (image already
+    uploaded to S3, transcription attached but NOT yet enriched) and the count of
+    NON-EMPTY pages, which the caller advances ``page_offset`` by so figure
+    pageNumbers line up with pdf_text's chunk page numbers across a report's
+    multiple PDFs. Per-page best-effort: one bad page contributes nothing rather
+    than aborting the report."""
     import pdfplumber
 
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
     prefix = figures_prefix(iso3)
     out: list[dict] = []
-    n_pages = 0
+    # Count of NON-EMPTY pages — the value the caller advances page_offset by, so
+    # figure pageNumbers line up with pdf_text's chunk page numbers. pdf_text
+    # numbers pages via extract_pages, which DROPS blank/image-only pages and
+    # offsets by that non-empty count; advancing here by the physical page count
+    # instead drifts every subsequent figure on a multi-PDF report. `extract_text`
+    # non-empty is the cheap proxy for extract_pages' (text+tables) test — they
+    # diverge only for the rare text-less-but-ruled-table page.
+    n_nonempty = 0
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        n_pages = len(pdf.pages)
         for i, page in enumerate(pdf.pages):
+            page_num = i + 1 + page_offset  # physical page index within PDF (1-based) + offset
+            try:
+                page_text = (page.extract_text() or "").strip()
+            except Exception:  # noqa: BLE001 — context only; fine to skip
+                page_text = ""
+            if page_text:
+                n_nonempty += 1
+
+            # Keep iterating (to finish the page count) even after the per-report
+            # figure cap is hit — just stop capturing more figures.
             if len(out) >= remaining:
-                break
-            page_num = i + 1 + page_offset
+                continue
             try:
                 regions = detect_figure_regions(page)
             except Exception as exc:  # noqa: BLE001
@@ -159,12 +174,6 @@ def _capture_pdf(
                 continue
             if not regions:
                 continue
-
-            page_text = ""
-            try:
-                page_text = (page.extract_text() or "").strip()
-            except Exception:  # noqa: BLE001 — context only; fine to skip
-                page_text = ""
 
             for region in regions:
                 if len(out) >= remaining:
@@ -200,7 +209,7 @@ def _capture_pdf(
                         "figure capture failed p%d of %s (%s): %s",
                         page_num, report_id, region.kind_hint, exc,
                     )
-    return out, n_pages
+    return out, n_nonempty
 
 
 @dg.asset(
@@ -272,16 +281,17 @@ def reliefweb_weekly_figures(
                 context.log.warning("s3 fetch failed for %s (%s): %s", entry["s3_key"], report_id, exc)
                 continue
             try:
-                captured, n_pages = _capture_pdf(
+                captured, n_nonempty = _capture_pdf(
                     context, pdf_bytes,
                     report_id=report_id, iso3=iso3, page_offset=page_offset,
                     seen_hashes=seen_hashes,
                     remaining=_MAX_FIGURES_PER_REPORT - len(raw_figures),
                 )
                 raw_figures.extend(captured)
-                # Advance the page offset by this PDF's page count so the next
-                # attachment's pageNumbers stay aligned with pdf_text.
-                page_offset += n_pages
+                # Advance by this PDF's NON-EMPTY page count — the same measure
+                # pdf_text uses — so the next attachment's pageNumbers stay aligned
+                # with the chunk page numbers.
+                page_offset += n_nonempty
             except Exception as exc:  # noqa: BLE001 — one bad PDF, not the report
                 context.log.warning("figure capture failed for %s (%s): %s", entry["s3_key"], report_id, exc)
 
@@ -326,14 +336,28 @@ def reliefweb_weekly_figures(
                 "timeRangeEnd": params.time_range_end,
             })
 
+        # #142-B: never upsert an empty figures list. `upsertReportFigures` deletes-
+        # then-inserts per report, so sending [] would WIPE the report's previously-
+        # captured figures — and a render/detect failure that captures nothing looks
+        # identical to a genuinely figure-less report. Err toward preservation: skip
+        # the upsert AND the record marker, so the report is re-attempted next run
+        # rather than marked done with zero figures. (A figure that rendered but whose
+        # vision transcription failed is still non-empty here — kind falls back to the
+        # structural hint — so it's stored; only a wholly-empty capture is skipped.)
+        if not figures_input:
+            context.log.info(
+                "report %s captured no figures — skipping upsert (not wiping) + record",
+                report_id,
+            )
+            summaries.append({"report_id": report_id, "s3_record_key": None, "figures_written": 0})
+            continue
+
         # Persist a record of what we captured (idempotency marker + audit) BEFORE
-        # the upsert, then upsert to clear-api. An empty figures list still upserts
-        # (clears any stale rows) and still writes the record so the report is
-        # marked done and not re-rendered next run.
+        # the upsert.
         record_body = b"\n".join(
             json.dumps(f, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             for f in figures_input
-        ) + (b"\n" if figures_input else b"")
+        ) + b"\n"
         s3.put_object(Bucket=bucket, Key=record_key, Body=record_body, ContentType="application/x-ndjson")
 
         try:

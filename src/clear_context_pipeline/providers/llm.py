@@ -111,9 +111,12 @@ _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     # Translation reuses extraction (haiku) unless LLM_TRANSLATE_* is set —
     # matching clear-pipeline's claude_model_translate = haiku.
     "translate": "extraction",
-    # Figure transcription (infographic capture) reuses extraction (haiku, which
-    # is vision-capable) unless a dedicated LLM_VISION_* block is set.
-    "vision": "extraction",
+    # Figure transcription (infographic capture) falls back to the NARRATIVE role
+    # (Anthropic/Sonnet), NOT extraction. Extraction may be an OSS/Ollama
+    # (openai_compat) backend that can't take image input — which would silently
+    # yield null transcriptions. Narrative is vision-capable and higher quality.
+    # A dedicated LLM_VISION_* block still overrides this fallback.
+    "vision": "narrative",
 }
 
 # Pydantic bound so `complete_structured` returns the exact subclass the
@@ -206,6 +209,9 @@ class LLMProvider(Protocol):
         only adds a parse that models fond of ```json fences or empty bodies
         fail on. No structured-output support is required, so this works with
         any chat model. ``cache_key`` behaves as in ``complete_structured``.
+        ``images`` behaves as in ``complete_structured`` too — optional
+        ``(media_type, bytes)`` blocks prepended to the user turn (Anthropic
+        only; OpenAI-compatible providers raise if any are passed).
         """
         ...
 
