@@ -278,9 +278,9 @@ def _generate_one_sector(
             max_tokens=3000,
             cache_key=cache_key,
         )
-    except Exception as exc:  # noqa: BLE001 — per-sector isolation
-        logger.warning(
-            "[situation:sector:%s] LLM call failed: %s", sector_key, exc,
+    except Exception:  # noqa: BLE001 — per-sector isolation
+        logger.exception(
+            "[situation:sector:%s] LLM call failed — returning empty sector", sector_key,
         )
         return SectorAnalysis()
 
@@ -349,9 +349,14 @@ def generate_all_sectors(
     # would be the cleanup path if we grow more narrative modules.
     aggregated_context = _format_aggregated(aggregated)
 
+    logger.info(
+        "[situation:sectors] generating %d sectors for %s (%s)",
+        len(_SECTOR_KEYS), country_name, period_label,
+    )
     outputs: dict[str, SectorAnalysis] = {}
     for sector_key, sector_display in _SECTOR_KEYS:
-        outputs[sector_key] = _generate_one_sector(
+        logger.debug("[situation:sector:%s] generating", sector_key)
+        sector = _generate_one_sector(
             llm,
             sector_key=sector_key,
             sector_display_name=sector_display,
@@ -360,8 +365,30 @@ def generate_all_sectors(
             aggregated_context=aggregated_context,
             cache_key=cache_key,
         )
+        outputs[sector_key] = sector
+        logger.debug(
+            "[situation:sector:%s] done: severity=%s impact=%d conditions=%d needs=%d",
+            sector_key, sector.severity, len(sector.impact),
+            len(sector.humanitarian_conditions), len(sector.top_needs),
+        )
 
+    populated = [k for k, s in outputs.items() if _sector_has_content(s)]
+    logger.info(
+        "[situation:sectors] done for %s (%s): %d/%d sectors populated (%s)",
+        country_name, period_label, len(populated), len(outputs),
+        ", ".join(populated) or "none",
+    )
     return Sectors(**outputs)
+
+
+def _sector_has_content(s: SectorAnalysis) -> bool:
+    """True when a sector carries any generated content — used only for the
+    populated/empty summary log so an all-empty run is obvious at a glance."""
+    return bool(
+        s.severity is not None
+        or s.impact or s.humanitarian_conditions or s.vulnerable_sections
+        or s.top_needs or s.priority_interventions
+    )
 
 
 def _format_aggregated(aggregated: dict[str, Any] | None) -> str:

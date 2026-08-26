@@ -302,8 +302,8 @@ def generate_ai_summary(
             llm, system_prompt=system, user_prompt=user,
             schema=_AISummaryLLM, cache_key=cache_key, max_tokens=1500,
         )
-    except Exception as exc:  # noqa: BLE001 — component-level isolation
-        logger.warning("[situation:ai_summary] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001 — component-level isolation
+        logger.exception("[situation:ai_summary] LLM call failed — returning empty component")
         return AISummary()
     clean_text, contributing = resolve_prose(result.text, rag.hit_report_ids)
     return AISummary(
@@ -356,8 +356,8 @@ def generate_context_risks(
             llm, system_prompt=system, user_prompt=user,
             schema=_ContextRisksLLM, cache_key=cache_key, max_tokens=3000,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[situation:context_risks] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[situation:context_risks] LLM call failed — returning empty component")
         return ContextRisks()
 
     # Resolve each domain's inline [Rn] citations independently — the eight
@@ -422,8 +422,8 @@ def generate_hazards_and_vulnerabilities(
             llm, system_prompt=system, user_prompt=user,
             schema=_HazardsVulnerabilitiesLLM, cache_key=cache_key, max_tokens=2000,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[situation:hazards_and_vulnerabilities] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[situation:hazards_and_vulnerabilities] LLM call failed — returning empty component")
         return HazardsAndVulnerabilities()
 
     hazards, haz_contrib = _sourced_bullets(result.hazards, rag)
@@ -473,8 +473,8 @@ def generate_displacement_narrative(
             llm, system_prompt=system, user_prompt=user,
             schema=_DisplacementLLM, cache_key=cache_key, max_tokens=2000,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[situation:displacement] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[situation:displacement] LLM call failed — returning empty component")
         return DisplacementNarrative()
 
     push, push_contrib = _sourced_bullets(result.push_factors, rag)

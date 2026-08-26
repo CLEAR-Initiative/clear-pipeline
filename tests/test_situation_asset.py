@@ -202,6 +202,91 @@ class TestGenerateAndUpsertForCountryYear:
         assert kwargs["window_kind"] == "yearly"
         assert kwargs["window_start"] == "2026-01-01T00:00:00+00:00"
 
+    def test_all_empty_generation_skips_upsert_to_preserve_previous(self):
+        # Regression guard for the prod incident: when RAG returns nothing (e.g.
+        # clear-api EMBEDDING_* unset), every narrative/sector generator yields
+        # its empty default. Such a failed run must NOT upsert — upserting would
+        # supersede the previous good row with nulls (validTo stamped on it inside
+        # the atomic mutation). We skip the upsert and return None, leaving the
+        # previous row current.
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                return_value="sudan-a0",
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                return_value=None,
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                return_value={},
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+            ) as mock_make_llm,
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_ai_summary",
+                return_value=AISummary(),  # empty — no text
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_context_risks",
+                return_value=ContextRisks(),
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
+                return_value=HazardsAndVulnerabilities(),
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_displacement_narrative",
+                return_value=DisplacementNarrative(),
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.generate_all_sectors",
+                return_value=Sectors(),
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+            ) as mock_upsert,
+        ):
+            mock_make_llm.return_value.model = "claude-sonnet-4-6"
+            result = generate_and_upsert_for_country_year(country_name="Sudan", year=2026)
+
+        assert result is None
+        mock_upsert.assert_not_called()
+
+    def test_skip_narrative_run_still_upserts_despite_empty_llm(self):
+        # The all-empty gate must NOT catch a deliberate deterministic-only run:
+        # SITUATION_SKIP_NARRATIVE intentionally nulls the LLM components, but that
+        # IS a valid row and must still upsert (and supersede).
+        os.environ["SITUATION_SKIP_NARRATIVE"] = "1"
+        with (
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                return_value="sudan-a0",
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                return_value=None,
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                return_value={},
+            ),
+            patch(
+                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                return_value={
+                    "situationAnalysisId": "sit-det",
+                    "countryLocationId": "sudan-a0",
+                    "supersededPrevious": True,
+                },
+            ) as mock_upsert,
+        ):
+            result = generate_and_upsert_for_country_year(country_name="Sudan", year=2026)
+
+        assert result is not None
+        mock_upsert.assert_called_once()
+
     def test_month_wrapper_sends_monthly_window_kind_and_first_of_month(self):
         # The monthly wrapper reads/writes the monthly-A0 bucket. window_kind
         # must be "monthly" and window_start exactly midnight on the 1st -
