@@ -84,6 +84,15 @@ mutation UpsertReportDatapoints($input: UpsertReportDatapointsInput!) {
 }
 """
 
+_UPSERT_REPORT_FIGURES = """
+mutation UpsertReportFigures($input: UpsertReportFiguresInput!) {
+  upsertReportFigures(input: $input) {
+    reportId
+    count
+  }
+}
+"""
+
 _REFRESH_AGGREGATED_DATAPOINTS = """
 mutation RefreshAggregatedDatapoints($from: DateTime!, $to: DateTime!, $schemaVersion: String!, $countryLocationId: String) {
   refreshAggregatedDatapoints(from: $from, to: $to, schemaVersion: $schemaVersion, countryLocationId: $countryLocationId) {
@@ -419,6 +428,36 @@ def upsert_report_datapoints(
     }
     result = _execute(_UPSERT_REPORT_DATAPOINTS, {"input": payload})
     return result["upsertReportDatapoints"]
+
+
+def upsert_report_figures(
+    *,
+    report_id: str,
+    report_title: str,
+    source_url: str,
+    extracted_by_model: str,
+    figures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Replace the ``report_figures`` rows for ``report_id`` (delete-then-insert,
+    same replace-on-reingest contract as ``upsert_report_datapoints``).
+
+    Each entry in ``figures`` is a ``ReportFigureInput``: ``pageNumber`` +
+    ``s3Key`` + ``kind`` are required; ``bbox`` / ``isFullPage`` /
+    ``transcription`` / ``sourceId`` and the retrieval-tag arrays
+    (``locationIds`` / ``locationPcodes`` / ``eventTypes`` / ``needSectors``) and
+    ``timeRangeStart`` / ``timeRangeEnd`` are optional. Passing an empty
+    ``figures`` list clears the report's figures — the desired behaviour when a
+    re-ingest finds none.
+    """
+    payload = {
+        "reportId": report_id,
+        "reportTitle": report_title,
+        "sourceUrl": source_url,
+        "extractedByModel": extracted_by_model,
+        "figures": figures,
+    }
+    result = _execute(_UPSERT_REPORT_FIGURES, {"input": payload})
+    return result["upsertReportFigures"]
 
 
 def has_aggregated_datapoints(
