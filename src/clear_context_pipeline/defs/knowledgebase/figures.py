@@ -34,6 +34,7 @@ import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
+from clear_context_pipeline.defs.knowledgebase._pdf_extract import page_extracted_content
 from clear_context_pipeline.defs.knowledgebase.enrich import (
     EXTRACTION_SYSTEM,
     ExtractedParameters,
@@ -147,20 +148,19 @@ def _capture_pdf(
     # Count of NON-EMPTY pages — the value the caller advances page_offset by, so
     # figure pageNumbers line up with pdf_text's chunk page numbers. pdf_text
     # numbers pages via extract_pages, which DROPS blank/image-only pages and
-    # offsets by that non-empty count; advancing here by the physical page count
-    # instead drifts every subsequent figure on a multi-PDF report. `extract_text`
-    # non-empty is the cheap proxy for extract_pages' (text+tables) test — they
-    # diverge only for the rare text-less-but-ruled-table page.
+    # offsets by that non-empty count. We use the SAME (text + tables) rule via
+    # the shared `page_extracted_content` helper — a page with a ruled table but
+    # no prose counts for both, so the offsets can't drift on a multi-PDF report.
     n_nonempty = 0
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, page in enumerate(pdf.pages):
             page_num = i + 1 + page_offset  # physical page index within PDF (1-based) + offset
             try:
-                page_text = (page.extract_text() or "").strip()
+                page_text, _, combined = page_extracted_content(page)
             except Exception:  # noqa: BLE001 — context only; fine to skip
-                page_text = ""
-            if page_text:
+                page_text, combined = "", ""
+            if combined:
                 n_nonempty += 1
 
             # Keep iterating (to finish the page count) even after the per-report
@@ -352,14 +352,13 @@ def reliefweb_weekly_figures(
             summaries.append({"report_id": report_id, "s3_record_key": None, "figures_written": 0})
             continue
 
-        # Persist a record of what we captured (idempotency marker + audit) BEFORE
-        # the upsert.
-        record_body = b"\n".join(
-            json.dumps(f, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            for f in figures_input
-        ) + b"\n"
-        s3.put_object(Bucket=bucket, Key=record_key, Body=record_body, ContentType="application/x-ndjson")
-
+        # Upsert FIRST, write the idempotency marker only on success. `_already_
+        # captured` gates re-processing on the marker existing, so writing it before
+        # the upsert would mark a report "done" even when the upsert FAILED (e.g. a
+        # not-yet-deployed clear-api schema 400s every call during this rollout) —
+        # stranding the report with no data and no retry. On failure we leave the
+        # marker unwritten so the next run re-attempts it (the S3 images are already
+        # uploaded under content-addressed keys, so a retry just re-overwrites them).
         try:
             result = clear_api.upsert_report_figures(
                 report_id=report_id,
@@ -369,9 +368,20 @@ def reliefweb_weekly_figures(
                 figures=figures_input,
             )
             written = int(result.get("count", len(figures_input)))
-        except Exception as exc:  # noqa: BLE001 — surface, don't abort the batch
-            context.log.warning("upsert_report_figures failed for %s: %s", report_id, exc)
-            written = 0
+        except Exception as exc:  # noqa: BLE001 — surface, don't abort the batch (or mark done)
+            context.log.warning(
+                "upsert_report_figures failed for %s — NOT writing the record marker "
+                "so it retries next run: %s", report_id, exc,
+            )
+            summaries.append({"report_id": report_id, "s3_record_key": None, "figures_written": 0})
+            continue
+
+        # Success → persist the record (idempotency marker + audit).
+        record_body = b"\n".join(
+            json.dumps(f, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            for f in figures_input
+        ) + b"\n"
+        s3.put_object(Bucket=bucket, Key=record_key, Body=record_body, ContentType="application/x-ndjson")
 
         total_figures += written
         summaries.append({

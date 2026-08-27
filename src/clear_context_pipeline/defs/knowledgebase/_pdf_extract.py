@@ -96,6 +96,20 @@ def _tables_markdown(page) -> str:
     return "\n\n[structured tables]\n\n" + "\n\n".join(blocks)
 
 
+def page_extracted_content(page) -> tuple[str, str, str]:
+    """One page's ``(prose_text, tables_markdown, combined)``.
+
+    ``combined`` is what decides whether a page counts as non-empty — prose OR a
+    real ruled table. This is the SINGLE source of that rule: ``extract_pages``
+    (text extraction) and the figures asset's page-offset counter both call it,
+    so a page with a table but no prose can't be counted by one and skipped by
+    the other (which would misalign figure ``pageNumber`` against chunk pages)."""
+    text = (page.extract_text() or "").strip()
+    tables_md = _tables_markdown(page)
+    combined = (text + tables_md).strip()
+    return text, tables_md, combined
+
+
 def extract_pages(pdf_bytes: bytes) -> list[dict]:
     """Return one dict per page with non-empty text. Page-level granularity is
     what the chunker + citation UI both need — chunk boundaries then respect
@@ -110,9 +124,7 @@ def extract_pages(pdf_bytes: bytes) -> list[dict]:
     pages: list[dict] = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
-            text = (page.extract_text() or "").strip()
-            tables_md = _tables_markdown(page)
-            combined = (text + tables_md).strip()
+            _, tables_md, combined = page_extracted_content(page)
             if combined:
                 pages.append({
                     "page_num": i,
