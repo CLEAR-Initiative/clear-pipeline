@@ -208,7 +208,7 @@ class DataminrConnector:
             external_id=record.alertId,
             title=record.headline,
             timestamp=record.alertTimestamp,
-            # The prose description (subHeadline / liveBrief text), not the headline.
+            # The prose description (subHeadline text), not the headline.
             description=created.get("description") or created.get("title"),
             location_name=loc.name if loc else None,
             url=record.publicPost.href if record.publicPost else None,
@@ -227,19 +227,10 @@ def _dataminr_raw_context(signal: dataminr.DataminrSignal) -> str:
         parts.append(f"Post text: {signal.publicPost.text}")
     if signal.publicPost and signal.publicPost.translatedText:
         parts.append(f"Translated: {signal.publicPost.translatedText}")
-    if signal.intelAgents:
-        for agent in signal.intelAgents:
-            for s in agent.summary or []:
-                if s.content:
-                    parts.append(f"Intel: {s.content[0]}")
     if signal.eventCorroboration and signal.eventCorroboration.summary:
         for s in signal.eventCorroboration.summary:
             if s.content:
                 parts.append(f"Corroboration: {s.content}")
-    if signal.liveBrief:
-        for lb in signal.liveBrief:
-            if lb.summary:
-                parts.append(f"Brief: {lb.summary}")
     return "\n".join(parts) if parts else "(no additional context)"
 
 

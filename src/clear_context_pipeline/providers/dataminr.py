@@ -58,25 +58,12 @@ class LinkedAlert(BaseModel):
     count: int | None = None
 
 
-class IntelSummary(BaseModel):
-    title: str | None = None
-    content: list[str] | None = None
-
-
-class IntelAgent(BaseModel):
-    summary: list[IntelSummary] | None = None
-
-
 class CorroborationSummary(BaseModel):
     content: str | None = None
 
 
 class EventCorroboration(BaseModel):
     summary: list[CorroborationSummary] | None = None
-
-
-class LiveBrief(BaseModel):
-    summary: str | None = None
 
 
 class DataminrSignal(BaseModel):
@@ -95,9 +82,7 @@ class DataminrSignal(BaseModel):
     alertTopics: list[AlertTopic] | None = None
     linkedAlerts: list[LinkedAlert] | None = None
     termsOfUse: str | None = None
-    intelAgents: list[IntelAgent] | None = None
     eventCorroboration: EventCorroboration | None = None
-    liveBrief: list[LiveBrief] | None = None
 
 
 class DataminrAlertsResponse(BaseModel):
