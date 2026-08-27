@@ -67,7 +67,8 @@ class Settings(BaseSettings):
     # ISO3 (matches the `iso3` field on IDU rows), unlike ACLED/GDACS's
     # country-name lists.
     idmc_client_id: str = ""
-    idmc_countries: str = "SDN,AFG,VEN"
+    # AB9 is the Abyei Area that sits between Sudan and South Sudan
+    idmc_countries: str = "SDN,AB9,AFG,VEN"
     idmc_allowed_types: str = "Conflict,Disaster"
     idmc_source_name: str = "idmc"
     idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
