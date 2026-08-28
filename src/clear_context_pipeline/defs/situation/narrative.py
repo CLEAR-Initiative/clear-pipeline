@@ -274,6 +274,7 @@ def generate_ai_summary(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> AISummary:
     """2–4 paragraph narrative synthesis grounded in a broad RAG search."""
     rag = fetch_rag_context(
@@ -282,6 +283,7 @@ def generate_ai_summary(
             "conflict displacement needs response funding"
         ),
         limit=12,
+        country_id=country_id,
     )
     if rag.is_empty:
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
@@ -325,6 +327,7 @@ def generate_context_risks(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> ContextRisks:
     """Eight risk domains in one LLM call. Single broad RAG search
     covers cross-domain context — separate per-domain searches would
@@ -335,6 +338,7 @@ def generate_context_risks(
             "society culture security legal policy infrastructure environment"
         ),
         limit=15,
+        country_id=country_id,
     )
     if rag.is_empty:
         return ContextRisks()
@@ -396,6 +400,7 @@ def generate_hazards_and_vulnerabilities(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> HazardsAndVulnerabilities:
     rag = fetch_rag_context(
         query=(
@@ -403,6 +408,7 @@ def generate_hazards_and_vulnerabilities(
             "conflict drought flood economic institutional structural"
         ),
         limit=10,
+        country_id=country_id,
     )
     if rag.is_empty:
         return HazardsAndVulnerabilities()
@@ -447,6 +453,7 @@ def generate_displacement_narrative(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> DisplacementNarrative:
     rag = fetch_rag_context(
         query=(
@@ -454,6 +461,7 @@ def generate_displacement_narrative(
             "IDPs refugees returnees drivers barriers conditions"
         ),
         limit=10,
+        country_id=country_id,
     )
     if rag.is_empty:
         return DisplacementNarrative()

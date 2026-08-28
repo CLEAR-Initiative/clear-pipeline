@@ -541,27 +541,27 @@ def generate_and_upsert_for_country_window(
         log.debug("[situation] %s: generating ai_summary", country_name)
         ai_summary_component = generate_ai_summary(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
         log.debug("[situation] %s: generating context_risks", country_name)
         context_risks_component = generate_context_risks(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
         log.debug("[situation] %s: generating hazards_and_vulnerabilities", country_name)
         hazards_component = generate_hazards_and_vulnerabilities(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
         log.debug("[situation] %s: generating displacement", country_name)
         displacement_component = generate_displacement_narrative(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
         log.debug("[situation] %s: generating sectors", country_name)
         sectors_component = generate_all_sectors(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
         generated_by_model = llm.model
         # Populated-vs-empty summary at INFO. This is the line that makes an
