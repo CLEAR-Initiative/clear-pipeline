@@ -160,7 +160,7 @@ _NAME_TOKEN = rf"(?:{_ARTICLE})?[A-Z][\w\-']*"
 #   "near Markib"                    →  "Markib"
 #   "drone strike on Nyala Airport"  →  "Nyala Airport"
 #   "around al-Obeid, Sudan"         →  "al-Obeid"
-# "on" is included because attack-style headlines and liveBrief text routinely
+# "on" is included because attack-style headlines and body text routinely
 # use "strike/attack ON <place>". Days-of-week + months are filtered as
 # stopwords above so "on Monday" / "on May 19" don't produce candidates.
 _PREP_PATTERN = re.compile(
@@ -310,8 +310,8 @@ def _score(c: Candidate) -> float:
 def _rank(candidates: list[Candidate]) -> list[Candidate]:
     """Three-tier ranking so the design intent "landmark beats admin" holds
     even when admin appears in the title and landmark only in the body
-    (the common case for Dataminr — headline says "in Nyala", liveBrief
-    says "on Nyala Airport"):
+    (e.g. headline says "in Nyala", the description says
+    "on Nyala Airport"):
 
       Tier 0: clean landmarks
       Tier 1: clean admins

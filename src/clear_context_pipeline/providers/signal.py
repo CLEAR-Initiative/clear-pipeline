@@ -250,10 +250,10 @@ def enrich_with_geoparser(
         "signal-title L4" branch in createPointLocation
 
     `extra_body_text` lets the caller feed additional text to the geoparser
-    *without* changing the signal row's stored description. Dataminr uses it
-    to pass liveBrief + intelAgents content — places like "Nyala Airport"
-    that live in those sub-fields but never make it into the user-visible
-    description.
+    *without* changing the signal row's stored description — e.g. deeper
+    body/sub-fields that mention a precise landmark ("Nyala Airport") which
+    never makes it into the user-visible description. No current source passes
+    it, but it's kept for sources whose payload carries such extra prose.
 
     Best-effort. Any failure (no candidate, Nominatim down, circuit open,
     L4 promotion error) is swallowed; the caller continues with source coords.
@@ -341,53 +341,17 @@ def enrich_with_geoparser(
     return geo_result
 
 
-def _build_dataminr_geoparser_text(signal: DataminrSignal) -> str | None:
-    """Collect every prose chunk from a Dataminr alert that might mention a
-    place name — liveBrief summaries and intelAgents content. The headline is
-    passed separately as the title; this function returns body-style text.
-
-    We feed this to the geoparser INSTEAD OF leaving it to the structured
-    description field. Dataminr typically leaves `subHeadline` null, so without
-    this the geoparser only ever sees the headline (where a precise landmark
-    like "Nyala Airport" rarely appears — the headline says "in Nyala").
-
-    Returns None when there's no extractable body text.
-    """
-    parts: list[str] = []
-    if signal.liveBrief:
-        for brief in signal.liveBrief:
-            if brief.summary:
-                parts.append(brief.summary)
-    if signal.intelAgents:
-        for agent in signal.intelAgents:
-            if not agent.summary:
-                continue
-            for section in agent.summary:
-                if section.content:
-                    for chunk in section.content:
-                        if chunk:
-                            parts.append(chunk)
-    if not parts:
-        return None
-    return "\n".join(parts)
-
-
 def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
     """Map a Dataminr signal to a CLEAR CreateSignalInput dict."""
-    # Build description with two fallbacks. Modern Dataminr alerts leave
-    # `subHeadline` null and put the prose in `liveBrief[*].summary`; older
-    # alerts populated subHeadline. We try subHeadline first (cheap structured
-    # fields), then fall back to joining liveBrief summaries.
+    # Description comes from the structured `subHeadline` fields. (Dataminr no
+    # longer sends the `liveBrief` / `intelAgents` prose we used to fall back to,
+    # so an alert with a null subHeadline simply has no description.)
     description_parts: list[str] = []
     if signal.subHeadline:
         if signal.subHeadline.title:
             description_parts.append(signal.subHeadline.title)
         if signal.subHeadline.subHeadlines:
             description_parts.append(signal.subHeadline.subHeadlines)
-    if not description_parts and signal.liveBrief:
-        for brief in signal.liveBrief:
-            if brief.summary:
-                description_parts.append(brief.summary)
     description = " — ".join(description_parts) if description_parts else None
 
     # URL from publicPost
@@ -438,16 +402,13 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
 
     # Text-based geoparser: additive enrichment + opportunistic L4 promotion.
     # Source coords stay on `rawData` (full Dataminr dump above), so the
-    # original is always recoverable.
-    # `extra_body_text` feeds liveBrief + intelAgents content into the
-    # geoparser — Dataminr typically leaves subHeadline null, so without this
-    # the geoparser only sees the headline and misses landmarks like
-    # "Nyala Airport" that appear in the deeper structured fields.
+    # original is always recoverable. The geoparser sees the headline (title)
+    # and the subHeadline-derived description — Dataminr no longer sends the
+    # liveBrief / intelAgents body text we used to feed it as extra context.
     enrich_with_geoparser(
         input_data,
         title=signal.headline,
         description=description,
-        extra_body_text=_build_dataminr_geoparser_text(signal),
         log_tag=f"dataminr:{signal.alertId}",
     )
 
