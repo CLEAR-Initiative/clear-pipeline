@@ -401,6 +401,55 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
     return meta
 
 
+_CR_DOMAINS = (
+    "demographics", "political", "economy", "socio_culture",
+    "security", "legal_policy", "infrastructure", "environment",
+)
+_SECTOR_CONTENT_FIELDS = (
+    "impact", "humanitarian_conditions", "vulnerable_sections",
+    "top_needs", "priority_interventions",
+)
+
+
+def _log_component_summary(
+    log, country_name: str, period_label: str, *,
+    ai_summary, context_risks, hazards, displacement, sectors,
+) -> bool:
+    """Emit a single INFO line stating which narrative/sector components ended up
+    populated vs empty — the fast signal for an all-null generation run (the exact
+    symptom when RAG returns nothing because clear-api's EMBEDDING_* is unset).
+
+    Returns ``all_empty`` — True when every narrative/sector component came back
+    empty. The caller uses it to SKIP the upsert on a normal run, so a failed
+    generation never supersedes the previous (good) row."""
+    ai = bool(ai_summary and getattr(ai_summary, "text", ""))
+    cr = bool(context_risks and any(
+        getattr(getattr(context_risks, d, None), "bullets", None) for d in _CR_DOMAINS
+    ))
+    hz = bool(hazards and (hazards.hazards or hazards.vulnerabilities))
+    dp = bool(displacement and (displacement.push_factors or displacement.return_intention))
+    sec_total = sec_pop = 0
+    if sectors is not None:
+        for name in type(sectors).model_fields:
+            s = getattr(sectors, name, None)
+            if s is None or not hasattr(s, "severity"):
+                continue
+            sec_total += 1
+            if s.severity is not None or any(getattr(s, f, None) for f in _SECTOR_CONTENT_FIELDS):
+                sec_pop += 1
+    all_empty = not (ai or cr or hz or dp or sec_pop)
+    log.log(
+        logging.WARNING if all_empty else logging.INFO,
+        "[situation] %s (%s) component summary%s: ai_summary=%s context_risks=%s "
+        "hazards=%s displacement=%s sectors=%d/%d",
+        country_name, period_label,
+        " — ALL EMPTY (likely RAG returned no hits; check clear-api EMBEDDING_* + logs)" if all_empty else "",
+        "ok" if ai else "empty", "ok" if cr else "empty",
+        "ok" if hz else "empty", "ok" if dp else "empty", sec_pop, sec_total,
+    )
+    return all_empty
+
+
 def generate_and_upsert_for_country_window(
     *,
     country_name: str,
@@ -424,6 +473,11 @@ def generate_and_upsert_for_country_window(
     """
     log = log_context or logger
 
+    log.info(
+        "[situation] %s (%s): starting generation (window_kind=%s window_start=%s)",
+        country_name, period_label, window_kind, window_start,
+    )
+
     country_id = clear_api.resolve_country_location_id(country_name, pcode=country_pcode)
     if not country_id:
         log.warning(
@@ -431,6 +485,7 @@ def generate_and_upsert_for_country_window(
             country_name, country_pcode or "-",
         )
         return None
+    log.debug("[situation] %s: resolved country_id=%s", country_name, country_id)
 
     aggregated: dict[str, Any] | None = None
     try:
@@ -449,6 +504,11 @@ def generate_and_upsert_for_country_window(
             "[situation] %s: aggregated_datapoint fetch failed (%s) - proceeding with empty datapoints",
             country_name, exc,
         )
+    log.debug(
+        "[situation] %s: aggregated_datapoint %s (%d contributing reports)",
+        country_name, "found" if aggregated else "none/empty",
+        len((aggregated or {}).get("contributingReportIds") or []),
+    )
 
     datapoints_component = _build_datapoints(aggregated)
     deterministic_source_ids = (aggregated or {}).get("contributingReportIds") or []
@@ -456,6 +516,10 @@ def generate_and_upsert_for_country_window(
     sources_component = _build_sources(deterministic_source_ids, report_meta)
 
     skip = _skip_narrative()
+    # Stays False for a deliberate deterministic-only (skip) run — that IS a valid
+    # row and is allowed to supersede. Only a normal run that produces nothing sets
+    # it True, which gates out the upsert below.
+    all_empty = False
     if skip:
         log.warning(
             "[situation] %s: %s set - shipping deterministic-only row",
@@ -470,27 +534,62 @@ def generate_and_upsert_for_country_window(
     else:
         llm = make_llm_provider("narrative")
         cache_key = f"situation:{country_id}:{window_kind}:{period_label}:{SCHEMA_VERSION}"
+        log.info(
+            "[situation] %s (%s): generating LLM components (provider=%s model=%s)",
+            country_name, period_label, llm.provider_name, llm.model,
+        )
+        log.debug("[situation] %s: generating ai_summary", country_name)
         ai_summary_component = generate_ai_summary(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
+        log.debug("[situation] %s: generating context_risks", country_name)
         context_risks_component = generate_context_risks(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
+        log.debug("[situation] %s: generating hazards_and_vulnerabilities", country_name)
         hazards_component = generate_hazards_and_vulnerabilities(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
+        log.debug("[situation] %s: generating displacement", country_name)
         displacement_component = generate_displacement_narrative(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
+        log.debug("[situation] %s: generating sectors", country_name)
         sectors_component = generate_all_sectors(
             llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key,
+            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
         )
         generated_by_model = llm.model
+        # Populated-vs-empty summary at INFO. This is the line that makes an
+        # all-null run (e.g. RAG returning nothing because clear-api's EMBEDDING_*
+        # is misconfigured) obvious at a glance instead of a silent bad row.
+        all_empty = _log_component_summary(
+            log, country_name, period_label,
+            ai_summary=ai_summary_component,
+            context_risks=context_risks_component,
+            hazards=hazards_component,
+            displacement=displacement_component,
+            sectors=sectors_component,
+        )
+
+    # Don't let a failed generation supersede the previous good row. A normal run
+    # whose narrative + sectors ALL came back empty is treated as unsuccessful:
+    # skip the upsert entirely so clear-api never stamps validTo on the previous
+    # current row. It stays current until a generation actually produces content.
+    # (A deliberate SITUATION_SKIP_NARRATIVE run keeps all_empty=False and still
+    # writes its intentional deterministic-only row.)
+    if all_empty:
+        log.warning(
+            "[situation] %s (%s): all narrative/sector components empty — SKIPPING upsert "
+            "(NOT superseding the previous row). Likely RAG returned no hits; check "
+            "clear-api EMBEDDING_* + logs.",
+            country_name, period_label,
+        )
+        return None
 
     payload_kwargs: dict[str, Any] = {
         "datapoints": datapoints_component,

@@ -18,10 +18,13 @@ from. The deduped `contributing_report_ids` union is still exposed as
 each component's coarse `source_report_ids` fallback.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 from clear_context_pipeline.providers import clear_api
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -54,21 +57,52 @@ def fetch_rag_context(
     query: str,
     limit: int = 10,
     filters: dict[str, Any] | None = None,
+    country_id: str | None = None,
 ) -> RAGContext:
     """Run one hybrid dense+BM25 search and package the hits.
+
+    ``country_id`` scopes the search to one country's subtree via clear-api's
+    ``countryLocationId`` filter — so a country's situation analysis only cites
+    knowledge-base chunks from reports about THAT country, not any other country
+    in the shared KB. Merged into ``filters`` here so callers just pass their
+    country id through; None leaves the search unscoped (used off the situation
+    path).
 
     On network / server error we return an empty RAGContext instead
     of raising — the caller degrades gracefully to "no evidence
     available for this component" rather than failing the whole
     situation analysis for a transient search hiccup.
+
+    The failure is LOGGED (``logger.exception``) rather than swallowed silently:
+    an empty RAGContext nulls the whole narrative/sector component downstream, so
+    a search error that used to vanish here — e.g. clear-api's embedding config
+    missing, making every ``searchKnowledgebase`` throw — is now diagnosable from
+    the pipeline logs instead of only surfacing as unexplained null fields.
     """
+    if country_id:
+        filters = {**(filters or {}), "countryLocationId": country_id}
+    logger.debug("[situation:rag] searching knowledgebase: query=%r limit=%d filters=%s", query, limit, filters)
     try:
         hits = clear_api.search_knowledgebase(query=query, filters=filters, limit=limit)
-    except Exception:  # noqa: BLE001 — degrade to empty on any search failure
+    except Exception:  # noqa: BLE001 — degrade to empty on any search failure, but LOG it
+        logger.exception(
+            "[situation:rag] searchKnowledgebase FAILED for query=%r — returning empty context "
+            "(this nulls the dependent narrative/sector component). Check clear-api logs + its "
+            "EMBEDDING_* config.",
+            query,
+        )
         return RAGContext(formatted_for_prompt="", contributing_report_ids=[], hit_count=0)
 
     if not hits:
+        logger.info(
+            "[situation:rag] searchKnowledgebase returned 0 hits for query=%r — component will be empty. "
+            "If unexpected, verify the knowledgebase is populated and clear-api's EMBEDDING_PROVIDER/"
+            "EMBEDDING_MODEL match the rows' embedding_provider/embedding_model.",
+            query,
+        )
         return RAGContext(formatted_for_prompt="", contributing_report_ids=[], hit_count=0)
+
+    logger.debug("[situation:rag] query=%r → %d hits", query, len(hits))
 
     # De-dupe report ids preserving first-seen order (which mirrors
     # the RRF-fused ranking — most relevant reports first).

@@ -274,6 +274,7 @@ def generate_ai_summary(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> AISummary:
     """2–4 paragraph narrative synthesis grounded in a broad RAG search."""
     rag = fetch_rag_context(
@@ -282,6 +283,7 @@ def generate_ai_summary(
             "conflict displacement needs response funding"
         ),
         limit=12,
+        country_id=country_id,
     )
     if rag.is_empty:
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
@@ -302,8 +304,8 @@ def generate_ai_summary(
             llm, system_prompt=system, user_prompt=user,
             schema=_AISummaryLLM, cache_key=cache_key, max_tokens=1500,
         )
-    except Exception as exc:  # noqa: BLE001 — component-level isolation
-        logger.warning("[situation:ai_summary] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001 — component-level isolation
+        logger.exception("[situation:ai_summary] LLM call failed — returning empty component")
         return AISummary()
     clean_text, contributing = resolve_prose(result.text, rag.hit_report_ids)
     return AISummary(
@@ -325,6 +327,7 @@ def generate_context_risks(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> ContextRisks:
     """Eight risk domains in one LLM call. Single broad RAG search
     covers cross-domain context — separate per-domain searches would
@@ -335,6 +338,7 @@ def generate_context_risks(
             "society culture security legal policy infrastructure environment"
         ),
         limit=15,
+        country_id=country_id,
     )
     if rag.is_empty:
         return ContextRisks()
@@ -356,8 +360,8 @@ def generate_context_risks(
             llm, system_prompt=system, user_prompt=user,
             schema=_ContextRisksLLM, cache_key=cache_key, max_tokens=3000,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[situation:context_risks] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[situation:context_risks] LLM call failed — returning empty component")
         return ContextRisks()
 
     # Resolve each domain's inline [Rn] citations independently — the eight
@@ -396,6 +400,7 @@ def generate_hazards_and_vulnerabilities(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> HazardsAndVulnerabilities:
     rag = fetch_rag_context(
         query=(
@@ -403,6 +408,7 @@ def generate_hazards_and_vulnerabilities(
             "conflict drought flood economic institutional structural"
         ),
         limit=10,
+        country_id=country_id,
     )
     if rag.is_empty:
         return HazardsAndVulnerabilities()
@@ -422,8 +428,8 @@ def generate_hazards_and_vulnerabilities(
             llm, system_prompt=system, user_prompt=user,
             schema=_HazardsVulnerabilitiesLLM, cache_key=cache_key, max_tokens=2000,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[situation:hazards_and_vulnerabilities] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[situation:hazards_and_vulnerabilities] LLM call failed — returning empty component")
         return HazardsAndVulnerabilities()
 
     hazards, haz_contrib = _sourced_bullets(result.hazards, rag)
@@ -447,6 +453,7 @@ def generate_displacement_narrative(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
+    country_id: str | None = None,
 ) -> DisplacementNarrative:
     rag = fetch_rag_context(
         query=(
@@ -454,6 +461,7 @@ def generate_displacement_narrative(
             "IDPs refugees returnees drivers barriers conditions"
         ),
         limit=10,
+        country_id=country_id,
     )
     if rag.is_empty:
         return DisplacementNarrative()
@@ -473,8 +481,8 @@ def generate_displacement_narrative(
             llm, system_prompt=system, user_prompt=user,
             schema=_DisplacementLLM, cache_key=cache_key, max_tokens=2000,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[situation:displacement] LLM call failed: %s", exc)
+    except Exception:  # noqa: BLE001
+        logger.exception("[situation:displacement] LLM call failed — returning empty component")
         return DisplacementNarrative()
 
     push, push_contrib = _sourced_bullets(result.push_factors, rag)
