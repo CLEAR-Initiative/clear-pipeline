@@ -57,8 +57,16 @@ def fetch_rag_context(
     query: str,
     limit: int = 10,
     filters: dict[str, Any] | None = None,
+    country_id: str | None = None,
 ) -> RAGContext:
     """Run one hybrid dense+BM25 search and package the hits.
+
+    ``country_id`` scopes the search to one country's subtree via clear-api's
+    ``countryLocationId`` filter — so a country's situation analysis only cites
+    knowledge-base chunks from reports about THAT country, not any other country
+    in the shared KB. Merged into ``filters`` here so callers just pass their
+    country id through; None leaves the search unscoped (used off the situation
+    path).
 
     On network / server error we return an empty RAGContext instead
     of raising — the caller degrades gracefully to "no evidence
@@ -71,6 +79,8 @@ def fetch_rag_context(
     missing, making every ``searchKnowledgebase`` throw — is now diagnosable from
     the pipeline logs instead of only surfacing as unexplained null fields.
     """
+    if country_id:
+        filters = {**(filters or {}), "countryLocationId": country_id}
     logger.debug("[situation:rag] searching knowledgebase: query=%r limit=%d filters=%s", query, limit, filters)
     try:
         hits = clear_api.search_knowledgebase(query=query, filters=filters, limit=limit)
