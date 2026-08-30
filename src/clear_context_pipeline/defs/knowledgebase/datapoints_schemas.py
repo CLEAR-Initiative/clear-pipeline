@@ -634,7 +634,15 @@ class NeedsAndFunding(BaseModel):
     overall_funding_received_usd: Optional[NumericField] = None
     overall_pin: Optional[NumericField] = Field(
         default=None,
-        description="Total PIN across all sectors when the report headlines a country/appeal-wide figure.",
+        description=(
+            "Total People in Need across all sectors, ONLY when the report "
+            "headlines a country/appeal-wide in-need figure (an HNO/HRP or "
+            "appeal document). Do NOT infer it from, or conflate it with, the "
+            "displaced (displacement.*), returnees, refugees, the affected "
+            "(overall_affected), or casualties - those are different "
+            "populations. A displacement tracker or sitrep that states no "
+            "explicit 'in need' figure gets null here, never its IDP total."
+        ),
     )
     overall_affected: Optional[NumericField] = Field(
         default=None,

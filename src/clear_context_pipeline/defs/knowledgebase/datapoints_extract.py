@@ -415,6 +415,41 @@ def _resolve_figure_scopes(merged: Any) -> tuple[int, int, int]:
     return figures, with_name, resolved
 
 
+def _drop_conflated_pin(merged: Any) -> bool:
+    """Null `needs_and_funding.overall_pin` when it merely re-labels a
+    displacement figure: same `value` AND the same source sentence (one
+    normalised quote contains the other) as any numeric field under
+    `displacement`. Returns True when a figure was dropped.
+
+    The schema tells the model to leave PIN null unless the report headlines
+    a country/appeal-wide in-need figure, but a displacement-only report (a
+    DTM snapshot) has produced overall_pin == idp_stock, quoted from the very
+    sentence that states the IDP total. Downstream that is indistinguishable
+    from a real PIN and, under latest-wins, it displaced the HNO figure on the
+    dashboard (8.6M "in need" for Sudan against an HNO of 33.7M). The check
+    is deliberately narrow - value AND sentence must match - so a report that
+    states both figures in separate sentences is untouched even when they
+    happen to coincide.
+    """
+    needs = merged.get("needs_and_funding") if isinstance(merged, dict) else None
+    pin = needs.get("overall_pin") if isinstance(needs, dict) else None
+    if not isinstance(pin, dict) or pin.get("value") is None:
+        return False
+    displacement_fields: list[dict] = []
+    _collect_numeric_fields(merged.get("displacement"), displacement_fields)
+    pin_quote = _norm_text(pin.get("source_quote"))
+    if not pin_quote:
+        return False
+    for f in displacement_fields:
+        if f.get("value") != pin.get("value"):
+            continue
+        quote = _norm_text(f.get("source_quote"))
+        if quote and (pin_quote in quote or quote in pin_quote):
+            needs["overall_pin"] = None
+            return True
+    return False
+
+
 # Bounds on LLM-emitted source names before they hit `resolveDataSource` (a
 # mutation that CREATES an ungraded row on miss). The names are lifted from
 # untrusted PDF body text, so cap length + per-report cardinality to stop a
@@ -731,6 +766,16 @@ def extract_datapoints_for_one_report(
 
     if not domains_ok:
         raise _NothingExtracted(f"every domain failed extraction for {report_id}")
+
+    # Cross-domain sanity: a PIN that is just the displacement figure
+    # re-labelled (same value, same sentence) is an extraction slip, not a
+    # datapoint. Drop it before anything downstream can treat it as one.
+    if _drop_conflated_pin(merged):
+        log.warning(
+            "[%s] dropped needs_and_funding.overall_pin: it duplicates a "
+            "displacement figure (same value and source sentence)",
+            report_id,
+        )
 
     # ── Post-process: locations, figure scopes, event types, totals ─
     refs: list[LocationRef] = []

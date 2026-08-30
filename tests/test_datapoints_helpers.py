@@ -511,3 +511,64 @@ class TestDocumentCredibilityPartial:
         )
         assert dc.methodology_transparency is None
         assert dc.representativeness is None
+
+
+# ── _drop_conflated_pin: PIN re-labelled from a displacement sentence ──────
+
+def _pin_figure(value, quote, name="Sudan"):
+    return {
+        "value": value, "unit": "people", "confidence": "reported",
+        "source_quote": quote, "page_number": 5, "chunk_index": None,
+        "scope_location_name": name,
+    }
+
+
+def test_drop_conflated_pin_nulls_pin_copied_from_idp_sentence():
+    # The live Sudan case (report 4226140): a DTM snapshot with no in-need
+    # figure, where overall_pin came back as the IDP total quoted from the
+    # same sentence (the PIN quote is a prefix of the idp_stock quote).
+    merged = {
+        "displacement": {"idp_stock": _pin_figure(
+            8_622_801,
+            "By the end of July 2026, DTM recorded an estimated 8,622,801 internally "
+            "displaced persons (IDPs) and 4,928,923 returnees across Sudan.",
+        )},
+        "needs_and_funding": {"overall_pin": _pin_figure(
+            8_622_801,
+            "By the end of July 2026, DTM recorded an estimated 8,622,801 internally "
+            "displaced persons (IDPs)",
+        )},
+    }
+    assert de._drop_conflated_pin(merged) is True
+    assert merged["needs_and_funding"]["overall_pin"] is None
+    assert merged["displacement"]["idp_stock"]["value"] == 8_622_801  # untouched
+
+
+def test_drop_conflated_pin_keeps_pin_stated_in_its_own_sentence():
+    # Same value, different sentence: a report may legitimately state that
+    # everyone displaced is in need. Not this check's call to make - keep it.
+    merged = {
+        "displacement": {"idp_stock": _pin_figure(500_000, "500,000 people are displaced.")},
+        "needs_and_funding": {"overall_pin": _pin_figure(
+            500_000, "An estimated 500,000 people are in need of assistance.",
+        )},
+    }
+    assert de._drop_conflated_pin(merged) is False
+    assert merged["needs_and_funding"]["overall_pin"]["value"] == 500_000
+
+
+def test_drop_conflated_pin_keeps_pin_with_different_value():
+    merged = {
+        "displacement": {"idp_stock": _pin_figure(8_622_801, "8,622,801 IDPs")},
+        "needs_and_funding": {"overall_pin": _pin_figure(33_699_770, "33.7 million people in need")},
+    }
+    assert de._drop_conflated_pin(merged) is False
+
+
+def test_drop_conflated_pin_tolerates_missing_or_failed_domains():
+    assert de._drop_conflated_pin({}) is False
+    assert de._drop_conflated_pin({"needs_and_funding": None, "displacement": None}) is False
+    assert de._drop_conflated_pin({"needs_and_funding": {"overall_pin": None}}) is False
+    merged = {"needs_and_funding": {"overall_pin": _pin_figure(1, "one")}, "displacement": None}
+    assert de._drop_conflated_pin(merged) is False
+    assert merged["needs_and_funding"]["overall_pin"]["value"] == 1
