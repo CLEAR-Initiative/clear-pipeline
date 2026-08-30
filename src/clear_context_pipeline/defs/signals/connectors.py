@@ -16,7 +16,7 @@ capability flags:
   │ acled      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
-  │ idmc       │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
+  │ idmc       │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
 
@@ -26,9 +26,10 @@ capability flags:
   blob (``parse`` → ``project``). Manual signals are analyst-created directly in
   clear-api (no poll, no lake blob) so ``project`` reads the signal row itself
   (``record=None``).
-- **drained** — its NEW signals are processed by the classify/group stage. All
-  current sources are drained; the flag reserves the option of a future
-  ingest-only source (see ``DRAINED_SOURCES``).
+- **drained** — its NEW signals are processed by the classify/group stage.
+  ``idmc`` is the one exception: its grouping logic is different and needs new
+  features that aren't built yet, so its signals are ingested but not grouped
+  into events for now (see ``DRAINED_SOURCES``).
 
 Connectors reuse the consolidated ``clear_context_pipeline.providers`` modules
 (dataminr, acled, gdacs, darfur24, signal, …) so every source shares one
@@ -427,7 +428,7 @@ class Darfur24Connector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# IDMC IDU — internal displacement updates (polled + drained)
+# IDMC IDU — internal displacement updates (polled, NOT drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class IDMCConnector:
     """IDU has no server-side filter or pagination — one poll fetches the
@@ -435,11 +436,15 @@ class IDMCConnector:
     types client-side, deduplicating on (id, content hash) rather than id
     alone so a revised figure (same id, changed role/figure/dates) is
     detected and re-submitted instead of silently skipped. See
-    ``providers/idmc.py`` for the fetch/dedup mechanics."""
+    ``providers/idmc.py`` for the fetch/dedup mechanics.
+
+    ``drained = False``: grouping signals into events works differently for
+    IDMC and needs new features that aren't built yet, so grouping is
+    deliberately deferred to a follow-up PR."""
 
     source = settings.idmc_source_name
     polled = True
-    drained = True
+    drained = False
     poll_interval_minutes = settings.idmc_poll_interval_minutes
 
     def poll(self, since: datetime | None) -> list[Any]:

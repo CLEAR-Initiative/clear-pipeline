@@ -52,12 +52,15 @@ def test_registry_flags_all_drained():
     by_name = {c.source: c for c in CONNECTORS}
     assert all(isinstance(c, SignalSource) for c in CONNECTORS)
     assert {"dataminr", "acled", "gdacs", "darfur24", "manual"} <= set(by_name)
-    # every source now feeds the shared stages (darfur24 is no longer a tracer)
-    assert all(c.drained for c in CONNECTORS)
+    # every source feeds the shared stages EXCEPT idmc — its grouping logic
+    # is different and needs new features that aren't built yet, so its
+    # signals are ingested but not grouped into events for now
+    assert all(c.drained for c in CONNECTORS if c.source != "idmc")
+    assert not by_name["idmc"].drained
     assert DRAINED_SOURCES == frozenset({"dataminr", "acled", "gdacs", "darfur24", "manual"})
     # only manual is non-polled
     assert not by_name["manual"].polled
-    assert all(by_name[s].polled for s in ("dataminr", "acled", "gdacs", "darfur24"))
+    assert all(by_name[s].polled for s in ("dataminr", "acled", "gdacs", "darfur24", "idmc"))
 
 
 def test_connectors_by_source_map():
