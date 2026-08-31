@@ -10,7 +10,8 @@ Claude no longer makes clustering decisions.
 """
 
 # Bump whenever the prompt text changes.
-REWRITE_PROMPT_VERSION = "rewrite-v2"
+# v3: added `start_date` (event onset) — the LLM fallback for events.startedAt.
+REWRITE_PROMPT_VERSION = "rewrite-v3"
 
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system.
@@ -46,13 +47,21 @@ Guidelines:
     any of the signals. Include refugees, IDPs, evacuees. Do NOT count deaths,
     injuries, or "people affected" — those are different. Return null if no
     signal mentions a displacement count.
+- start_date (YYYY-MM-DD or null):
+    When the real-world event actually STARTED (its onset) — the EARLIEST date
+    any signal indicates it began, NOT when the signal was published/collected.
+    Resolve relative phrases ("yesterday", "three days ago") against that
+    signal's date shown above. Use only what the text states or clearly implies;
+    return null if no signal indicates a start date — do NOT guess or default to
+    the publish date.
 
 Respond with this exact JSON:
 {{
   "title": "<short descriptive title>",
   "description": "<1-2 sentence summary>",
   "severity": <integer 1-5 or null>,
-  "population_displaced": <integer or null>
+  "population_displaced": <integer or null>,
+  "start_date": "<YYYY-MM-DD or null>"
 }}
 """
 

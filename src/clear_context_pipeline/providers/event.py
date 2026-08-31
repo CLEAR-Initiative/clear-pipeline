@@ -21,13 +21,23 @@ from clear_context_pipeline.providers.classify import (
     code_to_level2_map,
     code_to_level3_map,
 )
-from clear_context_pipeline.providers.clear_api import create_event, get_events, update_event
+from clear_context_pipeline.providers.clear_api import (
+    create_event,
+    get_events,
+    update_event,
+)
 from clear_context_pipeline.providers.llm import make_llm_provider
-from clear_context_pipeline.providers.redis_lock import redis_lock
-from clear_context_pipeline.providers.signal import extract_casualties_from_text
-from clear_context_pipeline.signals.config import settings
+from clear_context_pipeline.providers.prompts.rewrite import (
+    SYSTEM_PROMPT as REWRITE_SYSTEM,
+)
 from clear_context_pipeline.providers.prompts.rewrite import build_rewrite_prompt
-from clear_context_pipeline.providers.prompts.rewrite import SYSTEM_PROMPT as REWRITE_SYSTEM
+from clear_context_pipeline.providers.redis_lock import redis_lock
+from clear_context_pipeline.providers.signal import (
+    earliest_onset_iso,
+    extract_casualties_from_text,
+    extract_event_start_from_text,
+)
+from clear_context_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +49,11 @@ class EventRewrite(BaseModel):
     description: str
     severity: int | None = None
     population_displaced: int | None = None
+    """Event onset (when the real-world event STARTED) as an ISO-8601 date
+    (YYYY-MM-DD), inferred across the event's signals — the LLM fallback for
+    `startedAt` when the regex extractor can't parse it. Null when no signal
+    indicates a start date."""
+    start_date: str | None = None
 
 
 # ── Event-type stats (ACLED percentiles) ─────────────────────────────────────
@@ -692,6 +707,17 @@ def _match_and_act(
         if pop_displaced is not None:
             final_update["populationDisplaced"] = str(pop_displaced)
         final_update.update(merged_stats)
+        # Onset: keep the EARLIEST across the event's signals — the new signal's
+        # parsed onset, the LLM's (it saw the full set), and the event's current
+        # startedAt. Only write when it moves the value earlier.
+        new_onset = extract_event_start_from_text(
+            signal_title, signal_description, classification.summary, reference_ts=ts,
+        )
+        onset = earliest_onset_iso(
+            target.get("startedAt"), new_onset, rewrite.start_date if rewrite else None,
+        )
+        if onset is not None and onset != target.get("startedAt"):
+            final_update["startedAt"] = onset
 
         updated = update_event(target_id, final_update) if final_update else target
         _invalidate_events_cache()
@@ -728,6 +754,13 @@ def _match_and_act(
     # may be None for non-conflict glides whose level_3 isn't in the lookup
     # AND whose source didn't ship a structured value — in which case we
     # leave the field unset.
+    # Event onset (startedAt): the real-world start parsed from the signal text,
+    # anchored to this signal's collection time so relative phrases resolve. The
+    # LLM rewrite below is the fallback when the regex can't parse it.
+    started_at = extract_event_start_from_text(
+        signal_title, signal_description, classification.summary, reference_ts=ts,
+    )
+
     event_input: dict = {
         "signalIds": [signal_id],
         "title": boot_title,
@@ -740,6 +773,8 @@ def _match_and_act(
         "rank": 0.0,
         "locationId": event_location_id,
     }
+    if started_at is not None:
+        event_input["startedAt"] = started_at
     if resolved_stats["casualties"] is not None:
         event_input["casualties"] = resolved_stats["casualties"]
     if resolved_stats["population_affected"] is not None:
@@ -771,6 +806,11 @@ def _match_and_act(
         final_update["rank"] = event_severity / 5.0
     if pop_displaced is not None:
         final_update["populationDisplaced"] = str(pop_displaced)
+    # Onset fallback: if the regex couldn't parse a start date, take the LLM's
+    # (it saw the full signal text). Keep the earliest of the two either way.
+    onset = earliest_onset_iso(started_at, rewrite.start_date if rewrite else None)
+    if onset is not None and onset != started_at:
+        final_update["startedAt"] = onset
 
     if final_update:
         update_event(event["id"], final_update)
