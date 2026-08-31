@@ -359,7 +359,13 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
         for split in _split_by_location(parsed):
             split["content_hash"] = _content_hash(split["raw"])
             seen_key = f"idmc:seen:{split['idu_id']}:{split['content_hash']}"
-            if seen_key in batch_keys or _redis.exists(seen_key):
+            if seen_key in batch_keys:
+                deduped += 1
+                continue
+            # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
+            # idu_id forever, so a fixed TTL would eventually expire on an unchanged
+            # row and misfire it as "new". EXPIRE renews and reports existence in one call
+            if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
                 deduped += 1
                 continue
             batch_keys.add(seen_key)
