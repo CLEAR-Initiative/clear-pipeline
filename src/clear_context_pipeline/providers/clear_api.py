@@ -1186,6 +1186,7 @@ query Events {
     validTo
     firstSignalCreatedAt
     lastSignalCreatedAt
+    startedAt
     originLocation { id name level ancestorIds }
     destinationLocation { id name level ancestorIds }
     generalLocation { id name level ancestorIds }

@@ -1,9 +1,14 @@
 """Signal creation: map Dataminr payload → CLEAR signal and persist via GraphQL."""
 
+import calendar
 import logging
 import re
+from datetime import UTC, datetime, timedelta
 
-from clear_context_pipeline.providers.clear_api import create_signal, find_or_create_landmark_l4
+from clear_context_pipeline.providers.clear_api import (
+    create_signal,
+    find_or_create_landmark_l4,
+)
 from clear_context_pipeline.providers.dataminr import DataminrSignal
 from clear_context_pipeline.providers.geoparser import (
     GeoparseResult,
@@ -208,6 +213,133 @@ def extract_population_affected_from_text(*texts: str | None) -> int | None:
                 if best is None or val > best:
                     best = val
     return best
+
+
+# ── Event onset (startedAt) extraction ───────────────────────────────────────
+# The event's real-world start — distinct from when the signal was collected.
+# Parsed best-effort from headline/description text, anchored to the signal's own
+# timestamp so relative phrases ("yesterday", "3 days ago") resolve. Returns an
+# ISO-8601 date (YYYY-MM-DD) or None; the LLM rewrite pass is the fallback when
+# this returns None (see providers/event.py).
+
+# A mention older than this before the reference is treated as background
+# ("since the 2019 war"), not the current event's onset.
+_MAX_ONSET_LOOKBACK_DAYS = 180
+
+# Month name / abbreviation → month number, from the C locale (stable, no env
+# dependency). calendar.month_name[0] / month_abbr[0] are empty strings, skipped.
+_MONTHS: dict[str, int] = {}
+for _mi in range(1, 13):
+    _MONTHS[calendar.month_name[_mi].lower()] = _mi
+    _MONTHS[calendar.month_abbr[_mi].lower()] = _mi
+
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_DAYS_AGO_RE = re.compile(r"\b(\d{1,3})\s+days?\s+ago\b", re.IGNORECASE)
+_WEEKS_AGO_RE = re.compile(r"\b(\d{1,2})\s+weeks?\s+ago\b", re.IGNORECASE)
+_YESTERDAY_RE = re.compile(r"\byesterday\b", re.IGNORECASE)
+_LAST_WEEK_RE = re.compile(r"\b(?:last week|a week ago)\b", re.IGNORECASE)
+# "3 March 2026", "3rd March", "03 March"
+_DAY_MONTH_RE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})(?:\s+(\d{4}))?\b", re.IGNORECASE,
+)
+# "March 3, 2026", "March 3rd", "March 3". The (?!\d) stops the day capture from
+# eating the first digits of a bare year ("March 2026" must NOT parse as day=20).
+_MONTH_DAY_RE = re.compile(
+    r"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?(?!\d)(?:,?\s+(\d{4}))?\b", re.IGNORECASE,
+)
+
+
+def _onset_reference_dt(reference_ts: str | None) -> datetime:
+    """The signal timestamp as an aware UTC datetime; falls back to now()."""
+    if reference_ts:
+        try:
+            dt = datetime.fromisoformat(reference_ts.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        except (ValueError, AttributeError):
+            pass
+    return datetime.now(UTC)
+
+
+def _ymd(year: int, month: int, day: int) -> datetime | None:
+    try:
+        return datetime(year, month, day, tzinfo=UTC)
+    except ValueError:  # e.g. 31 February
+        return None
+
+
+def _month_day_candidate(
+    month_word: str, day: int, year_str: str | None, ref: datetime,
+) -> datetime | None:
+    """Resolve a (month-name, day, optional-year) triple. With no year, assume
+    the reference year, rolling back a year if that lands in the future (a report
+    can't predate the onset it describes)."""
+    month = _MONTHS.get(month_word.lower())
+    if not month:
+        return None
+    if year_str:
+        return _ymd(int(year_str), month, day)
+    cand = _ymd(ref.year, month, day)
+    if cand and cand.date() > ref.date():
+        cand = _ymd(ref.year - 1, month, day)
+    return cand
+
+
+def extract_event_start_from_text(
+    *texts: str | None, reference_ts: str | None = None,
+) -> str | None:
+    """Best-effort event-onset date parsed from free text.
+
+    Handles ISO dates, day/month(/year) and month/day(/year) phrasings, and
+    relative expressions ("yesterday", "N days/weeks ago", "last week") anchored
+    to ``reference_ts`` (the signal's collection time). Returns the EARLIEST
+    plausible onset as an ISO-8601 date (``YYYY-MM-DD``), or None when nothing
+    parses.
+
+    A candidate must fall within ``[reference - _MAX_ONSET_LOOKBACK_DAYS,
+    reference]`` — future dates (an onset can't post-date its report) and
+    long-past background mentions are dropped.
+    """
+    ref = _onset_reference_dt(reference_ts)
+    earliest_ok = ref - timedelta(days=_MAX_ONSET_LOOKBACK_DAYS)
+    candidates: list[datetime] = []
+
+    for text in texts:
+        if not text:
+            continue
+        for m in _ISO_DATE_RE.finditer(text):
+            c = _ymd(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if c:
+                candidates.append(c)
+        for m in _DAYS_AGO_RE.finditer(text):
+            candidates.append(ref - timedelta(days=int(m.group(1))))
+        for m in _WEEKS_AGO_RE.finditer(text):
+            candidates.append(ref - timedelta(weeks=int(m.group(1))))
+        if _YESTERDAY_RE.search(text):
+            candidates.append(ref - timedelta(days=1))
+        if _LAST_WEEK_RE.search(text):
+            candidates.append(ref - timedelta(days=7))
+        for m in _DAY_MONTH_RE.finditer(text):
+            c = _month_day_candidate(m.group(2), int(m.group(1)), m.group(3), ref)
+            if c:
+                candidates.append(c)
+        for m in _MONTH_DAY_RE.finditer(text):
+            c = _month_day_candidate(m.group(1), int(m.group(2)), m.group(3), ref)
+            if c:
+                candidates.append(c)
+
+    # Earliest plausible candidate = "when it started".
+    valid = [c for c in candidates if earliest_ok <= c <= ref]
+    if not valid:
+        return None
+    return min(valid).date().isoformat()
+
+
+def earliest_onset_iso(*values: str | None) -> str | None:
+    """The earliest of several ISO-8601 date/datetime strings (lexicographic
+    order is chronological for zero-padded ISO-8601), ignoring None. Used to keep
+    an event's ``startedAt`` at the earliest onset across its signals."""
+    present = [v for v in values if v]
+    return min(present) if present else None
 
 
 def geoparse_to_dict(result: GeoparseResult) -> dict:
