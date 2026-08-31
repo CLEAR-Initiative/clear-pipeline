@@ -28,7 +28,7 @@ import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
-from clear_context_pipeline.providers import acaps, clear_api, hapi, iom_dtm
+from clear_context_pipeline.providers import acaps, clear_api, hapi, iom_dtm, usgs
 
 # Load .env at import so env read at import time (the job's concurrency config
 # below) and at asset-run time both see it. Matches every other defs/ module.
@@ -509,6 +509,68 @@ def acaps_seasonal_calendar(
 
 
 # ────────────────────────────────────────────────────────────────────
+# USGS seismic — one admin0 blob per country, ~10-min cron (Expo #465 backend)
+# ────────────────────────────────────────────────────────────────────
+
+_USGS_TYPE = "usgs_earthquakes"
+# Prod default M5.5+ (spec). Override per-env with USGS_MIN_MAGNITUDE.
+_USGS_MIN_MAG = float(os.environ.get("USGS_MIN_MAGNITUDE") or usgs.DEFAULT_MIN_MAGNITUDE)
+_USGS_WINDOW_DAYS = _int_env("USGS_WINDOW_DAYS", usgs.DEFAULT_WINDOW_DAYS)
+
+
+@dg.asset(name=_USGS_TYPE, group_name="location_metadata")
+def usgs_earthquakes(
+    context: AssetExecutionContext, location_pcode_index: dict,
+) -> dict:
+    """Ingest USGS FDSN earthquakes → ``usgs_earthquakes`` (one admin0 blob per
+    country, filtered by that country's padded bbox).
+
+    Re-fetches NOW−``window`` days each run (small volume; self-healing; keeps
+    stale-but-recent events so the map can demote rather than drop them), slims
+    to the map contract, attaches ShakeMap MMI contours for ``has_shakemap``
+    events, and upserts one ``locationMetadata`` row per country. ``age_days`` /
+    ``stale`` are computed by the clear-api serve route, not stored."""
+    countries = clear_api.get_pipeline_countries()
+    batch: list[dict] = []
+    per_country: dict[str, Any] = {}
+    for country in countries:
+        iso3 = country.get("iso3")
+        name = country.get("name")
+        bbox = country.get("bbox")
+        if not iso3 or not (isinstance(bbox, list) and len(bbox) == 4):
+            continue
+        loc_id = _resolve(location_pcode_index, iso3, 0, name, _iso2_for(iso3))
+        if not loc_id:
+            per_country[iso3] = {"error": "no admin0 location resolved"}
+            continue
+        padded = usgs.pad_bbox((float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])))
+        try:
+            blob = usgs.build_seismic_collection(
+                bbox=padded, min_magnitude=_USGS_MIN_MAG, window_days=_USGS_WINDOW_DAYS,
+            )
+        except Exception as exc:  # noqa: BLE001 — one country's fetch, not the run
+            context.log.warning("[USGS] %s fetch failed: %s", iso3, exc)
+            per_country[iso3] = {"error": str(exc)}
+            continue
+        batch.append({"locationId": loc_id, "type": _USGS_TYPE, "data": blob})
+        per_country[iso3] = {
+            "features": len(blob["features"]),
+            "shakemaps": len(blob["shakemaps"]),
+            "reduction_ratio": blob["reduction_ratio"],
+        }
+
+    written = clear_api.upsert_location_metadata_batch(batch)
+    context.add_output_metadata({
+        "type": dg.MetadataValue.text(_USGS_TYPE),
+        "min_magnitude": dg.MetadataValue.float(_USGS_MIN_MAG),
+        "window_days": dg.MetadataValue.int(_USGS_WINDOW_DAYS),
+        "total_upserted": dg.MetadataValue.int(len(written)),
+        **{iso3: dg.MetadataValue.json(v) for iso3, v in per_country.items()},
+    })
+    return {"type": _USGS_TYPE, "total_upserted": len(written), "countries": per_country}
+
+
+# ────────────────────────────────────────────────────────────────────
 # Jobs + schedules
 # ────────────────────────────────────────────────────────────────────
 
@@ -549,5 +611,21 @@ location_metadata_monthly_schedule = dg.ScheduleDefinition(
     name="location_metadata_monthly_schedule",
     job=location_metadata_monthly_job,
     cron_schedule="0 3 1 * *",
+    execution_timezone="UTC",
+)
+
+# USGS seismic runs far more often (catalog updates are minutes-scale). ~10 min
+# is the spec's sweet spot (5–15 ok): faster is overkill, slower risks missing a
+# significant quake between analyst shifts. Small volume + unchanged-blob skip on
+# the clear-api side keep each run cheap.
+location_metadata_usgs_job = dg.define_asset_job(
+    name="location_metadata_usgs",
+    selection=[location_pcode_index, usgs_earthquakes],
+)
+
+location_metadata_usgs_schedule = dg.ScheduleDefinition(
+    name="location_metadata_usgs_schedule",
+    job=location_metadata_usgs_job,
+    cron_schedule="*/10 * * * *",
     execution_timezone="UTC",
 )
