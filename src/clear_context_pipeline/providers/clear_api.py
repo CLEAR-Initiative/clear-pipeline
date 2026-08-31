@@ -1033,10 +1033,34 @@ query EventForCrisis($id: String!) {
     types
     severity
     populationAffected
-    originLocation { name metadata { type data } }
-    destinationLocation { name metadata { type data } }
-    generalLocation { name metadata { type data } }
+    validFrom
+    validTo
+    originLocation { id ancestorIds name metadata { type data } }
+    destinationLocation { id ancestorIds name metadata { type data } }
+    generalLocation { id ancestorIds name metadata { type data } }
   }
+}
+"""
+
+# ── Crisis enrichment drain (clear-api pendingCrises / markCrisisEnriched) ──
+# The Dagster crisis-enrichment drain (ported from clear-pipeline's Celery
+# `enrich_crisis`). pendingCrises returns bare rows (enrichmentStatus=PENDING,
+# oldest-first); we pull each crisis's event ids + general location here so the
+# drain can gather full events (get_event_for_crisis) and resolve the country A0
+# for RAG scoping without an extra round-trip.
+PENDING_CRISES = """
+query PendingCrises($first: Int) {
+  pendingCrises(first: $first) {
+    id
+    events { id }
+    generalLocation { id ancestorIds }
+  }
+}
+"""
+
+MARK_CRISIS_ENRICHED = """
+mutation MarkCrisisEnriched($id: String!) {
+  markCrisisEnriched(id: $id) { id enrichmentStatus }
 }
 """
 
@@ -1513,6 +1537,22 @@ def update_crisis_population(
 def get_event_for_crisis(event_id: str) -> dict | None:
     result = _execute(GET_EVENT_FOR_CRISIS, {"id": event_id})
     return result.get("event")
+
+
+def pending_crises(first: int = 100) -> list[dict]:
+    """Crises awaiting enrichment (enrichmentStatus = PENDING), oldest-first — the
+    Dagster crisis-enrichment drain. Each row carries its event ids + general
+    location so the drain can gather events and scope RAG. Returns [] when nothing
+    is pending. Admin/pipeline only."""
+    result = _execute(PENDING_CRISES, {"first": first})
+    return result["pendingCrises"]
+
+
+def mark_crisis_enriched(crisis_id: str) -> dict:
+    """Flip a crisis PENDING → ENRICHED once its narrative/scenarios/needs are
+    current — the drain-completion signal. Idempotent. Admin/pipeline only."""
+    result = _execute(MARK_CRISIS_ENRICHED, {"id": crisis_id})
+    return result["markCrisisEnriched"]
 
 
 def get_event_with_signals(event_id: str) -> dict | None:

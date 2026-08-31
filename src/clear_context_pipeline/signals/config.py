@@ -124,6 +124,12 @@ class Settings(BaseSettings):
     # run — up to _MAX_BATCHES * _BATCH_SIZE = 10k signals — from an unbounded spend.
     signal_max_signals_per_run: int = 2000
 
+    # Cost guardrail for the crisis-enrichment drain: at most this many crises
+    # enriched per run (each fires three Claude calls — narrative + scenarios +
+    # needs). Lower than the signal cap because each crisis is far pricier. The
+    # remainder stays PENDING and drains on the next tick.
+    crisis_max_crises_per_run: int = 25
+
     # Suppress alert escalation (and the email fan-out it triggers) when the
     # signal's publishedAt is older than this many hours. Backdated Dataminr
     # alerts and replayed signals were firing immediate emails for week-old
