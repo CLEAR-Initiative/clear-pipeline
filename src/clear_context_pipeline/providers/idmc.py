@@ -25,6 +25,7 @@ import redis
 
 from clear_context_pipeline.providers.clear_api import find_or_create_landmark_l4
 from clear_context_pipeline.providers.signal import enrich_with_geoparser
+from clear_context_pipeline.providers.translation_hash import _stable_stringify
 from clear_context_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
@@ -102,20 +103,14 @@ def _parse_event(raw: dict) -> dict | None:
     }
 
 
-def _content_hash(event: dict) -> str:
-    """Fingerprint of the fields that define a "revision" of a figure. IDU has
-    no `updated_at` — entries are revised in place (role upgraded, figure
-    corrected) while keeping the same `id`, so a plain id-based seen-set would
-    silently ignore revisions. Hashing these fields lets a changed revision be
-    detected and re-submitted while an unchanged row is skipped."""
-    parts = "|".join([
-        event["role"],
-        str(event["figure"]),
-        event.get("displacement_start_date") or "",
-        event.get("displacement_end_date") or "",
-        event.get("locations_name") or "",
-    ])
-    return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
+def _content_hash(raw_data: dict) -> str:
+    """Fingerprint of a raw IDU row, used to detect revisions. IDU has no
+    `updated_at` — entries are revised in place (same `id`), so a plain
+    id-based seen-set would silently miss revisions. Hashes the full raw
+    payload via stable (sorted-key) JSON serialization, so any change
+    anywhere in the row is caught and produces a new hash."""
+    stringified_data = _stable_stringify(raw_data)
+    return hashlib.sha256(stringified_data.encode("utf-8")).hexdigest()[:16]
 
 
 def _fetch_all() -> list[dict]:
@@ -362,7 +357,7 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
             continue
 
         for split in _split_by_location(parsed):
-            split["content_hash"] = _content_hash(split)
+            split["content_hash"] = _content_hash(split["raw"])
             seen_key = f"idmc:seen:{split['idu_id']}:{split['content_hash']}"
             if seen_key in batch_keys or _redis.exists(seen_key):
                 deduped += 1
