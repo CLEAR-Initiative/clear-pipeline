@@ -103,13 +103,47 @@ def _parse_event(raw: dict) -> dict | None:
     }
 
 
+# IDMC's backend recomputes this row's centroid independently on every poll,
+# with float noise around 1e-11 to 1e-14 degrees (sub-nanometer on the
+# ground) — enough to flip latitude/longitude/centroid alone with nothing
+# actually revised. Rounded before hashing so the fingerprint tracks real
+# content changes, not that noise. 6 decimals (~11cm) is far finer than
+# IDU's own admin/settlement-level location accuracy.
+_HASH_COORD_DECIMALS = 6
+
+
+def _round_centroid(value: str | None) -> str | None:
+    """Round a `"[lat, lng]"` centroid string to `_HASH_COORD_DECIMALS`.
+    Returns the value unchanged if it isn't in the expected shape."""
+    if not value:
+        return value
+    coord = _parse_coordinate(value.strip().strip("[]"))
+    if coord is None:
+        return value
+    lat, lng = (round(c, _HASH_COORD_DECIMALS) for c in coord)
+    return f"[{lat}, {lng}]"
+
+
 def _content_hash(raw_data: dict) -> str:
     """Fingerprint of a raw IDU row, used to detect revisions. IDU has no
     `updated_at` — entries are revised in place (same `id`), so a plain
     id-based seen-set would silently miss revisions. Hashes the full raw
     payload via stable (sorted-key) JSON serialization, so any change
-    anywhere in the row is caught and produces a new hash."""
-    stringified_data = _stable_stringify(raw_data)
+    anywhere in the row is caught and produces a new hash — except
+    latitude/longitude/centroid, rounded first (see `_HASH_COORD_DECIMALS`)."""
+    normalized = dict(raw_data)
+    for field in ("latitude", "longitude"):
+        value = normalized.get(field)
+        if isinstance(value, (int, float)):
+            # float() first: IDMC sometimes serializes an exact-integer
+            # coordinate as a JSON int (9) instead of a JSON float (9.0)
+            # between polls. round() preserves the input type, so without
+            # this cast an int/float split on an otherwise-identical value
+            # still changes the JSON text ("9" vs "9.0") and flips the hash.
+            normalized[field] = round(float(value), _HASH_COORD_DECIMALS)
+    if "centroid" in normalized:
+        normalized["centroid"] = _round_centroid(normalized.get("centroid"))
+    stringified_data = _stable_stringify(normalized)
     return hashlib.sha256(stringified_data.encode("utf-8")).hexdigest()[:16]
 
 
