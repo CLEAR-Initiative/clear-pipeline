@@ -1033,6 +1033,8 @@ query EventForCrisis($id: String!) {
     types
     severity
     populationAffected
+    validFrom
+    validTo
     originLocation { id ancestorIds name metadata { type data } }
     destinationLocation { id ancestorIds name metadata { type data } }
     generalLocation { id ancestorIds name metadata { type data } }

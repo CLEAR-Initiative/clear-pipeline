@@ -20,6 +20,7 @@ from clear_context_pipeline.defs.crisis.prompts import (
     build_scenarios_prompt,
 )
 from clear_context_pipeline.defs.crisis.schemas import (
+    NEEDS_SECTORS,
     CrisisNarrative,
     CrisisNeedsAnalysis,
     CrisisScenarios,
@@ -101,6 +102,25 @@ def collect_district_ids(events: list[dict]) -> list[str]:
     return ids
 
 
+def compute_time_range(events: list[dict]) -> dict | None:
+    """The crisis's temporal window from its events — [min(validFrom),
+    max(validTo)] — used as the RAG ``timeRange`` filter so the knowledgebase
+    search prefers reports covering the crisis period, not the country's whole
+    history. ISO-8601 UTC strings sort lexicographically, so plain min/max is
+    correct. Returns None when no event carries usable bounds (search then stays
+    time-unscoped)."""
+    froms = [e["validFrom"] for e in events if e.get("validFrom")]
+    tos = [e["validTo"] for e in events if e.get("validTo")]
+    if not froms and not tos:
+        return None
+    time_range: dict = {}
+    if froms:
+        time_range["from"] = min(froms)
+    if tos:
+        time_range["to"] = max(tos)
+    return time_range or None
+
+
 def resolve_country_id(crisis: dict, events: list[dict], a0_ids: set[str]) -> str | None:
     """Find the crisis's country admin-0 ``locations.id`` for RAG country
     scoping. Scans the crisis's general location and every event location's id +
@@ -126,22 +146,24 @@ def resolve_country_id(crisis: dict, events: list[dict], a0_ids: set[str]) -> st
 
 # ─── RAG-grounded generators ──────────────────────────────────────────────
 
-def _rag_evidence(query: str, event_types: list[str], country_id: str | None, limit: int) -> str:
-    """Run one knowledgebase search scoped to the crisis's event types + country
-    and return the formatted evidence block (empty string on no hits — the
-    prompt then notes the absence and the LLM leans on the events alone)."""
-    filters = {"eventTypes": event_types} if event_types else None
-    rag = fetch_rag_context(query=query, limit=limit, filters=filters, country_id=country_id)
+def _rag_evidence(query: str, filters: dict | None, country_id: str | None, limit: int) -> str:
+    """Run one knowledgebase search under the given filters (country is merged in
+    by ``fetch_rag_context``) and return the formatted evidence block (empty
+    string on no hits — the prompt then notes the absence and the LLM leans on
+    the events alone)."""
+    rag = fetch_rag_context(
+        query=query, limit=limit, filters=filters or None, country_id=country_id,
+    )
     return "" if rag.is_empty else rag.formatted_for_prompt
 
 
 def generate_narrative(
-    llm: LLMProvider, *, events, locations, event_types, country_id, cache_key,
+    llm: LLMProvider, *, events, locations, event_types, filters, country_id, cache_key,
 ) -> CrisisNarrative | None:
     evidence = _rag_evidence(
         query=f"{' '.join(locations)} {' '.join(event_types)} humanitarian crisis "
         "displacement needs response scale",
-        event_types=event_types, country_id=country_id, limit=10,
+        filters=filters, country_id=country_id, limit=10,
     )
     user = build_narrative_prompt(events, locations, evidence)
     try:
@@ -155,12 +177,12 @@ def generate_narrative(
 
 
 def generate_scenarios(
-    llm: LLMProvider, *, events, locations, event_types, country_id, cache_key,
+    llm: LLMProvider, *, events, locations, event_types, filters, country_id, cache_key,
 ) -> CrisisScenarios | None:
     evidence = _rag_evidence(
         query=f"{' '.join(locations)} {' '.join(event_types)} outlook trajectory "
         "scenario risk humanitarian access response capacity",
-        event_types=event_types, country_id=country_id, limit=10,
+        filters=filters, country_id=country_id, limit=10,
     )
     user = build_scenarios_prompt(events, locations, evidence)
     try:
@@ -174,12 +196,15 @@ def generate_scenarios(
 
 
 def generate_needs_analysis(
-    llm: LLMProvider, *, events, locations, event_types, country_id, cache_key,
+    llm: LLMProvider, *, events, locations, event_types, filters, country_id, cache_key,
 ) -> CrisisNeedsAnalysis | None:
+    # The needs analysis is sector-scoped by definition, so narrow the search to
+    # the six NRC SAF sectors on top of the shared country/type/time filters.
+    needs_filters = {**(filters or {}), "needSectors": list(NEEDS_SECTORS)}
     evidence = _rag_evidence(
         query=f"{' '.join(locations)} {' '.join(event_types)} humanitarian needs "
         "shelter WASH protection health food security education sector severity",
-        event_types=event_types, country_id=country_id, limit=15,
+        filters=needs_filters, country_id=country_id, limit=15,
     )
     user = build_needs_analysis_prompt(events, locations, evidence)
     try:
@@ -221,18 +246,28 @@ def enrich_one_crisis(crisis: dict, *, a0_ids: set[str]) -> str:
     country_id = resolve_country_id(crisis, events, a0_ids)
     cache_key = f"crisis-enrich:{crisis_id}"
 
+    # Shared knowledgebase filters for all three generators: the crisis's hazard
+    # types + its temporal window (country is merged per-call from country_id).
+    # The needs generator narrows further by NRC sectors.
+    base_filters: dict = {}
+    if event_types:
+        base_filters["eventTypes"] = event_types
+    time_range = compute_time_range(events)
+    if time_range:
+        base_filters["timeRange"] = time_range
+
     llm = make_llm_provider("narrative")
     narrative = generate_narrative(
         llm, events=events, locations=locations, event_types=event_types,
-        country_id=country_id, cache_key=cache_key,
+        filters=base_filters, country_id=country_id, cache_key=cache_key,
     )
     scenarios = generate_scenarios(
         llm, events=events, locations=locations, event_types=event_types,
-        country_id=country_id, cache_key=cache_key,
+        filters=base_filters, country_id=country_id, cache_key=cache_key,
     )
     needs = generate_needs_analysis(
         llm, events=events, locations=locations, event_types=event_types,
-        country_id=country_id, cache_key=cache_key,
+        filters=base_filters, country_id=country_id, cache_key=cache_key,
     )
 
     # populationInArea is best-effort — a raster/geometry failure returns None

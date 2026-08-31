@@ -24,10 +24,12 @@ from clear_context_pipeline.defs.crisis.enrich import (
     collect_district_ids,
     collect_event_types,
     collect_location_names,
+    compute_time_range,
     enrich_one_crisis,
     resolve_country_id,
 )
 from clear_context_pipeline.defs.crisis.schemas import (
+    NEEDS_SECTORS,
     CrisisNarrative,
     CrisisNeedsAnalysis,
     CrisisScenarios,
@@ -36,7 +38,8 @@ from clear_context_pipeline.defs.crisis.schemas import (
 
 # ── fixtures ────────────────────────────────────────────────────────────────
 
-def _event(eid, *, types, gen_loc_id=None, gen_loc_name=None, ancestors=None):
+def _event(eid, *, types, gen_loc_id=None, gen_loc_name=None, ancestors=None,
+           valid_from="2026-01-01T00:00:00Z", valid_to="2026-01-31T00:00:00Z"):
     return {
         "id": eid,
         "title": f"Event {eid}",
@@ -44,6 +47,8 @@ def _event(eid, *, types, gen_loc_id=None, gen_loc_name=None, ancestors=None):
         "types": types,
         "severity": 4,
         "populationAffected": None,
+        "validFrom": valid_from,
+        "validTo": valid_to,
         "originLocation": None,
         "destinationLocation": None,
         "generalLocation": (
@@ -139,9 +144,10 @@ class TestEnrichOneCrisis:
         clear_api.set_crisis_needs_analysis.assert_called_once()
         clear_api.mark_crisis_enriched.assert_called_once_with("c1")
 
-    def test_rag_is_scoped_to_country_and_event_types(self):
-        # #2: the knowledgebase search must carry the crisis's country A0 +
-        # event types so a country's overview cites the right context.
+    def test_rag_is_scoped_to_country_type_time_and_sectors(self):
+        # #2: the knowledgebase search must carry the crisis's country A0, event
+        # types, and temporal window on every generator; the needs search adds
+        # the NRC sectors on top.
         capture = MagicMock()
         rag = MagicMock(is_empty=False, formatted_for_prompt="[R1] e")
         capture.return_value = rag
@@ -151,9 +157,29 @@ class TestEnrichOneCrisis:
             enrich_one_crisis(crisis, a0_ids={"sudan-a0"})
 
         assert capture.call_count == 3  # narrative + scenarios + needs
+        expected_time = {"from": "2026-01-01T00:00:00Z", "to": "2026-01-31T00:00:00Z"}
+        needs_seen = 0
         for _, kwargs in capture.call_args_list:
             assert kwargs["country_id"] == "sudan-a0"
-            assert kwargs["filters"] == {"eventTypes": ["FL"]}
+            assert kwargs["filters"]["eventTypes"] == ["FL"]
+            assert kwargs["filters"]["timeRange"] == expected_time
+            if "needSectors" in kwargs["filters"]:
+                assert kwargs["filters"]["needSectors"] == list(NEEDS_SECTORS)
+                needs_seen += 1
+        assert needs_seen == 1  # only the needs search is sector-scoped
+
+    def test_time_range_spans_all_events(self):
+        events = [
+            _event("e1", types=["FL"], valid_from="2026-03-05T00:00:00Z", valid_to="2026-03-10T00:00:00Z"),
+            _event("e2", types=["FL"], valid_from="2026-02-01T00:00:00Z", valid_to="2026-03-20T00:00:00Z"),
+        ]
+        assert compute_time_range(events) == {
+            "from": "2026-02-01T00:00:00Z", "to": "2026-03-20T00:00:00Z",
+        }
+
+    def test_time_range_none_when_no_bounds(self):
+        events = [_event("e1", types=["FL"], valid_from=None, valid_to=None)]
+        assert compute_time_range(events) is None
 
     def test_generator_failure_still_marks_enriched(self):
         clear_api = MagicMock()
