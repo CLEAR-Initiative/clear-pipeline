@@ -455,7 +455,7 @@ reliefweb_weekly_kb_job = dg.define_asset_job(
     selection=dg.AssetSelection.groups("reliefweb", "reliefweb_kb"),
 )
 
-# Monday 06:00 UTC — by the time we run, all of "last week" is settled in
+# Tuesday 06:00 UTC — by the time we run, all of "last week" is settled in
 # ReliefWeb's index. The assets are partitioned by country, so the schedule
 # fans out ONE run per live country partition (rather than a single global run).
 # `run_key` is per-country-per-week so a re-tick in the same week is deduped.
@@ -464,7 +464,7 @@ reliefweb_weekly_kb_job = dg.define_asset_job(
 @dg.schedule(
     name="reliefweb_weekly_schedule",
     job=reliefweb_weekly_kb_job,
-    cron_schedule="0 6 * * MON",
+    cron_schedule="0 6 * * TUE",
     execution_timezone="UTC",
 )
 def reliefweb_weekly_schedule(context: dg.ScheduleEvaluationContext):
@@ -488,7 +488,7 @@ def reliefweb_weekly_schedule(context: dg.ScheduleEvaluationContext):
 # ADD-ONLY: registering a partition is safe, but REMOVING one would discard that
 # country's materialization history, so a de-listed country is logged for a human
 # rather than dropped. The sensor does NOT launch runs — a new country is picked
-# up by the Monday schedule (its first run is the initial-lookback ingest), or an
+# up by the Tuesday schedule (its first run is the initial-lookback ingest), or an
 # operator can backfill it on demand from the Dagster UI.
 @dg.sensor(
     name="reliefweb_country_partition_sensor",
