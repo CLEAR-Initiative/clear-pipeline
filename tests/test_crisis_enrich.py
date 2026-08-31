@@ -101,6 +101,17 @@ class TestCollectors:
         crisis = {"id": "c1", "generalLocation": {"id": "x", "ancestorIds": ["y"]}}
         assert resolve_country_id(crisis, [], {"sudan-a0"}) is None
 
+    def test_resolve_country_id_multi_country_returns_first_and_warns(self, caplog):
+        # #58-3: a cross-border crisis scopes to the first A0 only (single-valued
+        # filter) but must log the gap.
+        crisis = {"id": "c1", "generalLocation": {"id": "kassala", "ancestorIds": ["sudan-a0"]}}
+        events = [_event("e1", types=["FL"], gen_loc_id="abyei", ancestors=["ssd-a0"])]
+        import logging
+        with caplog.at_level(logging.WARNING):
+            got = resolve_country_id(crisis, events, {"sudan-a0", "ssd-a0"})
+        assert got == "sudan-a0"  # first in candidate order
+        assert "spans 2 countries" in caplog.text
+
 
 # ── orchestration ───────────────────────────────────────────────────────────
 
@@ -202,6 +213,34 @@ class TestEnrichOneCrisis:
         clear_api.update_crisis_population.assert_not_called()
         clear_api.set_crisis_needs_analysis.assert_not_called()
         clear_api.mark_crisis_enriched.assert_called_once_with("c1")
+
+    def test_transient_llm_error_propagates_and_leaves_crisis_pending(self):
+        # #58-1 regression guard: a transient provider outage (survives the
+        # per-call retry) must PROPAGATE so the drain's attempt-bounded retry
+        # re-runs the crisis — NOT be swallowed and marked ENRICHED with nothing.
+        import anthropic
+        import httpx
+
+        clear_api = MagicMock()
+        clear_api.get_event_for_crisis.side_effect = lambda eid: _event(eid, types=["FL"])
+        llm = MagicMock()
+        llm.complete_structured.side_effect = anthropic.APIConnectionError(
+            request=httpx.Request("POST", "http://x"),
+        )
+        with (
+            patch.multiple(
+                enrich,
+                clear_api=clear_api,
+                make_llm_provider=MagicMock(return_value=llm),
+                fetch_rag_context=MagicMock(return_value=MagicMock(is_empty=True, formatted_for_prompt="")),
+                compute_population_in_area=MagicMock(return_value=None),
+            ),
+            pytest.raises(anthropic.APIConnectionError),
+        ):
+            enrich_one_crisis(
+                {"id": "c1", "events": [{"id": "e1"}], "generalLocation": None}, a0_ids=set(),
+            )
+        clear_api.mark_crisis_enriched.assert_not_called()
 
     def test_no_resolvable_events_marks_enriched_without_llm(self):
         clear_api = MagicMock()

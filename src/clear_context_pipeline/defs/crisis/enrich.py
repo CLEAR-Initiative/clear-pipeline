@@ -27,7 +27,7 @@ from clear_context_pipeline.defs.crisis.schemas import (
 )
 from clear_context_pipeline.defs.situation.rag_helper import fetch_rag_context
 from clear_context_pipeline.providers import clear_api, make_llm_provider
-from clear_context_pipeline.providers.llm import LLMProvider
+from clear_context_pipeline.providers.llm import TRANSIENT_LLM_ERRORS, LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +106,10 @@ def compute_time_range(events: list[dict]) -> dict | None:
     """The crisis's temporal window from its events — [min(validFrom),
     max(validTo)] — used as the RAG ``timeRange`` filter so the knowledgebase
     search prefers reports covering the crisis period, not the country's whole
-    history. ISO-8601 UTC strings sort lexicographically, so plain min/max is
-    correct. Returns None when no event carries usable bounds (search then stays
-    time-unscoped)."""
+    history. ``validFrom``/``validTo`` come from the GraphQL ``DateTime`` scalar,
+    which serialises uniformly as ISO-8601 UTC (``…Z``), so these strings sort
+    lexicographically and plain min/max is correct without parsing. Returns None
+    when no event carries usable bounds (search then stays time-unscoped)."""
     froms = [e["validFrom"] for e in events if e.get("validFrom")]
     tos = [e["validTo"] for e in events if e.get("validTo")]
     if not froms and not tos:
@@ -138,10 +139,21 @@ def resolve_country_id(crisis: dict, events: list[dict], a0_ids: set[str]) -> st
                     yield loc["id"]
                 yield from loc.get("ancestorIds") or []
 
+    matched: list[str] = []
     for cid in _candidates():
-        if cid in a0_ids:
-            return cid
-    return None
+        if cid in a0_ids and cid not in matched:
+            matched.append(cid)
+    if not matched:
+        return None
+    if len(matched) > 1:
+        # `countryLocationId` is single-valued, so a cross-border crisis can only
+        # be scoped to ONE country — the others' reports won't be retrieved. Log
+        # it so the gap is visible (a per-country union search is the real fix).
+        logger.warning(
+            "[crisis:enrich] crisis %s spans %d countries %s — RAG scopes to the first (%s) only",
+            crisis.get("id"), len(matched), matched, matched[0],
+        )
+    return matched[0]
 
 
 # ─── RAG-grounded generators ──────────────────────────────────────────────
@@ -171,6 +183,11 @@ def generate_narrative(
             system=NARRATIVE_SYSTEM_PROMPT, user=user, schema=CrisisNarrative,
             max_tokens=_NARRATIVE_MAX_TOKENS, cache_key=cache_key,
         )
+    except TRANSIENT_LLM_ERRORS:
+        # Transient provider outage (survived the per-call retry) — let it
+        # propagate so the drain's attempt-bounded retry re-runs the whole
+        # crisis, instead of permanently blanking this field.
+        raise
     except Exception:  # noqa: BLE001 — component-level isolation
         logger.exception("[crisis:enrich] narrative generation failed — skipping field")
         return None
@@ -190,6 +207,8 @@ def generate_scenarios(
             system=SCENARIOS_SYSTEM_PROMPT, user=user, schema=CrisisScenarios,
             max_tokens=_SCENARIOS_MAX_TOKENS, cache_key=cache_key,
         )
+    except TRANSIENT_LLM_ERRORS:
+        raise  # transient — let the drain retry the whole crisis (see generate_narrative)
     except Exception:  # noqa: BLE001
         logger.exception("[crisis:enrich] scenarios generation failed — skipping field")
         return None
@@ -212,6 +231,8 @@ def generate_needs_analysis(
             system=NEEDS_ANALYSIS_SYSTEM_PROMPT, user=user, schema=CrisisNeedsAnalysis,
             max_tokens=_NEEDS_MAX_TOKENS, cache_key=cache_key,
         )
+    except TRANSIENT_LLM_ERRORS:
+        raise  # transient — let the drain retry the whole crisis (see generate_narrative)
     except Exception:  # noqa: BLE001
         logger.exception("[crisis:enrich] needs-analysis generation failed — skipping field")
         return None

@@ -39,9 +39,9 @@ _CRISIS_LOCK_TTL_SECONDS = 360      # covers the 3 sequential Claude calls per c
 _DRAIN_LOCK_TTL_SECONDS = 3600      # generous single-flight guard
 _MAX_BATCHES = 50
 # Crises are heavier than signals (3 LLM calls + a RAG search each), so a smaller
-# batch and a lower per-run cap than the signal drain.
+# batch than the signal drain. The per-run cap is env-tunable
+# (settings.crisis_max_crises_per_run) and enforced INSIDE the per-crisis loop.
 _BATCH_SIZE = 50
-_MAX_CRISES_PER_RUN = 25
 # Bound per-crisis retries so a transient clear-api/LLM blip is retried, but a
 # persistently-bad crisis is force-marked ENRICHED and leaves the queue instead
 # of poisoning the oldest-first head.
@@ -99,7 +99,9 @@ def _drain_crises_locked(context) -> dg.MaterializeResult:
         context.log.warning("[enrich_crises] admin-0 lookup failed — RAG falls back to event-type scoping", exc_info=True)
         a0_ids = set()
 
+    max_per_run = settings.crisis_max_crises_per_run
     enriched = empty = requeued = failed = 0
+    cap_hit = False
     for _ in range(_MAX_BATCHES):
         batch = pending_crises(first=_BATCH_SIZE)  # oldest-first
         if not batch:
@@ -135,18 +137,22 @@ def _drain_crises_locked(context) -> dg.MaterializeResult:
             if outcome == ENRICHED:
                 enriched += 1
                 made_progress = True
+                # Cost guardrail (3 Claude calls per crisis): stop the moment we
+                # hit the cap, NOT after finishing the whole batch — otherwise a
+                # 50-wide batch could enrich ~2× the cap before it trips.
+                if enriched >= max_per_run:
+                    cap_hit = True
+                    break
             elif outcome == EMPTY:
                 empty += 1
                 made_progress = True
             else:  # _REQUEUE — transient, stays PENDING for the next run
                 requeued += 1
 
-        # Cost guardrail: cap LLM spend per run (3 Claude calls per crisis). The
-        # remainder stays PENDING and drains on the next tick.
-        if enriched >= _MAX_CRISES_PER_RUN:
+        if cap_hit:
             context.log.warning(
                 "[enrich_crises] hit per-run cap of %d enriched crises — stopping; remainder drains next run",
-                _MAX_CRISES_PER_RUN,
+                max_per_run,
             )
             break
         # Stop when a batch advanced nothing — every crisis was a transient

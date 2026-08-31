@@ -97,6 +97,21 @@ _FALLBACK_ERRORS: tuple[type[BaseException], ...] = (
     EmptyResponseError,
 )
 
+# Transient provider/transport failures that survive the built-in per-call retry
+# (the tenacity decorators below use ``reraise=True``, so after the last attempt
+# the original error propagates). Callers that run their own attempt-bounded
+# outer retry — e.g. the crisis-enrichment drain — should let THESE re-raise so
+# the whole unit is retried, instead of swallowing them as a permanent failure
+# and producing an empty result. Mirrors the retry sets on both providers.
+TRANSIENT_LLM_ERRORS: tuple[type[BaseException], ...] = (
+    anthropic.RateLimitError,
+    anthropic.APIConnectionError,
+    anthropic.InternalServerError,
+    openai.RateLimitError,
+    openai.APIConnectionError,
+    openai.InternalServerError,
+)
+
 # New roles fall back to `extraction`'s env vars when their own aren't set.
 # Keeps a code deploy safe if it lands before the infra apply that adds the
 # per-role vars: pre-apply, `extraction` is still Sonnet, so datapoints /
