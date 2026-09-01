@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     DOMAINS,
     SCHEMA_VERSION,
+    Disaggregation,
     LocationRef,
 )
 from clear_context_pipeline.defs.reliefweb_partitions import (
@@ -209,6 +210,17 @@ SYSTEM_PROMPT_TEMPLATE = (
     "  the figure cannot be tied to one place, set it null — do NOT default "
     "  to the country or the first place named. Emit the place NAME only; "
     "  never an admin level, and never the resolved id.\n"
+    "- SEX/AGE BREAKDOWN (`breakdown`, only on the population figures that "
+    "  carry it — IDP stock, new displacements, refugees, overall people-in-"
+    "  need, overall affected): fill it ONLY when the report disaggregates that "
+    "  figure by sex or age (e.g. '120,000 displaced, of whom 52% women and 40% "
+    "  children'). Emit only the cells the report states (female / male / "
+    "  sex_unknown; children_0_17 / adults_18_59 / elderly_60plus); leave the "
+    "  whole `breakdown` null when no split is given, and never invent one. Each "
+    "  cell is a normal numeric figure, BUT do NOT set its `scope_location_name` "
+    "  or `source_name` — a cell inherits its parent figure's scope + source. "
+    "  Convert a percentage to a count only when the total is known and the "
+    "  report frames the split as shares of that total.\n"
     "- `confidence` is a tier: verified > reported > estimated > media > "
     "  unverified. Use `verified` only when the report explicitly attributes "
     "  the figure to a UN or government mission verification. `reported` "
@@ -520,6 +532,65 @@ def _resolve_figure_sources(merged: Any) -> tuple[int, int]:
     return with_name, resolved
 
 
+# SADD breakdown cells (ADR-0008). The cell names come straight from the schema
+# so there's one source of truth — adding/renaming a cell can't silently skip
+# propagation.
+_BREAKDOWN_CELLS: tuple[str, ...] = tuple(Disaggregation.model_fields)
+# A cell's scope + source ARE the parent's, so its NAME fields are overwritten
+# from the parent (a divergent cell name would contradict the inherited id).
+_INHERITED_OVERWRITE_KEYS = ("scope_location_name", "source_name")
+# The id + period fields are filled only when the cell left them null — cells
+# are emitted null and the figure-scope/source resolvers skip them, so this is
+# what actually scopes them; never clobber a value the cell did carry.
+_INHERITED_FILL_KEYS = (
+    "scope_location_id", "source_id", "basis_period_start", "basis_period_end",
+)
+
+
+def _propagate_breakdown_scope(merged: Any) -> int:
+    """Copy each disaggregated figure's resolved scope/source/basis-period down
+    into its SADD ``breakdown`` cells (ADR-0008 §2), so the cells share the
+    parent's incident key and roll up (an unscoped cell is dropped by the
+    aggregator). Reuses the shared ``_collect_numeric_fields`` walker (which
+    stops at a figure leaf — it does NOT descend into ``breakdown``), matching
+    the sibling resolvers, then fills each figure's own cells. Returns the number
+    of cells propagated (for logging).
+    """
+    figures: list[dict] = []
+    _collect_numeric_fields(merged, figures)
+
+    count = 0
+    for fig in figures:
+        breakdown = fig.get("breakdown")
+        if not isinstance(breakdown, dict):
+            continue
+        total = fig.get("value")
+        for cell_name in _BREAKDOWN_CELLS:
+            cell = breakdown.get(cell_name)
+            if not isinstance(cell, dict):
+                continue
+            for k in _INHERITED_OVERWRITE_KEYS:
+                cell[k] = fig.get(k)
+            for k in _INHERITED_FILL_KEYS:
+                if fig.get(k) is not None and cell.get(k) is None:
+                    cell[k] = fig[k]
+            # A marginal larger than its own total is a likely extraction error
+            # (bad percentage→count, hallucinated cell) — surface it rather than
+            # ship a breakdown that reads as bigger than the whole.
+            cval = cell.get("value")
+            if (
+                isinstance(cval, (int, float))
+                and isinstance(total, (int, float))
+                and cval > total
+            ):
+                logger.warning(
+                    "[DATAPOINTS] SADD cell %s=%s exceeds its total %s (scope=%s) — likely extraction error",
+                    cell_name, cval, total, fig.get("scope_location_id"),
+                )
+            count += 1
+    return count
+
+
 def _dig(obj: Any, *path: str) -> Any:
     """Walk nested dicts safely — returns None the moment any step
     is missing / null. Used to pull hot totals out of the merged blob
@@ -828,6 +899,13 @@ def extract_datapoints_for_one_report(
         "publisher=%s -> %s",
         report_id, src_resolved, src_named, publisher_name, publisher_source_id,
     )
+
+    # SADD (ADR-0008): after scope + source are resolved on the parent figures,
+    # propagate them into each figure's breakdown cells so the cells inherit the
+    # parent's incident key and aggregate. Must run AFTER both resolvers above.
+    bd_cells = _propagate_breakdown_scope(merged)
+    if bd_cells:
+        log.info("[%s] SADD: propagated scope/source into %d breakdown cells", report_id, bd_cells)
 
     timing = merged.get("timing_and_scope") or {}
     # Constrain to the disaster_types level_2 taxonomy (drops off-taxonomy tags,

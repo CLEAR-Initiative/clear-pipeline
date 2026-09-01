@@ -19,10 +19,13 @@ of the design doc).
 from typing import Literal, Optional
 
 import json
+import logging
 import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 from clear_context_pipeline.providers.classify import (
     coerce_event_types,
@@ -51,12 +54,19 @@ _EVENT_TYPE_TAXONOMY = ", ".join(level2_values())
 #        an optional figure-level basis_period_start/end. `value` stays the
 #        headline point so downstream (clear-api aggregation) is unaffected; the
 #        richer shape is captured now and consumed by the reducer in later phases.
+#   v4 — sex/age disaggregation (SADD, ADR-0008): the headline population figures
+#        (displacement.{idp_stock, new_displacements, refugees},
+#        needs_and_funding.{overall_pin, overall_affected}) become
+#        DisaggregatedNumericField, gaining an optional `breakdown` of sex/age
+#        marginal cells. `value` stays the total, so existing aggregation is
+#        unaffected; the cells inherit the parent's scope/source post-extraction
+#        and roll up via their own clear-api FieldRules.
 #
 # Pre-launch the corpus is a handful of test reports we wipe and re-extract on
 # every change, so the version mainly documents the shape. Aggregation still
 # combines only same-version rows, so the bump keeps any remaining older rows
-# from mixing with the re-extracted v3 rows.
-SCHEMA_VERSION = "v3"
+# from mixing with the re-extracted v4 rows.
+SCHEMA_VERSION = "v4"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -398,6 +408,110 @@ class NumericField(BaseModel):
         return self
 
 
+class Disaggregation(BaseModel):
+    """Sex/age marginals for a population figure (SADD — ADR-0008).
+
+    Each cell is a full ``NumericField`` — it carries its own provenance and the
+    interval/range envelope, so it reduces through the same aggregation machinery
+    as the parent total. These are the MARGINALS a report states (a by-sex split
+    and/or a by-age split), NOT the full sex×age cross.
+
+    Rules the prompt enforces via the field descriptions:
+      * Populate ONLY the cells the report actually states. A null cell means
+        'not reported', never zero.
+      * Cells are NOT required to sum to the parent total — partial
+        disaggregation is normal.
+      * Do NOT emit ``scope_location_name`` / ``source_name`` on cells; they
+        inherit the parent figure's scope + source post-extraction (ADR-0008 §2).
+    """
+    female: Optional[NumericField] = Field(
+        default=None, description="Females within this figure's total, if the report gives a sex split. Null if not stated.")
+    male: Optional[NumericField] = Field(
+        default=None, description="Males within this figure's total, if stated. Null if not.")
+    sex_unknown: Optional[NumericField] = Field(
+        default=None, description="People of unknown/other sex within this figure, if the report reports such a bucket. Null if not.")
+    children_0_17: Optional[NumericField] = Field(
+        default=None, description="Children aged 0–17 within this figure, if the report gives an age split. Null if not stated.")
+    adults_18_59: Optional[NumericField] = Field(
+        default=None, description="Working-age adults 18–59 within this figure, if stated. Null if not.")
+    elderly_60plus: Optional[NumericField] = Field(
+        default=None, description="Elderly aged 60+ within this figure, if stated. Null if not.")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_cells(cls, data: Any) -> Any:
+        """Per-cell failure isolation for the deepest extraction level.
+
+        The breakdown adds a level of nesting where Claude's tool_use is most
+        likely to misbehave — a cell returned as a JSON-encoded string, or one
+        malformed cell in an otherwise-good breakdown. Because
+        ``complete_structured`` validates the WHOLE domain at once, a single bad
+        cell would raise a ValidationError that nulls the entire displacement /
+        needs_and_funding domain (losing every figure in it). So here we:
+          1. decode a stringified whole-breakdown blob, then
+          2. decode a stringified individual cell, and
+          3. validate each cell on its own — a cell that still won't parse drops
+             to ``None`` rather than taking the breakdown (and its domain) down.
+        """
+        data = _tolerate_stringified_json(data)
+        if not isinstance(data, dict):
+            return data
+        out: dict[str, Any] = {}
+        for key, raw in data.items():
+            raw = _tolerate_stringified_json(raw)
+            if raw is None or isinstance(raw, NumericField):
+                out[key] = raw  # already the right shape (in-code construction)
+                continue
+            try:
+                out[key] = NumericField.model_validate(raw)
+            except Exception as exc:  # noqa: BLE001 — isolate one bad cell, keep the rest
+                # A reported-but-malformed cell (e.g. `female: "52%"`) would
+                # otherwise be indistinguishable from an unreported one — log it
+                # so the silent drop is observable, then null just this cell.
+                logger.warning(
+                    "[DATAPOINTS] SADD cell %r dropped — unparseable as NumericField (%s)",
+                    key, exc,
+                )
+                out[key] = None
+        return out
+
+
+class DisaggregatedNumericField(NumericField):
+    """A ``NumericField`` that may carry a sex/age ``breakdown`` (SADD — ADR-0008).
+
+    Used on the headline population figures where a report may disaggregate the
+    total. `value` remains the total (unchanged for existing aggregation); the
+    optional `breakdown` cells roll up via their own clear-api FieldRules.
+    """
+    breakdown: Optional[Disaggregation] = Field(
+        default=None,
+        description=(
+            "Sex/age breakdown of THIS figure, populated ONLY when the report "
+            "disaggregates it (e.g. '120,000 displaced, of whom 52% women and "
+            "40% children'). Emit only the cells the report states; leave the "
+            "whole object null when the report gives no sex/age split for this "
+            "figure. Convert a stated percentage to a count ONLY when the total "
+            "is known and the report frames it as a share of that total; never "
+            "invent a split. Cells inherit this figure's location scope and "
+            "source — do not restate them on the cells."
+        ),
+    )
+
+    @field_validator("breakdown", mode="before")
+    @classmethod
+    def _coerce_breakdown(cls, v: Any) -> Any:
+        """Never let a malformed breakdown null the parent figure (and its
+        domain). Decode a stringified object (Claude tool_use quirk); if the
+        result still isn't a mapping, drop the breakdown to None and keep the
+        figure. Per-cell resilience then lives in ``Disaggregation`` above."""
+        v = _tolerate_stringified_json(v)
+        # A dict (from JSON) or an already-built Disaggregation (in-code) is
+        # fine; anything else is unusable garbage — drop it, keep the figure.
+        if v is None or isinstance(v, (dict, Disaggregation)):
+            return v
+        return None
+
+
 class TextField(BaseModel):
     """A non-numeric datapoint — descriptions, notes, categorical
     labels — with the same provenance envelope so citations work
@@ -554,11 +668,11 @@ class Displacement(BaseModel):
     Conflating a running total with a per-period count over-counts (the exact
     returnee bug ADR-0005 §4a fixes), so never put a cumulative total in a flow.
     """
-    idp_stock: Optional[NumericField] = Field(
+    idp_stock: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description="Currently-displaced IDP population at the END of the reporting period.",
     )
-    new_displacements: Optional[NumericField] = Field(
+    new_displacements: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description="People newly displaced DURING the reporting period.",
     )
@@ -578,7 +692,7 @@ class Displacement(BaseModel):
             "Do NOT put a cumulative return total here (that is returnee_stock)."
         ),
     )
-    refugees: Optional[NumericField] = Field(
+    refugees: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description="People displaced ACROSS an international border. Distinct from IDPs.",
     )
@@ -632,7 +746,7 @@ class NeedsAndFunding(BaseModel):
 
     overall_funding_required_usd: Optional[NumericField] = None
     overall_funding_received_usd: Optional[NumericField] = None
-    overall_pin: Optional[NumericField] = Field(
+    overall_pin: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description=(
             "Total People in Need across all sectors, ONLY when the report "
@@ -644,7 +758,7 @@ class NeedsAndFunding(BaseModel):
             "explicit 'in need' figure gets null here, never its IDP total."
         ),
     )
-    overall_affected: Optional[NumericField] = Field(
+    overall_affected: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description=(
             "Population Affected — the widest circle of crisis impact: "
