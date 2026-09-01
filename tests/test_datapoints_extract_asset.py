@@ -25,18 +25,19 @@ from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
     reliefweb_weekly_datapoints,
 )
 from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+    AccessAndIncidents,
     Casualties,
     CasualtyDisaggregation,
+    DisaggregatedNumericField,
+    Disaggregation,
     Displacement,
+    LocationRef,
+    NarrativeAndConfidence,
+    NeedsAndFunding,
     NumericField,
     TextField,
     TimingAndScope,
-    NeedsAndFunding,
-    AccessAndIncidents,
-    NarrativeAndConfidence,
-    LocationRef,
 )
-
 
 PDF_TEXT_SUMMARY = {
     "report_id": "test:sudan-2026-w27",
@@ -75,15 +76,38 @@ def _canned_domain_output(domain_name: str):
             )),
         )
     if domain_name == "displacement":
-        return Displacement(idp_stock=nf, new_displacements=nf)
+        # idp_stock carries a SADD breakdown (v4) so the happy path also
+        # exercises scope propagation into cells; new_displacements has none.
+        idp = DisaggregatedNumericField(
+            value=42000, unit="people", confidence="reported",
+            source_quote="42,000 IDPs in Kordofan, 22,000 women.",
+            chunk_index=0, page_number=2, scope_location_name="Kordofan",
+            breakdown=Disaggregation(
+                female=NumericField(
+                    value=22000, unit="people", confidence="reported",
+                    source_quote="22,000 women among the displaced.", page_number=2,
+                ),
+            ),
+        )
+        return Displacement(
+            idp_stock=idp,
+            new_displacements=DisaggregatedNumericField(
+                value=42000, unit="people", confidence="reported",
+                source_quote="42,000 IDPs in Kordofan.", chunk_index=0, page_number=2,
+            ),
+        )
     if domain_name == "needs_and_funding":
         # Affected (widest circle) is a distinct, wider figure than PIN.
-        affected = NumericField(
+        affected = DisaggregatedNumericField(
             value=100000, unit="people", confidence="reported",
             source_quote="100,000 people affected in Kordofan.",
             chunk_index=0, page_number=2,
         )
-        return NeedsAndFunding(overall_pin=nf, overall_affected=affected)
+        pin = DisaggregatedNumericField(
+            value=42000, unit="people", confidence="reported",
+            source_quote="42,000 IDPs in Kordofan.", chunk_index=0, page_number=2,
+        )
+        return NeedsAndFunding(overall_pin=pin, overall_affected=affected)
     if domain_name == "access_and_incidents":
         return AccessAndIncidents(security_incidents_count=nf)
     if domain_name == "narrative_and_confidence":
@@ -215,6 +239,12 @@ class TestExtractionAsset:
         }
         for domain in merged_data.values():
             assert domain is not None
+        # SADD (v4): the idp_stock breakdown cell inherited the parent figure's
+        # resolved scope post-extraction (resolve_location mocked to loc-kordofan),
+        # so the cell will aggregate instead of being dropped as unscoped.
+        female = merged_data["displacement"]["idp_stock"]["breakdown"]["female"]
+        assert female["value"] == 22000
+        assert female["scope_location_id"] == "loc-kordofan"
         # Hot totals hoisted from the merged blob.
         assert upsert_kwargs["total_killed"] == 15
         assert upsert_kwargs["total_displaced"] == 42000
