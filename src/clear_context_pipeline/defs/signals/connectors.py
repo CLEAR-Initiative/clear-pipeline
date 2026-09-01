@@ -143,6 +143,16 @@ class PollSource(SignalSource, Protocol):
         No-op for sources with no seen-set (Dataminr uses the watermark alone)."""
         ...
 
+    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
+        """Adapt an already-built ``to_signal_input`` payload into an
+        ``updateSignalContent`` input dict for a per-record content revision, or
+        ``None`` if this source never revises records in place. Takes
+        ``input_data`` as-is (not rebuilt from ``record``) so create and update
+        always agree and no enrichment (geoparser/L4 promotion) runs twice.
+        ``created`` is ``createSignal``'s result, providing the target id.
+        No-op for every source except IDMC."""
+        ...
+
     def parse(self, raw: bytes) -> Any:
         """Inverse of ``raw_bytes``: rebuild the record from a lake blob."""
         ...
@@ -195,6 +205,9 @@ class DataminrConnector:
 
     def post_create(self, record: Any) -> None:
         return None  # Dataminr dedups via the watermark — no seen-set to mark
+
+    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
+        return None  # Dataminr signals are never revised in place
 
     def parse(self, raw: bytes) -> dataminr.DataminrSignal:
         return dataminr.DataminrSignal.model_validate_json(raw)
@@ -283,6 +296,9 @@ class ACLEDConnector:
     def post_create(self, record: Any) -> None:
         acled.mark_seen(record["acled_id"])  # only after createSignal confirmed
 
+    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
+        return None  # ACLED signals are never revised in place
+
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
 
@@ -336,6 +352,9 @@ class GDACSConnector:
 
     def post_create(self, record: Any) -> None:
         gdacs.mark_seen(record["gdacs_id"])  # only after createSignal confirmed
+
+    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
+        return None  # GDACS signals are never revised in place
 
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
@@ -413,6 +432,9 @@ class Darfur24Connector:
         # Mark seen ONLY after createSignal confirmed the signal (expo-383).
         darfur24.mark_seen(record["darfur24_id"])
 
+    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
+        return None  # darfur24 signals are never revised in place
+
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
 
@@ -475,6 +497,9 @@ class IDMCConnector:
 
     def post_create(self, record: Any) -> None:
         idmc.mark_seen(record["idu_id"], record["content_hash"])  # only after createSignal confirmed
+
+    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
+        return idmc.build_signal_content_update(input_data, created["id"])
 
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)

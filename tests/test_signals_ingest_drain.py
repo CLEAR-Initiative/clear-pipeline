@@ -18,6 +18,7 @@ from clear_context_pipeline.defs.signals.connectors import (
     Darfur24Connector,
     DataminrConnector,
     GDACSConnector,
+    IDMCConnector,
     ManualConnector,
     SignalSource,
 )
@@ -69,6 +70,28 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["gdacs"], GDACSConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["darfur24"], Darfur24Connector)
     assert isinstance(CONNECTORS_BY_SOURCE["manual"], ManualConnector)
+
+
+# ── to_content_update_input dispatch ──────────────────────────────────────────
+
+def test_non_revising_connectors_return_none_for_content_update():
+    dummy_input = {"rawData": {}, "contentHash": "h"}
+    dummy_created = {"id": "sig-1"}
+    for connector in (DataminrConnector(), ACLEDConnector(), GDACSConnector(), Darfur24Connector()):
+        assert connector.to_content_update_input(dummy_input, dummy_created) is None
+
+
+def test_idmc_connector_delegates_to_build_signal_content_update():
+    input_data = {
+        "rawData": {"figure": 1500},
+        "title": "t",
+        "contentHash": "hash123",
+    }
+    created = {"id": "signal-abc"}
+    result = IDMCConnector().to_content_update_input(input_data, created)
+    assert result["id"] == "signal-abc"
+    assert result["contentHash"] == "hash123"
+    assert result["rawData"] == {"figure": 1500}
 
 
 # ── ingest factory (per-source, polled only) ─────────────────────────────────
