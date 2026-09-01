@@ -54,13 +54,18 @@ _EVENT_TYPE_TAXONOMY = ", ".join(level2_values())
 #        an optional figure-level basis_period_start/end. `value` stays the
 #        headline point so downstream (clear-api aggregation) is unaffected; the
 #        richer shape is captured now and consumed by the reducer in later phases.
-#   v4 — sex/age disaggregation (SADD, ADR-0008): the headline population figures
-#        (displacement.{idp_stock, new_displacements, refugees},
-#        needs_and_funding.{overall_pin, overall_affected}) become
-#        DisaggregatedNumericField, gaining an optional `breakdown` of sex/age
-#        marginal cells. `value` stays the total, so existing aggregation is
-#        unaffected; the cells inherit the parent's scope/source post-extraction
-#        and roll up via their own clear-api FieldRules.
+#   v4 — sex/age disaggregation (SADD, ADR-0008): population/need/response figures
+#        become DisaggregatedNumericField, gaining an optional `breakdown` of
+#        sex/age marginal cells. `value` stays the total, so existing aggregation
+#        is unaffected; cells inherit the parent's scope/source post-extraction
+#        and roll up via their own clear-api FieldRules. Rolled out in two waves
+#        under the SAME v4 (the additions are backward-compatible — purely
+#        additional optional fields + additive rules, so no re-version needed;
+#        older v4 rows simply read null for the newer paths until re-extracted):
+#          - Phase 1: displacement.{idp_stock, new_displacements, refugees},
+#            needs_and_funding.{overall_pin, overall_affected}.
+#          - Phase 2: needs_and_funding.<sector>.{people_in_need, people_targeted,
+#            people_reached} and displacement.{returnee_stock, new_returns}.
 #
 # Pre-launch the corpus is a handful of test reports we wipe and re-extract on
 # every change, so the version mainly documents the shape. Aggregation still
@@ -676,7 +681,7 @@ class Displacement(BaseModel):
         default=None,
         description="People newly displaced DURING the reporting period.",
     )
-    returnee_stock: Optional[NumericField] = Field(
+    returnee_stock: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description=(
             "Cumulative total of people who have returned to their area of "
@@ -684,7 +689,7 @@ class Displacement(BaseModel):
             "(STOCK), not the period's new returns. Aggregates latest-wins."
         ),
     )
-    new_returns: Optional[NumericField] = Field(
+    new_returns: Optional[DisaggregatedNumericField] = Field(
         default=None,
         description=(
             "People who returned to their area of origin DURING the reporting "
@@ -717,9 +722,9 @@ class SectorNeeds(BaseModel):
     sector's response plan aims to reach; `people_reached` is who
     they actually reached during the reporting period.
     """
-    people_in_need: Optional[NumericField] = None
-    people_targeted: Optional[NumericField] = None
-    people_reached: Optional[NumericField] = None
+    people_in_need: Optional[DisaggregatedNumericField] = None
+    people_targeted: Optional[DisaggregatedNumericField] = None
+    people_reached: Optional[DisaggregatedNumericField] = None
     operational_presence: Optional[NumericField] = Field(
         default=None,
         description="Number of partner organisations delivering in-sector aid.",

@@ -210,3 +210,50 @@ class TestRobustness:
         assert n.overall_pin.breakdown.children_0_17.value == 30000
         assert n.overall_pin.breakdown.female is None
         assert n.overall_affected.value == 100000
+
+
+# ── Phase 2: sector need/response + returnee figures carry SADD too ──────────
+
+class TestPhase2Fields:
+    def _fig(self, value, **extra):
+        return {
+            "value": value, "unit": "people", "confidence": "reported",
+            "source_quote": "q", **extra,
+        }
+
+    def test_sector_response_and_returnee_carry_breakdown(self):
+        needs = NeedsAndFunding.model_validate({
+            "health": {
+                "people_reached": self._fig(
+                    45000, breakdown={"female": self._fig(24000)},
+                ),
+                "people_targeted": self._fig(
+                    60000, breakdown={"children_0_17": self._fig(25000)},
+                ),
+            },
+        })
+        assert needs.health.people_reached.breakdown.female.value == 24000
+        assert needs.health.people_targeted.breakdown.children_0_17.value == 25000
+
+        d = Displacement.model_validate({
+            "returnee_stock": self._fig(1000, breakdown={"male": self._fig(600)}),
+        })
+        assert d.returnee_stock.breakdown.male.value == 600
+
+    def test_propagation_reaches_a_sector_nested_cell(self):
+        # people_reached lives one level deeper (needs_and_funding.<sector>.…);
+        # the shared walker still finds it as a figure leaf and propagation fills
+        # its cell.
+        needs = NeedsAndFunding.model_validate({
+            "health": {
+                "people_reached": self._fig(
+                    45000, scope_location_name="Kassala",
+                    breakdown={"female": self._fig(24000)},
+                ),
+            },
+        })
+        merged = {"needs_and_funding": needs.model_dump(mode="json")}
+        reached = merged["needs_and_funding"]["health"]["people_reached"]
+        reached["scope_location_id"] = "loc-kassala"
+        assert _propagate_breakdown_scope(merged) >= 1
+        assert reached["breakdown"]["female"]["scope_location_id"] == "loc-kassala"
