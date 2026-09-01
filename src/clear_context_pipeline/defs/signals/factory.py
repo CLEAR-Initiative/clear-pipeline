@@ -25,7 +25,7 @@ import dagster as dg
 from clear_context_pipeline.defs.signals import lake
 from clear_context_pipeline.defs.signals.connectors import SignalSource
 from clear_context_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_context_pipeline.providers.clear_api import create_signal, update_signal_content
+from clear_context_pipeline.providers.clear_api import create_signal
 from clear_context_pipeline.signals.config import settings
 
 
@@ -67,13 +67,9 @@ def build_source_assets(connector: SignalSource) -> list:
         for record in records:
             # Per-record isolation: one bad record (a 4xx createSignal, a geoparser
             # blow-up in to_signal_input) must NOT abort the batch and strand the
-            # rest. seen-marking (post_create) happens only AFTER createSignal AND
-            # any content-update call both succeed, so a failed record stays
-            # re-pollable. clear-api's (sourceId, externalId) get-or-create makes a
-            # plain re-fetch idempotent — but for a source that revises records in
-            # place (to_content_update_input returning non-None), createSignal
-            # alone would silently no-op on the revision; the follow-up update is
-            # what actually applies it.
+            # rest. seen-marking (post_create) happens only AFTER createSignal, so a
+            # failed record stays re-pollable; clear-api's (sourceId, externalId)
+            # upsert makes the re-fetch idempotent.
             try:
                 key = lake.raw_key(
                     src, connector.published_at(record), connector.external_id(record)
@@ -81,14 +77,7 @@ def build_source_assets(connector: SignalSource) -> list:
                 lake.write_raw(s3, bucket, key, connector.raw_bytes(record))
                 input_data = connector.to_signal_input(record, api_source_id)
                 input_data["rawS3Key"] = key
-                created_signal = create_signal(input_data)
-                # Every connector implements to_content_update_input — one that
-                # doesn't revise records in place returns None explicitly (its own
-                # implementation, not a fallback), so the update call below never
-                # runs for it.
-                update_input = connector.to_content_update_input(input_data, created_signal)
-                if update_input is not None:
-                    update_signal_content(update_input)
+                create_signal(input_data)
                 connector.post_create(record)
                 created += 1
             except Exception:  # noqa: BLE001 — isolate one record's failure

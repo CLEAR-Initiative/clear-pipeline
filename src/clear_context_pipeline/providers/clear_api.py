@@ -867,16 +867,6 @@ mutation CreateSignal($input: CreateSignalInput!) {
 }
 """
 
-UPDATE_SIGNAL_CONTENT = """
-mutation UpdateSignalContent($input: UpdateSignalContentInput!) {
-  updateSignalContent(input: $input) {
-    id
-    contentHash
-    lastRevisedAt
-  }
-}
-"""
-
 UPDATE_SIGNAL_SEVERITY = """
 mutation UpdateSignalSeverity($id: String!, $severity: Int!) {
   updateSignalSeverity(id: $id, severity: $severity) {
@@ -1283,14 +1273,6 @@ mutation MarkSignalsProcessed($ids: [String!]!, $status: SignalStatus) {
 def create_signal(input_data: dict) -> dict:
     result = _execute(CREATE_SIGNAL, {"input": input_data})
     return result["createSignal"]
-
-
-def update_signal_content(input_data: dict) -> dict:
-    """Apply an in-place content revision to an existing signal (e.g. an IDMC
-    IDU row revised upstream). Hash-gated server-side — a no-op retry with an
-    unchanged contentHash returns the row untouched."""
-    result = _execute(UPDATE_SIGNAL_CONTENT, {"input": input_data})
-    return result["updateSignalContent"]
 
 
 def pending_signals(first: int = 100, source: str | None = None) -> list[dict]:

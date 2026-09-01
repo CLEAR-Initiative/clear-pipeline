@@ -18,7 +18,6 @@ from clear_context_pipeline.defs.signals.connectors import (
     Darfur24Connector,
     DataminrConnector,
     GDACSConnector,
-    IDMCConnector,
     ManualConnector,
     SignalSource,
 )
@@ -53,15 +52,12 @@ def test_registry_flags_all_drained():
     by_name = {c.source: c for c in CONNECTORS}
     assert all(isinstance(c, SignalSource) for c in CONNECTORS)
     assert {"dataminr", "acled", "gdacs", "darfur24", "manual"} <= set(by_name)
-    # every source feeds the shared stages EXCEPT idmc — its grouping logic
-    # is different and needs new features that aren't built yet, so its
-    # signals are ingested but not grouped into events for now
-    assert all(c.drained for c in CONNECTORS if c.source != "idmc")
-    assert not by_name["idmc"].drained
+    # every source now feeds the shared stages (darfur24 is no longer a tracer)
+    assert all(c.drained for c in CONNECTORS)
     assert DRAINED_SOURCES == frozenset({"dataminr", "acled", "gdacs", "darfur24", "manual"})
     # only manual is non-polled
     assert not by_name["manual"].polled
-    assert all(by_name[s].polled for s in ("dataminr", "acled", "gdacs", "darfur24", "idmc"))
+    assert all(by_name[s].polled for s in ("dataminr", "acled", "gdacs", "darfur24"))
 
 
 def test_connectors_by_source_map():
@@ -70,28 +66,6 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["gdacs"], GDACSConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["darfur24"], Darfur24Connector)
     assert isinstance(CONNECTORS_BY_SOURCE["manual"], ManualConnector)
-
-
-# ── to_content_update_input dispatch ──────────────────────────────────────────
-
-def test_non_revising_connectors_return_none_for_content_update():
-    dummy_input = {"rawData": {}, "contentHash": "h"}
-    dummy_created = {"id": "sig-1"}
-    for connector in (DataminrConnector(), ACLEDConnector(), GDACSConnector(), Darfur24Connector()):
-        assert connector.to_content_update_input(dummy_input, dummy_created) is None
-
-
-def test_idmc_connector_delegates_to_build_signal_content_update():
-    input_data = {
-        "rawData": {"figure": 1500},
-        "title": "t",
-        "contentHash": "hash123",
-    }
-    created = {"id": "signal-abc"}
-    result = IDMCConnector().to_content_update_input(input_data, created)
-    assert result["id"] == "signal-abc"
-    assert result["contentHash"] == "hash123"
-    assert result["rawData"] == {"figure": 1500}
 
 
 # ── ingest factory (per-source, polled only) ─────────────────────────────────

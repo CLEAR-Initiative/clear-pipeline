@@ -16,7 +16,6 @@ capability flags:
   │ acled      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
-  │ idmc       │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
 
@@ -26,10 +25,9 @@ capability flags:
   blob (``parse`` → ``project``). Manual signals are analyst-created directly in
   clear-api (no poll, no lake blob) so ``project`` reads the signal row itself
   (``record=None``).
-- **drained** — its NEW signals are processed by the classify/group stage.
-  ``idmc`` is the one exception: its grouping logic is different and needs new
-  features that aren't built yet, so its signals are ingested but not grouped
-  into events for now (see ``DRAINED_SOURCES``).
+- **drained** — its NEW signals are processed by the classify/group stage. All
+  current sources are drained; the flag reserves the option of a future
+  ingest-only source (see ``DRAINED_SOURCES``).
 
 Connectors reuse the consolidated ``clear_context_pipeline.providers`` modules
 (dataminr, acled, gdacs, darfur24, signal, …) so every source shares one
@@ -43,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_context_pipeline.providers import acled, darfur24, dataminr, gdacs, idmc
+from clear_context_pipeline.providers import acled, darfur24, dataminr, gdacs
 from clear_context_pipeline.providers.signal import build_signal_input
 from clear_context_pipeline.signals.config import settings
 
@@ -143,16 +141,6 @@ class PollSource(SignalSource, Protocol):
         No-op for sources with no seen-set (Dataminr uses the watermark alone)."""
         ...
 
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        """Adapt an already-built ``to_signal_input`` payload into an
-        ``updateSignalContent`` input dict for a per-record content revision, or
-        ``None`` if this source never revises records in place. Takes
-        ``input_data`` as-is (not rebuilt from ``record``) so create and update
-        always agree and no enrichment (geoparser/L4 promotion) runs twice.
-        ``created`` is ``createSignal``'s result, providing the target id.
-        No-op for every source except IDMC."""
-        ...
-
     def parse(self, raw: bytes) -> Any:
         """Inverse of ``raw_bytes``: rebuild the record from a lake blob."""
         ...
@@ -205,9 +193,6 @@ class DataminrConnector:
 
     def post_create(self, record: Any) -> None:
         return None  # Dataminr dedups via the watermark — no seen-set to mark
-
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return None  # Dataminr signals are never revised in place
 
     def parse(self, raw: bytes) -> dataminr.DataminrSignal:
         return dataminr.DataminrSignal.model_validate_json(raw)
@@ -287,9 +272,6 @@ class ACLEDConnector:
     def post_create(self, record: Any) -> None:
         acled.mark_seen(record["acled_id"])  # only after createSignal confirmed
 
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return None  # ACLED signals are never revised in place
-
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
 
@@ -343,9 +325,6 @@ class GDACSConnector:
 
     def post_create(self, record: Any) -> None:
         gdacs.mark_seen(record["gdacs_id"])  # only after createSignal confirmed
-
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return None  # GDACS signals are never revised in place
 
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
@@ -423,9 +402,6 @@ class Darfur24Connector:
         # Mark seen ONLY after createSignal confirmed the signal (expo-383).
         darfur24.mark_seen(record["darfur24_id"])
 
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return None  # darfur24 signals are never revised in place
-
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
 
@@ -437,74 +413,6 @@ class Darfur24Connector:
             description=record.get("description"),
             location_name=_first_location_name(created),
             url=record.get("url"),
-        )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# IDMC IDU — internal displacement updates (polled, NOT drained)
-# ──────────────────────────────────────────────────────────────────────────────
-class IDMCConnector:
-    """IDU has no server-side filter or pagination — one poll fetches the
-    entire global dataset and filters to configured countries/displacement
-    types client-side, deduplicating on (id, content hash) rather than id
-    alone so a revised figure (same id, changed role/figure/dates) is
-    detected and re-submitted instead of silently skipped. See
-    ``providers/idmc.py`` for the fetch/dedup mechanics.
-
-    ``drained = False``: grouping signals into events works differently for
-    IDMC and needs new features that aren't built yet, so grouping is
-    deliberately deferred to a follow-up PR."""
-
-    source = settings.idmc_source_name
-    polled = True
-    drained = False
-    poll_interval_minutes = settings.idmc_poll_interval_minutes
-
-    def poll(self, since: datetime | None) -> list[Any]:
-        return idmc.fetch_idu_records(since=since)
-
-    def external_id(self, record: Any) -> str:
-        return record["idu_id"]
-
-    def published_at(self, record: Any) -> str:
-        return record.get("created_at") or ""
-
-    def raw_bytes(self, record: Any) -> bytes:
-        return json.dumps(record).encode("utf-8")
-
-    def api_source_id(self) -> str:
-        from clear_context_pipeline.providers.clear_api import get_source_id_by_name
-
-        return get_source_id_by_name(settings.idmc_source_name)
-
-    def to_signal_input(self, record: Any, api_source_id: str) -> dict:
-        return idmc.build_idmc_signal_input(record, api_source_id)
-
-    def last_synced(self) -> datetime | None:
-        return idmc.get_last_synced()
-
-    def set_watermark(self, ts: datetime) -> None:
-        idmc.set_last_synced(ts)
-
-    def post_create(self, record: Any) -> None:
-        idmc.mark_seen(record["idu_id"], record["content_hash"])  # only after createSignal confirmed
-
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return idmc.build_signal_content_update(input_data, created["id"])
-
-    def parse(self, raw: bytes) -> dict:
-        return json.loads(raw)
-
-    def project(self, record: dict, created: dict) -> SignalView:
-        return SignalView(
-            external_id=record["idu_id"],
-            title=record["title"],
-            timestamp=created.get("publishedAt") or record.get("created_at") or "",
-            description=record.get("description"),
-            location_name=record.get("locations_name") or _first_location_name(created),
-            url=record.get("source_url"),
-            lat=record.get("lat"),
-            lng=record.get("lng"),
         )
 
 
@@ -540,7 +448,6 @@ CONNECTORS: list[SignalSource] = [
     ACLEDConnector(),
     GDACSConnector(),
     Darfur24Connector(),
-    IDMCConnector(),
     ManualConnector(),
 ]
 
