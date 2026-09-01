@@ -292,16 +292,13 @@ def test_unresolvable_ambiguous_entry_falls_back():
 # ── _split_by_location: count mismatch fallback ──────────────────────────────
 
 
-def test_locations_field_count_mismatch_returns_parsed_unchanged():
+def test_locations_field_count_mismatch_drops_the_row():
     raw = _three_location_raw()
     # Only two locations_type entries for three names -> mismatch.
     raw["locations_type"] = "Origin; Destination"
     parsed = _parsed_from(raw)
-    splits = _split_by_location(parsed)
 
-    assert splits == [parsed]
-    assert splits[0]["lat"] == parsed["lat"]
-    assert splits[0]["lng"] == parsed["lng"]
+    assert _split_by_location(parsed) == []
 
 
 # ── build_idmc_signal_input: origin/destination resolution ──────────────────

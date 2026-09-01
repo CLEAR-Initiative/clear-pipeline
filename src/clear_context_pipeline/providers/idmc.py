@@ -284,8 +284,8 @@ def _split_by_location(parsed: dict) -> list[dict]:
 
     A single-location row keeps its `idu_id` unchanged (no suffix) — an
     already-ingested row's dedup identity must not shift. A count mismatch
-    across the four locations_* fields returns `[parsed]` fully unchanged,
-    logged as a warning.
+    across the four locations_* fields returns `[]` (dropped, not guessed
+    at), logged as an error.
     """
     raw = parsed.get("raw") or {}
     names = _LOCATION_SEP_RE.split((raw.get("locations_name") or "").strip())
@@ -294,12 +294,12 @@ def _split_by_location(parsed: dict) -> list[dict]:
     accuracies = _LOCATION_SEP_RE.split((raw.get("locations_accuracy") or "").strip())
 
     if not (len(names) == len(types) == len(coords) == len(accuracies)):
-        logger.warning(
-            "[IDMC] locations_* field count mismatch for idu_id=%s "
-            "(names=%d types=%d coords=%d accuracy=%d) — skipping split",
+        logger.error(
+            "[IDMC] idu_id=%s: locations_* field count mismatch "
+            "(names=%d types=%d coords=%d accuracy=%d) — dropping row",
             parsed.get("idu_id"), len(names), len(types), len(coords), len(accuracies),
         )
-        return [parsed]
+        return []
 
     # No explicit n==1 shortcut needed: with a single location, `origins`
     # and `destinations` can never both be non-empty, so the checks below
@@ -380,7 +380,7 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     raw_rows = _fetch_all()
 
     events: list[dict] = []
-    parse_failed = filtered_out = deduped = 0
+    parse_failed = filtered_out = deduped = mismatched = 0
     batch_keys: set[str] = set()
     for raw in raw_rows:
         parsed = _parse_event(raw)
@@ -395,7 +395,12 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
             filtered_out += 1
             continue
 
-        for split in _split_by_location(parsed):
+        splits = _split_by_location(parsed)
+        if not splits:
+            mismatched += 1
+            continue
+
+        for split in splits:
             split["content_hash"] = _content_hash(split["raw"])
             seen_key = f"idmc:seen:{split['idu_id']}:{split['content_hash']}"
             if seen_key in batch_keys:
@@ -412,8 +417,8 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
 
     logger.info(
         "[IDMC] Result: %d new/changed events (parse_failed=%d, filtered_out=%d, "
-        "already_seen=%d) out of %d raw",
-        len(events), parse_failed, filtered_out, deduped, len(raw_rows),
+        "already_seen=%d, mismatched=%d) out of %d raw",
+        len(events), parse_failed, filtered_out, deduped, mismatched, len(raw_rows),
     )
     return events
 
