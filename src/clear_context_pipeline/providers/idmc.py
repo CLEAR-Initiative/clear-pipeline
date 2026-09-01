@@ -482,6 +482,7 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
         "title": event["title"],
         "description": event.get("description"),
         "severity": event.get("severity"),
+        "contentHash": event["content_hash"],
     }
 
     if event.get("source_url"):
@@ -537,3 +538,31 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
     )
 
     return input_data
+
+
+def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
+    """Adapt a create_signal input dict (already built by
+    build_idmc_signal_input) into an updateSignalContent input dict targeting
+    an existing signal — reuses the same values rather than recomputing them,
+    so a revision's create and update calls always agree.
+
+    url/originId/destinationId/lat/lng/geoparsedData are spread in only when
+    build_idmc_signal_input actually set them, never defaulted via `.get()`.
+    An ABSENT key tells clear-api's Prisma update "leave this field alone";
+    sending an explicit None instead would NULL OUT a previously-resolved
+    value (e.g. originId) just because this poll's _promote_location call
+    happened to fail transiently.
+    """
+    return {
+        "id": signal_id,
+        "contentHash": input_data["contentHash"],
+        "rawData": input_data["rawData"],
+        "title": input_data.get("title"),
+        "description": input_data.get("description"),
+        "severity": input_data.get("severity"),
+        **{
+            k: input_data[k]
+            for k in ("url", "originId", "destinationId", "lat", "lng", "geoparsedData")
+            if k in input_data
+        },
+    }

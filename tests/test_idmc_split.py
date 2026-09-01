@@ -8,10 +8,12 @@ from unittest.mock import patch
 
 from clear_context_pipeline.providers.idmc import (
     _classify_role,
+    _content_hash,
     _kind_from_locations_accuracy,
     _parse_coordinate,
     _split_by_location,
     build_idmc_signal_input,
+    build_signal_content_update,
 )
 
 
@@ -41,13 +43,16 @@ def _raw(**overrides) -> dict:
 
 def _parsed(**raw_overrides) -> dict:
     """A single-location record as `build_idmc_signal_input` actually
-    receives it in production: always the output of `_split_by_location`
-    (even the n==1 case), never `_parse_event`'s raw output directly —
-    that's what surfaces `locations_coordinates`/`locations_accuracy` at
-    the top level."""
+    receives it in production: the output of `_split_by_location` (even the
+    n==1 case) with `content_hash` attached, exactly like `fetch_idu_records`
+    does before handing a record to a connector — never `_parse_event`'s raw
+    output directly, that's what surfaces `locations_coordinates`/
+    `locations_accuracy` at the top level."""
     from clear_context_pipeline.providers.idmc import _parse_event
 
-    return _split_by_location(_parse_event(_raw(**raw_overrides)))[0]
+    result = _split_by_location(_parse_event(_raw(**raw_overrides)))[0]
+    result["content_hash"] = _content_hash(result["raw"])
+    return result
 
 
 def _parsed_from(raw: dict) -> dict:
@@ -459,6 +464,7 @@ def test_missing_coordinate_skips_promotion_attempt_entirely():
 def test_pair_signal_resolves_both_ends_independently():
     parsed = _parsed_from(_one_origin_one_destination_raw())
     split = _split_by_location(parsed)[0]  # merged 1:1 pair
+    split["content_hash"] = _content_hash(split["raw"])
 
     def fake_promote(*, name, lat, lng, kind, source_lat, source_lng):
         return _promo(f"loc-{name}")
@@ -481,6 +487,7 @@ def test_pair_signal_resolves_both_ends_independently():
 def test_pair_signal_one_end_unresolvable_still_sets_the_other():
     parsed = _parsed_from(_one_origin_one_destination_raw())
     split = _split_by_location(parsed)[0]
+    split["content_hash"] = _content_hash(split["raw"])
 
     def fake_promote(*, name, lat, lng, kind, source_lat, source_lng):
         # Only the origin (Al Jazirah) resolves; destination doesn't.
@@ -584,3 +591,77 @@ def test_real_sample_splits_all_share_the_row_level_centroid():
     for split in splits:
         assert split["lat"] == parsed["lat"] == 13.578933333333332
         assert split["lng"] == parsed["lng"] == 24.743561
+
+
+# ── build_signal_content_update ──────────────────────────────────────────
+
+
+def test_build_signal_content_update_carries_required_fields():
+    input_data = {
+        "sourceId": "src-1",
+        "externalId": "idmc:174447",
+        "rawData": {"figure": 1500},
+        "publishedAt": "2026-01-06T00:00:00Z",
+        "title": "Clashes in Darfur",
+        "description": "Some description",
+        "severity": 3,
+        "contentHash": "hash123",
+    }
+    update_input = build_signal_content_update(input_data, "signal-abc")
+    assert update_input["id"] == "signal-abc"
+    assert update_input["contentHash"] == "hash123"
+    assert update_input["rawData"] == {"figure": 1500}
+    assert update_input["title"] == "Clashes in Darfur"
+    assert update_input["description"] == "Some description"
+    assert update_input["severity"] == 3
+
+
+def test_build_signal_content_update_omits_absent_optional_fields():
+    """The regression this guards against: an absent key must stay absent in
+    the update payload, never default to None — sending an explicit null
+    would clear a previously-resolved field (e.g. originId) on a revision
+    where location resolution happened to fail transiently this poll."""
+    input_data = {
+        "rawData": {"figure": 1500},
+        "title": "t",
+        "description": None,
+        "severity": 2,
+        "contentHash": "hash123",
+        # originId/destinationId/lat/lng/url/geoparsedData deliberately absent
+    }
+    update_input = build_signal_content_update(input_data, "signal-abc")
+    for absent_field in ("url", "originId", "destinationId", "lat", "lng", "geoparsedData"):
+        assert absent_field not in update_input
+
+
+def test_build_signal_content_update_carries_present_optional_fields():
+    input_data = {
+        "rawData": {"figure": 1500},
+        "title": "t",
+        "description": "d",
+        "severity": 2,
+        "contentHash": "hash123",
+        "url": "https://example.com",
+        "originId": "loc-origin",
+        "destinationId": "loc-dest",
+        "lat": 13.6,
+        "lng": 24.7,
+        "geoparsedData": {"candidate": "Nyala"},
+    }
+    update_input = build_signal_content_update(input_data, "signal-abc")
+    assert update_input["url"] == "https://example.com"
+    assert update_input["originId"] == "loc-origin"
+    assert update_input["destinationId"] == "loc-dest"
+    assert update_input["lat"] == 13.6
+    assert update_input["lng"] == 24.7
+    assert update_input["geoparsedData"] == {"candidate": "Nyala"}
+
+
+def test_build_signal_content_update_never_includes_location_id():
+    """locationId isn't produced by build_idmc_signal_input at all (IDMC only
+    ever sets originId/destinationId/lat/lng client-side; the general
+    fallback location is resolved server-side from lat/lng), so it should
+    never appear here either."""
+    input_data = {"rawData": {}, "contentHash": "h"}
+    update_input = build_signal_content_update(input_data, "signal-abc")
+    assert "locationId" not in update_input
