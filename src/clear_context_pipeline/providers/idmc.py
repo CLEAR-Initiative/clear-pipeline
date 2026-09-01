@@ -67,7 +67,7 @@ def _parse_event(raw: dict) -> dict | None:
         pass
 
     try:
-        figure = int(figure)
+        figure = int(float(figure))
     except (ValueError, TypeError):
         return None
 
