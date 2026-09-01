@@ -37,12 +37,6 @@ _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/"
 
-# Displacement-type values IDU carries that CLEAR is scoped to ingest (per the
-# requirements doc's "Event types covered" — Conflict, Displacement, Natural
-# Hazards). Anything else (e.g. a future IDU category CLEAR hasn't scoped in)
-# is dropped rather than silently ingested.
-_ALLOWED_DISPLACEMENT_TYPES = frozenset({"Conflict", "Disaster"})
-
 # Separator between entries in IDU's compound locations_* fields
 # (locations_name, locations_type, locations_coordinates, locations_accuracy)
 # — semicolon, with variable surrounding whitespace observed in live data.

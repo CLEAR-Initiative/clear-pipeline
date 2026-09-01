@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     idmc_client_id: str = ""
     # AB9 is the Abyei Area that sits between Sudan and South Sudan
     idmc_countries: str = "SDN,AB9,AFG,VEN"
+    # Maps the requirements doc's "Event types covered" (Conflict, Displacement,
+    # Natural Hazards) onto IDU's own displacement_type values; anything else
+    # (e.g. a future IDU category CLEAR hasn't scoped in) is dropped.
     idmc_allowed_types: str = "Conflict,Disaster"
     idmc_source_name: str = "idmc"
     idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
