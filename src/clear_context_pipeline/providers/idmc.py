@@ -3,16 +3,19 @@ internal displacement flows (conflict and disaster triggered), via the Helix
 Tools API.
 
 Requires a registered `client_id` (query param) — request one via IDMC.
-Endpoint: GET https://helix-tools-api.idmcdb.org/external-api/idus/all/
+Endpoint: GET https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/
 (302 → S3 dump). Unlike ACLED/GDACS, this endpoint has NO server-side
-filtering or pagination — every poll fetches the entire global dataset and
-filters client-side.
+country/type filtering or pagination via query params — every poll fetches
+IDMC's whole last-180-days feed and filters client-side. IDMC's own docs don't
+specify which date field scopes the 180-day window (displacement date? event
+date? created_at?) — see docs/idmc-signal-revision-propagation.md for the risk
+this poses to catching revisions on records that age out of the window.
 
 One row = one *figure*, not one event: an IDU `event_id` can have many rows
 across locations, dates, and revisions. Filtering + dedup are keyed on the
 row-level `id`.
 
-Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_all_retrieve
+Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_last_180_days_retrieve
 """
 
 import hashlib
@@ -32,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
-IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/all/"
+IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/"
 
 # Displacement-type values IDU carries that CLEAR is scoped to ingest (per the
 # requirements doc's "Event types covered" — Conflict, Displacement, Natural
@@ -148,9 +151,10 @@ def _content_hash(raw_data: dict) -> str:
 
 
 def _fetch_all() -> list[dict]:
-    """Fetch the entire IDU dataset. No date/country filter — the endpoint
-    ignores query params server-side; the 302 lands on an S3 dump of every row."""
-    logger.info("[IDMC] fetching full IDU dataset from %s", IDU_URL)
+    """Fetch IDMC's last-180-days IDU feed. No country/type filter — the
+    endpoint ignores those query params server-side; the 302 lands on an S3
+    dump of every row IDMC currently serves for this window."""
+    logger.info("[IDMC] fetching last-180-days IDU feed from %s", IDU_URL)
     try:
         resp = httpx.get(
             IDU_URL,
@@ -366,8 +370,9 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     """Fetch + filter IDU records for the configured countries and displacement
     types, deduplicated against the Redis seen-set (id + content hash — see
     `_content_hash`). `since` is accepted for `PollSource` protocol parity but
-    ignored: the API has no date filter, so every poll re-scans the full dump
-    and the content-hash dedup does the "what's new/changed" work instead.
+    ignored: the API takes no client-controllable date filter, so every poll
+    re-scans IDMC's whole last-180-days window and the content-hash dedup does
+    the "what's new/changed" work instead.
     """
     countries = {c.strip().upper() for c in settings.idmc_countries.split(",") if c.strip()}
     allowed_types = {t.strip() for t in settings.idmc_allowed_types.split(",") if t.strip()}
