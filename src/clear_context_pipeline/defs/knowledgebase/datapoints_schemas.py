@@ -19,10 +19,13 @@ of the design doc).
 from typing import Literal, Optional
 
 import json
+import logging
 import re
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 from clear_context_pipeline.providers.classify import (
     coerce_event_types,
@@ -461,7 +464,14 @@ class Disaggregation(BaseModel):
                 continue
             try:
                 out[key] = NumericField.model_validate(raw)
-            except Exception:  # noqa: BLE001 — isolate one bad cell, keep the rest
+            except Exception as exc:  # noqa: BLE001 — isolate one bad cell, keep the rest
+                # A reported-but-malformed cell (e.g. `female: "52%"`) would
+                # otherwise be indistinguishable from an unreported one — log it
+                # so the silent drop is observable, then null just this cell.
+                logger.warning(
+                    "[DATAPOINTS] SADD cell %r dropped — unparseable as NumericField (%s)",
+                    key, exc,
+                )
                 out[key] = None
         return out
 

@@ -130,7 +130,7 @@ scope for the pipeline + clear-api change.
   yields an empty aggregate; SADD data with no rule is stored but not aggregated.
   Ship the two repos together; backfill by running the v4 re-extraction then the
   aggregation refresh.
-- **~25 new `FieldRule` entries** in Phase 1. Mechanical, O(1) each; the
+- **30 new `FieldRule` entries** in Phase 1 (5 parents × 6 cells). Mechanical, O(1) each; the
   label-uniqueness test guards collisions.
 - **Cells inherit the parent's `qualityBias`** (e.g. displacement → underreport),
   so a low-quality breakdown is corrected in the same direction as its total.

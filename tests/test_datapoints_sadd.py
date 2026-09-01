@@ -15,6 +15,7 @@ from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     DisaggregatedNumericField,
     Disaggregation,
     Displacement,
+    NeedsAndFunding,
     NumericField,
 )
 
@@ -111,6 +112,35 @@ class TestPropagation:
         }
         assert _propagate_breakdown_scope(merged) == 0
 
+    def test_unresolved_parent_leaves_cell_unscoped(self):
+        # If the parent's scope_location_name didn't resolve (scope_location_id
+        # is null), the cell must stay unscoped — so the aggregator drops it,
+        # matching the parent (which is also dropped). No orphaned cell.
+        idp = DisaggregatedNumericField(
+            value=1000, unit="people", confidence="reported", source_quote="q",
+            scope_location_name="Nowhere",  # never resolved → id stays null
+            breakdown=Disaggregation(female=_nf(520)),
+        )
+        merged = {"displacement": {"idp_stock": idp.model_dump(mode="json")}}
+        _propagate_breakdown_scope(merged)
+        assert merged["displacement"]["idp_stock"]["scope_location_id"] is None
+        assert merged["displacement"]["idp_stock"]["breakdown"]["female"]["scope_location_id"] is None
+
+    def test_cell_name_is_overwritten_to_match_parent(self):
+        # A cell inherits the parent's scope, so its name must match the parent's
+        # (never diverge from the inherited id).
+        idp = DisaggregatedNumericField(
+            value=1000, unit="people", confidence="reported", source_quote="q",
+            scope_location_name="Kassala",
+            breakdown=Disaggregation(female=_nf(520)),
+        )
+        merged = {"displacement": {"idp_stock": idp.model_dump(mode="json")}}
+        merged["displacement"]["idp_stock"]["scope_location_id"] = "loc-kassala"
+        _propagate_breakdown_scope(merged)
+        female = merged["displacement"]["idp_stock"]["breakdown"]["female"]
+        assert female["scope_location_id"] == "loc-kassala"
+        assert female["scope_location_name"] == "Kassala"  # name matches id
+
 
 # ── robustness: deep nesting must not null the domain ────────────────────────
 
@@ -163,3 +193,20 @@ class TestRobustness:
         assert d.idp_stock.breakdown.female.value == 520
         assert d.idp_stock.breakdown.male is None
         assert d.new_displacements.value == 42  # sibling figure intact
+
+    def test_bad_cell_does_not_null_the_needs_domain(self):
+        # Same blast-radius guard on the other SADD domain.
+        n = NeedsAndFunding.model_validate({
+            "overall_pin": {
+                **self._base(), "value": 80000,
+                "breakdown": {
+                    "children_0_17": {**self._base(), "value": 30000},
+                    "female": "garbage",
+                },
+            },
+            "overall_affected": {**self._base(), "value": 100000},
+        })
+        assert n.overall_pin.value == 80000
+        assert n.overall_pin.breakdown.children_0_17.value == 30000
+        assert n.overall_pin.breakdown.female is None
+        assert n.overall_affected.value == 100000

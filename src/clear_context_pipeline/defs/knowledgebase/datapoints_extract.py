@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
     DOMAINS,
     SCHEMA_VERSION,
+    Disaggregation,
     LocationRef,
 )
 from clear_context_pipeline.defs.reliefweb_partitions import (
@@ -531,14 +532,17 @@ def _resolve_figure_sources(merged: Any) -> tuple[int, int]:
     return with_name, resolved
 
 
-# SADD breakdown cells (ADR-0008) + the figure-level fields cells inherit from
-# their parent (scope + source + basis period). Cells are emitted scope/source-
-# null by the LLM and skipped by the figure-scope/source resolvers, so without
-# this propagation they'd be unscoped and the aggregator would drop them.
-_BREAKDOWN_CELLS = (
-    "female", "male", "sex_unknown", "children_0_17", "adults_18_59", "elderly_60plus",
-)
-_INHERITED_CELL_KEYS = (
+# SADD breakdown cells (ADR-0008). The cell names come straight from the schema
+# so there's one source of truth — adding/renaming a cell can't silently skip
+# propagation.
+_BREAKDOWN_CELLS: tuple[str, ...] = tuple(Disaggregation.model_fields)
+# A cell's scope + source ARE the parent's, so its NAME fields are overwritten
+# from the parent (a divergent cell name would contradict the inherited id).
+_INHERITED_OVERWRITE_KEYS = ("scope_location_name", "source_name")
+# The id + period fields are filled only when the cell left them null — cells
+# are emitted null and the figure-scope/source resolvers skip them, so this is
+# what actually scopes them; never clobber a value the cell did carry.
+_INHERITED_FILL_KEYS = (
     "scope_location_id", "source_id", "basis_period_start", "basis_period_end",
 )
 
@@ -547,32 +551,43 @@ def _propagate_breakdown_scope(merged: Any) -> int:
     """Copy each disaggregated figure's resolved scope/source/basis-period down
     into its SADD ``breakdown`` cells (ADR-0008 §2), so the cells share the
     parent's incident key and roll up (an unscoped cell is dropped by the
-    aggregator). Only fills a cell key that is still null — never clobbers a
-    value the cell carried. Returns the number of cells propagated (for logging).
+    aggregator). Reuses the shared ``_collect_numeric_fields`` walker (which
+    stops at a figure leaf — it does NOT descend into ``breakdown``), matching
+    the sibling resolvers, then fills each figure's own cells. Returns the number
+    of cells propagated (for logging).
     """
+    figures: list[dict] = []
+    _collect_numeric_fields(merged, figures)
+
     count = 0
-
-    def walk(obj: Any) -> None:
-        nonlocal count
-        if isinstance(obj, dict):
-            breakdown = obj.get("breakdown")
-            if isinstance(breakdown, dict) and "scope_location_name" in obj:
-                for cell_name in _BREAKDOWN_CELLS:
-                    cell = breakdown.get(cell_name)
-                    if not isinstance(cell, dict):
-                        continue
-                    for k in _INHERITED_CELL_KEYS:
-                        if obj.get(k) is not None and cell.get(k) is None:
-                            cell[k] = obj[k]
-                    count += 1
-                return  # a figure is a leaf for this walk; cells are handled here
-            for v in obj.values():
-                walk(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                walk(v)
-
-    walk(merged)
+    for fig in figures:
+        breakdown = fig.get("breakdown")
+        if not isinstance(breakdown, dict):
+            continue
+        total = fig.get("value")
+        for cell_name in _BREAKDOWN_CELLS:
+            cell = breakdown.get(cell_name)
+            if not isinstance(cell, dict):
+                continue
+            for k in _INHERITED_OVERWRITE_KEYS:
+                cell[k] = fig.get(k)
+            for k in _INHERITED_FILL_KEYS:
+                if fig.get(k) is not None and cell.get(k) is None:
+                    cell[k] = fig[k]
+            # A marginal larger than its own total is a likely extraction error
+            # (bad percentage→count, hallucinated cell) — surface it rather than
+            # ship a breakdown that reads as bigger than the whole.
+            cval = cell.get("value")
+            if (
+                isinstance(cval, (int, float))
+                and isinstance(total, (int, float))
+                and cval > total
+            ):
+                logger.warning(
+                    "[DATAPOINTS] SADD cell %s=%s exceeds its total %s (scope=%s) — likely extraction error",
+                    cell_name, cval, total, fig.get("scope_location_id"),
+                )
+            count += 1
     return count
 
 
