@@ -41,6 +41,13 @@ dependencies = [
     "shapely>=2.0", # geometry ops for population + grouping
     "numpy>=1.26", # raster/vector math
     "psycopg[binary]>=3.3.4",
+    # ── GX medallion POC (defs/dq_poc_idmc/) ──
+    "pandas>=2.2", # DataFrame batches the GX checks validate
+    # GX Core only, no Cloud. Pinned to the "Fluent" API line (>=1.0) —
+    # the docs/data-quality-ingestion-design.md §4 maturity-risk note is
+    # about exactly this 0.x->1.x rewrite, so the pin is deliberate, not
+    # incidental. Verified against 1.22.0 directly, not against 0.x docs.
+    "great-expectations>=1.22,<2",
 ]
 
 [dependency-groups]
