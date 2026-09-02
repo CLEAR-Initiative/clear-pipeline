@@ -230,3 +230,8 @@ evals/reports/
 .DS_Store
 
 data-source-specs
+
+# Slide decks generated alongside design docs — binary, not diffable, kept
+# out of the repo. The design docs themselves (docs/*.md) are the tracked
+# source of truth.
+*.pptx
