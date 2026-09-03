@@ -131,10 +131,13 @@ class Settings(BaseSettings):
     sentry_env: str = "development"
     log_level: str = "INFO"
 
-    # NOTE: the clear-pipeline `insights` per-Claude-call telemetry is intentionally
-    # NOT wired in the Dagster port — LLM calls go through providers/llm.py, which
-    # has no insights hook. Call-level telemetry is dropped for the signal pipeline;
-    # a per-run guardrail (below) bounds spend instead.
+    # Insights dashboard (clear-pipeline-insights): one row per LLM call, posted
+    # by providers/insights.py from the make_llm_provider wrapper. Empty token
+    # disables it. PIPELINE_ENV labels the run (dev / staging / prod); unset →
+    # local-<user>. Per-run guardrails (below) still bound spend independently.
+    insights_api_url: str = "https://clear-pipeline-insights.vercel.app"
+    insights_ingest_token: str = ""
+    pipeline_env: str = ""
 
     # Cost guardrail: a single classify_group drain run processes at most this many
     # signals (each grouped signal makes one rewrite LLM call). Prevents a runaway
