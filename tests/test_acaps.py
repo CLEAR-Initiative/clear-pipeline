@@ -1,6 +1,6 @@
 """Unit tests for the ACAPS seasonal-calendar blob builder (no network)."""
 
-from clear_context_pipeline.providers import acaps
+from clear_pipeline.providers import acaps
 
 
 def _entry(id_, iso, *, country_wide, event_type, adm1_names=None, months=None):

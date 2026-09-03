@@ -5,7 +5,7 @@ S3 instead of re-paying for it.
 
 from unittest.mock import MagicMock
 
-from clear_context_pipeline.defs.knowledgebase import enrich as en
+from clear_pipeline.defs.knowledgebase import enrich as en
 
 
 def _s3_returning(body: bytes) -> MagicMock:

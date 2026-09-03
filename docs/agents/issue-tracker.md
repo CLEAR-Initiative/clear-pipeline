@@ -76,7 +76,7 @@ Run `exponential tickets get <ticket-cuid> --json`. The output includes the tick
 
 ## GitHub Issues
 
-Not used for this repo. Issues are enabled on `CLEAR-Initiative/clear-context-pipeline` but empty — treat Exponential as the source of truth.
+Not used for this repo. Issues are enabled on `CLEAR-Initiative/clear-pipeline` but empty — treat Exponential as the source of truth.
 
 
 ## Wayfinding operations

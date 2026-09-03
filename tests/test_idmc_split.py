@@ -6,7 +6,7 @@ test_signals_ingest_drain.py's style.
 
 from unittest.mock import patch
 
-from clear_context_pipeline.providers.idmc import (
+from clear_pipeline.providers.idmc import (
     _classify_role,
     _content_hash,
     _kind_from_locations_accuracy,
@@ -48,7 +48,7 @@ def _parsed(**raw_overrides) -> dict:
     does before handing a record to a connector — never `_parse_event`'s raw
     output directly, that's what surfaces `locations_coordinates`/
     `locations_accuracy` at the top level."""
-    from clear_context_pipeline.providers.idmc import _parse_event
+    from clear_pipeline.providers.idmc import _parse_event
 
     result = _split_by_location(_parse_event(_raw(**raw_overrides)))[0]
     result["content_hash"] = _content_hash(result["raw"])
@@ -56,7 +56,7 @@ def _parsed(**raw_overrides) -> dict:
 
 
 def _parsed_from(raw: dict) -> dict:
-    from clear_context_pipeline.providers.idmc import _parse_event
+    from clear_pipeline.providers.idmc import _parse_event
 
     return _parse_event(raw)
 
@@ -318,10 +318,10 @@ def _promo(location_id=None, aborted_reason=None):
 def test_resolves_origin_id_using_name_and_coordinate():
     parsed = _parsed(locations_type="Origin")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo("loc-123"),
     ) as mock_promote, patch(
-        "clear_context_pipeline.providers.idmc.enrich_with_geoparser"
+        "clear_pipeline.providers.idmc.enrich_with_geoparser"
     ) as mock_geoparse:
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
@@ -342,9 +342,9 @@ def test_resolves_origin_id_using_name_and_coordinate():
 def test_resolves_destination_id():
     parsed = _parsed(locations_type="Destination")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo("loc-456"),
-    ), patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ), patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     assert input_data["destinationId"] == "loc-456"
@@ -354,9 +354,9 @@ def test_resolves_destination_id():
 def test_origin_and_destination_sets_both_ids():
     parsed = _parsed(locations_type="Origin and destination")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo("loc-789"),
-    ), patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ), patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     assert input_data["originId"] == "loc-789"
@@ -367,9 +367,9 @@ def test_origin_and_destination_sets_both_ids():
 def test_blank_locations_type_leaves_both_unset():
     parsed = _parsed(locations_type="")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo("loc-999"),
-    ), patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ), patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     assert "originId" not in input_data
@@ -383,10 +383,10 @@ def test_no_match_still_uses_origin_coordinate_for_lat_lng():
     # though promotion itself found no matching/creatable location.
     parsed = _parsed()
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo(None),
     ) as mock_promote, patch(
-        "clear_context_pipeline.providers.idmc.enrich_with_geoparser"
+        "clear_pipeline.providers.idmc.enrich_with_geoparser"
     ) as mock_geoparse:
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
@@ -403,9 +403,9 @@ def test_no_origin_role_falls_through_to_centroid_lat_lng():
     # falls back to the row's shared centroid.
     parsed = _parsed(locations_type="Destination")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo("loc-456"),
-    ), patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ), patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     assert input_data["lat"] == parsed["lat"] == 13.578933333333332
@@ -415,9 +415,9 @@ def test_no_origin_role_falls_through_to_centroid_lat_lng():
 def test_aborted_promotion_leaves_origin_destination_unset():
     parsed = _parsed(locations_type="Origin")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         return_value=_promo(None, aborted_reason="different_a2"),
-    ), patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ), patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     assert "originId" not in input_data
@@ -427,10 +427,10 @@ def test_aborted_promotion_leaves_origin_destination_unset():
 def test_promotion_exception_is_caught_and_falls_through():
     parsed = _parsed(locations_type="Origin")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         side_effect=RuntimeError("boom"),
     ), patch(
-        "clear_context_pipeline.providers.idmc.enrich_with_geoparser"
+        "clear_pipeline.providers.idmc.enrich_with_geoparser"
     ) as mock_geoparse:
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
@@ -446,8 +446,8 @@ def test_promotion_exception_is_caught_and_falls_through():
 def test_missing_coordinate_skips_promotion_attempt_entirely():
     parsed = _parsed(locations_coordinates="")
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4"
-    ) as mock_promote, patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4"
+    ) as mock_promote, patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     mock_promote.assert_not_called()
@@ -467,9 +467,9 @@ def test_pair_signal_resolves_both_ends_independently():
         return _promo(f"loc-{name}")
 
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         side_effect=fake_promote,
-    ) as mock_promote, patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ) as mock_promote, patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(split, source_id="src-1")
 
     assert mock_promote.call_count == 2
@@ -491,9 +491,9 @@ def test_pair_signal_one_end_unresolvable_still_sets_the_other():
         return _promo("loc-origin" if name == "Al Jazirah" else None)
 
     with patch(
-        "clear_context_pipeline.providers.idmc.find_or_create_landmark_l4",
+        "clear_pipeline.providers.idmc.find_or_create_landmark_l4",
         side_effect=fake_promote,
-    ), patch("clear_context_pipeline.providers.idmc.enrich_with_geoparser"):
+    ), patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
         input_data = build_idmc_signal_input(split, source_id="src-1")
 
     assert input_data["originId"] == "loc-origin"

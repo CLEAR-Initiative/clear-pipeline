@@ -7,7 +7,7 @@ projection also has to mirror the canonical nesting so clear-api's deep-merge
 overlay lines up by key/index.
 """
 
-from clear_context_pipeline.providers.situation_prose import (
+from clear_pipeline.providers.situation_prose import (
     PROSE_COMPONENTS,
     extract_situation_prose,
 )

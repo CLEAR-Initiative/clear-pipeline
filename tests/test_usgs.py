@@ -4,7 +4,7 @@ Deterministic — http_retry is monkeypatched, no network. Covers the slim
 transform, has_shakemap gating, bbox padding, and build_seismic_collection
 (reduction stats + ShakeMap attach + serve-side age/stale omission)."""
 
-from clear_context_pipeline.providers import usgs
+from clear_pipeline.providers import usgs
 
 
 def _fat(event_id="us1", *, mag=6.1, types=",origin,shakemap,", coords=(10.0, 20.0, 35.5)):

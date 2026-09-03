@@ -8,7 +8,7 @@ and skipping figures with no usable transcription.
 import io
 import json
 
-from clear_context_pipeline.defs.knowledgebase.upsert import (
+from clear_pipeline.defs.knowledgebase.upsert import (
     FIGURE_CHUNK_INDEX_BASE,
     _figure_kb_rows,
 )

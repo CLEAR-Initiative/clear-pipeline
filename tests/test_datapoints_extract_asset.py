@@ -21,10 +21,10 @@ from unittest.mock import MagicMock, patch
 import dagster as dg
 import pytest
 
-from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
+from clear_pipeline.defs.knowledgebase.datapoints_extract import (
     reliefweb_weekly_datapoints,
 )
-from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     AccessAndIncidents,
     Casualties,
     CasualtyDisaggregation,
@@ -186,11 +186,11 @@ def _datapoints_not_already_extracted(monkeypatch):
     capability preflight to 'deployed', so the extraction tests exercise the
     full path. Specific tests override these."""
     monkeypatch.setattr(
-        "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
+        "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
         lambda report_id, *, schema_version: False,
     )
     monkeypatch.setattr(
-        "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
+        "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
         lambda: True,
     )
 
@@ -201,18 +201,18 @@ class TestExtractionAsset:
         # into a single data blob and upserts once.
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
                 return_value=_mock_s3_client(_canned_doc_text_body()),
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
                 return_value="loc-kordofan",
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
             ) as mock_upsert,
         ):
             _configure_llm_mock(mock_make_llm)
@@ -267,18 +267,18 @@ class TestExtractionAsset:
         # no LLM extraction, no upsert, and the summary marks it reused.
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
                 return_value=_mock_s3_client(_canned_doc_text_body()),
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.report_datapoints_exist",
                 return_value=True,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
             ) as mock_upsert,
         ):
             _configure_llm_mock(mock_make_llm)
@@ -297,18 +297,18 @@ class TestExtractionAsset:
         # report after paying for its 6 LLM calls and finish green with 0 data.
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
                 return_value=_mock_s3_client(_canned_doc_text_body()),
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
                 return_value=False,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
             ) as mock_upsert,
         ):
             _configure_llm_mock(mock_make_llm)
@@ -325,10 +325,10 @@ class TestExtractionAsset:
         # (and an empty week must not fail even if clear-api is down).
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.supports_source_attribution",
                 side_effect=AssertionError("preflight ran on an empty batch"),
             ),
         ):
@@ -349,18 +349,18 @@ class TestExtractionAsset:
 
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
                 return_value=_mock_s3_client(_canned_doc_text_body()),
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
                 return_value={
                     "reportId": PDF_TEXT_SUMMARY["report_id"],
                     "schemaVersion": "v1",
@@ -392,14 +392,14 @@ class TestExtractionAsset:
         # version's aggregation).
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
                 return_value=_mock_s3_client(_canned_doc_text_body()),
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
             ) as mock_upsert,
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
@@ -420,10 +420,10 @@ class TestExtractionAsset:
         os.environ["KB_SKIP_CONTEXTUALIZATION"] = "1"
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
             ) as mock_upsert,
         ):
             result = reliefweb_weekly_datapoints(
@@ -436,7 +436,7 @@ class TestExtractionAsset:
 
     def test_empty_upstream_produces_no_work(self):
         with patch(
-            "clear_context_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
+            "clear_pipeline.defs.knowledgebase.datapoints_extract.make_llm_provider",
         ) as mock_make_llm:
             # `.model` must be a string for the metadata write at the
             # end of the asset — it's still emitted even when no

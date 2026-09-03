@@ -4,7 +4,7 @@ Deterministic — no PDF rendering (that needs a raster backend + a real page).
 Covers the content-hash dedup key and the S3 key scheme, which are pure.
 """
 
-from clear_context_pipeline.providers.pdf_render import figure_s3_key, image_hash
+from clear_pipeline.providers.pdf_render import figure_s3_key, image_hash
 
 
 def test_image_hash_is_stable_and_content_addressed():

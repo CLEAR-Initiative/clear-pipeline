@@ -1,7 +1,7 @@
 # Where the webserver + daemon find user code. Baked into DAGSTER_HOME.
 #
 # In-process module load (NOT a separate `dagster api grpc` sidecar): the
-# webserver and daemon each import `clear_context_pipeline.definitions`
+# webserver and daemon each import `clear_pipeline.definitions`
 # directly. This is the simplest prod shape on Railway, whose private network
 # is IPv6-only — a grpc code-server bound on 0.0.0.0 (IPv4) isn't reachable
 # across services there, so we avoid the cross-service hop entirely.
@@ -13,5 +13,5 @@
 # this file; this baked copy is used where nothing is mounted.
 load_from:
   - python_module:
-      module_name: clear_context_pipeline.definitions
-      location_name: clear-context-pipeline
+      module_name: clear_pipeline.definitions
+      location_name: clear-pipeline

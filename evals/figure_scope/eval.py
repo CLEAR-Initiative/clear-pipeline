@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[2]
 load_dotenv(REPO / ".env")
 sys.path.insert(0, str(REPO / "src"))
 
-from clear_context_pipeline.providers.llm import make_llm_provider  # noqa: E402
+from clear_pipeline.providers.llm import make_llm_provider  # noqa: E402
 
 
 # ── The model's answer shape ────────────────────────────────────────

@@ -29,7 +29,7 @@ filename stem.
 
 ## 2. Configure
 
-- `src/clear_context_pipeline/defs/evals/candidates.py` — the candidate list,
+- `src/clear_pipeline/defs/evals/candidates.py` — the candidate list,
   ordered by parameter size. **Re-verify each slug** (id, `structured_outputs`
   support, price) against OpenRouter's live catalog before a run — the catalog
   moves: <https://openrouter.ai/models>.

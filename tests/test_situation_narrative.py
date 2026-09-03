@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clear_context_pipeline.defs.situation.narrative import (
+from clear_pipeline.defs.situation.narrative import (
     _AISummaryLLM,
     _ContextRisksLLM,
     _DisplacementLLM,
@@ -26,7 +26,7 @@ from clear_context_pipeline.defs.situation.narrative import (
     generate_displacement_narrative,
     generate_hazards_and_vulnerabilities,
 )
-from clear_context_pipeline.defs.situation.rag_helper import RAGContext
+from clear_pipeline.defs.situation.rag_helper import RAGContext
 
 
 def _fake_rag_context(
@@ -59,7 +59,7 @@ class TestGenerateAISummary:
         # zero-evidence prose invites hallucination. Return the
         # empty default and let the dashboard render an empty state.
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=0),
         ):
             llm = MagicMock()
@@ -73,7 +73,7 @@ class TestGenerateAISummary:
 
     def test_happy_path_populates_text_and_source_ids(self):
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=3, report_ids=["r-a", "r-b", "r-c"]),
         ):
             llm = MagicMock()
@@ -95,7 +95,7 @@ class TestGenerateAISummary:
         # the caller (`generate_and_upsert_for_country_year`) still
         # ships datapoints + sources + the other narrative sections.
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=2),
         ):
             llm = MagicMock()
@@ -116,7 +116,7 @@ class TestGenerateAISummary:
 class TestGenerateContextRisks:
     def test_empty_rag_returns_empty_default(self):
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=0),
         ):
             llm = MagicMock()
@@ -134,7 +134,7 @@ class TestGenerateContextRisks:
         # One RAG search feeds all 8 domains. Each domain's
         # `source_report_ids` equals the shared RAG contribution list.
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=4, report_ids=["r-1", "r-2"]),
         ):
             llm = MagicMock()
@@ -163,7 +163,7 @@ class TestGenerateContextRisks:
 
     def test_llm_error_returns_empty(self):
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=2),
         ):
             llm = MagicMock()
@@ -195,7 +195,7 @@ class TestGenerateContextRisks:
 class TestGenerateHazardsAndVulnerabilities:
     def test_empty_rag_returns_empty_default(self):
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=0),
         ):
             llm = MagicMock()
@@ -212,7 +212,7 @@ class TestGenerateHazardsAndVulnerabilities:
         # and attributes each bullet to ONLY the reports it cited (not the
         # coarse union), and builds the container's report_id -> [lines] map.
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=2, report_ids=["r-x", "r-y"]),
         ):
             llm = MagicMock()
@@ -245,7 +245,7 @@ class TestGenerateHazardsAndVulnerabilities:
 class TestGenerateDisplacementNarrative:
     def test_empty_rag_returns_empty_default(self):
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=0),
         ):
             llm = MagicMock()
@@ -262,7 +262,7 @@ class TestGenerateDisplacementNarrative:
         # Phase C — the list comprehension must close cleanly with `]`.
         # Bullets carry inline [R1] markers → resolved per-bullet.
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=3, report_ids=["r-1"]),
         ):
             llm = MagicMock()
@@ -283,7 +283,7 @@ class TestGenerateDisplacementNarrative:
 
     def test_llm_error_returns_empty(self):
         with patch(
-            "clear_context_pipeline.defs.situation.narrative.fetch_rag_context",
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
             return_value=_fake_rag_context(hits=2),
         ):
             llm = MagicMock()

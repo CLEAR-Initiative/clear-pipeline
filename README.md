@@ -1,15 +1,4 @@
-# clear-context-pipeline
-
-> ⚠️ **Status: POC — experimentation phase.**
-> This project is a proof-of-concept exploring structured humanitarian
-> datapoint extraction, vector RAG, and pre-computed aggregations for
-> the situation-analysis dashboard. APIs, schemas, prompts, and
-> aggregation rules are all expected to change as we learn from real
-> data. Not production-ready — do not build durable integrations
-> against its outputs yet, and expect breaking changes between
-> iterations. Schemas are versioned (`schemaVersion` on
-> `report_datapoints` / `aggregated_datapoints`) so future stable
-> releases can migrate cleanly.
+# clear-pipeline
 
 Dagster project that builds the CLEAR knowledge base from ReliefWeb
 PDFs (weekly cron) and one-off manual document uploads. Ingest chain:
