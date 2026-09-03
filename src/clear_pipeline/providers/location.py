@@ -4,6 +4,7 @@ import logging
 
 from pydantic import BaseModel
 
+from clear_pipeline.providers import insights
 from clear_pipeline.providers.llm import make_llm_provider
 from clear_pipeline.providers.clear_api import get_locations
 
@@ -128,9 +129,10 @@ def resolve_signal_location(
     prompt = _build_prompt(title, description, dataminr_location_name, locations)
 
     try:
-        result = make_llm_provider("signal").complete_structured(
-            system=SYSTEM_PROMPT, user=prompt, schema=_LocationResolution
-        )
+        with insights.scope(stage="signal.location", prompt_version=LOCATION_PROMPT_VERSION):
+            result = make_llm_provider("signal").complete_structured(
+                system=SYSTEM_PROMPT, user=prompt, schema=_LocationResolution
+            )
 
         # Validate returned IDs against known locations
         known_ids = {loc["id"] for loc in locations}

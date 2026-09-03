@@ -59,6 +59,7 @@ from typing import Any, Literal, Protocol, TypeVar
 import anthropic
 import openai
 from pydantic import BaseModel, ValidationError
+from clear_pipeline.providers import insights
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -307,14 +308,19 @@ class AnthropicProvider:
             messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
 
+        usage = insights.usage_from_anthropic(response.usage)
         for block in response.content:
             if block.type == "tool_use" and block.name == tool["name"]:
+                insights.capture(
+                    model=self.model, raw_response=json.dumps(block.input), usage=usage,
+                )
                 return schema.model_validate(block.input)
 
         # Fallback: the model returned free text instead of the tool
         # (extremely rare with `tool_choice` forcing the tool). Try to
         # parse as raw JSON so we don't drop the call entirely.
         text = "".join(getattr(b, "text", "") for b in response.content).strip()
+        insights.capture(model=self.model, raw_response=text, usage=usage)
         return schema.model_validate_json(text)
 
     @retry(
@@ -348,6 +354,10 @@ class AnthropicProvider:
             messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
         text = _strip_code_fence("".join(getattr(b, "text", "") for b in response.content))
+        insights.capture(
+            model=self.model, raw_response=text,
+            usage=insights.usage_from_anthropic(response.usage),
+        )
         if not text:
             raise EmptyResponseError(f"empty text response from {self.model}")
         return text
@@ -523,6 +533,9 @@ class OpenAICompatibleProvider:
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         text = _strip_code_fence(raw.choices[0].message.content or "")
+        insights.capture(
+            model=self.model, raw_response=text, usage=insights.usage_from_openai(raw.usage),
+        )
         try:
             return schema.model_validate_json(text)
         except (ValidationError, json.JSONDecodeError) as exc:
@@ -551,6 +564,10 @@ class OpenAICompatibleProvider:
                 response_format=response_format,  # type: ignore[arg-type]
             )
             repaired_text = _strip_code_fence(repair.choices[0].message.content or "")
+            insights.capture(
+                model=self.model, raw_response=repaired_text,
+                usage=insights.usage_from_openai(repair.usage),
+            )
             return schema.model_validate_json(repaired_text)
 
     @retry(
@@ -598,6 +615,9 @@ class OpenAICompatibleProvider:
         # FAILURE, not a successful "" — returning it would silently poison this
         # chunk's context embedding, so raise to trigger the fallback + breaker.
         text = _strip_code_fence(raw.choices[0].message.content or "")
+        insights.capture(
+            model=self.model, raw_response=text, usage=insights.usage_from_openai(raw.usage),
+        )
         if not text:
             raise EmptyResponseError(f"empty text response from {self.model}")
         return text
@@ -809,5 +829,5 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         logger.info(
             "[LLM] role=%s primary=%s with fallback=%s", role, model, fb_model,
         )
-        return FallbackProvider(primary, fallback)
-    return primary
+        return insights.wrap(FallbackProvider(primary, fallback))
+    return insights.wrap(primary)
