@@ -14,7 +14,7 @@ from unittest.mock import patch
 import dagster as dg
 import pytest
 
-from clear_context_pipeline.defs.knowledgebase.datapoints_aggregate import (
+from clear_pipeline.defs.knowledgebase.datapoints_aggregate import (
     reliefweb_weekly_datapoint_aggregations,
 )
 
@@ -35,7 +35,7 @@ class TestAggregationAsset:
         # the first-run check; stub it so the window-selection tests don't need a
         # live clear-api. (None would also work — it just means an unscoped call.)
         with patch(
-            "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.resolve_country_location_id_by_iso3",
+            "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.resolve_country_location_id_by_iso3",
             return_value="loc-sdn",
         ):
             yield
@@ -45,7 +45,7 @@ class TestAggregationAsset:
         # nothing to trigger a refresh over — bail early rather than
         # calling clear-api and racking up a no-op mutation.
         with patch(
-            "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+            "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
         ) as mock_refresh:
             result = reliefweb_weekly_datapoint_aggregations(
                 _build_op_context(), reliefweb_weekly_datapoints=[],
@@ -63,11 +63,11 @@ class TestAggregationAsset:
 
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
                 return_value=False,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
             ) as mock_refresh,
         ):
             mock_refresh.return_value = {
@@ -94,14 +94,14 @@ class TestAggregationAsset:
         os.environ.pop("KB_AGGREGATION_INITIAL_LOOKBACK_DAYS", None)
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.resolve_country_location_id_by_iso3",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.resolve_country_location_id_by_iso3",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
             ) as mock_has,
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
             ) as mock_refresh,
         ):
             mock_refresh.return_value = {
@@ -123,11 +123,11 @@ class TestAggregationAsset:
 
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
                 return_value=True,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
             ) as mock_refresh,
         ):
             mock_refresh.return_value = {
@@ -151,11 +151,11 @@ class TestAggregationAsset:
         # since aggregation is idempotent.
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
                 side_effect=RuntimeError("clear-api 500"),
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
             ) as mock_refresh,
         ):
             mock_refresh.return_value = {
@@ -179,11 +179,11 @@ class TestAggregationAsset:
         os.environ.pop("KB_AGGREGATION_MAX_RETRO_DAYS", None)
         with (
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
                 return_value=True,
             ),
             patch(
-                "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+                "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
             ) as mock_refresh,
         ):
             mock_refresh.return_value = {
@@ -209,11 +209,11 @@ class TestAggregationAsset:
         try:
             with (
                 patch(
-                    "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
+                    "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.has_aggregated_datapoints",
                     return_value=True,
                 ),
                 patch(
-                    "clear_context_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
+                    "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
                 ) as mock_refresh,
             ):
                 mock_refresh.return_value = {

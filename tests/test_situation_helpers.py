@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from clear_context_pipeline.defs.situation.generate import (
+from clear_pipeline.defs.situation.generate import (
     _build_datapoints,
     _build_sources,
     _calendar_year_window,
@@ -25,12 +25,12 @@ from clear_context_pipeline.defs.situation.generate import (
     _previous_window,
     _resolve_comparison,
 )
-from clear_context_pipeline.defs.situation.rag_helper import (
+from clear_pipeline.defs.situation.rag_helper import (
     _format_hits_for_prompt,
     _pages_range,
     fetch_rag_context,
 )
-from clear_context_pipeline.defs.situation.schemas import Source
+from clear_pipeline.defs.situation.schemas import Source
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ class TestResolveComparison:
 
     def _patch_get(self, side_effect):
         return patch(
-            "clear_context_pipeline.defs.situation.generate.clear_api.get_situation_analysis",
+            "clear_pipeline.defs.situation.generate.clear_api.get_situation_analysis",
             side_effect=side_effect,
         )
 
@@ -333,7 +333,7 @@ class TestFetchReportMeta:
     def test_returns_empty_on_no_ids(self):
         # No GraphQL calls for the empty case.
         with patch(
-            "clear_context_pipeline.providers.clear_api._execute",
+            "clear_pipeline.providers.clear_api._execute",
         ) as mock_execute:
             result = _fetch_report_meta([])
         assert result == {}
@@ -354,7 +354,7 @@ class TestFetchReportMeta:
                 },
             }
         with patch(
-            "clear_context_pipeline.providers.clear_api._execute",
+            "clear_pipeline.providers.clear_api._execute",
             side_effect=side_effect,
         ):
             result = _fetch_report_meta(["good", "bad", "another"])
@@ -370,7 +370,7 @@ class TestFetchReportMeta:
 class TestFetchRagContext:
     def test_empty_hits_returns_empty_context(self):
         with patch(
-            "clear_context_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
+            "clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
             return_value=[],
         ):
             ctx = fetch_rag_context(query="anything")
@@ -387,7 +387,7 @@ class TestFetchRagContext:
             {"reportId": "r-1", "reportTitle": "T1 again", "publishedAt": "2026-01", "pageStart": 5, "pageEnd": 5, "chunkText": "c"},
         ]
         with patch(
-            "clear_context_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
+            "clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
             return_value=hits,
         ):
             ctx = fetch_rag_context(query="anything")
@@ -399,7 +399,7 @@ class TestFetchRagContext:
         # analysis - the caller degrades to "no evidence for this
         # component" and moves on.
         with patch(
-            "clear_context_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
+            "clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
             side_effect=RuntimeError("clear-api 500"),
         ):
             ctx = fetch_rag_context(query="anything")
@@ -408,7 +408,7 @@ class TestFetchRagContext:
 
     def test_forwards_filters_to_underlying_search(self):
         with patch(
-            "clear_context_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
+            "clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase",
         ) as mock_search:
             mock_search.return_value = []
             fetch_rag_context(

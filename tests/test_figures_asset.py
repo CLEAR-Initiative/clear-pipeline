@@ -4,11 +4,11 @@ Deterministic — no S3, no LLM, no PDF. Covers transcription-text flattening
 (fed to the parameter extractor) and the kind fallback.
 """
 
-from clear_context_pipeline.defs.knowledgebase.figures import (
+from clear_pipeline.defs.knowledgebase.figures import (
     _transcription_text,
     fig_kind_from_hint,
 )
-from clear_context_pipeline.providers.vision import (
+from clear_pipeline.providers.vision import (
     FigureGroup,
     FigureRow,
     FigureTranscription,

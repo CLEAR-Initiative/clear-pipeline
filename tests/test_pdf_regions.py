@@ -5,7 +5,7 @@ Deterministic — synthetic page objects, no real PDF. Covers the whole-page
 logo area filter, and the vector-only fallback.
 """
 
-from clear_context_pipeline.providers.pdf_regions import (
+from clear_pipeline.providers.pdf_regions import (
     FigureRegion,
     detect_figure_regions,
     pad_bbox,

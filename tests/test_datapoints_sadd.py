@@ -8,10 +8,10 @@ aggregator would drop the cells as unscoped).
 
 import json
 
-from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
+from clear_pipeline.defs.knowledgebase.datapoints_extract import (
     _propagate_breakdown_scope,
 )
-from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     DisaggregatedNumericField,
     Disaggregation,
     Displacement,

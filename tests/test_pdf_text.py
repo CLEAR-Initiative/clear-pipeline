@@ -11,8 +11,8 @@ These cover the pure helpers without touching Dagster/S3:
 
 from unittest.mock import MagicMock
 
-from clear_context_pipeline.defs.knowledgebase import pdf_text as pt
-from clear_context_pipeline.defs.knowledgebase._pdf_extract import extract_pages_pypdf
+from clear_pipeline.defs.knowledgebase import pdf_text as pt
+from clear_pipeline.defs.knowledgebase._pdf_extract import extract_pages_pypdf
 
 # A minimal one-page PDF with the text "Hello CLEAR".
 _SAMPLE_PDF = (

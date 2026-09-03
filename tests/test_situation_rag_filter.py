@@ -8,10 +8,10 @@ OTHER countries in the shared KB. Fix: thread `country_id` → the
 
 from unittest.mock import patch
 
-from clear_context_pipeline.defs.situation import rag_helper
+from clear_pipeline.defs.situation import rag_helper
 
 
-def _capture(monkey_target="clear_context_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase"):
+def _capture(monkey_target="clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase"):
     return patch(monkey_target, return_value=[])
 
 

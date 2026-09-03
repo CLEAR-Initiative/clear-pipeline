@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clear_context_pipeline.defs.crisis import enrich
-from clear_context_pipeline.defs.crisis.enrich import (
+from clear_pipeline.defs.crisis import enrich
+from clear_pipeline.defs.crisis.enrich import (
     EMPTY,
     ENRICHED,
     collect_district_ids,
@@ -28,7 +28,7 @@ from clear_context_pipeline.defs.crisis.enrich import (
     enrich_one_crisis,
     resolve_country_id,
 )
-from clear_context_pipeline.defs.crisis.schemas import (
+from clear_pipeline.defs.crisis.schemas import (
     NEEDS_SECTORS,
     CrisisNarrative,
     CrisisNeedsAnalysis,

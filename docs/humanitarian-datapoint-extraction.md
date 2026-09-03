@@ -593,7 +593,7 @@ This lets the taxonomy evolve without invalidating the whole corpus.
 
 ## 8. Integration Points
 
-### 8.1 dagster-quickstart / clear-context-pipeline
+### 8.1 dagster-quickstart / clear-pipeline
 
 Two new assets, downstream of the existing `reliefweb_weekly_pdf_text`:
 

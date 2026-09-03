@@ -18,13 +18,13 @@ from unittest.mock import MagicMock, patch
 import dagster as dg
 import pytest
 
-from clear_context_pipeline.defs.situation.generate import (
+from clear_pipeline.defs.situation.generate import (
     _build_datapoints,
     generate_and_upsert_for_country_month,
     generate_and_upsert_for_country_year,
     weekly_situation_analyses,
 )
-from clear_context_pipeline.defs.situation.schemas import (
+from clear_pipeline.defs.situation.schemas import (
     HazardsAndVulnerabilities,
     ContextRisks,
     AISummary,
@@ -68,27 +68,27 @@ def _patch_narrative_generators(stub_source_ids: list[str] | None = None):
     return {
         "generate_ai_summary":
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_ai_summary",
+                "clear_pipeline.defs.situation.generate.generate_ai_summary",
                 return_value=AISummary(text="Sample summary", source_report_ids=src_ids),
             ),
         "generate_context_risks":
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_context_risks",
+                "clear_pipeline.defs.situation.generate.generate_context_risks",
                 return_value=ContextRisks(),
             ),
         "generate_hazards_and_vulnerabilities":
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
+                "clear_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
                 return_value=HazardsAndVulnerabilities(),
             ),
         "generate_displacement_narrative":
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_displacement_narrative",
+                "clear_pipeline.defs.situation.generate.generate_displacement_narrative",
                 return_value=DisplacementNarrative(),
             ),
         "generate_all_sectors":
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_all_sectors",
+                "clear_pipeline.defs.situation.generate.generate_all_sectors",
                 return_value=Sectors(),
             ),
     }
@@ -100,11 +100,11 @@ class TestGenerateAndUpsertForCountryYear:
         # skips cleanly rather than upserting an orphan row.
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
             ) as mock_upsert,
         ):
             result = generate_and_upsert_for_country_year(
@@ -120,22 +120,22 @@ class TestGenerateAndUpsertForCountryYear:
         patches = _patch_narrative_generators()
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 side_effect=RuntimeError("clear-api 500"),
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
                 return_value={
                     "situationAnalysisId": "sit-1",
                     "countryLocationId": "sudan-a0",
@@ -173,19 +173,19 @@ class TestGenerateAndUpsertForCountryYear:
         patches = _patch_narrative_generators()
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ),
             patches["generate_ai_summary"],
             patches["generate_context_risks"],
@@ -193,7 +193,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
             ) as mock_upsert,
         ):
             generate_and_upsert_for_country_year(country_name="Sudan", year=2026)
@@ -211,42 +211,42 @@ class TestGenerateAndUpsertForCountryYear:
         # previous row current.
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_ai_summary",
+                "clear_pipeline.defs.situation.generate.generate_ai_summary",
                 return_value=AISummary(),  # empty — no text
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_context_risks",
+                "clear_pipeline.defs.situation.generate.generate_context_risks",
                 return_value=ContextRisks(),
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
+                "clear_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
                 return_value=HazardsAndVulnerabilities(),
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_displacement_narrative",
+                "clear_pipeline.defs.situation.generate.generate_displacement_narrative",
                 return_value=DisplacementNarrative(),
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_all_sectors",
+                "clear_pipeline.defs.situation.generate.generate_all_sectors",
                 return_value=Sectors(),
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
             ) as mock_upsert,
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
@@ -262,19 +262,19 @@ class TestGenerateAndUpsertForCountryYear:
         os.environ["SITUATION_SKIP_NARRATIVE"] = "1"
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
                 return_value={
                     "situationAnalysisId": "sit-det",
                     "countryLocationId": "sudan-a0",
@@ -295,19 +295,19 @@ class TestGenerateAndUpsertForCountryYear:
         patches = _patch_narrative_generators()
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=None,
             ) as mock_agg,
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ),
             patches["generate_ai_summary"],
             patches["generate_context_risks"],
@@ -315,7 +315,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
             ) as mock_upsert,
         ):
             generate_and_upsert_for_country_month(
@@ -337,22 +337,22 @@ class TestGenerateAndUpsertForCountryYear:
         os.environ["SITUATION_SKIP_NARRATIVE"] = "1"
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=AGGREGATED_STUB,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
                 return_value={
                     "situationAnalysisId": "sit-2",
                     "countryLocationId": "sudan-a0",
@@ -388,22 +388,22 @@ class TestGenerateAndUpsertForCountryYear:
         patches = _patch_narrative_generators(stub_source_ids=["r-2", "r-4"])
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=AGGREGATED_STUB,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value=report_meta,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
                 return_value={
                     "situationAnalysisId": "sit-3",
                     "countryLocationId": "sudan-a0",
@@ -460,25 +460,25 @@ class TestGenerateAndUpsertForCountryYear:
         # 4xx from clear-api on the situation upsert - bad payload
         # shape. Log, return None, don't retry.
         patches = _patch_narrative_generators()
-        from clear_context_pipeline.providers.clear_api import ClearApiError
+        from clear_pipeline.providers.clear_api import ClearApiError
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
+                "clear_pipeline.defs.situation.generate.clear_api.resolve_country_location_id",
                 return_value="sudan-a0",
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
+                "clear_pipeline.defs.situation.generate.clear_api.get_aggregated_datapoint",
                 return_value=AGGREGATED_STUB,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate._fetch_report_meta",
+                "clear_pipeline.defs.situation.generate._fetch_report_meta",
                 return_value={},
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.make_llm_provider",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
                 side_effect=ClearApiError("400 bad request"),
             ),
             patches["generate_ai_summary"],
@@ -504,14 +504,14 @@ class TestWeeklySituationAnalysesAsset:
         # Partition `sdn` → resolves to "Sudan" → one yearly + one monthly call.
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
+                "clear_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
                 return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": None}],
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
+                "clear_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
             ) as mock_year,
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_month",
+                "clear_pipeline.defs.situation.generate.generate_and_upsert_for_country_month",
             ) as mock_month,
         ):
             mock_year.return_value = {
@@ -536,7 +536,7 @@ class TestWeeklySituationAnalysesAsset:
         # A partition iso3 not in pipelineCountries can't resolve a name.
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
+                "clear_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
                 return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": None}],
             ),
             pytest.raises(dg.Failure),
@@ -549,15 +549,15 @@ class TestWeeklySituationAnalysesAsset:
         # keeps going and omits the country from the summary list.
         with (
             patch(
-                "clear_context_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
+                "clear_pipeline.defs.situation.generate.clear_api.get_pipeline_countries",
                 return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": None}],
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
+                "clear_pipeline.defs.situation.generate.generate_and_upsert_for_country_year",
                 return_value=None,
             ),
             patch(
-                "clear_context_pipeline.defs.situation.generate.generate_and_upsert_for_country_month",
+                "clear_pipeline.defs.situation.generate.generate_and_upsert_for_country_month",
                 return_value=None,
             ),
         ):

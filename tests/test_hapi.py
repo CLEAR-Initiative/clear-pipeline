@@ -2,7 +2,7 @@
 
 import pytest
 
-from clear_context_pipeline.providers import hapi
+from clear_pipeline.providers import hapi
 
 
 def test_app_identifier_required_and_trimmed(monkeypatch):

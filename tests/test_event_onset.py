@@ -6,7 +6,7 @@ long-past background mentions), earliest-wins, and the earliest_onset_iso helper
 the pipeline uses to keep an event's onset at the earliest across its signals.
 """
 
-from clear_context_pipeline.providers.signal import (
+from clear_pipeline.providers.signal import (
     earliest_onset_iso,
     extract_event_start_from_text,
 )

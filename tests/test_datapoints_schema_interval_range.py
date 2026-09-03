@@ -5,7 +5,7 @@ and an optional figure-level basis_period. `value` stays the headline point; the
 range defaults to it for an exact figure so downstream is unaffected.
 """
 
-from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION,
     NumericField,
 )

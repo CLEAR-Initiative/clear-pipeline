@@ -16,11 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir uv
 
 # Copy the metadata + source layout hatchling needs BEFORE `uv pip install`
-# runs. The build backend has `packages = ["src/clear_context_pipeline"]`
+# runs. The build backend has `packages = ["src/clear_pipeline"]`
 # in pyproject.toml, so `src/` must exist on disk when the wheel is built
 # — otherwise hatchling silently produces a wheel containing pyproject
 # metadata only, the package is missing at runtime, and Dagster's
-# gRPC server fails with `ModuleNotFoundError: clear_context_pipeline`.
+# gRPC server fails with `ModuleNotFoundError: clear_pipeline`.
 #
 # Layer-cache trick: pyproject + uv.lock + src/ change at different
 # cadences. Splitting these COPYs means a source-only change only

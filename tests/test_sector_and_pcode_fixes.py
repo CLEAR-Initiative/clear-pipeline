@@ -2,9 +2,9 @@
 
 from unittest.mock import patch
 
-from clear_context_pipeline.defs.knowledgebase.enrich import ExtractedParameters
-from clear_context_pipeline.providers import clear_api
-from clear_context_pipeline.providers.llm import _to_strict_json_schema
+from clear_pipeline.defs.knowledgebase.enrich import ExtractedParameters
+from clear_pipeline.providers import clear_api
+from clear_pipeline.providers.llm import _to_strict_json_schema
 
 
 # ── strict-schema transform: make Pydantic schemas OpenAI strict-valid ───────
@@ -69,11 +69,11 @@ def test_need_sectors_empty_default():
 def test_resolve_by_iso3_uses_pcode():
     with (
         patch(
-            "clear_context_pipeline.providers.clear_api.get_pipeline_countries",
+            "clear_pipeline.providers.clear_api.get_pipeline_countries",
             return_value=[{"name": "Venezuela (Bolivarian Republic of)", "iso3": "VEN", "pcode": "VE"}],
         ),
         patch(
-            "clear_context_pipeline.providers.clear_api.resolve_location",
+            "clear_pipeline.providers.clear_api.resolve_location",
             return_value="loc-ven",
         ) as mock_resolve,
     ):
@@ -85,7 +85,7 @@ def test_resolve_by_iso3_uses_pcode():
 
 def test_resolve_by_iso3_unknown_country_returns_none():
     with patch(
-        "clear_context_pipeline.providers.clear_api.get_pipeline_countries",
+        "clear_pipeline.providers.clear_api.get_pipeline_countries",
         return_value=[{"name": "Sudan", "iso3": "SDN", "pcode": "SD"}],
     ):
         assert clear_api.resolve_country_location_id_by_iso3("xxx") is None

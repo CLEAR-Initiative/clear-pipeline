@@ -9,8 +9,8 @@ classify_group drain-loop control flow, and the translation-hash helper.
 
 from unittest.mock import MagicMock, patch
 
-from clear_context_pipeline.defs.signals import factory, lake, stages
-from clear_context_pipeline.defs.signals.connectors import (
+from clear_pipeline.defs.signals import factory, lake, stages
+from clear_pipeline.defs.signals.connectors import (
     CONNECTORS,
     CONNECTORS_BY_SOURCE,
     DRAINED_SOURCES,
@@ -22,7 +22,7 @@ from clear_context_pipeline.defs.signals.connectors import (
     ManualConnector,
     SignalSource,
 )
-from clear_context_pipeline.providers.translation_hash import (
+from clear_pipeline.providers.translation_hash import (
     HASH_FIELDS,
     compute_source_hashes,
     stale_fields,
@@ -241,7 +241,7 @@ def test_drain_marks_failed_after_max_attempts_and_keeps_going():
 # ── translate drain — no repeated LLM calls on a stuck entity ────────────────
 
 def test_translate_unparseable_entity_invoked_once_per_run():
-    from clear_context_pipeline.providers import translate as tp
+    from clear_pipeline.providers import translate as tp
 
     calls = {"n": 0}
 
@@ -278,7 +278,7 @@ def test_translate_unknown_entity_type_is_dropped():
 # ── single-inference: group_signal reuses classify_locally's prediction ──────
 
 def test_classify_locally_carries_taxonomy_for_group_reuse():
-    from clear_context_pipeline.providers.classify import SignalClassification, classify_locally
+    from clear_pipeline.providers.classify import SignalClassification, classify_locally
 
     # group_signal reads glide (disaster_types[0]) + type_level_2 off the
     # classification instead of re-running the model, so classify_locally must

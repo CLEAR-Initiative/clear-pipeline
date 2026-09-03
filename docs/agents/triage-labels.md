@@ -28,4 +28,4 @@ Exponential does have a separate `labels` concept (`exponential labels --help`) 
 
 ## Note on GitHub labels
 
-`CLEAR-Initiative/clear-context-pipeline` carries GitHub's default label set (`bug`, `enhancement`, `wontfix`, …). Those are unused — GitHub Issues is not this repo's tracker. Don't map triage roles onto them.
+`CLEAR-Initiative/clear-pipeline` carries GitHub's default label set (`bug`, `enhancement`, `wontfix`, …). Those are unused — GitHub Issues is not this repo's tracker. Don't map triage roles onto them.

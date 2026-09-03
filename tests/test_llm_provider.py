@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from clear_context_pipeline.providers.llm import _strip_code_fence
+from clear_pipeline.providers.llm import _strip_code_fence
 
 
 class TestStripCodeFence:
@@ -52,7 +52,7 @@ class TestStripCodeFence:
 
 # ── FallbackProvider + circuit breaker ────────────────────────────────
 
-from clear_context_pipeline.providers.llm import (
+from clear_pipeline.providers.llm import (
     EmptyResponseError,
     FallbackProvider,
 )

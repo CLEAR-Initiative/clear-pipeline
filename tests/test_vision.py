@@ -5,8 +5,8 @@ prompt builder, and transcribe_figure's best-effort None-on-failure contract
 (the LLM provider is monkeypatched).
 """
 
-from clear_context_pipeline.providers import vision
-from clear_context_pipeline.providers.vision import (
+from clear_pipeline.providers import vision
+from clear_pipeline.providers.vision import (
     FigureGroup,
     FigureRow,
     FigureTranscription,

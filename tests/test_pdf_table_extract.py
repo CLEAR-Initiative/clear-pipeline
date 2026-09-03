@@ -5,7 +5,7 @@ detection over-fires on prose blocks and layout boxes, so `_table_to_markdown`
 must reject those while keeping genuine ruled data tables.
 """
 
-from clear_context_pipeline.defs.knowledgebase._pdf_extract import (
+from clear_pipeline.defs.knowledgebase._pdf_extract import (
     _table_to_markdown,
     _tables_markdown,
 )

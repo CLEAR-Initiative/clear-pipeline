@@ -15,7 +15,7 @@ workloads run them:
 - **Backfill run** — 1,000+ reports at once (new country onboarding, schema-version
   re-extraction). Cost and reliability dominate.
 
-We ran a Claude-parity eval (`src/clear_context_pipeline/defs/evals/`, results in
+We ran a Claude-parity eval (`src/clear_pipeline/defs/evals/`, results in
 `evals/results/leaderboard.md` + `evals/results/COST_STRATEGY.md`) scoring cheap
 OpenRouter models against Claude as the oracle, per step. This ADR records what we
 decided from it.
@@ -170,9 +170,9 @@ behind a spot-check, which is why the default remains Claude Sonnet.
 - **Eval results (latest run)** above — the scored comparison this ADR draws on,
   embedded inline (the `evals/results/` artefacts it's generated from are gitignored).
 - `evals/results/COST_STRATEGY.md` — the token/cost model and per-step breakdown.
-- `src/clear_context_pipeline/defs/evals/candidates.py` — the candidate set +
+- `src/clear_pipeline/defs/evals/candidates.py` — the candidate set +
   drop reasons.
-- `src/clear_context_pipeline/providers/llm.py` — `FallbackProvider`, timeout,
+- `src/clear_pipeline/providers/llm.py` — `FallbackProvider`, timeout,
   circuit breaker.
 - ADR-0001 / ADR-0002 — the datapoints extraction + aggregation decisions this
   pipeline's numbers depend on.
