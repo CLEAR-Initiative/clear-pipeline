@@ -13,7 +13,7 @@ boundaries reproducible across the pipeline.
 
 import pytest
 
-from clear_context_pipeline.defs.knowledgebase.chunks import (
+from clear_pipeline.defs.knowledgebase.chunks import (
     _slice_into_chunks,
     _encoding,
 )

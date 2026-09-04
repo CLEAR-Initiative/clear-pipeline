@@ -5,7 +5,7 @@ aggregation's 90-day first-run backfill has a matching window to work over.
 
 from unittest.mock import MagicMock
 
-from clear_context_pipeline.defs import reliefweb_to_s3 as rw
+from clear_pipeline.defs import reliefweb_to_s3 as rw
 
 
 def test_is_first_ingest_true_when_no_reports():

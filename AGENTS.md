@@ -1,4 +1,4 @@
-# clear-context-pipeline
+# clear-pipeline
 
 A pipeline for extracting humanitarian datapoints from ReliefWeb.
 

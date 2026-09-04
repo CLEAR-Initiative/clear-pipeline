@@ -16,9 +16,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clear_context_pipeline.defs.situation.rag_helper import RAGContext
-from clear_context_pipeline.defs.situation.schemas import Sectors
-from clear_context_pipeline.defs.situation.sectors import (
+from clear_pipeline.defs.situation.rag_helper import RAGContext
+from clear_pipeline.defs.situation.schemas import Sectors
+from clear_pipeline.defs.situation.sectors import (
     _SECTOR_KEYS,
     _InformationCoverageAreaLLM,
     _SectorLLM,
@@ -60,7 +60,7 @@ def _fake_sector_llm_output(severity: str = "high") -> _SectorLLM:
 class TestGenerateOneSector:
     def test_populates_all_fields_on_happy_path(self):
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             return_value=_fake_rag_context(hits=3, report_ids=["r-a", "r-b"]),
         ):
             llm = MagicMock()
@@ -93,7 +93,7 @@ class TestGenerateOneSector:
             return _fake_rag_context(hits=2)
 
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             side_effect=capture,
         ):
             llm = MagicMock()
@@ -124,7 +124,7 @@ class TestGenerateOneSector:
             return call_sequence.pop(0)
 
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             side_effect=side_effect,
         ):
             llm = MagicMock()
@@ -147,7 +147,7 @@ class TestGenerateOneSector:
         # default. Don't call the LLM (invites hallucination without
         # evidence).
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             side_effect=[_fake_rag_context(hits=0), _fake_rag_context(hits=0)],
         ):
             llm = MagicMock()
@@ -167,7 +167,7 @@ class TestGenerateOneSector:
 
     def test_llm_error_returns_empty_default(self):
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             return_value=_fake_rag_context(hits=2),
         ):
             llm = MagicMock()
@@ -194,7 +194,7 @@ class TestGenerateAllSectors:
     def test_ships_all_six_sectors_in_stable_order(self):
         # Every sector present in the output, keys match the fixed set.
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             return_value=_fake_rag_context(hits=2),
         ):
             llm = MagicMock()
@@ -232,7 +232,7 @@ class TestGenerateAllSectors:
 
         llm_call_counter = [0]
         with patch(
-            "clear_context_pipeline.defs.situation.sectors.fetch_rag_context",
+            "clear_pipeline.defs.situation.sectors.fetch_rag_context",
             side_effect=rag_side,
         ):
             llm = MagicMock()

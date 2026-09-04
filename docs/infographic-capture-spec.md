@@ -418,7 +418,7 @@ embedding for visual similarity.
 
 ## 13. References
 
-- Extraction: `src/clear_context_pipeline/defs/knowledgebase/_pdf_extract.py`, `pdf_text.py`
+- Extraction: `src/clear_pipeline/defs/knowledgebase/_pdf_extract.py`, `pdf_text.py`
 - Chunk / enrich / embed / upsert: `chunks.py`, `enrich.py`, `providers/embedding.py`,
   `upsert.py` (metadata: `locationIds` / `eventTypes` / `needSectors` / `timeRange`)
 - Figure provenance: clear-api `services/datapoint-aggregation.ts` → `contributing_figures`

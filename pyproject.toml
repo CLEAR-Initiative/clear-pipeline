@@ -1,5 +1,5 @@
 [project]
-name = "clear_context_pipeline"
+name = "clear_pipeline"
 requires-python = ">=3.10,<3.15"
 version = "0.1.0"
 dependencies = [
@@ -61,22 +61,22 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # `src/` layout — hatchling's default wheel discovery looks for a
-# top-level directory matching `project.name` (i.e. `./clear_context_pipeline`),
-# which doesn't exist here (source lives under `./src/clear_context_pipeline`).
+# top-level directory matching `project.name` (i.e. `./clear_pipeline`),
+# which doesn't exist here (source lives under `./src/clear_pipeline`).
 # Without this, `uv pip install .` produces a wheel with no Python code
-# and the deployed image fails with "No module named 'clear_context_pipeline'"
-# when Dagster's gRPC server tries `-m clear_context_pipeline.definitions`.
+# and the deployed image fails with "No module named 'clear_pipeline'"
+# when Dagster's gRPC server tries `-m clear_pipeline.definitions`.
 [tool.hatch.build.targets.wheel]
-packages = ["src/clear_context_pipeline"]
+packages = ["src/clear_pipeline"]
 force-include = { "pyproject.toml" = "pyproject.toml" }
 
 [tool.dg]
 directory_type = "project"
 
 [tool.dg.project]
-root_module = "clear_context_pipeline"
+root_module = "clear_pipeline"
 registry_modules = [
-    "clear_context_pipeline.components.*",
+    "clear_pipeline.components.*",
 ]
 
 

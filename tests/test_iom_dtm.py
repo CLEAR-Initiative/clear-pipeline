@@ -1,6 +1,6 @@
 """Unit tests for the ported IOM DTM aggregation (no network)."""
 
-from clear_context_pipeline.providers import iom_dtm
+from clear_pipeline.providers import iom_dtm
 
 
 def _rec(pcode, round_no, ind, *, origin=None, origin_name=None, atype="BA", name="Dest"):

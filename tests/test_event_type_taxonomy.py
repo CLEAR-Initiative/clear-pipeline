@@ -5,7 +5,7 @@ disaster_types level_2 taxonomy (mirrored in event_categories.json), used by bot
 KB enrichment and datapoint extraction.
 """
 
-from clear_context_pipeline.providers.classify import (
+from clear_pipeline.providers.classify import (
     coerce_event_types,
     level2_values,
 )

@@ -4,13 +4,13 @@ The narrative LLMs append inline [Rn] markers; these helpers strip them and
 build the `report_id -> [generated lines]` map the dashboard cites from.
 """
 
-from clear_context_pipeline.defs.situation.citations import (
+from clear_pipeline.defs.situation.citations import (
     merge_contributing,
     resolve_bullets,
     resolve_prose,
 )
-from clear_context_pipeline.defs.situation.narrative import _sourced_bullets
-from clear_context_pipeline.defs.situation.rag_helper import RAGContext
+from clear_pipeline.defs.situation.narrative import _sourced_bullets
+from clear_pipeline.defs.situation.rag_helper import RAGContext
 
 HITS = ["rep-A", "rep-B", "rep-C"]  # [R1]=A, [R2]=B, [R3]=C
 

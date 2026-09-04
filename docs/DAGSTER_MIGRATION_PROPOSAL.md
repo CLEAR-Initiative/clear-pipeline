@@ -2,11 +2,11 @@
 
 > **UPDATE 2026-08-13 — CONSOLIDATION.** The design below (a separate Dagster code
 > location in clear-pipeline) was superseded: the signal pipeline is being **ported
-> INTO clear-context-pipeline** (one Dagster project for KB/situation **and**
+> INTO clear-pipeline** (one Dagster project for KB/situation **and**
 > signals→events→alerts), and **clear-pipeline is deprecated at the end of the
 > migration**. Rationale: two repos force cross-repo duplication when a source needs
 > utilities from both. The signal domain now lives under
-> `src/clear_context_pipeline/signals/` (config/models/sources/services/prompts) with
+> `src/clear_pipeline/signals/` (config/models/sources/services/prompts) with
 > assets under `defs/signals/`, reusing the shared providers (`clear_api._execute`,
 > `providers/s3`, `make_llm_provider`). **Cutover is BIG-BANG, not shadow/dual-run:**
 > build all sources → test locally → deploy with event schedules `default_status=STOPPED`
@@ -15,7 +15,7 @@
 > durable clear-api status markers) still hold — only the destination + cutover changed.
 
 **Status:** Design settled · consolidation in progress · **Related:**
-[ARCHITECTURE.md](./ARCHITECTURE.md), the clear-context-pipeline Dagster patterns.
+[ARCHITECTURE.md](./ARCHITECTURE.md), the clear-pipeline Dagster patterns.
 
 This document proposes migrating clear-pipeline from Celery to Dagster, and re-homing
 raw source payloads into an S3 data lake. It captures a settled design; it is not an
@@ -34,7 +34,7 @@ replica without double-scheduling).
 
 We want to move to Dagster for four reasons, all of which apply:
 
-1. **Ops consolidation** — clear-context-pipeline already runs on Dagster. One orchestrator
+1. **Ops consolidation** — clear-pipeline already runs on Dagster. One orchestrator
    across both pipelines retires the separate Celery + beat + Redis-broker operational surface.
 2. **Observability & lineage** — run history, asset lineage, and a UI over the pipeline.
    (Per-Claude-call telemetry stays in the pipeline-insights dashboard — see §9.)
@@ -237,7 +237,7 @@ run by hand, not on any schedule, and are not migrated.
 
 - **clear-api:** status/`processed_at` on signal; pending flags on crisis/translation entities (§6.1).
 - **Dagster deployment:** clear-pipeline ships as a **new code location inside the existing
-  clear-context-pipeline Dagster instance** (decided — one daemon/UI across both pipelines, directly
+  clear-pipeline Dagster instance** (decided — one daemon/UI across both pipelines, directly
   advancing the consolidation driver). Blast-radius isolation is handled at the code-location level.
 - **S3 lake:** bucket + `raw/<source>/<date>/…` layout (can reuse the context-pipeline bucket
   under a distinct prefix).

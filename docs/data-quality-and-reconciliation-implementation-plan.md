@@ -4,7 +4,7 @@
 
 Implements ADR-0004 (source attribution + credibility), ADR-0005 (data-quality scoring +
 bias-aware aggregation), and ADR-0006 (location-metadata reconciliation) across **clear-api**
-(schema, aggregation, resolvers) and **clear-context-pipeline** (extraction, enrich,
+(schema, aggregation, resolvers) and **clear-pipeline** (extraction, enrich,
 aggregate refresh).
 
 > **Note on ADR-0006:** it is **forthcoming** — it lands with the Location Metadata
@@ -71,9 +71,9 @@ finalise values on sign-off. Track, don't wait:
 
 | Ticket | Repo | Scope | Depends | Acceptance |
 |---|---|---|---|---|
-| **A2** | clear-context-pipeline | Add `source` to `enrich.py::ExtractedParameters`, `datapoints_schemas.py::NumericField` (cited source id, default = publisher), and chunk tags. Wire ReliefWeb `report.source` → `report_datapoints.sourceId` (primary else first). Call `resolveDataSource` during enrich/extraction. | A1b | Every datapoint carries a source id; publisher recorded; chunk tags carry source |
-| **A3** | clear-context-pipeline | Add 7 intrinsic credibility criteria to per-datapoint extraction (directness = existing `confidence`; + attribution, consistency, plausibility w/ crisis brief, specificity, methodology, representativeness). One document-level fallback assessment per report. Store on `NumericField` + `report_datapoints`. | A2 | Each datapoint has criteria; doc-level fallback stored; KB **cost guardrail** verified |
-| **B1-extract** | clear-context-pipeline | Split returns into **stock** vs **flow** in the extraction schema (feeds `returnee_stock` / `new_returns`); clarify `idp_stock` vs `new_displacements`. | A2 | Returns no longer conflated at extraction |
+| **A2** | clear-pipeline | Add `source` to `enrich.py::ExtractedParameters`, `datapoints_schemas.py::NumericField` (cited source id, default = publisher), and chunk tags. Wire ReliefWeb `report.source` → `report_datapoints.sourceId` (primary else first). Call `resolveDataSource` during enrich/extraction. | A1b | Every datapoint carries a source id; publisher recorded; chunk tags carry source |
+| **A3** | clear-pipeline | Add 7 intrinsic credibility criteria to per-datapoint extraction (directness = existing `confidence`; + attribution, consistency, plausibility w/ crisis brief, specificity, methodology, representativeness). One document-level fallback assessment per report. Store on `NumericField` + `report_datapoints`. | A2 | Each datapoint has criteria; doc-level fallback stored; KB **cost guardrail** verified |
+| **B1-extract** | clear-pipeline | Split returns into **stock** vs **flow** in the extraction schema (feeds `returnee_stock` / `new_returns`); clarify `idp_stock` vs `new_displacements`. | A2 | Returns no longer conflated at extraction |
 
 Bump `schema_version` **once** covering A2 + A3 + B1-extract.
 
@@ -87,7 +87,7 @@ Bump `schema_version` **once** covering A2 + A3 + B1-extract.
 |---|---|---|---|---|
 | **A4** | clear-api | `data_quality = ((reliability×2.5) × info_credibility)/10` per contributor. Cache the **time-invariant** part (7 intrinsic criteria + source id/reliability + `newest_report_at`); resolver computes **Recency live** and finalises `data_quality` on read (both cached + on-demand paths). Retain confidence-only as a *directness* view. | Ph2 | `data_quality` computed; no silent recency decay; directness view retained |
 | **A5** | clear-api | Per-field `quality_bias` map. Generalise `latest_wins_with_confidence_override` → `data_quality` + bias: override gate = `window/x`; comparable-quality (`|Δ|<1.0`) tiebreak by bias; `max` fields drop-bottom-quartile then max. Keep pure `latest_wins` for state fields. Field→window table. | A4 | Winner selection keys on `data_quality`+bias; `max` quartile-gated |
-| **A5-retro** | clear-context-pipeline + clear-api | Retrospective trigger: refresh **union** of rolling window + `[min…max reportingPeriodEnd]` of the batch (`datapoints_aggregate.py`). Situation analysis: refresh **computed figure components**, not narrative. | A5 | Retrospective report refreshes its old bucket; situation figures refresh without narrative regen |
+| **A5-retro** | clear-pipeline + clear-api | Retrospective trigger: refresh **union** of rolling window + `[min…max reportingPeriodEnd]` of the batch (`datapoints_aggregate.py`). Situation analysis: refresh **computed figure components**, not narrative. | A5 | Retrospective report refreshes its old bucket; situation figures refresh without narrative regen |
 | **A-tests** | clear-api | Extend the aggregation test suite (existing + bias / quartile / override-window / retrospective cases). | A5-retro | Green suite incl. new cases |
 
 ---
@@ -108,7 +108,7 @@ Bump `schema_version` **once** covering A2 + A3 + B1-extract.
 
 | Ticket | Repo | Scope | Depends |
 |---|---|---|---|
-| **X1** | clear-context-pipeline | Regenerate the model-replacement **eval reference schema** (new source + credibility + stock/flow fields). | Ph2 |
+| **X1** | clear-pipeline | Regenerate the model-replacement **eval reference schema** (new source + credibility + stock/flow fields). | Ph2 |
 | **X2** | clear-mvp / clear-api | Update consumers of `quality_score` / `dataQualityScore` (dashboard, situation analysis, GraphQL surface) for the new `data_quality` meaning + the returnee-field split + the divergence signal. | Ph3, Ph4 |
 
 ---

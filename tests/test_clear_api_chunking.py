@@ -5,7 +5,7 @@ the env knobs it reads are lazy (read at call time, not import) so a value set i
 .env — loaded AFTER this module is imported — actually applies.
 """
 
-from clear_context_pipeline.providers import clear_api
+from clear_pipeline.providers import clear_api
 
 
 def _row(nbytes: int) -> dict:

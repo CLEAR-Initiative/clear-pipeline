@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from clear_context_pipeline.defs.knowledgebase import datapoints_extract as de
-from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
+from clear_pipeline.defs.knowledgebase import datapoints_extract as de
+from clear_pipeline.defs.knowledgebase.datapoints_extract import (
     _backfill_chunk_indices,
     _collect_location_refs,
     _collect_numeric_fields,
@@ -24,7 +24,7 @@ from clear_context_pipeline.defs.knowledgebase.datapoints_extract import (
     _resolve_figure_scopes,
     _resolve_figure_sources,
 )
-from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     Casualties,
     CasualtyDisaggregation,
     DocumentCredibility,
@@ -165,7 +165,7 @@ class TestResolveAllLocations:
             LocationRef(pcode="SD01"),
         ]
         with patch(
-            "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
+            "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
         ) as mock_resolve:
             mock_resolve.return_value = "loc-sd01"
             resolved, unresolved = _resolve_all_locations(refs)
@@ -176,7 +176,7 @@ class TestResolveAllLocations:
     def test_separates_resolved_and_unresolved(self):
         refs = [LocationRef(pcode="SD01"), LocationRef(pcode="SD-BAD")]
         with patch(
-            "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
+            "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
         ) as mock_resolve:
             mock_resolve.side_effect = ["loc-sd01", None]
             resolved, unresolved = _resolve_all_locations(refs)
@@ -188,7 +188,7 @@ class TestResolveAllLocations:
         # whole batch — the ref just gets treated as unresolved.
         refs = [LocationRef(pcode="SD01"), LocationRef(pcode="SD02")]
         with patch(
-            "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
+            "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location",
         ) as mock_resolve:
             mock_resolve.side_effect = ["loc-sd01", RuntimeError("network blip")]
             resolved, unresolved = _resolve_all_locations(refs)
@@ -197,7 +197,7 @@ class TestResolveAllLocations:
         assert unresolved == ["SD02"]
 
 
-RESOLVE = "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location"
+RESOLVE = "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_location"
 
 
 def _nf(value, scope=None):
@@ -463,7 +463,7 @@ class TestNormSourceName:
 
 
 class TestResolveFigureSources:
-    SRC = "clear_context_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_data_source"
+    SRC = "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.resolve_data_source"
 
     def test_llm_supplied_id_is_overwritten(self):
         blob = {"d": {"f": {**_nf_src(1, None), "source_id": "hallucinated"}}}

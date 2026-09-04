@@ -1,6 +1,6 @@
 """Unit tests for the location-metadata resolution helpers (no network)."""
 
-from clear_context_pipeline.defs.location_metadata import assets
+from clear_pipeline.defs.location_metadata import assets
 
 
 # name_to_id is level -> iso2 -> normalised_name -> id (country-scoped): an admin1

@@ -7,8 +7,8 @@ from unittest.mock import patch
 import dagster as dg
 from dagster import DagsterInstance
 
-from clear_context_pipeline.defs import reliefweb_partitions as rp
-from clear_context_pipeline.defs.reliefweb_to_s3 import (
+from clear_pipeline.defs import reliefweb_partitions as rp
+from clear_pipeline.defs.reliefweb_to_s3 import (
     reliefweb_country_partition_sensor,
     reliefweb_weekly_schedule,
 )
@@ -37,7 +37,7 @@ def test_prefixes_are_per_country():
 
 def test_list_pipeline_iso3s_lowercases_and_skips_blank():
     with patch(
-        "clear_context_pipeline.defs.reliefweb_partitions.clear_api.get_pipeline_countries",
+        "clear_pipeline.defs.reliefweb_partitions.clear_api.get_pipeline_countries",
         return_value=[{"iso3": "SDN"}, {"iso3": "Eth"}, {"iso3": None}, {}],
     ):
         assert rp.list_pipeline_iso3s() == ["sdn", "eth"]
@@ -50,7 +50,7 @@ def test_sensor_registers_only_new_partitions():
     instance.add_dynamic_partitions(_PART, ["sdn"])  # sdn already established
     ctx = dg.build_sensor_context(instance=instance)
     with patch(
-        "clear_context_pipeline.defs.reliefweb_to_s3.list_pipeline_iso3s",
+        "clear_pipeline.defs.reliefweb_to_s3.list_pipeline_iso3s",
         return_value=["sdn", "eth"],
     ):
         result = reliefweb_country_partition_sensor(ctx)
@@ -64,7 +64,7 @@ def test_sensor_skips_when_in_sync():
     instance.add_dynamic_partitions(_PART, ["sdn"])
     ctx = dg.build_sensor_context(instance=instance)
     with patch(
-        "clear_context_pipeline.defs.reliefweb_to_s3.list_pipeline_iso3s",
+        "clear_pipeline.defs.reliefweb_to_s3.list_pipeline_iso3s",
         return_value=["sdn"],
     ):
         result = reliefweb_country_partition_sensor(ctx)
@@ -78,7 +78,7 @@ def test_sensor_is_add_only_never_removes_delisted():
     instance.add_dynamic_partitions(_PART, ["sdn"])
     ctx = dg.build_sensor_context(instance=instance)
     with patch(
-        "clear_context_pipeline.defs.reliefweb_to_s3.list_pipeline_iso3s",
+        "clear_pipeline.defs.reliefweb_to_s3.list_pipeline_iso3s",
         return_value=["eth"],
     ):
         result = reliefweb_country_partition_sensor(ctx)

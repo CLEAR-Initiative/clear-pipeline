@@ -6,7 +6,7 @@ regardless of count, so a fixed 128-slice fails on large backfills — the bug
 these tests pin.
 """
 
-from clear_context_pipeline.defs.knowledgebase.upsert import (
+from clear_pipeline.defs.knowledgebase.upsert import (
     EMBED_BATCH_SIZE,
     _embedding_batches,
 )

@@ -5,7 +5,7 @@ and an optional figure-level basis_period. `value` stays the headline point; the
 range defaults to it for an exact figure so downstream is unaffected.
 """
 
-from clear_context_pipeline.defs.knowledgebase.datapoints_schemas import (
+from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION,
     NumericField,
 )
@@ -17,8 +17,8 @@ def _nf(**kw) -> NumericField:
     return NumericField(**{**base, **kw})
 
 
-def test_schema_version_is_v3():
-    assert SCHEMA_VERSION == "v3"
+def test_schema_version_is_v4():
+    assert SCHEMA_VERSION == "v4"
 
 
 def test_exact_figure_defaults_range_to_point():
