@@ -26,7 +26,6 @@ from datetime import UTC, datetime
 import httpx
 import redis
 
-from clear_pipeline.providers.clear_api import find_or_create_landmark_l4
 from clear_pipeline.providers.signal import enrich_with_geoparser
 from clear_pipeline.providers.translation_hash import _stable_stringify
 from clear_pipeline.signals.config import settings
@@ -343,23 +342,6 @@ def _parse_coordinate(pair: str) -> tuple[float, float] | None:
         return None
 
 
-def _kind_from_locations_accuracy(accuracy: str | None) -> str:
-    """Map IDU's `locations_accuracy` free text to clear-api's
-    `findOrCreateLandmarkL4` `kind` argument — a hard-validated binary,
-    only "landmark" or "admin" (clear-api rejects anything else).
-
-    Every value seen in live IDU data ("Locality", "District/Zone/
-    Department (ADM2)", "County/City/town/Village/Woreda (ADM3)")
-    describes an administrative/settlement precision level, never a
-    POI-style landmark — IDU's `locations_name` entries are towns,
-    villages, and districts, not landmarks. So this currently always
-    resolves to "admin"; kept as an explicit mapping (not a bare
-    constant) so a future accuracy value that genuinely denotes a
-    landmark has somewhere to plug in.
-    """
-    return "admin"
-
-
 def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     """Fetch + filter IDU records for the configured countries and displacement
     types, deduplicated against the Redis seen-set (id + content hash — see
@@ -435,41 +417,6 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("idmc:last_synced", ts.isoformat())
 
 
-def _promote_location(
-    *, name: str, coord_str: str, accuracy: str,
-    source_lat: float | None, source_lng: float | None, idu_id: str | None,
-) -> str | None:
-    """Resolve one location's name + coordinate into a real L4 landmark id
-    via `find_or_create_landmark_l4`. Best-effort, same convention
-    `signal.py`'s own use of this function follows: a transport hiccup
-    shouldn't drop the whole signal (IDMC polls once every 24h), so
-    failures are logged and swallowed, not raised."""
-    first_segment = (name or "").split(",")[0].strip()
-    coord = _parse_coordinate(coord_str or "")
-    if not (first_segment and coord):
-        return None
-    try:
-        promo = find_or_create_landmark_l4(
-            name=first_segment,
-            lat=coord[0],
-            lng=coord[1],
-            kind=_kind_from_locations_accuracy(accuracy),
-            # Anchor against the row's own centroid so a wildly mismatched
-            # candidate aborts instead of mis-attributing the split.
-            source_lat=source_lat,
-            source_lng=source_lng,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[IDMC] L4 promotion failed for idu_id=%s: %s", idu_id, exc)
-        return None
-    if promo.get("abortedReason"):
-        logger.info(
-            "[IDMC] L4 promotion aborted (%s) for idu_id=%s", promo["abortedReason"], idu_id,
-        )
-        return None
-    return promo.get("locationId")
-
-
 def build_idmc_signal_input(event: dict, source_id: str) -> dict:
     """Convert a parsed IDU row into a CLEAR CreateSignalInput dict."""
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
@@ -492,47 +439,19 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
     if event.get("source_url"):
         input_data["url"] = event["source_url"]
 
-    # Best-effort origin/destination resolution: promote each location's
-    # own name + coordinate into a real L4 landmark, then route the result
-    # to originId/destinationId. `locations_name`/`locations_type`/etc. are
-    # 1 entry for a plain location, 2 for a paired flow (_split_pairs) —
-    # this loop covers both without caring which.
-    names = _LOCATION_SEP_RE.split((event.get("locations_name") or "").strip())
-    types = _LOCATION_SEP_RE.split((event.get("locations_type") or "").strip())
-    coords_list = _LOCATION_SEP_RE.split((event.get("locations_coordinates") or "").strip())
-    accuracies = _LOCATION_SEP_RE.split((event.get("locations_accuracy") or "").strip())
-    origin_coord: tuple[float, float] | None = None
-    for name_i, type_i, coord_str_i, accuracy_i in zip(
-        names, types, coords_list, accuracies, strict=True
-    ):
-        location_id = _promote_location(
-            name=name_i, coord_str=coord_str_i, accuracy=accuracy_i,
-            source_lat=event.get("lat"), source_lng=event.get("lng"),
-            idu_id=event.get("idu_id"),
+    # Pass lat/lng for server-side PostGIS geo-resolution into a general
+    # locationId — same as ACLED/GDACS.
+    has_lat = event.get("lat") is not None
+    has_lng = event.get("lng") is not None
+    if has_lat != has_lng:
+        logger.warning(
+            "[IDMC] idu_id=%s: partial coordinate (lat=%s, lng=%s) — skipping "
+            "centroid resolution",
+            event.get("idu_id"), event.get("lat"), event.get("lng"),
         )
-        loc_type = type_i.strip().lower()
-        if "origin" in loc_type and origin_coord is None:
-            origin_coord = _parse_coordinate(coord_str_i)
-        if not location_id:
-            continue
-        # Both fields set when "Origin and destination" — the same place
-        # served both roles for this movement.
-        if "origin" in loc_type:
-            input_data["originId"] = location_id
-        if "destination" in loc_type:
-            input_data["destinationId"] = location_id
-        # Blank/unrecognized: leave both unset — general locationId (via
-        # lat/lng + enrich_with_geoparser below) is the fallback.
-
-    # Pass lat/lng for server-side PostGIS geo-resolution — same as
-    # ACLED/GDACS. Prefer the origin's own precise coordinate when one was
-    # provided (more specific than the row's shared centroid); fall back
-    # to the centroid otherwise (destination-only rows, or independent
-    # splits with no role at all).
-    lat, lng = origin_coord if origin_coord else (event.get("lat"), event.get("lng"))
-    if lat is not None and lng is not None:
-        input_data["lat"] = lat
-        input_data["lng"] = lng
+    if has_lat and has_lng:
+        input_data["lat"] = event["lat"]
+        input_data["lng"] = event["lng"]
 
     enrich_with_geoparser(
         input_data,
@@ -550,12 +469,11 @@ def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
     an existing signal — reuses the same values rather than recomputing them,
     so a revision's create and update calls always agree.
 
-    url/originId/destinationId/lat/lng/geoparsedData are spread in only when
-    build_idmc_signal_input actually set them, never defaulted via `.get()`.
-    An ABSENT key tells clear-api's Prisma update "leave this field alone";
-    sending an explicit None instead would NULL OUT a previously-resolved
-    value (e.g. originId) just because this poll's _promote_location call
-    happened to fail transiently.
+    url/lat/lng/geoparsedData are spread in only when build_idmc_signal_input
+    actually set them, never defaulted via `.get()`. An ABSENT key tells
+    clear-api's Prisma update "leave this field alone"; sending an explicit
+    None instead would NULL OUT a previously-resolved value just because
+    this poll's data happened to be missing it transiently.
     """
     return {
         "id": signal_id,
@@ -564,9 +482,11 @@ def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
         "title": input_data.get("title"),
         "description": input_data.get("description"),
         "severity": input_data.get("severity"),
+        # lat/lng/geoparsedData can be transiently missing (bad coordinate
+        # data, or Nominatim being down) — omit, don't null a resolved value.
         **{
             k: input_data[k]
-            for k in ("url", "originId", "destinationId", "lat", "lng", "geoparsedData")
+            for k in ("url", "lat", "lng", "geoparsedData")
             if k in input_data
         },
     }
