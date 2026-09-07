@@ -13,14 +13,14 @@ this poses to catching revisions on records that age out of the window.
 
 One row = one *figure*, not one event: an IDU `event_id` can have many rows
 across locations, dates, and revisions. Filtering + dedup are keyed on the
-row-level `id`.
+row-level `id`. A single row can itself describe multiple flows of
+displacement (e.g. one origin, several destinations).
 
 Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_last_180_days_retrieve
 """
 
 import hashlib
 import logging
-import re
 from datetime import UTC, datetime
 
 import httpx
@@ -35,11 +35,6 @@ logger = logging.getLogger(__name__)
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/"
-
-# Separator between entries in IDU's compound locations_* fields
-# (locations_name, locations_type, locations_coordinates, locations_accuracy)
-# — semicolon, with variable surrounding whitespace observed in live data.
-_LOCATION_SEP_RE = re.compile(r"\s*;\s*")
 
 
 def _parse_event(raw: dict) -> dict | None:
@@ -174,162 +169,6 @@ def _fetch_all() -> list[dict]:
     return data
 
 
-def _classify_role(location_type: str) -> str:
-    """Classify one `locations_type` entry: "origin", "destination", "both"
-    (ambiguous — "Origin and destination"), or "neither"."""
-    t = (location_type or "").strip().lower()
-    is_origin = "origin" in t
-    is_destination = "destination" in t
-    if is_origin and is_destination:
-        return "both"
-    if is_origin:
-        return "origin"
-    if is_destination:
-        return "destination"
-    return "neither"
-
-
-def _build_split(parsed: dict, raw: dict, figure: int, name: str, type_: str,
-                  coords: str, accuracy: str, idu_id: str | None) -> dict:
-    """One output dict shared by both split strategies below — a fresh
-    `raw` (never a shared reference) plus the same fields surfaced
-    top-level, per index/pair."""
-    split_raw = {
-        **raw,
-        "figure": figure,
-        "locations_name": name,
-        "locations_type": type_,
-        "locations_coordinates": coords,
-        "locations_accuracy": accuracy,
-    }
-    split = {
-        **parsed,
-        "figure": figure,
-        "locations_name": name,
-        "locations_type": type_,
-        "locations_coordinates": coords,
-        "locations_accuracy": accuracy,
-        "raw": split_raw,
-    }
-    if idu_id is not None:
-        split["idu_id"] = idu_id
-    return split
-
-
-def _split_independent(parsed: dict, raw: dict, names: list[str], types: list[str],
-                        coords: list[str], accuracies: list[str]) -> list[dict]:
-    """Fallback: one signal per raw location, figure divided equally across
-    all N (not pair-aware) — used when the row's origin/destination
-    composition doesn't resolve to a clean pairing (see TODO.md)."""
-    n = len(names)
-    figure = parsed.get("figure") or 0
-    base, remainder = divmod(figure, n)
-    return [
-        _build_split(
-            parsed, raw, base + (1 if i < remainder else 0),
-            names[i], types[i], coords[i], accuracies[i],
-            f"{parsed['idu_id']}:{i}" if n > 1 else None,
-        )
-        for i in range(n)
-    ]
-
-
-def _split_pairs(parsed: dict, raw: dict, names: list[str], types: list[str],
-                  coords: list[str], accuracies: list[str],
-                  origins: list[int], destinations: list[int]) -> list[dict]:
-    """One signal per (origin, destination) pair — 1:1 merges into a single
-    signal carrying the full, undivided figure and the row's original
-    `idu_id`; 1:N/N:1 fans out into N signals, figure divided by N (the
-    pair count, not the raw location count)."""
-    pairs = [(o, d) for o in origins for d in destinations]
-    n_pairs = len(pairs)
-    figure = parsed.get("figure") or 0
-    base, remainder = divmod(figure, n_pairs)
-    return [
-        _build_split(
-            parsed, raw, base + (1 if i < remainder else 0),
-            f"{names[o]}; {names[d]}", f"{types[o]}; {types[d]}",
-            f"{coords[o]}; {coords[d]}", f"{accuracies[o]}; {accuracies[d]}",
-            f"{parsed['idu_id']}:{i}" if n_pairs > 1 else None,
-        )
-        for i, (o, d) in enumerate(pairs)
-    ]
-
-
-def _split_by_location(parsed: dict) -> list[dict]:
-    """Split a multi-location IDU row into flow signals, pairing origins
-    with destinations rather than treating every named location as an
-    independent occurrence.
-
-    Example — idu_id=174447, figure=1000, 1 origin (Al Jazirah) + 1
-    destination (Al Fao): merges into ONE signal, `idu_id` unchanged,
-    full undivided figure — it's one flow, not two. With 1 origin + 2
-    destinations instead, it fans out into 2 signals (`idu_id:0`/`:1`),
-    figure divided by 2. "Origin and destination" fills whichever role
-    has zero plain matches elsewhere in the row (it's not a role of its
-    own — see the classify step below).
-
-    Falls back to `_split_independent` (equal division per raw location,
-    ignoring role) when the composition doesn't resolve to a clean
-    pairing — multiple origins AND multiple destinations at once, or any
-    location with neither role. See TODO.md — rare (only seen in old
-    2018 Triangulation-role data so far), logged at INFO when it fires.
-
-    A single-location row keeps its `idu_id` unchanged (no suffix) — an
-    already-ingested row's dedup identity must not shift. A count mismatch
-    across the four locations_* fields returns `[]` (dropped, not guessed
-    at), logged as an error.
-    """
-    raw = parsed.get("raw") or {}
-    names = _LOCATION_SEP_RE.split((raw.get("locations_name") or "").strip())
-    types = _LOCATION_SEP_RE.split((raw.get("locations_type") or "").strip())
-    coords = _LOCATION_SEP_RE.split((raw.get("locations_coordinates") or "").strip())
-    accuracies = _LOCATION_SEP_RE.split((raw.get("locations_accuracy") or "").strip())
-
-    if not (len(names) == len(types) == len(coords) == len(accuracies)):
-        logger.error(
-            "[IDMC] idu_id=%s: locations_* field count mismatch "
-            "(names=%d types=%d coords=%d accuracy=%d) — dropping row",
-            parsed.get("idu_id"), len(names), len(types), len(coords), len(accuracies),
-        )
-        return []
-
-    # No explicit n==1 shortcut needed: with a single location, `origins`
-    # and `destinations` can never both be non-empty, so the checks below
-    # always fall back to `_split_independent` — which handles n==1
-    # correctly on its own (single output, idu_id unchanged).
-    roles = [_classify_role(t) for t in types]
-    origins = [i for i, r in enumerate(roles) if r == "origin"]
-    destinations = [i for i, r in enumerate(roles) if r == "destination"]
-    ambiguous = [i for i, r in enumerate(roles) if r == "both"]
-    neither = [i for i, r in enumerate(roles) if r == "neither"]
-
-    unresolved_ambiguous = False
-    if ambiguous:
-        if destinations and not origins:
-            origins = origins + ambiguous
-        elif origins and not destinations:
-            destinations = destinations + ambiguous
-        else:
-            # Neither role is otherwise singular — can't tell which one
-            # each ambiguous entry fills. TODO.md.
-            unresolved_ambiguous = True
-
-    if (
-        neither or unresolved_ambiguous or not origins or not destinations
-        or (len(origins) > 1 and len(destinations) > 1)
-    ):
-        logger.info(
-            "[IDMC] idu_id=%s: locations_type composition isn't a clean "
-            "1:1/1:N/N:1 pairing (origins=%d destinations=%d neither=%d) — "
-            "falling back to independent per-location split (TODO.md)",
-            parsed.get("idu_id"), len(origins), len(destinations), len(neither),
-        )
-        return _split_independent(parsed, raw, names, types, coords, accuracies)
-
-    return _split_pairs(parsed, raw, names, types, coords, accuracies, origins, destinations)
-
-
 def _parse_coordinate(pair: str) -> tuple[float, float] | None:
     """Parse one `"lat, lng"` entry from `locations_coordinates`. Returns
     None on a malformed or empty pair."""
@@ -356,7 +195,7 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     raw_rows = _fetch_all()
 
     events: list[dict] = []
-    parse_failed = filtered_out = deduped = mismatched = 0
+    parse_failed = filtered_out = deduped = 0
     batch_keys: set[str] = set()
     for raw in raw_rows:
         parsed = _parse_event(raw)
@@ -371,30 +210,24 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
             filtered_out += 1
             continue
 
-        splits = _split_by_location(parsed)
-        if not splits:
-            mismatched += 1
+        parsed["content_hash"] = _content_hash(parsed["raw"])
+        seen_key = f"idmc:seen:{parsed['idu_id']}:{parsed['content_hash']}"
+        if seen_key in batch_keys:
+            deduped += 1
             continue
-
-        for split in splits:
-            split["content_hash"] = _content_hash(split["raw"])
-            seen_key = f"idmc:seen:{split['idu_id']}:{split['content_hash']}"
-            if seen_key in batch_keys:
-                deduped += 1
-                continue
-            # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
-            # idu_id forever, so a fixed TTL would eventually expire on an unchanged
-            # row and misfire it as "new". EXPIRE renews and reports existence in one call
-            if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
-                deduped += 1
-                continue
-            batch_keys.add(seen_key)
-            events.append(split)
+        # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
+        # idu_id forever, so a fixed TTL would eventually expire on an unchanged
+        # row and misfire it as "new". EXPIRE renews and reports existence in one call
+        if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
+            deduped += 1
+            continue
+        batch_keys.add(seen_key)
+        events.append(parsed)
 
     logger.info(
         "[IDMC] Result: %d new/changed events (parse_failed=%d, filtered_out=%d, "
-        "already_seen=%d, mismatched=%d) out of %d raw",
-        len(events), parse_failed, filtered_out, deduped, mismatched, len(raw_rows),
+        "already_seen=%d) out of %d raw",
+        len(events), parse_failed, filtered_out, deduped, len(raw_rows),
     )
     return events
 
