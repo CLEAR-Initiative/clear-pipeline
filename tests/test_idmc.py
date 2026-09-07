@@ -75,6 +75,61 @@ def _parsed_from(raw: dict) -> dict:
     return result
 
 
+# ── _parse_event: edge cases ──────────────────────────────────────────────
+
+
+def test_missing_id_returns_none():
+    assert _parse_event(_raw(id=None)) is None
+
+
+def test_missing_figure_returns_none():
+    assert _parse_event(_raw(figure=None)) is None
+
+
+def test_malformed_figure_returns_none():
+    assert _parse_event(_raw(figure="not-a-number")) is None
+
+
+def test_malformed_latitude_discards_valid_longitude_too():
+    """The lat/lng parse is one shared try/except — a bad latitude raises
+    before the longitude line ever runs, so a perfectly good longitude is
+    silently discarded along with it. Locking in current behavior."""
+    result = _parse_event(_raw(latitude="not-a-float", longitude=24.5))
+    assert result is not None
+    assert result["lat"] is None
+    assert result["lng"] is None
+
+
+# ── _content_hash / _round_centroid: coordinate-noise rounding ────────────
+# IDMC's backend recomputes latitude/longitude/centroid independently on
+# every poll with float noise around 1e-11 to 1e-14 degrees — these tests
+# guard the fingerprint against flagging that noise as a real revision.
+
+
+def test_content_hash_ignores_latitude_longitude_float_noise():
+    raw_a = _raw(latitude=13.578933333333332, longitude=24.743561)
+    raw_b = _raw(latitude=13.578933333333335, longitude=24.743561000001)
+    assert _content_hash(raw_a) == _content_hash(raw_b)
+
+
+def test_content_hash_treats_int_and_float_coordinate_as_equal():
+    raw_a = _raw(latitude=9, longitude=24.743561)
+    raw_b = _raw(latitude=9.0, longitude=24.743561)
+    assert _content_hash(raw_a) == _content_hash(raw_b)
+
+
+def test_content_hash_ignores_centroid_noise():
+    raw_a = _raw(centroid="[13.578933333333332, 24.743561]")
+    raw_b = _raw(centroid="[13.5789333333349, 24.7435612222]")
+    assert _content_hash(raw_a) == _content_hash(raw_b)
+
+
+def test_content_hash_changes_on_real_content_change():
+    raw_a = _raw(figure=100)
+    raw_b = _raw(figure=200)
+    assert _content_hash(raw_a) != _content_hash(raw_b)
+
+
 # ── _parse_coordinate ─────────────────────────────────────────────────────
 
 
