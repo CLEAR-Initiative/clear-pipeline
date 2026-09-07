@@ -433,11 +433,9 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
         "title": event["title"],
         "description": event.get("description"),
         "severity": event.get("severity"),
+        "url": event.get("source_url"),
         "contentHash": event["content_hash"],
     }
-
-    if event.get("source_url"):
-        input_data["url"] = event["source_url"]
 
     # Pass lat/lng for server-side PostGIS geo-resolution into a general
     # locationId — same as ACLED/GDACS.
@@ -469,7 +467,7 @@ def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
     an existing signal — reuses the same values rather than recomputing them,
     so a revision's create and update calls always agree.
 
-    url/lat/lng/geoparsedData are spread in only when build_idmc_signal_input
+    lat/lng/geoparsedData are spread in only when build_idmc_signal_input
     actually set them, never defaulted via `.get()`. An ABSENT key tells
     clear-api's Prisma update "leave this field alone"; sending an explicit
     None instead would NULL OUT a previously-resolved value just because
@@ -482,11 +480,12 @@ def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
         "title": input_data.get("title"),
         "description": input_data.get("description"),
         "severity": input_data.get("severity"),
+        "url": input_data.get("url"),
         # lat/lng/geoparsedData can be transiently missing (bad coordinate
         # data, or Nominatim being down) — omit, don't null a resolved value.
         **{
             k: input_data[k]
-            for k in ("url", "lat", "lng", "geoparsedData")
+            for k in ("lat", "lng", "geoparsedData")
             if k in input_data
         },
     }
