@@ -43,7 +43,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_pipeline.providers import acled, darfur24, dataminr, gdacs, idmc
+from clear_pipeline.providers import (
+    acled,
+    darfur24,
+    dataminr,
+    gdacs,
+    idmc,
+)
+from clear_pipeline.providers.clear_api import (
+    get_locations_by_level,
+    get_source_id_by_name,
+)
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
 
@@ -190,8 +200,6 @@ class DataminrConnector:
         return record.model_dump_json().encode("utf-8")
 
     def api_source_id(self) -> str:
-        from clear_pipeline.providers.clear_api import get_source_id_by_name
-
         return get_source_id_by_name(settings.dataminr_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
@@ -271,8 +279,6 @@ class ACLEDConnector:
         return json.dumps(record).encode("utf-8")
 
     def api_source_id(self) -> str:
-        from clear_pipeline.providers.clear_api import get_source_id_by_name
-
         return get_source_id_by_name(settings.acled_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
@@ -328,8 +334,6 @@ class GDACSConnector:
         return json.dumps(record).encode("utf-8")
 
     def api_source_id(self) -> str:
-        from clear_pipeline.providers.clear_api import get_source_id_by_name
-
         return get_source_id_by_name(settings.gdacs_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
@@ -380,8 +384,6 @@ class Darfur24Connector:
         None on failure so a signal is never dropped over a location lookup)."""
         if self._location_id is not None:
             return self._location_id
-        from clear_pipeline.providers.clear_api import get_locations_by_level
-
         try:
             for loc in get_locations_by_level(0):
                 if loc["name"] == settings.darfur24_default_country:
@@ -404,8 +406,6 @@ class Darfur24Connector:
         return json.dumps(record).encode("utf-8")
 
     def api_source_id(self) -> str:
-        from clear_pipeline.providers.clear_api import get_source_id_by_name
-
         return get_source_id_by_name(settings.darfur24_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
@@ -473,8 +473,6 @@ class IDMCConnector:
         return json.dumps(record).encode("utf-8")
 
     def api_source_id(self) -> str:
-        from clear_pipeline.providers.clear_api import get_source_id_by_name
-
         return get_source_id_by_name(settings.idmc_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
