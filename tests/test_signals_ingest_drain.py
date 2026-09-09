@@ -166,7 +166,6 @@ def test_project_sudan_war_x_from_signal_row():
     assert view.external_id == "sig-x-1"
     assert view.title.startswith("RSF shelling reported in Omdurman")
     assert view.description.endswith("several casualties")
-    assert view.url == "https://x.com/someone/status/2094734567902953601"
     assert view.timestamp == "2026-09-02T12:00:00Z"
     assert view.location_name == "Omdurman"
 

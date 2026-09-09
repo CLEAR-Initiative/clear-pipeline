@@ -18,7 +18,7 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
-  │ sudan-war-x│  False  │  True   │ no ingest — pushed to clear-api; feeds stages│
+  │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
 
 - **polled** — has an external API to poll. The factory builds an ingest asset +
@@ -541,8 +541,8 @@ class SudanWarXConnector:
     """No external API on our side: an external poller POSTs X posts to
     clear-api's ``POST /api/x/ingest``, which writes ``source=sudan-war-x``
     signals directly (``externalId`` ``x:{post id}``, ``title`` = truncated post
-    text, ``description`` = full post text, ``url``, ``publishedAt``; author +
-    metrics ride along in ``rawData``). Exactly like ``manual``: no ingest asset,
+    text, ``description`` = full post text, ``publishedAt``; ``url``, author and
+    metrics stay on the row / in ``rawData``). Exactly like ``manual``: no ingest asset,
     no lake blob — the drain reads NEW rows and ``project`` builds the view from
     the signal row itself.
 
@@ -563,7 +563,6 @@ class SudanWarXConnector:
             timestamp=created.get("publishedAt") or "",
             description=created.get("description"),
             location_name=_first_location_name(created),
-            url=created.get("url"),
         )
 
 
