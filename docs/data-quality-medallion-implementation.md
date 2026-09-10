@@ -50,7 +50,7 @@ flowchart LR
 ```
 
 Solid arrows are the data path (each asset's output feeds the next via
-`ins=`/`AssetIn`, §6); the check labels ride alongside as `@dg.asset_check`s
+`ins=`/`AssetIn`, §7); the check labels ride alongside as `@dg.asset_check`s
 on the asset each one gates, not separate nodes in the actual graph.
 
 Each layer's GX check:
@@ -205,7 +205,101 @@ today.
   wraps its equivalent step in `redis_lock`). Fine for one Dagster run at a
   time; add a lock if this ever runs concurrently.
 
-## 6. A real wiring bug, found by testing rather than assumed away
+## 6. Gold events persistence: SCD2, decided but not yet built
+
+Today's committed code writes `gold/<source>/events/<eventId>.json` as a
+single mutable file, overwritten in place every time a new signal merges
+in — no history retained. That's fine for `<source>_push`'s own needs (it
+only ever reads the current state), but it means there's no way to answer
+"what did this Event look like before signal X merged in," which matters
+for audit and debugging severity/title changes after the fact.
+
+**Not everything in gold needs this** — only the events table is a genuine
+slowly-changing dimension:
+
+| Gold table | Nature | SCD2? |
+|---|---|---|
+| `signals` | written once, `pushedAt` flips null → timestamp | No — one status flip, Type-1 overwrite stays fine |
+| `events` | title/description/severity/population/signalIds all change as signals merge in over the active window | **Yes** |
+
+### 6.1 Format decision: Apache Iceberg, not Delta Lake
+
+Both are "Parquet data files + a metadata/transaction log" — the data
+itself is never locked in either way, and either format's native `MERGE`
+gives the standard SCD2 upsert-or-close-and-insert pattern for free
+instead of hand-rolling versioned files + a compaction story.
+
+The deciding factor is **governance, not engineering**, and it matters
+more here than usual because this project already leans toward
+self-hosted, sovereignty-conscious infrastructure (S3-compatible storage,
+Scaleway as the intended second cloud) rather than a single managed
+vendor's stack:
+
+- **Iceberg** was donated by Netflix to the **Apache Software
+  Foundation**, which structurally requires a diverse committer/PMC base —
+  no single company can dominate the roadmap by contribution volume alone.
+  It also has broad *native*, multi-vendor support (Snowflake, AWS — S3
+  Tables is built on it — BigQuery/BigLake, Trino, Flink) that isn't
+  anchored to one company's compute product.
+- **Delta Lake** was created by Databricks and donated to the **Linux
+  Foundation**, which is genuinely open-license but doesn't carry the same
+  anti-capture structural requirement — Databricks remains by far the
+  dominant contributor and roadmap driver in practice. Its strongest
+  support is naturally where Databricks sits in the stack.
+
+**Caveat, deliberately not resolved here**: PyIceberg's native Python
+write/merge path has historically lagged delta-rs's — this needs a direct
+check (`pip show pyiceberg`, its current changelog, a small write/merge
+smoke test) before committing, not an assumption carried over from either
+side of this conversation. If PyIceberg's merge support turns out too
+immature for a clean SCD2 implementation, that's a real reason to revisit
+Delta despite the governance trade-off above — worth surfacing as a
+blocker if hit, not silently working around.
+
+### 6.2 SCD2 markers
+
+```python
+{
+    "eventId": "...",              # business key, stable across versions
+    "version": 3,                   # monotonic per eventId
+    "effectiveFrom": "2026-09-10T12:00:00Z",
+    "effectiveTo": None,             # None = current row
+    "isCurrent": True,               # redundant with effectiveTo is None, kept for query ergonomics
+    "contentHash": "sha256(...)",    # hash of the mutable fields — skip writing
+                                       # a new version when nothing changed
+    # ...the rest of today's event fields (title, description, severity,
+    # signalIds, population, ...)
+}
+```
+
+`effectiveTo: None` rather than a far-future sentinel date — this project
+has no raw-SQL warehouse joins to keep NULL-free, and Iceberg/DuckDB both
+handle NULL ranges cleanly. `contentHash` mirrors the content-hash dedup
+pattern already used elsewhere in this codebase (IDMC's `_content_hash`,
+the translation staleness check) — without it, every `push` run that
+touches an event would write a "new version" even when nothing about it
+actually changed, turning the history into noise instead of a signal.
+
+```mermaid
+flowchart TD
+    NewSig["new signal merges into event"] --> Hash["compute contentHash<br/>over title/description/severity/signalIds/population"]
+    Hash --> Cmp{"contentHash == current version's?"}
+    Cmp -->|yes| Skip["no-op — current row stays current<br/>(avoids version-spam on idempotent re-runs)"]
+    Cmp -->|no| Close["MERGE: close current row<br/>effectiveTo = now, isCurrent = false"]
+    Close --> Insert["insert new row<br/>version += 1, effectiveFrom = now, isCurrent = true"]
+```
+
+### 6.3 Status
+
+Decided, not implemented. `dataminr_gold`/`dataminr_push` still write the
+mutable single-file JSON described at the top of this section. Follow-up
+work, in order: verify PyIceberg's write/merge maturity directly (§6.1's
+caveat), pick a catalog for a single-writer setup (a file-based or SQLite
+catalog is likely sufficient — no REST catalog service needed for one
+Dagster writer), then replace the events half of `<source>_gold` with an
+Iceberg `MERGE`. Gold **signals** keeps its current shape unchanged.
+
+## 7. A real wiring bug, found by testing rather than assumed away
 
 The first draft wired Dagster's per-asset data dependencies with
 `deps=["upstream_asset"]` plus a `**kwargs` catch-all parameter on the
@@ -224,11 +318,11 @@ def _silver(context, bronze_df: pd.DataFrame) -> pd.DataFrame:
 ```
 
 This is exactly the class of bug a structural "does it import cleanly"
-check would miss — worth calling out because it's why §7's end-to-end test
+check would miss — worth calling out because it's why §8's end-to-end test
 runs the real Dagster execution engine rather than calling functions
 directly.
 
-## 7. Verification
+## 8. Verification
 
 - **`tests/test_medallion_pipeline.py`** — a real `dagster.materialize()`
   run (not mocked at the Dagster level) against a fake in-memory S3 and
@@ -236,7 +330,7 @@ directly.
   records in the same district merge into one gold event; both push and
   get `pushedAt` stamped; a second run against the same state re-pushes
   nothing, confirming the incremental cursor. This is the test that would
-  have caught §6's bug.
+  have caught §7's bug.
 - **`ruff check`** — clean on every new/changed file.
 - **`ty check`** — clean on `gx_utils.py` and `sources.py` (fixed one real
   finding: `DataminrMedallionSource.source` was a read-only `@property`
@@ -251,11 +345,12 @@ directly.
   downloading a HuggingFace model, unrelated to this change and present on
   `dev` beforehand).
 
-## 8. Not covered here
+## 9. Not covered here
 
 - Per-source quality-rule thresholds (blocking vs. non-blocking cutoffs) →
   task 2.
 - Aggregations for ontology business objects beyond Signal/Event/Alert →
   task 3 (blocked on business-side ontology clarifications).
 - ACLED / Darfur24 / IDMC adapters → §3's recipe, not yet written.
+- Iceberg-backed gold events (SCD2) → §6, decided, not yet built.
 - Integration tests against real S3/clear-api → task 6.
