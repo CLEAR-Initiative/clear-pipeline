@@ -473,8 +473,14 @@ def enrich_with_geoparser(
     return geo_result
 
 
-def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
-    """Map a Dataminr signal to a CLEAR CreateSignalInput dict."""
+def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool = True) -> dict:
+    """Map a Dataminr signal to a CLEAR CreateSignalInput dict.
+
+    `promote` threads through to `enrich_with_geoparser` — the production
+    path (`connectors.py`) leaves it True (today's behavior: an opportunistic
+    L4 landmark write). The medallion silver stage passes False so this stays
+    a pure, clear-api-write-free transform; `geoparsedData` is still captured
+    either way."""
     # Description comes from the structured `subHeadline` fields. (Dataminr no
     # longer sends the `liveBrief` / `intelAgents` prose we used to fall back to,
     # so an alert with a null subHeadline simply has no description.)
@@ -541,6 +547,7 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
         input_data,
         title=signal.headline,
         description=description,
+        promote=promote,
         log_tag=f"dataminr:{signal.alertId}",
     )
 
