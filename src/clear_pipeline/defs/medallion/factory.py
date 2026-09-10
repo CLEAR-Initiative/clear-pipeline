@@ -1,0 +1,562 @@
+"""Generic bronze -> silver -> gold medallion asset factory. One call —
+``build_medallion_assets(source)`` — produces one source's full pipeline:
+8 assets + 6 GX asset checks + 1 job. Nothing here writes to clear-api until
+``<source>_push`` — bronze/silver/gold are all S3 artifacts.
+
+**Add a data source = add a ``MedallionSource`` to ``sources.py``** — this
+module needs no change, mirroring ``defs/signals/factory.py``'s
+``build_source_assets(connector)`` pattern.
+
+Simplifications this first pass makes, each with its upgrade path:
+
+  - **Geo consolidation (``<source>_geo``) uses a heuristic district key**
+    (the second comma-segment of the geoparser's `display_name`, e.g.
+    "El Fasher, North Darfur, Sudan" -> "North Darfur"), not the real
+    admin-2 polygon walk `resolve_signal_admin2` does — that function needs
+    a clear-api-resolved location (id/level/ancestorIds), which only exists
+    *after* a signal has been pushed. Pre-push clustering is therefore
+    approximate; the AUTHORITATIVE admin-2 (used for the real `Event.
+    locationId`) is resolved in ``<source>_push``, right after each
+    signal's `createSignal` call returns a real location. Upgrade path:
+    once a read-only admin-2-from-coordinates lookup exists outside
+    clear-api, swap it in here and drop the string-split heuristic.
+  - **No LLM rewrite of merged event title/description** (production's
+    `_rewrite_event`). Bootstrap-only: first signal's title/description on
+    create, latest signal's on merge. Upgrade path: call an equivalent
+    rewrite once the gold event shape is stable and worth the LLM cost.
+  - **Single-writer S3 read-modify-write**, no cross-run locking (production
+    uses `redis_lock` around `_match_and_act`). Fine for one Dagster run at
+    a time; add a lock if this ever runs concurrently.
+"""
+
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import dagster as dg
+import great_expectations as gx
+import pandas as pd
+
+from clear_pipeline.defs.medallion.gx_utils import validate_dataframe
+from clear_pipeline.defs.medallion.sources import MedallionSource
+from clear_pipeline.defs.signals import lake
+from clear_pipeline.providers.alert import escalate_to_alert, is_stale_signal
+from clear_pipeline.providers.classify import classify_locally
+from clear_pipeline.providers.clear_api import create_event, create_signal, update_event
+from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS, resolve_signal_admin2
+from clear_pipeline.signals.config import settings
+
+# Mirrors defs/signals/stages.py's private _ALERT_MIN_SEVERITY — duplicated
+# rather than imported since that name is underscore-private to that module.
+ALERT_MIN_SEVERITY = 4
+
+_BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
+_SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
+
+
+def _s3():
+    return lake.s3_client(), settings.s3_bucket
+
+
+def _district_key(geoparsed: dict | None) -> str | None:
+    """Heuristic district proxy from the geoparser's display_name — see the
+    module docstring's simplifications note. None when nothing geoparsed."""
+    if not geoparsed or not geoparsed.get("display_name"):
+        return None
+    parts = [p.strip() for p in geoparsed["display_name"].split(",") if p.strip()]
+    return parts[1] if len(parts) > 1 else (parts[0] if parts else None)
+
+
+def build_medallion_assets(source: MedallionSource) -> list:
+    """Return one source's full medallion defs: [8 assets, 6 checks, 1 job]."""
+    src = source.source
+    group = f"{src}_medallion"
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Bronze: raw records, untouched. GX-gated on shape before anything reads it.
+    # ══════════════════════════════════════════════════════════════════════
+    @dg.asset(
+        name=f"{src}_bronze",
+        group_name=group,
+        description=f"Poll {src}, write each raw record to S3 bronze (unchanged from production's raw_{src}).",
+    )
+    def _bronze(context: dg.AssetExecutionContext) -> pd.DataFrame:
+        poll_started = datetime.now(UTC)
+        since = source.last_synced()
+        records = source.poll(since)
+        context.log.info("[%s bronze] %d records fetched", src, len(records))
+
+        if not records:
+            context.add_output_metadata({"records_fetched": 0})
+            return pd.DataFrame(columns=_BRONZE_COLUMNS)
+
+        s3, bucket = _s3()
+        rows: list[dict] = []
+        written = failed = 0
+        for record in records:
+            try:
+                ext_id = source.external_id(record)
+                pub_at = source.published_at(record)
+                key = lake.raw_key(src, pub_at, ext_id)
+                lake.write_raw(s3, bucket, key, source.raw_bytes(record))
+                rows.append({"externalId": ext_id, "publishedAt": pub_at, "s3Key": key})
+                written += 1
+            except Exception:  # noqa: BLE001 — one bad record shouldn't drop the batch
+                context.log.exception("[%s bronze] failed to write a record", src)
+                failed += 1
+
+        # Same clean-batch-only watermark advance as production's factory.py:
+        # a partial failure holds it so the next poll retries the window.
+        if failed == 0:
+            source.set_watermark(poll_started)
+        else:
+            context.log.warning("[%s bronze] %d record(s) failed — watermark held for retry", src, failed)
+
+        context.add_output_metadata({"records_fetched": len(records), "written": written, "failed": failed})
+        return pd.DataFrame(rows)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Silver: cleansed, normalized, ONE row per record. No clear-api write.
+    # ══════════════════════════════════════════════════════════════════════
+    @dg.asset(
+        name=f"{src}_silver",
+        group_name=group,
+        ins={"bronze_df": dg.AssetIn(key=f"{src}_bronze")},
+        description=f"Normalize + geo-enrich {src} bronze rows (no clear-api write); write cleansed records to S3 silver.",
+    )
+    def _silver(context: dg.AssetExecutionContext, bronze_df: pd.DataFrame) -> pd.DataFrame:
+        if bronze_df.empty:
+            return pd.DataFrame(columns=_SILVER_COLUMNS)
+
+        source_id = source.api_source_id()
+        s3, bucket = _s3()
+        rows: list[dict] = []
+        for row in bronze_df.to_dict("records"):
+            raw = s3.get_object(Bucket=bucket, Key=row["s3Key"])["Body"].read()
+            record = source.parse(raw)
+            signal_input = source.to_silver_input(record, source_id)
+
+            key = lake.raw_key(src, row["publishedAt"], row["externalId"], layer="silver")
+            lake.write_json(s3, bucket, key, signal_input)
+
+            rows.append({
+                "externalId": row["externalId"],
+                "publishedAt": row["publishedAt"],
+                "title": signal_input.get("title"),
+                "description": signal_input.get("description"),
+                "severity": signal_input.get("severity"),
+                "lat": signal_input.get("lat"),
+                "lng": signal_input.get("lng"),
+                "geoparsedData": signal_input.get("geoparsedData"),
+                "signalInput": signal_input,
+            })
+
+        context.add_output_metadata({"rows": len(rows)})
+        return pd.DataFrame(rows)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Silver -> Gold business logic. Pure transforms, source-agnostic from
+    # here on — nothing below reads or writes clear-api except `_push`.
+    # ══════════════════════════════════════════════════════════════════════
+    @dg.asset(
+        name=f"{src}_classify",
+        group_name=group,
+        ins={"silver_df": dg.AssetIn(key=f"{src}_silver")},
+        description="Relevance + event type (classify_locally, unchanged) — pure transform over silver.",
+    )
+    def _classify(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
+        df = silver_df.copy()
+        if df.empty:
+            df["relevanceScore"] = pd.Series(dtype=float)
+            df["eventType"] = pd.Series(dtype=object)
+            df["glideCode"] = pd.Series(dtype=object)
+            return df
+
+        relevances, types, glides = [], [], []
+        for row in df.itertuples():
+            c = classify_locally(title=row.title, description=row.description, source_severity=row.severity)
+            relevances.append(c.relevance)
+            types.append(c.type_level_2)
+            glides.append(c.disaster_types[0] if c.disaster_types else "ot")
+        df["relevanceScore"] = relevances
+        df["eventType"] = types
+        df["glideCode"] = glides
+        context.add_output_metadata({"rows": len(df)})
+        return df
+
+    @dg.asset(
+        name=f"{src}_geo",
+        group_name=group,
+        ins={"classify_df": dg.AssetIn(key=f"{src}_classify")},
+        description="Heuristic district key from the geoparser's display_name — see factory.py's module docstring.",
+    )
+    def _geo(context: dg.AssetExecutionContext, classify_df: pd.DataFrame) -> pd.DataFrame:
+        df = classify_df.copy()
+        if df.empty:
+            df["districtKey"] = pd.Series(dtype=object)
+            return df
+        df["districtKey"] = df["geoparsedData"].map(_district_key)
+        unresolved = int(df["districtKey"].isna().sum())
+        context.add_output_metadata({"rows": len(df), "unresolved_district": unresolved})
+        return df
+
+    def _load_open_gold_events(s3, bucket: str, now: datetime) -> dict[tuple[str, str], dict]:
+        """Existing gold event rows still inside the active window, keyed by
+        (districtKey, eventType). Rows outside the window are excluded — a
+        new signal in that district+type starts a fresh event, same
+        semantics as production's active-events cache."""
+        cutoff = now - timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
+        open_events: dict[tuple[str, str], dict] = {}
+        for key in lake.list_keys(s3, bucket, f"gold/{src}/events/"):
+            event = lake.read_json(s3, bucket, key)
+            if not event:
+                continue
+            try:
+                last_touched = datetime.fromisoformat(event["lastSignalCreatedAt"].replace("Z", "+00:00"))
+            except (KeyError, ValueError, AttributeError):
+                continue
+            if last_touched < cutoff:
+                continue
+            district, event_type = event.get("districtKey"), event.get("eventType")
+            if district and event_type:
+                open_events[(district, event_type)] = event
+        return open_events
+
+    @dg.asset(
+        name=f"{src}_temporal",
+        group_name=group,
+        ins={"geo_df": dg.AssetIn(key=f"{src}_geo")},
+        description="Tag new-vs-merged against gold events still inside the active window (S3, not clear-api).",
+    )
+    def _temporal(context: dg.AssetExecutionContext, geo_df: pd.DataFrame) -> pd.DataFrame:
+        df = geo_df.copy()
+        if df.empty:
+            df["eventId"] = pd.Series(dtype=object)
+            df["matchOutcome"] = pd.Series(dtype=object)
+            return df
+
+        s3, bucket = _s3()
+        now = datetime.now(UTC)
+        open_events = _load_open_gold_events(s3, bucket, now)
+        # Batch-local: two new signals landing in the same (district, type)
+        # this run join the same fresh event, not two separate ones.
+        batch_new: dict[tuple[str, str], str] = {}
+
+        event_ids, outcomes = [], []
+        for row in df.itertuples():
+            key = (row.districtKey, row.eventType)
+            if row.districtKey is None or row.eventType is None:
+                event_ids.append(str(uuid.uuid4()))
+                outcomes.append("new_event")
+                continue
+            existing = open_events.get(key)
+            if existing:
+                event_ids.append(existing["eventId"])
+                outcomes.append("merged")
+            elif key in batch_new:
+                event_ids.append(batch_new[key])
+                outcomes.append("merged")
+            else:
+                new_id = str(uuid.uuid4())
+                batch_new[key] = new_id
+                event_ids.append(new_id)
+                outcomes.append("new_event")
+        df["eventId"] = event_ids
+        df["matchOutcome"] = outcomes
+        merged_ratio = (df["matchOutcome"] == "merged").mean() if len(df) else 0.0
+        context.add_output_metadata({"rows": len(df), "merged_ratio": round(float(merged_ratio), 3)})
+        return df
+
+    @dg.asset(
+        name=f"{src}_match",
+        group_name=group,
+        ins={"temporal_df": dg.AssetIn(key=f"{src}_temporal")},
+        description="Create-or-merge into a gold-shaped Event (in-memory) — no S3/clear-api write yet.",
+    )
+    def _match(context: dg.AssetExecutionContext, temporal_df: pd.DataFrame) -> list[dict]:
+        df = temporal_df
+        if df.empty:
+            return []
+
+        s3, bucket = _s3()
+        now_iso = datetime.now(UTC).isoformat()
+        bundles: dict[str, dict] = {}
+
+        for row in df.sort_values("publishedAt").itertuples():
+            bundle = bundles.get(row.eventId)
+            if bundle is None:
+                existing = (
+                    lake.read_json(s3, bucket, f"gold/{src}/events/{row.eventId}.json")
+                    if row.matchOutcome == "merged" else None
+                )
+                bundle = existing or {
+                    "eventId": row.eventId,
+                    "clearApiEventId": None,
+                    "districtKey": row.districtKey,
+                    "eventType": row.eventType,
+                    "glideCode": row.glideCode,
+                    "title": row.title,
+                    "description": row.description,
+                    "severity": row.severity or 1,
+                    "casualties": None,
+                    "signalIds": [],
+                    "startedAt": row.publishedAt,
+                    "firstSignalCreatedAt": row.publishedAt,
+                }
+                bundles[row.eventId] = bundle
+            else:
+                # Merge-in-batch: latest signal's title/description wins (no
+                # LLM rewrite this pass — see module docstring).
+                bundle["title"] = row.title or bundle["title"]
+                bundle["description"] = row.description or bundle["description"]
+
+            bundle["signalIds"] = list({*bundle["signalIds"], row.externalId})
+            bundle["severity"] = max(bundle["severity"] or 1, row.severity or 1)
+            bundle["lastSignalCreatedAt"] = row.publishedAt
+            bundle.setdefault("newSignalRows", []).append({
+                "externalId": row.externalId,
+                "eventId": row.eventId,
+                "relevanceScore": row.relevanceScore,
+                "eventType": row.eventType,
+                "districtKey": row.districtKey,
+                "matchOutcome": row.matchOutcome,
+                "createdAt": now_iso,
+                "pushedAt": None,
+                "signalInput": row.signalInput,
+            })
+            casualties = (row.signalInput or {}).get("casualties")
+            if casualties is not None:
+                bundle["casualties"] = (bundle.get("casualties") or 0) + casualties
+
+        context.add_output_metadata({"events": len(bundles), "signals": int(len(df))})
+        return list(bundles.values())
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Gold: finished signal + event rows, GX-gated before they're eligible to push.
+    # ══════════════════════════════════════════════════════════════════════
+    @dg.asset(
+        name=f"{src}_gold",
+        group_name=group,
+        ins={"bundles": dg.AssetIn(key=f"{src}_match")},
+        description="Write the finished signal + event rows to the S3 gold tables.",
+    )
+    def _gold(context: dg.AssetExecutionContext, bundles: list[dict]) -> pd.DataFrame:
+        if not bundles:
+            return pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"])
+
+        s3, bucket = _s3()
+        signal_rows: list[dict] = []
+        for bundle in bundles:
+            new_signals = bundle.pop("newSignalRows", [])
+            lake.write_json(s3, bucket, f"gold/{src}/events/{bundle['eventId']}.json", bundle)
+            for sig_row in new_signals:
+                sig_row["populationAffectedContribution"] = None
+                sig_row["casualtiesContribution"] = (sig_row["signalInput"] or {}).get("casualties")
+                sig_row["severity"] = bundle["severity"]
+                lake.write_json(s3, bucket, f"gold/{src}/signals/{sig_row['externalId']}.json", sig_row)
+                signal_rows.append(sig_row)
+
+        context.add_output_metadata({"events_written": len(bundles), "signals_written": len(signal_rows)})
+        return pd.DataFrame(signal_rows)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Push: the ONLY stage that writes to clear-api. Incremental — only rows
+    # with pushedAt IS NULL.
+    # ══════════════════════════════════════════════════════════════════════
+    @dg.asset(
+        name=f"{src}_push",
+        group_name=group,
+        deps=[f"{src}_gold"],
+        description="Push unpushed gold rows (pushedAt IS NULL) to clear-api, then stamp them pushed.",
+    )
+    def _push(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+        s3, bucket = _s3()
+        unpushed: list[dict] = []
+        for key in lake.list_keys(s3, bucket, f"gold/{src}/signals/"):
+            row = lake.read_json(s3, bucket, key)
+            if row and row.get("pushedAt") is None:
+                unpushed.append(row)
+
+        if not unpushed:
+            context.log.info("[%s push] nothing to push", src)
+            return dg.MaterializeResult(metadata={"pushed_signals": 0, "pushed_events": 0})
+
+        by_event: dict[str, list[dict]] = {}
+        for row in unpushed:
+            by_event.setdefault(row["eventId"], []).append(row)
+
+        pushed_signals = pushed_events = alerted = failed = 0
+        for event_id, sig_rows in by_event.items():
+            try:
+                event_row = lake.read_json(s3, bucket, f"gold/{src}/events/{event_id}.json")
+                if not event_row:
+                    context.log.warning(
+                        "[%s push] gold event %s missing — skipping its %d signal(s)",
+                        src, event_id, len(sig_rows),
+                    )
+                    continue
+
+                created_signals = [
+                    create_signal(row["signalInput"])
+                    for row in sorted(sig_rows, key=lambda r: r["createdAt"])
+                ]
+
+                # Authoritative admin-2, resolved now that a real
+                # (createSignal-resolved) location exists — see module docstring.
+                location_id = None
+                for created in created_signals:
+                    location_id = resolve_signal_admin2(created)
+                    if location_id:
+                        break
+
+                event_input = {
+                    "signalIds": event_row["signalIds"],
+                    "title": event_row["title"],
+                    "description": event_row["description"],
+                    "severity": event_row["severity"],
+                    "rank": event_row["severity"] / 5.0,
+                    "types": [event_row.get("glideCode") or "ot"],
+                    "locationId": location_id,
+                    "validFrom": event_row["firstSignalCreatedAt"],
+                    "validTo": (
+                        datetime.fromisoformat(event_row["firstSignalCreatedAt"].replace("Z", "+00:00"))
+                        + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
+                    ).isoformat(),
+                    "firstSignalCreatedAt": event_row["firstSignalCreatedAt"],
+                    "lastSignalCreatedAt": event_row["lastSignalCreatedAt"],
+                    "startedAt": event_row["startedAt"],
+                }
+                if event_row.get("casualties") is not None:
+                    event_input["casualties"] = event_row["casualties"]
+
+                if event_row.get("clearApiEventId"):
+                    clear_event = update_event(event_row["clearApiEventId"], {
+                        "signalIds": event_row["signalIds"],
+                        "title": event_input["title"],
+                        "description": event_input["description"],
+                        "severity": event_input["severity"],
+                        "rank": event_input["rank"],
+                        "lastSignalCreatedAt": event_input["lastSignalCreatedAt"],
+                        **({"casualties": event_input["casualties"]} if "casualties" in event_input else {}),
+                    })
+                else:
+                    clear_event = create_event(event_input)
+                    event_row["clearApiEventId"] = clear_event["id"]
+                pushed_events += 1
+
+                if (
+                    event_row["severity"] >= ALERT_MIN_SEVERITY
+                    and not is_stale_signal(event_row["lastSignalCreatedAt"])
+                ):
+                    escalate_to_alert(clear_event)
+                    alerted += 1
+
+                now_iso = datetime.now(UTC).isoformat()
+                for sig_row in sig_rows:
+                    sig_row["pushedAt"] = now_iso
+                    lake.write_json(s3, bucket, f"gold/{src}/signals/{sig_row['externalId']}.json", sig_row)
+                    pushed_signals += 1
+                lake.write_json(s3, bucket, f"gold/{src}/events/{event_id}.json", event_row)
+            except Exception:  # noqa: BLE001 — isolate one event's push failure; its rows stay unpushed for retry
+                context.log.exception("[%s push] event %s failed — its signals stay unpushed for retry", src, event_id)
+                failed += 1
+
+        context.log.info(
+            "[%s push] pushed_signals=%d pushed_events=%d alerted=%d failed=%d",
+            src, pushed_signals, pushed_events, alerted, failed,
+        )
+        return dg.MaterializeResult(metadata={
+            "pushed_signals": pushed_signals, "pushed_events": pushed_events,
+            "alerted": alerted, "failed_events": failed,
+        })
+
+    # ══════════════════════════════════════════════════════════════════════
+    # GX asset checks — blocking at bronze/silver/gold, observational at
+    # classify/geo/temporal. See gx_utils.py's docstring for the split.
+    # ══════════════════════════════════════════════════════════════════════
+    def _blocking_result(result, **extra) -> dg.AssetCheckResult:
+        metadata = {**result.check_metadata(), **extra}
+        if result.blocked:
+            return dg.AssetCheckResult(passed=False, severity=dg.AssetCheckSeverity.ERROR, metadata=metadata)
+        if not result.success:
+            return dg.AssetCheckResult(passed=False, severity=dg.AssetCheckSeverity.WARN, metadata=metadata)
+        return dg.AssetCheckResult(passed=True, metadata=metadata)
+
+    def _observational_result(result, **extra) -> dg.AssetCheckResult:
+        return dg.AssetCheckResult(
+            passed=result.success, severity=dg.AssetCheckSeverity.WARN,
+            metadata={**result.check_metadata(), **extra},
+        )
+
+    @dg.asset_check(asset=_bronze, blocking=True, name="bronze_shape")
+    def _bronze_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        result = validate_dataframe(
+            df, suite_name=f"{src}_bronze",
+            expectations=[
+                gx.expectations.ExpectColumnValuesToNotBeNull(column="externalId"),
+                gx.expectations.ExpectColumnValuesToNotBeNull(column="publishedAt"),
+                gx.expectations.ExpectTableRowCountToBeBetween(min_value=1),
+            ],
+        )
+        return _blocking_result(result)
+
+    @dg.asset_check(asset=_silver, blocking=True, name="silver_completeness")
+    def _silver_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        result = validate_dataframe(
+            df, suite_name=f"{src}_silver",
+            expectations=[
+                gx.expectations.ExpectColumnValuesToNotBeNull(column="title", mostly=0.95),
+                gx.expectations.ExpectColumnValuesToNotBeNull(column="description", mostly=0.95),
+                gx.expectations.ExpectColumnValuesToBeBetween(column="severity", min_value=1, max_value=5),
+                gx.expectations.ExpectColumnValuesToBeUnique(column="externalId"),
+                gx.expectations.ExpectColumnValuesToBeBetween(column="lat", min_value=-90, max_value=90, mostly=0.99),
+                gx.expectations.ExpectColumnValuesToBeBetween(column="lng", min_value=-180, max_value=180, mostly=0.99),
+            ],
+        )
+        return _blocking_result(result)
+
+    @dg.asset_check(asset=_classify, name="classify_populated")
+    def _classify_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        result = validate_dataframe(
+            df, suite_name=f"{src}_classify",
+            expectations=[gx.expectations.ExpectColumnValuesToNotBeNull(column="relevanceScore")],
+        )
+        return _observational_result(result)
+
+    @dg.asset_check(asset=_geo, name="geo_resolution_rate")
+    def _geo_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        result = validate_dataframe(
+            df, suite_name=f"{src}_geo",
+            expectations=[gx.expectations.ExpectColumnValuesToNotBeNull(column="districtKey", mostly=0.7)],
+        )
+        return _observational_result(result)
+
+    @dg.asset_check(asset=_temporal, name="temporal_match_ratio")
+    def _temporal_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        result = validate_dataframe(
+            df, suite_name=f"{src}_temporal",
+            expectations=[gx.expectations.ExpectColumnValuesToBeInSet(column="matchOutcome", value_set=["new_event", "merged"])],
+        )
+        merged_ratio = (df["matchOutcome"] == "merged").mean() if len(df) else 0.0
+        return _observational_result(result, merged_ratio=round(float(merged_ratio), 3))
+
+    @dg.asset_check(asset=_gold, blocking=True, name="gold_integrity")
+    def _gold_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        result = validate_dataframe(
+            df, suite_name=f"{src}_gold",
+            expectations=[
+                gx.expectations.ExpectColumnValuesToBeBetween(column="severity", min_value=1, max_value=5),
+                gx.expectations.ExpectColumnValuesToNotBeNull(column="eventId"),
+            ],
+        )
+        return _blocking_result(result)
+
+    job = dg.define_asset_job(
+        name=f"{src}_medallion",
+        selection=[_bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push],
+    )
+
+    return [
+        _bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push,
+        _bronze_check, _silver_check, _classify_check, _geo_check, _temporal_check, _gold_check,
+        job,
+    ]
