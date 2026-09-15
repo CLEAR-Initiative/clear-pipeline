@@ -96,8 +96,15 @@ jobs:
             echo "$GHCR_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             cd /srv/app
             docker compose pull dagster-code dagster-daemon dagster-webserver
+            # `rm -f -s` first: a container left over from an interrupted prior
+            # deploy can hold the service's container name outside compose's
+            # bookkeeping, which makes --force-recreate fail with "name already
+            # in use" instead of replacing it.
+            docker compose rm -f -s dagster-code
             docker compose up -d --force-recreate dagster-code
+            docker compose rm -f -s dagster-daemon
             docker compose up -d --force-recreate dagster-daemon
+            docker compose rm -f -s dagster-webserver
             docker compose up -d --force-recreate dagster-webserver
             docker image prune -a -f
             docker compose ps | grep -E 'dagster-'
