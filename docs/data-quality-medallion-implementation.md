@@ -1,8 +1,10 @@
 # Medallion pipeline implementation: architecture and first source (Dataminr)
 
-Documents what got built in `defs/medallion/` — a generic bronze → silver →
+Documents what got built in `defs/gx_pipeline/` — a generic bronze → silver →
 gold factory, GX-gated at every promotion, with Dataminr as the first
-source wired in. Companion to the per-source projected-pipeline docs
+source wired in. ("Medallion" names the layering pattern; the package and
+class names below describe what the code is instead of which pattern built
+it — see §3.) Companion to the per-source projected-pipeline docs
 (`data-quality-dataminr-pipeline-map.md`, `-acled-`, `-darfur24-`), which
 describe the *target*; this doc describes what's actually running.
 
@@ -21,12 +23,22 @@ S3/clear-api — those stay open per the per-source mapping docs.
 ## 2. Package layout
 
 ```
-src/clear_pipeline/defs/medallion/
-├── sources.py    # MedallionSource protocol + per-source adapters (ONLY per-source code)
-├── factory.py    # build_medallion_assets(source) -> 8 assets + 6 GX checks + 1 job
+src/clear_pipeline/defs/gx_pipeline/
+├── sources.py    # GXSource protocol + per-source adapters (ONLY per-source code)
+├── factory.py    # build_gx_source_assets(source) -> 8 assets + 6 GX checks + 1 job
 ├── gx_utils.py   # Great Expectations Core helper, fully source-agnostic
-└── assets.py     # loops MEDALLION_SOURCES -> module globals, for Dagster auto-discovery
+├── iceberg_events.py  # gold events, SCD2 (§6) — technology-specific, not pattern-named
+└── assets.py     # loops GX_SOURCES -> module globals, for Dagster auto-discovery
 ```
+
+The package/class names are deliberately source-generic and pattern-neutral
+— they say what each piece *is* (a GX-gated source, a factory that builds
+its assets), not that it happens to implement a bronze/silver/gold
+medallion layering internally. That layering is real and worth naming when
+*describing* the architecture (this doc does, freely) — it just isn't the
+right vocabulary for the code's own identity, the way naming a class
+`CQRSHandler` would leak an implementation pattern into an interface that
+should just say what it handles.
 
 Mirrors `defs/signals/`'s existing `connectors.py` + `factory.py` +
 `assets.py` split deliberately, so the pattern is already familiar to
@@ -72,48 +84,74 @@ production ingest's existing failure policy.
 
 ## 3. Adding a new source
 
+`GXSource` adapters call each source's `providers/<source>.py` module
+directly — **no import from `defs/signals` at all**, not even the
+production connector classes. This was a deliberate correction, not the
+original shape: the first version had each adapter wrap its matching
+`defs/signals/connectors.py` connector by composition. Checking what those
+connector classes actually contained showed every method the adapter used
+was a one-line passthrough to `providers/<source>.py` — no logic worth
+reusing lived in `defs/signals/connectors.py` itself, it exists there only
+to satisfy the *production drain's* protocol (`project`/
+`to_content_update_input`, which this package never calls). Repointing to
+`providers/` directly is byte-identical behavior with one upside: this
+package now has zero import dependency on `defs/signals/`, so deleting
+`defs/signals/` later (once this package fully replaces the production
+poll -> drain path) requires no change here at all.
+
 ```mermaid
 flowchart TB
-    subgraph Production["defs/signals/connectors.py — unchanged"]
-        DC["DataminrConnector<br/>poll, external_id, published_at,<br/>raw_bytes, parse, api_source_id,<br/>last_synced, set_watermark"]
-        AC["ACLEDConnector<br/>(same shape)"]
-        DFC["Darfur24Connector<br/>(same shape)"]
+    subgraph Providers["providers/&lt;source&gt;.py — shared with production, unchanged"]
+        PD["providers/dataminr.py<br/>fetch_signals, get/set_last_synced"]
+        PA["providers/acled.py<br/>(same shape)"]
     end
 
-    subgraph Medallion["defs/medallion/sources.py — new"]
-        Proto["MedallionSource protocol<br/>everything above, + to_silver_input()"]
-        DMS["DataminrMedallionSource<br/>wraps DataminrConnector (composition)<br/>adds to_silver_input = build_signal_input(promote=False)"]
-        AMS["ACLEDMedallionSource<br/>not yet written — same recipe"]
-        Reg["MEDALLION_SOURCES registry"]
+    subgraph GX["defs/gx_pipeline/sources.py"]
+        Proto["GXSource protocol<br/>poll, external_id, published_at, raw_bytes,<br/>parse, api_source_id, last_synced,<br/>set_watermark, + to_silver_input()"]
+        DMS["DataminrGXSource<br/>calls providers/dataminr.py directly<br/>to_silver_input = build_signal_input(promote=False)"]
+        AMS["ACLEDGXSource<br/>not yet written — same recipe"]
+        Reg["GX_SOURCES registry"]
     end
 
-    DC -.->|delegates| DMS
-    AC -.->|would delegate| AMS
+    PD -->|called directly| DMS
+    PA -.->|would be called directly| AMS
     DMS -->|implements| Proto
     AMS -.->|would implement| Proto
     DMS --> Reg
     AMS -.-> Reg
-    Reg --> Factory["factory.py::build_medallion_assets(source)<br/>— reads only, never changes"]
+    Reg --> Factory["factory.py::build_gx_source_assets(source)<br/>— reads only, never changes"]
 ```
 
 Dotted lines mark what doesn't exist yet (ACLED shown as the worked
 example — Darfur24/IDMC follow the same shape). Adding a source touches
 `sources.py` only:
 
-1. In `sources.py`, write a small adapter class that wraps the source's
-   existing production connector (`defs/signals/connectors.py`) for
-   everything bronze already needs (`poll`, `external_id`, `published_at`,
-   `raw_bytes`, `parse`, `api_source_id`, `last_synced`, `set_watermark` —
-   all delegate straight through), plus **one new method**,
-   `to_silver_input(record, source_id) -> dict`, a pure transform with no
-   clear-api write.
-2. Register the adapter in `MEDALLION_SOURCES`.
+1. In `sources.py`, write a small adapter class that calls the source's
+   `providers/<source>.py` module directly for everything bronze already
+   needs (`poll`, `external_id`, `published_at`, `raw_bytes`, `parse`,
+   `api_source_id`, `last_synced`, `set_watermark`), plus **one new
+   method**, `to_silver_input(record, source_id) -> dict`, a pure
+   transform with no clear-api write.
+2. Register the adapter in `GX_SOURCES`.
 3. Nothing else changes — `factory.py` and `assets.py` are source-agnostic.
 
 For ACLED and Darfur24, step 1 needs a `promote: bool = False`-style
 passthrough added to `build_acled_signal_input` / `build_darfur24_signal_input`
 first, mirroring the fix already made to `build_signal_input` (§4). Darfur24
 never calls the geoparser at all, so it may not need one.
+
+**On `defs/signals/`'s remaining dependency**: `factory.py` still imports
+`defs/signals/lake.py` for generic S3 read/write/list helpers
+(`s3_client`/`raw_key`/`write_raw`/`write_json`/`read_json`/`list_keys`).
+That module has no source-specific or drain-specific logic — it's a shared
+utility that happens to live inside `defs/signals/` as an accident of
+where it was first written, not because this package needs anything
+`defs/signals/`-specific from it. When `defs/signals/` is actually retired,
+the fix is moving that one file to a `providers/`-level location (mirroring
+where `providers/s3.py` already sits) and updating both this package's
+import and production's own (`defs/signals/factory.py`, `stages.py`). Not
+done now — it would mean touching production's import paths today for zero
+behavior change, purely to pre-empt a retirement that hasn't happened yet.
 
 ## 4. Shared-code changes
 
@@ -291,13 +329,69 @@ flowchart TD
 
 ### 6.3 Status
 
-Decided, not implemented. `dataminr_gold`/`dataminr_push` still write the
-mutable single-file JSON described at the top of this section. Follow-up
-work, in order: verify PyIceberg's write/merge maturity directly (§6.1's
-caveat), pick a catalog for a single-writer setup (a file-based or SQLite
-catalog is likely sufficient — no REST catalog service needed for one
-Dagster writer), then replace the events half of `<source>_gold` with an
-Iceberg `MERGE`. Gold **signals** keeps its current shape unchanged.
+Built (`defs/gx_pipeline/iceberg_events.py`), wired into `factory.py`, verified
+on Dataminr.
+
+**§6.1's caveat resolved, not assumed.** Before writing any pipeline code,
+PyIceberg 0.12.0 was installed and its actual write API checked directly:
+`Table.upsert` exists but is Type-1 (updates matching rows in place —
+wrong tool for SCD2, would destroy history), while `Table.overwrite(df,
+overwrite_filter=...)` does exactly what's needed — atomically replace the
+rows matching a filter with new content, so "close the current row +
+insert the next version" happens as one commit. Confirmed empirically with
+a standalone script against a real local Iceberg table before it was ever
+wired into `factory.py`: append for a brand-new key, `overwrite` for a
+changed one, full history retained, `isCurrent` scans return only the
+current row. The pattern is now the exact content of `iceberg_events.py`'s
+`merge_event`.
+
+**Catalog**: `pyiceberg`'s SQL catalog (`ICEBERG_CATALOG_URI` /
+`ICEBERG_WAREHOUSE`, `signals/config.py`, documented in `.env.example`).
+SQLite by default — fine for dev/CI, not durable across pods/redeploys.
+
+Checked before recommending Postgres for production, not assumed: does
+"reuse the existing Postgres" mean literally `DAGSTER_POSTGRES_URL`?
+`deploy/dagster.yaml` says no — that database is explicitly "DEDICATED to
+Dagster... Dagster owns and migrates its own schema." Putting Iceberg's
+tables there would violate a boundary this repo already drew on purpose.
+The production value is a **separate database on the same Postgres
+server** — same instance, so still genuinely "no new infrastructure," just
+`CREATE DATABASE iceberg_catalog;` next to the one Dagster owns.
+
+Verified against a real Postgres 16 instance (a throwaway container, not
+assumed from docs): `postgresql+psycopg2://...` — the `+psycopg2` driver
+suffix is required, plain `postgresql://` isn't enough for PyIceberg's
+SQLAlchemy-based SQL catalog. `psycopg2` is already present transitively
+via `dagster-postgres`, so no new dependency either. The catalog creates
+exactly two tables (`iceberg_tables`, `iceberg_namespace_properties`) — no
+collision risk with Dagster's own tables even before considering the
+separate-database decision above.
+
+Also checked, since it's the obvious follow-up question: can a write skip
+the catalog entirely? PyIceberg's catalog-less `StaticTable` exists, but
+it's backed by a `NoopCatalog` whose `commit_table` unconditionally raises
+`NotImplementedError` — confirmed by reading the installed source, not
+assumed. It's built for reading one known, pinned snapshot, not for the
+ongoing merge pattern this table needs. Some catalog is structurally
+required for writing — it's the thing that durably tracks "which
+`metadata.json` is current" between separate Dagster run processes.
+
+**`clearApiEventId` lives outside the Iceberg table on purpose** — a small
+side JSON file (`gold/<source>/events_push_state/<eventId>.json`), written
+only by `<source>_push`. It's operational push-cursor state, not business
+content: baking it into the table would spawn a spurious new SCD2 version
+on every push regardless of whether the event's content actually changed.
+`<source>_push` is a pure *reader* of the Iceberg table — the only writer
+is `<source>_gold`.
+
+**Verified**: `tests/test_medallion_pipeline.py` now includes
+`test_iceberg_events_scd2_versioning` (append, idempotent no-op, a real
+content change producing v2 with v1 closed, full history queryable) and
+the end-to-end Dagster test asserts against the actual Iceberg table
+(`current_events_df`/`current_event`) instead of S3 JSON.
+
+Gold **signals** keeps its original shape (S3 JSON, `pushedAt` overwrite)
+— it was never a slowly-changing dimension, see §6's table.
 
 ## 7. A real wiring bug, found by testing rather than assumed away
 
@@ -333,8 +427,8 @@ directly.
   have caught §7's bug.
 - **`ruff check`** — clean on every new/changed file.
 - **`ty check`** — clean on `gx_utils.py` and `sources.py` (fixed one real
-  finding: `DataminrMedallionSource.source` was a read-only `@property`
-  against a `MedallionSource` protocol declaring a mutable `str` field —
+  finding: `DataminrGXSource.source` was a read-only `@property`
+  against a `GXSource` protocol declaring a mutable `str` field —
   narrowed the protocol member to a read-only property). `factory.py`
   reports false positives against Great Expectations' dynamically-built
   Pydantic expectation classes, which no static checker resolves without

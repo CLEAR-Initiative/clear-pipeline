@@ -1,9 +1,9 @@
-"""Generic bronze -> silver -> gold medallion pipeline, GX-gated at every
-promotion. Implements docs/data-quality-<source>-pipeline-map.md for each
+"""Generic GX-gated bronze -> silver -> gold pipeline, one signal source at
+a time. Implements docs/data-quality-<source>-pipeline-map.md for each
 registered source (see ``sources.py``).
 
-**Add a data source = add a ``MedallionSource`` adapter to
-``sources.MEDALLION_SOURCES``** — ``factory.py`` and ``assets.py`` need no
+**Add a data source = add a ``GXSource`` adapter to
+``sources.GX_SOURCES``** — ``factory.py`` and ``assets.py`` need no
 change, mirroring ``defs/signals``' ``CONNECTORS`` registry pattern.
 
 Deliberately isolated from ``defs/signals/``: this stands up the

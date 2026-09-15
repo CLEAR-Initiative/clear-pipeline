@@ -121,6 +121,28 @@ class Settings(BaseSettings):
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
 
+    # Iceberg (gold events SCD2 table — docs/data-quality-medallion-implementation.md §6).
+    # SQL catalog: no new service, just a metadata pointer store (2 small
+    # tables: iceberg_tables, iceberg_namespace_properties). SQLite by
+    # default — fine for local dev/CI, but a local file doesn't survive
+    # across pods/redeploys, so production MUST set this via env.
+    #
+    # Point it at the SAME Postgres server deploy/dagster.yaml already uses
+    # (DAGSTER_POSTGRES_URL) — but a DIFFERENT DATABASE, not that one. That
+    # file is explicit: "[DAGSTER_POSTGRES_URL] DEDICATED to Dagster (its
+    # own database, NOT clear-api's — Dagster owns and migrates its own
+    # schema)". Reusing it here would put Iceberg's tables inside a database
+    # this repo has deliberately reserved for Dagster's own migrations.
+    # A sibling database on the same server is still "no new infrastructure"
+    # (same Postgres instance, just `CREATE DATABASE iceberg_catalog;`).
+    #
+    # Verified against a real Postgres 16 instance before this was set as
+    # the recommended production value: "postgresql+psycopg2://user:pass@
+    # host:5432/iceberg_catalog" — driver must be `+psycopg2` explicitly
+    # (psycopg2 is already pulled in transitively by dagster-postgres).
+    iceberg_catalog_uri: str = "sqlite:///.dagster_iceberg_catalog.db"
+    iceberg_warehouse: str = ""  # defaults to f"s3://{s3_bucket}/gold-iceberg" when empty
+
     # API server
     api_port: int = 8000
     api_shared_secret: str = ""  # Shared secret for clear-api → pipeline calls

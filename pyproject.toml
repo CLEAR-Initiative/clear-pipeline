@@ -43,6 +43,7 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "great-expectations>=1.22,<2",
     "pandas>=2.3.3",
+    "pyiceberg[pyarrow,sql-sqlite]>=0.12.0",
 ]
 
 [dependency-groups]

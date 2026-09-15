@@ -1,32 +1,23 @@
-"""Generic bronze -> silver -> gold medallion asset factory. One call —
-``build_medallion_assets(source)`` — produces one source's full pipeline:
-8 assets + 6 GX asset checks + 1 job. Nothing here writes to clear-api until
-``<source>_push`` — bronze/silver/gold are all S3 artifacts.
+"""Generic GX-gated bronze -> silver -> gold asset factory.
+``build_gx_source_assets(source)`` produces one source's full pipeline: 8
+assets + 6 GX checks + 1 job. Nothing writes to clear-api until
+``<source>_push``. Gold signals are S3 JSON; gold events is an Iceberg
+SCD2 table (`iceberg_events.py`) — see
+docs/data-quality-medallion-implementation.md §6 for why.
 
-**Add a data source = add a ``MedallionSource`` to ``sources.py``** — this
+**Add a data source = add a ``GXSource`` to ``sources.py``** — this
 module needs no change, mirroring ``defs/signals/factory.py``'s
-``build_source_assets(connector)`` pattern.
+``build_source_assets(connector)``.
 
-Simplifications this first pass makes, each with its upgrade path:
+Simplifications, each with an upgrade path (details in the doc §5):
 
-  - **Geo consolidation (``<source>_geo``) uses a heuristic district key**
-    (the second comma-segment of the geoparser's `display_name`, e.g.
-    "El Fasher, North Darfur, Sudan" -> "North Darfur"), not the real
-    admin-2 polygon walk `resolve_signal_admin2` does — that function needs
-    a clear-api-resolved location (id/level/ancestorIds), which only exists
-    *after* a signal has been pushed. Pre-push clustering is therefore
-    approximate; the AUTHORITATIVE admin-2 (used for the real `Event.
-    locationId`) is resolved in ``<source>_push``, right after each
-    signal's `createSignal` call returns a real location. Upgrade path:
-    once a read-only admin-2-from-coordinates lookup exists outside
-    clear-api, swap it in here and drop the string-split heuristic.
-  - **No LLM rewrite of merged event title/description** (production's
-    `_rewrite_event`). Bootstrap-only: first signal's title/description on
-    create, latest signal's on merge. Upgrade path: call an equivalent
-    rewrite once the gold event shape is stable and worth the LLM cost.
-  - **Single-writer S3 read-modify-write**, no cross-run locking (production
-    uses `redis_lock` around `_match_and_act`). Fine for one Dagster run at
-    a time; add a lock if this ever runs concurrently.
+  - ``<source>_geo`` clusters on a heuristic district key (geoparser
+    `display_name`, not a real admin-2 lookup — that needs a
+    clear-api-resolved location, which only exists post-push). The
+    authoritative admin-2 is resolved in ``<source>_push`` instead.
+  - No LLM rewrite of merged event title/description — bootstrap only.
+  - Single-writer, no cross-run locking (production uses `redis_lock`
+    here); fine for one Dagster run at a time.
 """
 
 import uuid
@@ -36,8 +27,9 @@ import dagster as dg
 import great_expectations as gx
 import pandas as pd
 
-from clear_pipeline.defs.medallion.gx_utils import validate_dataframe
-from clear_pipeline.defs.medallion.sources import MedallionSource
+from clear_pipeline.defs.gx_pipeline import iceberg_events
+from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
+from clear_pipeline.defs.gx_pipeline.sources import GXSource
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.providers.alert import escalate_to_alert, is_stale_signal
 from clear_pipeline.providers.classify import classify_locally
@@ -66,10 +58,10 @@ def _district_key(geoparsed: dict | None) -> str | None:
     return parts[1] if len(parts) > 1 else (parts[0] if parts else None)
 
 
-def build_medallion_assets(source: MedallionSource) -> list:
-    """Return one source's full medallion defs: [8 assets, 6 checks, 1 job]."""
+def build_gx_source_assets(source: GXSource) -> list:
+    """Return one source's full GX-gated defs: [8 assets, 6 checks, 1 job]."""
     src = source.source
-    group = f"{src}_medallion"
+    group = f"{src}_gx"
 
     # ══════════════════════════════════════════════════════════════════════
     # Bronze: raw records, untouched. GX-gated on shape before anything reads it.
@@ -199,27 +191,28 @@ def build_medallion_assets(source: MedallionSource) -> list:
         context.add_output_metadata({"rows": len(df), "unresolved_district": unresolved})
         return df
 
-    def _load_open_gold_events(s3, bucket: str, now: datetime) -> dict[tuple[str, str], dict]:
-        """Existing gold event rows still inside the active window, keyed by
-        (districtKey, eventType). Rows outside the window are excluded — a
-        new signal in that district+type starts a fresh event, same
-        semantics as production's active-events cache."""
+    def _load_open_gold_event_ids(now: datetime) -> dict[tuple[str, str], str]:
+        """eventId of the current-version gold event (Iceberg, §6) still
+        inside the active window, keyed by (districtKey, eventType). Rows
+        outside the window are excluded — a new signal in that district+type
+        starts a fresh event, same semantics as production's active-events
+        cache. Only the id is needed here; `_match` re-reads the full
+        current row itself when it actually merges into one."""
         cutoff = now - timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
-        open_events: dict[tuple[str, str], dict] = {}
-        for key in lake.list_keys(s3, bucket, f"gold/{src}/events/"):
-            event = lake.read_json(s3, bucket, key)
-            if not event:
-                continue
+        events_table = iceberg_events.get_events_table(src)
+        current_df = iceberg_events.current_events_df(events_table)
+        open_event_ids: dict[tuple[str, str], str] = {}
+        for row in current_df.to_dict("records"):
             try:
-                last_touched = datetime.fromisoformat(event["lastSignalCreatedAt"].replace("Z", "+00:00"))
-            except (KeyError, ValueError, AttributeError):
+                last_touched = datetime.fromisoformat(str(row["lastSignalCreatedAt"]).replace("Z", "+00:00"))
+            except (KeyError, ValueError, AttributeError, TypeError):
                 continue
             if last_touched < cutoff:
                 continue
-            district, event_type = event.get("districtKey"), event.get("eventType")
+            district, event_type = row.get("districtKey"), row.get("eventType")
             if district and event_type:
-                open_events[(district, event_type)] = event
-        return open_events
+                open_event_ids[(district, event_type)] = row["eventId"]
+        return open_event_ids
 
     @dg.asset(
         name=f"{src}_temporal",
@@ -234,9 +227,8 @@ def build_medallion_assets(source: MedallionSource) -> list:
             df["matchOutcome"] = pd.Series(dtype=object)
             return df
 
-        s3, bucket = _s3()
         now = datetime.now(UTC)
-        open_events = _load_open_gold_events(s3, bucket, now)
+        open_event_ids = _load_open_gold_event_ids(now)
         # Batch-local: two new signals landing in the same (district, type)
         # this run join the same fresh event, not two separate ones.
         batch_new: dict[tuple[str, str], str] = {}
@@ -248,9 +240,9 @@ def build_medallion_assets(source: MedallionSource) -> list:
                 event_ids.append(str(uuid.uuid4()))
                 outcomes.append("new_event")
                 continue
-            existing = open_events.get(key)
-            if existing:
-                event_ids.append(existing["eventId"])
+            existing_id = open_event_ids.get(key)
+            if existing_id:
+                event_ids.append(existing_id)
                 outcomes.append("merged")
             elif key in batch_new:
                 event_ids.append(batch_new[key])
@@ -277,20 +269,19 @@ def build_medallion_assets(source: MedallionSource) -> list:
         if df.empty:
             return []
 
-        s3, bucket = _s3()
         now_iso = datetime.now(UTC).isoformat()
+        events_table = iceberg_events.get_events_table(src)
         bundles: dict[str, dict] = {}
 
         for row in df.sort_values("publishedAt").itertuples():
             bundle = bundles.get(row.eventId)
             if bundle is None:
                 existing = (
-                    lake.read_json(s3, bucket, f"gold/{src}/events/{row.eventId}.json")
+                    iceberg_events.current_event(events_table, row.eventId)
                     if row.matchOutcome == "merged" else None
                 )
                 bundle = existing or {
                     "eventId": row.eventId,
-                    "clearApiEventId": None,
                     "districtKey": row.districtKey,
                     "eventType": row.eventType,
                     "glideCode": row.glideCode,
@@ -337,17 +328,23 @@ def build_medallion_assets(source: MedallionSource) -> list:
         name=f"{src}_gold",
         group_name=group,
         ins={"bundles": dg.AssetIn(key=f"{src}_match")},
-        description="Write the finished signal + event rows to the S3 gold tables.",
+        description="Write signal rows to S3, merge event rows into the Iceberg SCD2 table (§6).",
     )
     def _gold(context: dg.AssetExecutionContext, bundles: list[dict]) -> pd.DataFrame:
         if not bundles:
             return pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"])
 
         s3, bucket = _s3()
+        events_table = iceberg_events.get_events_table(src)
         signal_rows: list[dict] = []
+        new_versions = no_op_versions = 0
         for bundle in bundles:
             new_signals = bundle.pop("newSignalRows", [])
-            lake.write_json(s3, bucket, f"gold/{src}/events/{bundle['eventId']}.json", bundle)
+            merged = iceberg_events.merge_event(events_table, bundle)
+            if merged["version"] != bundle.get("version"):
+                new_versions += 1
+            else:
+                no_op_versions += 1
             for sig_row in new_signals:
                 sig_row["populationAffectedContribution"] = None
                 sig_row["casualtiesContribution"] = (sig_row["signalInput"] or {}).get("casualties")
@@ -355,7 +352,10 @@ def build_medallion_assets(source: MedallionSource) -> list:
                 lake.write_json(s3, bucket, f"gold/{src}/signals/{sig_row['externalId']}.json", sig_row)
                 signal_rows.append(sig_row)
 
-        context.add_output_metadata({"events_written": len(bundles), "signals_written": len(signal_rows)})
+        context.add_output_metadata({
+            "events_written": len(bundles), "signals_written": len(signal_rows),
+            "event_versions_new": new_versions, "event_versions_unchanged": no_op_versions,
+        })
         return pd.DataFrame(signal_rows)
 
     # ══════════════════════════════════════════════════════════════════════
@@ -370,6 +370,7 @@ def build_medallion_assets(source: MedallionSource) -> list:
     )
     def _push(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         s3, bucket = _s3()
+        events_table = iceberg_events.get_events_table(src)
         unpushed: list[dict] = []
         for key in lake.list_keys(s3, bucket, f"gold/{src}/signals/"):
             row = lake.read_json(s3, bucket, key)
@@ -387,21 +388,24 @@ def build_medallion_assets(source: MedallionSource) -> list:
         pushed_signals = pushed_events = alerted = failed = 0
         for event_id, sig_rows in by_event.items():
             try:
-                event_row = lake.read_json(s3, bucket, f"gold/{src}/events/{event_id}.json")
+                # Iceberg current version — push only ever reads it (iceberg_events.py).
+                event_row = iceberg_events.current_event(events_table, event_id)
                 if not event_row:
                     context.log.warning(
                         "[%s push] gold event %s missing — skipping its %d signal(s)",
                         src, event_id, len(sig_rows),
                     )
                     continue
+                # clearApiEventId is push state, not SCD2 content — kept separate.
+                push_state_key = f"gold/{src}/events_push_state/{event_id}.json"
+                push_state = lake.read_json(s3, bucket, push_state_key) or {}
 
                 created_signals = [
                     create_signal(row["signalInput"])
                     for row in sorted(sig_rows, key=lambda r: r["createdAt"])
                 ]
 
-                # Authoritative admin-2, resolved now that a real
-                # (createSignal-resolved) location exists — see module docstring.
+                # Authoritative admin-2, now that createSignal resolved a real location.
                 location_id = None
                 for created in created_signals:
                     location_id = resolve_signal_admin2(created)
@@ -428,8 +432,8 @@ def build_medallion_assets(source: MedallionSource) -> list:
                 if event_row.get("casualties") is not None:
                     event_input["casualties"] = event_row["casualties"]
 
-                if event_row.get("clearApiEventId"):
-                    clear_event = update_event(event_row["clearApiEventId"], {
+                if push_state.get("clearApiEventId"):
+                    clear_event = update_event(push_state["clearApiEventId"], {
                         "signalIds": event_row["signalIds"],
                         "title": event_input["title"],
                         "description": event_input["description"],
@@ -440,7 +444,7 @@ def build_medallion_assets(source: MedallionSource) -> list:
                     })
                 else:
                     clear_event = create_event(event_input)
-                    event_row["clearApiEventId"] = clear_event["id"]
+                    push_state["clearApiEventId"] = clear_event["id"]
                 pushed_events += 1
 
                 if (
@@ -455,7 +459,7 @@ def build_medallion_assets(source: MedallionSource) -> list:
                     sig_row["pushedAt"] = now_iso
                     lake.write_json(s3, bucket, f"gold/{src}/signals/{sig_row['externalId']}.json", sig_row)
                     pushed_signals += 1
-                lake.write_json(s3, bucket, f"gold/{src}/events/{event_id}.json", event_row)
+                lake.write_json(s3, bucket, push_state_key, push_state)
             except Exception:  # noqa: BLE001 — isolate one event's push failure; its rows stay unpushed for retry
                 context.log.exception("[%s push] event %s failed — its signals stay unpushed for retry", src, event_id)
                 failed += 1
@@ -551,7 +555,7 @@ def build_medallion_assets(source: MedallionSource) -> list:
         return _blocking_result(result)
 
     job = dg.define_asset_job(
-        name=f"{src}_medallion",
+        name=f"{src}_gx",
         selection=[_bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push],
     )
 
