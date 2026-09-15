@@ -1,40 +1,46 @@
-"""Per-source medallion adapters — the ONLY per-source code in this package.
+"""Per-source adapters — the ONLY per-source code in this package.
 
 **Add a data source = add an adapter here** and register it in
-``MEDALLION_SOURCES``. Mirrors ``defs/signals/connectors.py``'s
-``SignalSource``/``CONNECTORS`` pattern deliberately: each adapter *wraps*
-that module's existing production connector (composition, not
-modification — ``defs/signals/`` stays untouched) for the bronze plumbing
-every source already has (poll, id/timestamp extraction, raw-byte
-serialization, parse, watermark), and adds exactly one new method,
-``to_silver_input``, the medallion-specific pure transform with no
-clear-api write.
+``GX_SOURCES``. Mirrors ``defs/signals/connectors.py``'s
+``SignalSource``/``CONNECTORS`` shape, but calls ``providers/<source>.py``
+directly instead of wrapping a connector — those connectors are thin
+one-line passthroughs to ``providers/`` anyway, so this is the same
+behavior with zero import dependency on ``defs/signals``. That's
+deliberate: ``defs/signals/`` runs the production poll -> drain pipeline
+and its connectors carry drain-only methods (``project``,
+``to_content_update_input``) this package doesn't need — once this
+package replaces that pipeline, `defs/signals/` is deletable with no
+change here.
+
+``to_silver_input`` is the one method with no production equivalent: a
+pure transform, no clear-api write, built on
+``providers/signal.py``'s ``build_signal_input(..., promote=False)``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_pipeline.defs.signals.connectors import DataminrConnector
 from clear_pipeline.providers import dataminr
+from clear_pipeline.providers.clear_api import get_source_id_by_name
 from clear_pipeline.providers.signal import build_signal_input
+from clear_pipeline.signals.config import settings
 
 
 @runtime_checkable
-class MedallionSource(Protocol):
+class GXSource(Protocol):
     """What ``factory.py`` needs from a source. Every method except
-    ``to_silver_input`` already exists on the matching production connector
-    in ``defs/signals/connectors.py`` — adapters below delegate to it."""
+    ``to_silver_input`` already exists as a `providers/<source>.py`
+    function or attribute — adapters below call it directly, no
+    `defs/signals` import (see module docstring)."""
 
     @property
     def source(self) -> str:
         """DataSource name in clear-api. Doubles as the S3 prefix
         (``raw|silver|gold/<source>/…``) and every Dagster asset's name
-        prefix (``<source>_bronze``, ``<source>_silver``, …). Read-only —
-        adapters expose it as a `@property` delegating to their wrapped
-        connector."""
+        prefix (``<source>_bronze``, ``<source>_silver``, …)."""
         ...
 
     def poll(self, since: datetime | None) -> list[Any]:
@@ -73,40 +79,38 @@ class MedallionSource(Protocol):
         """Normalize a record into a clear-api ``CreateSignalInput``-shaped
         dict, with NO clear-api write as a side effect (unlike the
         production connector's ``to_signal_input``, which may promote a
-        geoparser candidate to a real L4 location row). The only method a
-        medallion adapter adds beyond its wrapped production connector."""
+        geoparser candidate to a real L4 location row). The only method
+        without a direct production equivalent."""
         ...
 
 
 @dataclass(frozen=True)
-class DataminrMedallionSource:
-    """Wraps the production ``DataminrConnector`` for everything bronze
-    needs — identical fetch, keys, and watermark behavior to today's
-    ``raw_dataminr`` ingest asset."""
-
-    _connector: DataminrConnector = field(default_factory=DataminrConnector)
+class DataminrGXSource:
+    """Calls `providers/dataminr.py` directly — identical fetch, keys, and
+    watermark behavior to today's `raw_dataminr` ingest asset, with no
+    import from `defs/signals` (see module docstring)."""
 
     @property
     def source(self) -> str:
-        return self._connector.source
+        return settings.dataminr_source_name
 
     def poll(self, since: datetime | None) -> list[Any]:
-        return self._connector.poll(since)
+        return dataminr.fetch_signals(since=since)
 
     def external_id(self, record: Any) -> str:
-        return self._connector.external_id(record)
+        return record.alertId
 
     def published_at(self, record: Any) -> str:
-        return self._connector.published_at(record)
+        return record.alertTimestamp
 
     def raw_bytes(self, record: Any) -> bytes:
-        return self._connector.raw_bytes(record)
+        return record.model_dump_json().encode("utf-8")
 
     def parse(self, raw: bytes) -> Any:
-        return self._connector.parse(raw)
+        return dataminr.DataminrSignal.model_validate_json(raw)
 
     def api_source_id(self) -> str:
-        return self._connector.api_source_id()
+        return get_source_id_by_name(settings.dataminr_source_name)
 
     def last_synced(self) -> datetime | None:
         return dataminr.get_last_synced()
@@ -121,11 +125,12 @@ class DataminrMedallionSource:
         return build_signal_input(record, source_id, promote=False)
 
 
-# Add ACLEDMedallionSource / Darfur24MedallionSource / IDMCMedallionSource
-# here, each wrapping its connectors.py counterpart, once their own
-# to_silver_input is ready (ACLED/Darfur24 need the same promote=False
-# passthrough added to build_acled_signal_input / build_darfur24_signal_input
-# first — Darfur24 doesn't call the geoparser at all, so it may not need one).
-MEDALLION_SOURCES: list[MedallionSource] = [
-    DataminrMedallionSource(),
+# Add ACLEDGXSource / Darfur24GXSource / IDMCGXSource here, each calling its
+# providers/<source>.py module directly (same recipe as DataminrGXSource
+# above — no defs/signals import), once their own to_silver_input is ready
+# (ACLED/Darfur24 need the same promote=False passthrough added to
+# build_acled_signal_input / build_darfur24_signal_input first — Darfur24
+# doesn't call the geoparser at all, so it may not need one).
+GX_SOURCES: list[GXSource] = [
+    DataminrGXSource(),
 ]

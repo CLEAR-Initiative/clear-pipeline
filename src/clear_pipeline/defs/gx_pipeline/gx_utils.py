@@ -1,17 +1,12 @@
-"""Great Expectations Core helper, shared by every source's medallion checks.
+"""Great Expectations Core helper, shared by every source's GX checks.
 
-GX Core only (no Cloud): every check builds a fresh, in-process "ephemeral"
-context, defines a suite, validates one pandas DataFrame, and throws the
-context away. Nothing is persisted to disk or to a GX-hosted service —
-matches the "runs in-process against data the pipeline already holds in
-memory, no new service" design goal.
+GX Core only, no Cloud: each check builds a throwaway in-process context,
+validates one pandas DataFrame, discards the context. No new service.
 
-Failure policy: a structural failure (row count, table-wide uniqueness) has
-no "unexpected proportion" to weigh, so it always blocks. A column-level
-failure blocks only once its unexpected proportion crosses
-`block_threshold`; below that it's a warning and the batch proceeds.
-Per-record isolation (one bad record shouldn't block a batch) is the
-caller's job — this module's job is the *suite-level* warn/block call.
+Failure policy: a structural failure (row count, uniqueness) always
+blocks — no partial credit. A column-level failure blocks only past
+`block_threshold`; below that it's a warning. Per-record isolation is the
+caller's job; this module only does the suite-level warn/block call.
 """
 
 import logging
@@ -83,7 +78,7 @@ def validate_dataframe(
     gates.
     """
     context = gx.get_context(mode="ephemeral")
-    data_source = context.data_sources.add_pandas("medallion_pandas")
+    data_source = context.data_sources.add_pandas("gx_pipeline_pandas")
     data_asset = data_source.add_dataframe_asset(name=f"{suite_name}_asset")
     batch_definition = data_asset.add_batch_definition_whole_dataframe(f"{suite_name}_batch")
 
