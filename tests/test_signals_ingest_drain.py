@@ -53,20 +53,21 @@ def _recorder(sink):
 def test_registry_flags_all_drained():
     by_name = {c.source: c for c in CONNECTORS}
     assert all(isinstance(c, SignalSource) for c in CONNECTORS)
-    assert {"dataminr", "acled", "gdacs", "darfur24", "manual", "sudan-war-x"} <= set(by_name)
-    # every source feeds the shared stages EXCEPT idmc — its grouping logic
-    # is different and needs new features that aren't built yet, so its
-    # signals are ingested but not grouped into events for now
-    assert all(c.drained for c in CONNECTORS if c.source != "idmc")
+    assert {"dataminr", "acled", "gdacs", "darfur24", "manual"} <= set(by_name)
+    # every source feeds the shared stages EXCEPT idmc/dtm — idmc's grouping
+    # logic is different and needs new features that aren't built yet; dtm's
+    # district+type grouping doesn't fit a bulletin that can span many
+    # districts. Both are ingested but not grouped into events for now.
+    assert all(c.drained for c in CONNECTORS if c.source not in ("idmc", "dtm"))
     assert not by_name["idmc"].drained
-    assert DRAINED_SOURCES == frozenset(
-        {"dataminr", "acled", "gdacs", "darfur24", "manual", "sudan-war-x"}
-    )
-    # manual and the X push feed are the non-polled sources (no ingest asset —
-    # rows are created directly in clear-api and drained from there)
+    assert not by_name["dtm"].drained
+    assert DRAINED_SOURCES == frozenset({"dataminr", "acled", "gdacs", "darfur24", "manual"})
+    # only manual is non-polled
     assert not by_name["manual"].polled
-    assert not by_name["sudan-war-x"].polled
-    assert all(by_name[s].polled for s in ("dataminr", "acled", "gdacs", "darfur24", "idmc"))
+    assert all(
+        by_name[s].polled
+        for s in ("dataminr", "acled", "gdacs", "darfur24", "idmc", "dtm")
+    )
 
 
 def test_connectors_by_source_map():
