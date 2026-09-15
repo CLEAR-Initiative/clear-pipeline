@@ -19,6 +19,7 @@ capability flags:
   │ idmc       │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
+  │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
 
 - **polled** — has an external API to poll. The factory builds an ingest asset +
@@ -26,7 +27,8 @@ capability flags:
   rawS3Key=…)``. The shared classify/group stage rehydrates the record from the
   blob (``parse`` → ``project``). Manual signals are analyst-created directly in
   clear-api (no poll, no lake blob) so ``project`` reads the signal row itself
-  (``record=None``).
+  (``record=None``). Push feeds (``sudan-war-x``, delivered by an external
+  poller to clear-api's ``POST /api/x/ingest``) work the same way.
 - **drained** — its NEW signals are processed by the classify/group stage.
   ``idmc`` is the one exception: its grouping logic is different and needs new
   features that aren't built yet, so its signals are ingested but not grouped
@@ -624,6 +626,38 @@ class ManualConnector:
         )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# sudan-war-x — X posts pushed to clear-api (NOT polled, drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class SudanWarXConnector:
+    """No external API on our side: an external poller POSTs X posts to
+    clear-api's ``POST /api/x/ingest``, which writes ``source=sudan-war-x``
+    signals directly (``externalId`` ``x:{post id}``, ``title`` = truncated post
+    text, ``description`` = full post text, ``publishedAt``; ``url``, author and
+    metrics stay on the row / in ``rawData``). Exactly like ``manual``: no ingest asset,
+    no lake blob — the drain reads NEW rows and ``project`` builds the view from
+    the signal row itself.
+
+    One connector per push feed (clear-api ADR 0005 keys DataSource rows per
+    feed, not per platform); a second X watchlist needs its own registry entry.
+    """
+
+    source = settings.sudan_war_x_source_name
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def project(self, record: Any, created: dict) -> SignalView:
+        # record is None — everything comes from the clear-api signal row.
+        return SignalView(
+            external_id=created["id"],
+            title=created.get("title") or "",
+            timestamp=created.get("publishedAt") or "",
+            description=created.get("description"),
+            location_name=_first_location_name(created),
+        )
+
+
 #: The connector registry — the factory builds every source's ingest defs from
 #: this, and the shared drain stages dispatch per-signal projection through
 #: CONNECTORS_BY_SOURCE.
@@ -635,6 +669,7 @@ CONNECTORS: list[SignalSource] = [
     IDMCConnector(),
     DTMFlashAlertConnector(),
     ManualConnector(),
+    SudanWarXConnector(),
 ]
 
 #: source name → connector, so the shared classify/group stage can rehydrate +

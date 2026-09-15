@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     manual_source_name: str = "manual"
     manual_poll_interval_minutes: int = 1
 
+    # sudan-war-x — X posts pushed by an external poller to clear-api's
+    # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push
+    # feed). Like manual: no poll, no lake blob — the route already writes the
+    # signal row (title/description/url/publishedAt) and the shared drain
+    # sensor picks NEW rows up at `manual_poll_interval_minutes`. Must match
+    # the feed's data_sources row name.
+    sudan_war_x_source_name: str = "sudan-war-x"
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 

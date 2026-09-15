@@ -21,6 +21,7 @@ from clear_pipeline.defs.signals.connectors import (
     IDMCConnector,
     ManualConnector,
     SignalSource,
+    SudanWarXConnector,
 )
 from clear_pipeline.providers.translation_hash import (
     HASH_FIELDS,
@@ -75,6 +76,7 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["gdacs"], GDACSConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["darfur24"], Darfur24Connector)
     assert isinstance(CONNECTORS_BY_SOURCE["manual"], ManualConnector)
+    assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
 
 
 # ── to_content_update_input dispatch ──────────────────────────────────────────
@@ -110,8 +112,9 @@ def test_factory_builds_ingest_for_polled_only():
     assert any("dataminr_poll_sensor" in n for n in dm)
     assert not any("signals_processed" in n for n in dm)  # drains are shared stages now
 
-    # manual is not polled → no ingest defs
+    # manual / sudan-war-x are not polled → no ingest defs
     assert factory.build_source_assets(ManualConnector()) == []
+    assert factory.build_source_assets(SudanWarXConnector()) == []
 
 
 def test_raw_key_is_source_date_partitioned_and_slash_safe():
@@ -138,6 +141,34 @@ def test_project_manual_from_signal_row():
     assert view.external_id == "m1"
     assert view.title == "Reported shelling"
     assert view.location_name == "Khartoum"
+
+
+def test_project_sudan_war_x_from_signal_row():
+    # Regression for expo-533: X posts pushed via clear-api's POST /api/x/ingest
+    # land as NEW `sudan-war-x` rows with no rawS3Key. They used to hit the
+    # "unknown_source" branch and be marked FAILED; now they project from the
+    # row exactly like manual signals.
+    created = {
+        "id": "sig-x-1",
+        "externalId": "x:2094734567902953601",
+        "source": {"name": "sudan-war-x"},
+        "title": "RSF shelling reported in Omdurman this morning, several…",
+        "description": "RSF shelling reported in Omdurman this morning, several casualties",
+        "url": "https://x.com/someone/status/2094734567902953601",
+        "publishedAt": "2026-09-02T12:00:00Z",
+        "generalLocation": {"name": "Omdurman"},
+        "rawData": {"author": {"username": "someone"}, "metrics": {"likes": 3}},
+        # no rawS3Key — pushed rows have no lake blob
+    }
+    result = stages._project(created)
+    assert result != "unknown_source"
+    connector, view = result
+    assert isinstance(connector, SudanWarXConnector)
+    assert view.external_id == "sig-x-1"
+    assert view.title.startswith("RSF shelling reported in Omdurman")
+    assert view.description.endswith("several casualties")
+    assert view.timestamp == "2026-09-02T12:00:00Z"
+    assert view.location_name == "Omdurman"
 
 
 def test_project_polled_without_blob_returns_no_blob():

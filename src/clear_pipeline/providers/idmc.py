@@ -13,20 +13,19 @@ this poses to catching revisions on records that age out of the window.
 
 One row = one *figure*, not one event: an IDU `event_id` can have many rows
 across locations, dates, and revisions. Filtering + dedup are keyed on the
-row-level `id`.
+row-level `id`. A single row can itself describe multiple flows of
+displacement (e.g. one origin, several destinations).
 
 Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_last_180_days_retrieve
 """
 
 import hashlib
 import logging
-import re
 from datetime import UTC, datetime
 
 import httpx
 import redis
 
-from clear_pipeline.providers.clear_api import find_or_create_landmark_l4
 from clear_pipeline.providers.signal import enrich_with_geoparser
 from clear_pipeline.providers.translation_hash import _stable_stringify
 from clear_pipeline.signals.config import settings
@@ -36,11 +35,6 @@ logger = logging.getLogger(__name__)
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/"
-
-# Separator between entries in IDU's compound locations_* fields
-# (locations_name, locations_type, locations_coordinates, locations_accuracy)
-# — semicolon, with variable surrounding whitespace observed in live data.
-_LOCATION_SEP_RE = re.compile(r"\s*;\s*")
 
 
 def _parse_event(raw: dict) -> dict | None:
@@ -175,162 +169,6 @@ def _fetch_all() -> list[dict]:
     return data
 
 
-def _classify_role(location_type: str) -> str:
-    """Classify one `locations_type` entry: "origin", "destination", "both"
-    (ambiguous — "Origin and destination"), or "neither"."""
-    t = (location_type or "").strip().lower()
-    is_origin = "origin" in t
-    is_destination = "destination" in t
-    if is_origin and is_destination:
-        return "both"
-    if is_origin:
-        return "origin"
-    if is_destination:
-        return "destination"
-    return "neither"
-
-
-def _build_split(parsed: dict, raw: dict, figure: int, name: str, type_: str,
-                  coords: str, accuracy: str, idu_id: str | None) -> dict:
-    """One output dict shared by both split strategies below — a fresh
-    `raw` (never a shared reference) plus the same fields surfaced
-    top-level, per index/pair."""
-    split_raw = {
-        **raw,
-        "figure": figure,
-        "locations_name": name,
-        "locations_type": type_,
-        "locations_coordinates": coords,
-        "locations_accuracy": accuracy,
-    }
-    split = {
-        **parsed,
-        "figure": figure,
-        "locations_name": name,
-        "locations_type": type_,
-        "locations_coordinates": coords,
-        "locations_accuracy": accuracy,
-        "raw": split_raw,
-    }
-    if idu_id is not None:
-        split["idu_id"] = idu_id
-    return split
-
-
-def _split_independent(parsed: dict, raw: dict, names: list[str], types: list[str],
-                        coords: list[str], accuracies: list[str]) -> list[dict]:
-    """Fallback: one signal per raw location, figure divided equally across
-    all N (not pair-aware) — used when the row's origin/destination
-    composition doesn't resolve to a clean pairing (see TODO.md)."""
-    n = len(names)
-    figure = parsed.get("figure") or 0
-    base, remainder = divmod(figure, n)
-    return [
-        _build_split(
-            parsed, raw, base + (1 if i < remainder else 0),
-            names[i], types[i], coords[i], accuracies[i],
-            f"{parsed['idu_id']}:{i}" if n > 1 else None,
-        )
-        for i in range(n)
-    ]
-
-
-def _split_pairs(parsed: dict, raw: dict, names: list[str], types: list[str],
-                  coords: list[str], accuracies: list[str],
-                  origins: list[int], destinations: list[int]) -> list[dict]:
-    """One signal per (origin, destination) pair — 1:1 merges into a single
-    signal carrying the full, undivided figure and the row's original
-    `idu_id`; 1:N/N:1 fans out into N signals, figure divided by N (the
-    pair count, not the raw location count)."""
-    pairs = [(o, d) for o in origins for d in destinations]
-    n_pairs = len(pairs)
-    figure = parsed.get("figure") or 0
-    base, remainder = divmod(figure, n_pairs)
-    return [
-        _build_split(
-            parsed, raw, base + (1 if i < remainder else 0),
-            f"{names[o]}; {names[d]}", f"{types[o]}; {types[d]}",
-            f"{coords[o]}; {coords[d]}", f"{accuracies[o]}; {accuracies[d]}",
-            f"{parsed['idu_id']}:{i}" if n_pairs > 1 else None,
-        )
-        for i, (o, d) in enumerate(pairs)
-    ]
-
-
-def _split_by_location(parsed: dict) -> list[dict]:
-    """Split a multi-location IDU row into flow signals, pairing origins
-    with destinations rather than treating every named location as an
-    independent occurrence.
-
-    Example — idu_id=174447, figure=1000, 1 origin (Al Jazirah) + 1
-    destination (Al Fao): merges into ONE signal, `idu_id` unchanged,
-    full undivided figure — it's one flow, not two. With 1 origin + 2
-    destinations instead, it fans out into 2 signals (`idu_id:0`/`:1`),
-    figure divided by 2. "Origin and destination" fills whichever role
-    has zero plain matches elsewhere in the row (it's not a role of its
-    own — see the classify step below).
-
-    Falls back to `_split_independent` (equal division per raw location,
-    ignoring role) when the composition doesn't resolve to a clean
-    pairing — multiple origins AND multiple destinations at once, or any
-    location with neither role. See TODO.md — rare (only seen in old
-    2018 Triangulation-role data so far), logged at INFO when it fires.
-
-    A single-location row keeps its `idu_id` unchanged (no suffix) — an
-    already-ingested row's dedup identity must not shift. A count mismatch
-    across the four locations_* fields returns `[]` (dropped, not guessed
-    at), logged as an error.
-    """
-    raw = parsed.get("raw") or {}
-    names = _LOCATION_SEP_RE.split((raw.get("locations_name") or "").strip())
-    types = _LOCATION_SEP_RE.split((raw.get("locations_type") or "").strip())
-    coords = _LOCATION_SEP_RE.split((raw.get("locations_coordinates") or "").strip())
-    accuracies = _LOCATION_SEP_RE.split((raw.get("locations_accuracy") or "").strip())
-
-    if not (len(names) == len(types) == len(coords) == len(accuracies)):
-        logger.error(
-            "[IDMC] idu_id=%s: locations_* field count mismatch "
-            "(names=%d types=%d coords=%d accuracy=%d) — dropping row",
-            parsed.get("idu_id"), len(names), len(types), len(coords), len(accuracies),
-        )
-        return []
-
-    # No explicit n==1 shortcut needed: with a single location, `origins`
-    # and `destinations` can never both be non-empty, so the checks below
-    # always fall back to `_split_independent` — which handles n==1
-    # correctly on its own (single output, idu_id unchanged).
-    roles = [_classify_role(t) for t in types]
-    origins = [i for i, r in enumerate(roles) if r == "origin"]
-    destinations = [i for i, r in enumerate(roles) if r == "destination"]
-    ambiguous = [i for i, r in enumerate(roles) if r == "both"]
-    neither = [i for i, r in enumerate(roles) if r == "neither"]
-
-    unresolved_ambiguous = False
-    if ambiguous:
-        if destinations and not origins:
-            origins = origins + ambiguous
-        elif origins and not destinations:
-            destinations = destinations + ambiguous
-        else:
-            # Neither role is otherwise singular — can't tell which one
-            # each ambiguous entry fills. TODO.md.
-            unresolved_ambiguous = True
-
-    if (
-        neither or unresolved_ambiguous or not origins or not destinations
-        or (len(origins) > 1 and len(destinations) > 1)
-    ):
-        logger.info(
-            "[IDMC] idu_id=%s: locations_type composition isn't a clean "
-            "1:1/1:N/N:1 pairing (origins=%d destinations=%d neither=%d) — "
-            "falling back to independent per-location split (TODO.md)",
-            parsed.get("idu_id"), len(origins), len(destinations), len(neither),
-        )
-        return _split_independent(parsed, raw, names, types, coords, accuracies)
-
-    return _split_pairs(parsed, raw, names, types, coords, accuracies, origins, destinations)
-
-
 def _parse_coordinate(pair: str) -> tuple[float, float] | None:
     """Parse one `"lat, lng"` entry from `locations_coordinates`. Returns
     None on a malformed or empty pair."""
@@ -341,23 +179,6 @@ def _parse_coordinate(pair: str) -> tuple[float, float] | None:
         return float(parts[0]), float(parts[1])
     except (TypeError, ValueError):
         return None
-
-
-def _kind_from_locations_accuracy(accuracy: str | None) -> str:
-    """Map IDU's `locations_accuracy` free text to clear-api's
-    `findOrCreateLandmarkL4` `kind` argument — a hard-validated binary,
-    only "landmark" or "admin" (clear-api rejects anything else).
-
-    Every value seen in live IDU data ("Locality", "District/Zone/
-    Department (ADM2)", "County/City/town/Village/Woreda (ADM3)")
-    describes an administrative/settlement precision level, never a
-    POI-style landmark — IDU's `locations_name` entries are towns,
-    villages, and districts, not landmarks. So this currently always
-    resolves to "admin"; kept as an explicit mapping (not a bare
-    constant) so a future accuracy value that genuinely denotes a
-    landmark has somewhere to plug in.
-    """
-    return "admin"
 
 
 def fetch_idu_records(since: datetime | None = None) -> list[dict]:
@@ -374,7 +195,7 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     raw_rows = _fetch_all()
 
     events: list[dict] = []
-    parse_failed = filtered_out = deduped = mismatched = 0
+    parse_failed = filtered_out = deduped = 0
     batch_keys: set[str] = set()
     for raw in raw_rows:
         parsed = _parse_event(raw)
@@ -389,30 +210,24 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
             filtered_out += 1
             continue
 
-        splits = _split_by_location(parsed)
-        if not splits:
-            mismatched += 1
+        parsed["content_hash"] = _content_hash(parsed["raw"])
+        seen_key = f"idmc:seen:{parsed['idu_id']}:{parsed['content_hash']}"
+        if seen_key in batch_keys:
+            deduped += 1
             continue
-
-        for split in splits:
-            split["content_hash"] = _content_hash(split["raw"])
-            seen_key = f"idmc:seen:{split['idu_id']}:{split['content_hash']}"
-            if seen_key in batch_keys:
-                deduped += 1
-                continue
-            # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
-            # idu_id forever, so a fixed TTL would eventually expire on an unchanged
-            # row and misfire it as "new". EXPIRE renews and reports existence in one call
-            if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
-                deduped += 1
-                continue
-            batch_keys.add(seen_key)
-            events.append(split)
+        # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
+        # idu_id forever, so a fixed TTL would eventually expire on an unchanged
+        # row and misfire it as "new". EXPIRE renews and reports existence in one call
+        if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
+            deduped += 1
+            continue
+        batch_keys.add(seen_key)
+        events.append(parsed)
 
     logger.info(
         "[IDMC] Result: %d new/changed events (parse_failed=%d, filtered_out=%d, "
-        "already_seen=%d, mismatched=%d) out of %d raw",
-        len(events), parse_failed, filtered_out, deduped, mismatched, len(raw_rows),
+        "already_seen=%d) out of %d raw",
+        len(events), parse_failed, filtered_out, deduped, len(raw_rows),
     )
     return events
 
@@ -435,41 +250,6 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("idmc:last_synced", ts.isoformat())
 
 
-def _promote_location(
-    *, name: str, coord_str: str, accuracy: str,
-    source_lat: float | None, source_lng: float | None, idu_id: str | None,
-) -> str | None:
-    """Resolve one location's name + coordinate into a real L4 landmark id
-    via `find_or_create_landmark_l4`. Best-effort, same convention
-    `signal.py`'s own use of this function follows: a transport hiccup
-    shouldn't drop the whole signal (IDMC polls once every 24h), so
-    failures are logged and swallowed, not raised."""
-    first_segment = (name or "").split(",")[0].strip()
-    coord = _parse_coordinate(coord_str or "")
-    if not (first_segment and coord):
-        return None
-    try:
-        promo = find_or_create_landmark_l4(
-            name=first_segment,
-            lat=coord[0],
-            lng=coord[1],
-            kind=_kind_from_locations_accuracy(accuracy),
-            # Anchor against the row's own centroid so a wildly mismatched
-            # candidate aborts instead of mis-attributing the split.
-            source_lat=source_lat,
-            source_lng=source_lng,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[IDMC] L4 promotion failed for idu_id=%s: %s", idu_id, exc)
-        return None
-    if promo.get("abortedReason"):
-        logger.info(
-            "[IDMC] L4 promotion aborted (%s) for idu_id=%s", promo["abortedReason"], idu_id,
-        )
-        return None
-    return promo.get("locationId")
-
-
 def build_idmc_signal_input(event: dict, source_id: str) -> dict:
     """Convert a parsed IDU row into a CLEAR CreateSignalInput dict."""
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
@@ -486,53 +266,23 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
         "title": event["title"],
         "description": event.get("description"),
         "severity": event.get("severity"),
+        "url": event.get("source_url"),
         "contentHash": event["content_hash"],
     }
 
-    if event.get("source_url"):
-        input_data["url"] = event["source_url"]
-
-    # Best-effort origin/destination resolution: promote each location's
-    # own name + coordinate into a real L4 landmark, then route the result
-    # to originId/destinationId. `locations_name`/`locations_type`/etc. are
-    # 1 entry for a plain location, 2 for a paired flow (_split_pairs) —
-    # this loop covers both without caring which.
-    names = _LOCATION_SEP_RE.split((event.get("locations_name") or "").strip())
-    types = _LOCATION_SEP_RE.split((event.get("locations_type") or "").strip())
-    coords_list = _LOCATION_SEP_RE.split((event.get("locations_coordinates") or "").strip())
-    accuracies = _LOCATION_SEP_RE.split((event.get("locations_accuracy") or "").strip())
-    origin_coord: tuple[float, float] | None = None
-    for name_i, type_i, coord_str_i, accuracy_i in zip(
-        names, types, coords_list, accuracies, strict=True
-    ):
-        location_id = _promote_location(
-            name=name_i, coord_str=coord_str_i, accuracy=accuracy_i,
-            source_lat=event.get("lat"), source_lng=event.get("lng"),
-            idu_id=event.get("idu_id"),
+    # Pass lat/lng for server-side PostGIS geo-resolution into a general
+    # locationId — same as ACLED/GDACS.
+    has_lat = event.get("lat") is not None
+    has_lng = event.get("lng") is not None
+    if has_lat != has_lng:
+        logger.warning(
+            "[IDMC] idu_id=%s: partial coordinate (lat=%s, lng=%s) — skipping "
+            "centroid resolution",
+            event.get("idu_id"), event.get("lat"), event.get("lng"),
         )
-        loc_type = type_i.strip().lower()
-        if "origin" in loc_type and origin_coord is None:
-            origin_coord = _parse_coordinate(coord_str_i)
-        if not location_id:
-            continue
-        # Both fields set when "Origin and destination" — the same place
-        # served both roles for this movement.
-        if "origin" in loc_type:
-            input_data["originId"] = location_id
-        if "destination" in loc_type:
-            input_data["destinationId"] = location_id
-        # Blank/unrecognized: leave both unset — general locationId (via
-        # lat/lng + enrich_with_geoparser below) is the fallback.
-
-    # Pass lat/lng for server-side PostGIS geo-resolution — same as
-    # ACLED/GDACS. Prefer the origin's own precise coordinate when one was
-    # provided (more specific than the row's shared centroid); fall back
-    # to the centroid otherwise (destination-only rows, or independent
-    # splits with no role at all).
-    lat, lng = origin_coord if origin_coord else (event.get("lat"), event.get("lng"))
-    if lat is not None and lng is not None:
-        input_data["lat"] = lat
-        input_data["lng"] = lng
+    if has_lat and has_lng:
+        input_data["lat"] = event["lat"]
+        input_data["lng"] = event["lng"]
 
     enrich_with_geoparser(
         input_data,
@@ -550,12 +300,11 @@ def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
     an existing signal — reuses the same values rather than recomputing them,
     so a revision's create and update calls always agree.
 
-    url/originId/destinationId/lat/lng/geoparsedData are spread in only when
-    build_idmc_signal_input actually set them, never defaulted via `.get()`.
-    An ABSENT key tells clear-api's Prisma update "leave this field alone";
-    sending an explicit None instead would NULL OUT a previously-resolved
-    value (e.g. originId) just because this poll's _promote_location call
-    happened to fail transiently.
+    lat/lng/geoparsedData are spread in only when build_idmc_signal_input
+    actually set them, never defaulted via `.get()`. An ABSENT key tells
+    clear-api's Prisma update "leave this field alone"; sending an explicit
+    None instead would NULL OUT a previously-resolved value just because
+    this poll's data happened to be missing it transiently.
     """
     return {
         "id": signal_id,
@@ -564,9 +313,12 @@ def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
         "title": input_data.get("title"),
         "description": input_data.get("description"),
         "severity": input_data.get("severity"),
+        "url": input_data.get("url"),
+        # lat/lng/geoparsedData can be transiently missing (bad coordinate
+        # data, or Nominatim being down) — omit, don't null a resolved value.
         **{
             k: input_data[k]
-            for k in ("url", "originId", "destinationId", "lat", "lng", "geoparsedData")
+            for k in ("lat", "lng", "geoparsedData")
             if k in input_data
         },
     }
