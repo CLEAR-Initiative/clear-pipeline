@@ -16,6 +16,7 @@ from clear_pipeline.providers.geoparser import (
     extract_top_candidate,
     geoparse_signal,
 )
+from clear_pipeline.providers import insights
 from clear_pipeline.providers.location import resolve_signal_location
 
 logger = logging.getLogger(__name__)
@@ -555,11 +556,12 @@ def build_signal_input(signal: DataminrSignal, source_id: str) -> dict:
         logger.info("Signal has coords: using lat/lng for PostGIS resolution")
     else:
         # No coordinates — use Claude to resolve location from text
-        loc_result = resolve_signal_location(
-            title=signal.headline,
-            description=description,
-            dataminr_location_name=dataminr_location_name,
-        )
+        with insights.scope(signal_id=f"dataminr:{signal.alertId}"):
+            loc_result = resolve_signal_location(
+                title=signal.headline,
+                description=description,
+                dataminr_location_name=dataminr_location_name,
+            )
         if loc_result["location_type"] == "displacement":
             if loc_result["origin_id"]:
                 input_data["originId"] = loc_result["origin_id"]

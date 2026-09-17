@@ -16,6 +16,7 @@ import logging
 from typing import Any, Iterable
 
 from clear_pipeline.providers import clear_api
+from clear_pipeline.providers import insights
 from clear_pipeline.providers.llm import make_llm_provider
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.translation_hash import (
@@ -133,11 +134,17 @@ def translate_entity(
     if not target_locales or not fields_to_translate:
         return None
 
-    text = make_llm_provider("translate").complete_text(
-        system=_system_prompt(),
-        user=_build_user_prompt(entity_type, canonical, target_locales, fields_to_translate),
-        max_tokens=_TRANSLATE_MAX_TOKENS,
-    )
+    with insights.scope(
+        stage=f"translate.{entity_type}",
+        prompt_version=TRANSLATION_PROMPT_VERSION,
+        signal_id=entity_id if entity_type == "signal" else None,
+        event_id=entity_id if entity_type == "event" else None,
+    ):
+        text = make_llm_provider("translate").complete_text(
+            system=_system_prompt(),
+            user=_build_user_prompt(entity_type, canonical, target_locales, fields_to_translate),
+            max_tokens=_TRANSLATE_MAX_TOKENS,
+        )
     result = _parse_json(text)
     if result is None:
         logger.error(
