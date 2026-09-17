@@ -232,6 +232,9 @@ ServiceType = Literal[
     "transport", "other",
 ]
 SeparationCategory = Literal["unaccompanied", "separated", "other"]
+ShelterCondition = Literal[
+    "inadequate", "unsafe", "damaged", "overcrowded", "exposed", "other",
+]
 
 # Casualty axes.
 CasualtyStatus = Literal["confirmed", "presumed", "unverified", "other"]
@@ -240,29 +243,27 @@ MissingCaseStatus = Literal["new", "active", "resolved", "other"]
 
 def _coerce_categorical_keys(allowed: frozenset[str]):
     """Build a ``mode="before"`` validator for a ``dict[<AxisEnum>, NumericField]``
-    categorical breakdown. Normalizes each key (snake-case) and folds any value
-    outside the axis enum to ``"other"`` rather than letting an off-taxonomy key
-    raise a ``ValidationError`` that would null the whole domain. Mirrors the
-    lenient ``_coerce_qualifier`` / ``_coerce_measure_type`` field coercers, and
-    decodes a stringified map first (the Claude tool_use quirk)."""
+    categorical breakdown. For each entry it: (1) normalizes the key (snake-case)
+    and folds any off-enum key to ``"other"``; (2) validates the cell IN ISOLATION
+    via ``_coerce_cell`` — a malformed or null cell is dropped, never raised, so a
+    single bad cell can't null the whole extraction domain (the ADR-0008 SADD
+    guarantee, extended here — reviewer P1); (3) SUMS two source labels that fold
+    onto the same key (usually both → ``"other"``) rather than keeping the first,
+    since the cells are additive counts (reviewer P4 / ADR-0009 §2 'nothing is
+    dropped'). Decodes a stringified map first (the Claude tool_use quirk)."""
     def _coerce(v: Any) -> Any:
         v = _tolerate_stringified_json(v)
         if not isinstance(v, dict):
             return v
         out: dict[str, Any] = {}
-        for k, cell in v.items():
+        for k, raw in v.items():
             key = re.sub(r"[\s-]+", "_", str(k).strip().lower())
             if key not in allowed:
                 key = "other"
-            if key in out:
-                # Two source labels normalized onto the same enum key (typically
-                # both → "other"). Keep the first; a merge of two NumericField
-                # cells is ill-defined. Log so the drop is observable.
-                logger.warning(
-                    "[DATAPOINTS] categorical key collision on %r — keeping first cell", key,
-                )
-                continue
-            out[key] = cell
+            cell = _coerce_cell(raw)
+            if cell is None:
+                continue  # malformed/absent cell dropped in isolation — domain survives
+            out[key] = _merge_count_cells(out[key], cell) if key in out else cell
         return out
     return _coerce
 
@@ -285,6 +286,13 @@ def _coerce_categorical_list(allowed: frozenset[str]):
                 out.append(key)
         return out
     return _coerce
+
+
+def _enum_vals(literal_type: Any) -> str:
+    """Comma-joined enum values for a ``Literal`` — keeps the ``Field`` prompt
+    descriptions DRY (reviewer P6): adding an enum value updates the prompt
+    automatically, instead of re-typing the list in prose in a second place."""
+    return ", ".join(str(v) for v in get_args(literal_type))
 
 
 class NumericField(BaseModel):
@@ -525,6 +533,37 @@ class NumericField(BaseModel):
         return self
 
 
+def _coerce_cell(raw: Any) -> Optional[NumericField]:
+    """Validate ONE breakdown cell to a ``NumericField`` in isolation, dropping a
+    malformed or null cell to ``None`` (logged) instead of raising. Shared by SADD
+    (``Disaggregation``) and the categorical ``by_<axis>`` maps so a single bad
+    cell can never null the whole extraction domain (ADR-0008 blast-radius
+    guarantee; reviewer P1). Decodes a stringified cell first (Claude tool_use)."""
+    raw = _tolerate_stringified_json(raw)
+    if raw is None or isinstance(raw, NumericField):
+        return raw  # already the right shape (or genuinely absent)
+    try:
+        return NumericField.model_validate(raw)
+    except Exception as exc:  # noqa: BLE001 — isolate one bad cell, keep the rest
+        logger.warning(
+            "[DATAPOINTS] breakdown cell dropped — unparseable as NumericField (%s)", exc,
+        )
+        return None
+
+
+def _merge_count_cells(a: NumericField, b: NumericField) -> NumericField:
+    """Sum two count cells that folded onto the same categorical key (the ``other``
+    bucket, reviewer P4): they are additive counts of distinct real categories, so
+    the value and the reported range add. Keeps ``a``'s provenance envelope; both
+    cells have populated ``value_low``/``value_high`` (the range model-validator
+    ran on each)."""
+    merged = a.model_copy()
+    merged.value = a.value + b.value
+    merged.value_low = a.value_low + b.value_low
+    merged.value_high = a.value_high + b.value_high
+    return merged
+
+
 class Disaggregation(BaseModel):
     """Sex/age marginals for a population figure (SADD — ADR-0008).
 
@@ -573,24 +612,10 @@ class Disaggregation(BaseModel):
         data = _tolerate_stringified_json(data)
         if not isinstance(data, dict):
             return data
-        out: dict[str, Any] = {}
-        for key, raw in data.items():
-            raw = _tolerate_stringified_json(raw)
-            if raw is None or isinstance(raw, NumericField):
-                out[key] = raw  # already the right shape (in-code construction)
-                continue
-            try:
-                out[key] = NumericField.model_validate(raw)
-            except Exception as exc:  # noqa: BLE001 — isolate one bad cell, keep the rest
-                # A reported-but-malformed cell (e.g. `female: "52%"`) would
-                # otherwise be indistinguishable from an unreported one — log it
-                # so the silent drop is observable, then null just this cell.
-                logger.warning(
-                    "[DATAPOINTS] SADD cell %r dropped — unparseable as NumericField (%s)",
-                    key, exc,
-                )
-                out[key] = None
-        return out
+        # Validate each cell on its own via the shared isolator — a cell that
+        # won't parse drops to None rather than taking the breakdown (and its
+        # whole domain) down. Same helper the categorical `by_<axis>` maps use.
+        return {key: _coerce_cell(raw) for key, raw in data.items()}
 
 
 class DisaggregatedNumericField(NumericField):
@@ -824,23 +849,19 @@ class DisplacementFlow(BaseModel):
     value: NumericField
 
 
-class DisplacementNumericField(DisaggregatedNumericField):
-    """A displacement count (IDP stock / new displacements) that may carry BOTH a
-    sex/age ``breakdown`` (ADR-0008) and closed-vocab displacement axes (ADR-0009).
-
-    The category-unit CSV rows are NOT separate figures — their numbers are these
-    displacement counts, split by an axis (ADR-0009 §3): accommodation (#8) and
-    intentions (#10) split the current IDP stock; cause (#9) splits new
-    displacement. Populate only the axis the report actually gives for THIS count;
-    all default null."""
+class IdpStockField(DisaggregatedNumericField):
+    """Current IDP stock — a ``NumericField`` that may carry a sex/age
+    ``breakdown`` (ADR-0008) PLUS the accommodation (#8) and intention (#10) axes
+    that split a STOCK (ADR-0009 §3). Kept separate from the flow figure so the
+    schema exposes only the axes clear-api actually aggregates for this field
+    (reviewer P12). Populate only the axis the report gives; all default null."""
     by_accommodation_type: Optional[dict[AccommodationType, NumericField]] = Field(
         default=None,
         description=(
             "Split of this displaced population by where they are living, ONLY "
             "when the report gives it (e.g. '5,000 in collective centres, 3,000 "
-            "with host families'). Keys: host_family, rented, collective_centre, "
-            "reception_centre, formal_site, informal_site, public_building, "
-            "open_air, other. Cells inherit this figure's scope/source."
+            f"with host families'). Keys: {_enum_vals(AccommodationType)}. Cells "
+            "inherit this figure's scope/source."
         ),
     )
     by_intention: Optional[dict[Intention, NumericField]] = Field(
@@ -848,17 +869,7 @@ class DisplacementNumericField(DisaggregatedNumericField):
         description=(
             "Split of this displaced population by stated movement intention, "
             "ONLY when the report gives counts (e.g. 'of 10,000 IDPs, 6,000 "
-            "intend to return'). Keys: return, remain, move_onward, relocate, "
-            "undecided, other. Use only for a STOCK; leave null for flows."
-        ),
-    )
-    by_cause: Optional[dict[DisplacementCause, NumericField]] = Field(
-        default=None,
-        description=(
-            "Split of this displacement by its stated primary cause, ONLY when "
-            "the report gives counts by cause. Keys: conflict, violence, "
-            "natural_hazard, eviction, housing_destruction, loss_of_services, "
-            "livelihood_loss, other. Most relevant for new displacement (#9)."
+            f"intend to return'). Keys: {_enum_vals(Intention)}."
         ),
     )
 
@@ -868,6 +879,21 @@ class DisplacementNumericField(DisaggregatedNumericField):
     _coerce_by_intention = field_validator("by_intention", mode="before")(
         _coerce_categorical_keys(frozenset(get_args(Intention))),
     )
+
+
+class NewDisplacementField(DisaggregatedNumericField):
+    """New-displacement flow — sex/age ``breakdown`` (ADR-0008) PLUS the cause
+    axis (#9) that splits a FLOW (ADR-0009 §3). Separate from the stock figure so
+    only the intended axis is exposed (reviewer P12)."""
+    by_cause: Optional[dict[DisplacementCause, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of this displacement by its stated primary cause, ONLY when "
+            f"the report gives counts by cause. Keys: {_enum_vals(DisplacementCause)}. "
+            "Cells inherit this figure's scope/source."
+        ),
+    )
+
     _coerce_by_cause = field_validator("by_cause", mode="before")(
         _coerce_categorical_keys(frozenset(get_args(DisplacementCause))),
     )
@@ -880,8 +906,8 @@ class MovementFigure(NumericField):
     by_movement_type: Optional[dict[MovementType, NumericField]] = Field(
         default=None,
         description=(
-            "Split by movement type (evacuation / relocation / other), ONLY when "
-            "the report separates them. Cells inherit this figure's scope/source."
+            f"Split by movement type ({_enum_vals(MovementType)}), ONLY when the "
+            "report separates them. Cells inherit this figure's scope/source."
         ),
     )
 
@@ -897,9 +923,8 @@ class SiteCountFigure(NumericField):
     by_site_type: Optional[dict[SiteType, NumericField]] = Field(
         default=None,
         description=(
-            "Split of the site count by site type (site, settlement, "
-            "collective_centre, reception_centre, camp, other), ONLY when the "
-            "report gives it. Cells inherit this figure's scope/source."
+            f"Split of the site count by site type ({_enum_vals(SiteType)}), ONLY "
+            "when the report gives it. Cells inherit this figure's scope/source."
         ),
     )
 
@@ -920,11 +945,11 @@ class Displacement(BaseModel):
     Conflating a running total with a per-period count over-counts (the exact
     returnee bug ADR-0005 §4a fixes), so never put a cumulative total in a flow.
     """
-    idp_stock: Optional[DisplacementNumericField] = Field(
+    idp_stock: Optional[IdpStockField] = Field(
         default=None,
         description="Currently-displaced IDP population at the END of the reporting period.",
     )
-    new_displacements: Optional[DisplacementNumericField] = Field(
+    new_displacements: Optional[NewDisplacementField] = Field(
         default=None,
         description="People newly displaced DURING the reporting period.",
     )
@@ -967,8 +992,47 @@ class Displacement(BaseModel):
             "(ADR-0009 #7) — a count of locations, not people. Null unless stated."
         ),
     )
+    # Count-less presence lists (ADR-0009 §3, reviewer P3): a report that names an
+    # accommodation type / driver / intention WITHOUT a number has nowhere to land
+    # in the numeric `by_<axis>` maps (which need a value). Capture the bare set
+    # here, mirroring AccessAndIncidents.access_barriers. Use the numeric map when
+    # counts ARE given; these lists only for the count-less case.
+    accommodation_types: list[AccommodationType] = Field(
+        default_factory=list,
+        description=(
+            "Accommodation types of displaced people the report NAMES without a "
+            f"count (#8). Values: {_enum_vals(AccommodationType)}. Empty if none, "
+            "or if counts are given (use idp_stock.by_accommodation_type then)."
+        ),
+    )
+    displacement_causes: list[DisplacementCause] = Field(
+        default_factory=list,
+        description=(
+            "Displacement causes/drivers the report NAMES without a count (#9). "
+            f"Values: {_enum_vals(DisplacementCause)}. Empty if none, or if counts "
+            "are given (use new_displacements.by_cause then)."
+        ),
+    )
+    intentions: list[Intention] = Field(
+        default_factory=list,
+        description=(
+            "Displaced people's stated movement intentions the report NAMES "
+            f"without a count (#10), e.g. 'most intend to return'. Values: "
+            f"{_enum_vals(Intention)}. Empty if none, or if counts are given "
+            "(use idp_stock.by_intention then)."
+        ),
+    )
 
     _tolerate_flows = field_validator("flows", mode="before")(_tolerate_stringified_json)
+    _coerce_accommodation_types = field_validator("accommodation_types", mode="before")(
+        _coerce_categorical_list(frozenset(get_args(AccommodationType))),
+    )
+    _coerce_displacement_causes = field_validator("displacement_causes", mode="before")(
+        _coerce_categorical_list(frozenset(get_args(DisplacementCause))),
+    )
+    _coerce_intentions = field_validator("intentions", mode="before")(
+        _coerce_categorical_list(frozenset(get_args(Intention))),
+    )
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1087,10 +1151,10 @@ class HousingCount(NumericField):
         default=None,
         description=(
             "Split of this dwelling count by dwelling type, ONLY when the report "
-            "states it (e.g. '200 houses and 50 apartments destroyed'). Keys: "
-            "house, apartment, makeshift, traditional, mobile, other. Emit only "
-            "the types the report gives; null when it gives no type split. Do NOT "
-            "set scope/source on the cells — they inherit this figure's."
+            f"states it (e.g. '200 houses and 50 apartments destroyed'). Keys: "
+            f"{_enum_vals(DwellingType)}. Emit only the types the report gives; "
+            "null when it gives no type split. Do NOT set scope/source on the "
+            "cells — they inherit this figure's."
         ),
     )
     by_severity: Optional[dict[DamageSeverity, NumericField]] = Field(
@@ -1143,9 +1207,9 @@ class AccessConstrainedField(DisaggregatedNumericField):
     by_access_classification: Optional[dict[AccessClassification, NumericField]] = Field(
         default=None,
         description=(
-            "Split by access classification (hard_to_reach, inaccessible, "
-            "besieged, isolated, constrained, other), ONLY when the report gives "
-            "counts per class. Cells inherit this figure's scope/source."
+            f"Split by access classification ({_enum_vals(AccessClassification)}), "
+            "ONLY when the report gives counts per class. Cells inherit this "
+            "figure's scope/source."
         ),
     )
     by_barrier: Optional[dict[AccessBarrier, NumericField]] = Field(
@@ -1173,9 +1237,8 @@ class RoutesBlockedField(NumericField):
     by_infrastructure_type: Optional[dict[InfrastructureType, NumericField]] = Field(
         default=None,
         description=(
-            "Split by infrastructure type (road, route, bridge, crossing, "
-            "transport_link, other), ONLY when the report gives it. Cells inherit "
-            "this figure's scope/source."
+            f"Split by infrastructure type ({_enum_vals(InfrastructureType)}), "
+            "ONLY when the report gives it. Cells inherit this figure's scope/source."
         ),
     )
 
@@ -1216,6 +1279,23 @@ class FamilySeparationField(DisaggregatedNumericField):
 
     _coerce_by_separation_category = field_validator("by_separation_category", mode="before")(
         _coerce_categorical_keys(frozenset(get_args(SeparationCategory))),
+    )
+
+
+class ShelterConditionField(DisaggregatedNumericField):
+    """People/households living in inadequate or unsafe shelter (ADR-0009, CSV
+    #19), split by the reported condition. SADD-splittable via ``breakdown``."""
+    by_shelter_condition: Optional[dict[ShelterCondition, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split by shelter condition (inadequate, unsafe, damaged, "
+            "overcrowded, exposed, other), ONLY when the report distinguishes "
+            "them. Cells inherit this figure's scope/source."
+        ),
+    )
+
+    _coerce_by_shelter_condition = field_validator("by_shelter_condition", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(ShelterCondition))),
     )
 
 
@@ -1266,10 +1346,8 @@ class AccessAndIncidents(BaseModel):
         default_factory=list,
         description=(
             "Presence list of humanitarian access barriers the report names WITHOUT "
-            "a count (#22) — insecurity, road_damage, checkpoints, "
-            "administrative_restrictions, denial, weather, distance, transport, "
-            "discrimination, lack_of_information, other. When a barrier IS given a "
-            "count, put it in access_constrained_population.by_barrier instead. "
+            f"a count (#22) — {_enum_vals(AccessBarrier)}. When a barrier IS given "
+            "a count, put it in access_constrained_population.by_barrier instead. "
             "Empty list if none named."
         ),
     )
@@ -1293,6 +1371,14 @@ class AccessAndIncidents(BaseModel):
         description=(
             "Separated / unaccompanied people reported (#14, protection). Null "
             "unless stated."
+        ),
+    )
+    shelter_condition_people: Optional[ShelterConditionField] = Field(
+        default=None,
+        description=(
+            "People/households living in inadequate or unsafe shelter (#19) — "
+            "distinct from shelter-sector PIN. Null unless the report states such "
+            "a figure."
         ),
     )
     inaccessible_locations_count: Optional[NumericField] = Field(

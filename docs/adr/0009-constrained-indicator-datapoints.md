@@ -66,7 +66,15 @@ preserved in the cell's `source_quote`. When an `"other"` bucket gets heavy for
 some axis, we promote that value into the enum in a later schema bump (we are
 versioning for one anyway). Result: anticipated categories aggregate
 deterministically on fixed keys — no normalization step — and the long tail is
-captured, not lost.
+captured, not lost. When two off-vocab labels both fold to `"other"` in the same
+map, their counts are **summed** into the one `"other"` cell (they are additive
+counts of distinct real categories) — never keep-first, which would drop data
+and contradict this section.
+
+Per-cell isolation: each cell is validated on its own (shared `_coerce_cell`),
+so a single malformed or null cell drops to nothing rather than raising a
+`ValidationError` that would null the whole extraction domain — the same
+blast-radius guarantee SADD has.
 
 ### 3. Shape — a categorical breakdown is ALWAYS a `by_<axis>` map on a headline count
 
@@ -102,7 +110,10 @@ means nothing is double-counted:
 numeric `dict[Enum, NumericField]` is the wrong shape then — there is nothing to
 put in `value`. For the count-less case the axis is captured as a **`list[<AxisEnum>]`
 presence set** (like `active_clusters` / `event_types`); the numeric `by_<axis>`
-map is used only when the report actually splits the parent count along it.
+map is used only when the report actually splits the parent count along it. The
+list fallback is wired on every axis where count-less reporting is common:
+`AccessAndIncidents.access_barriers` (#22) and `Displacement.{accommodation_types,
+displacement_causes, intentions}` (#8/#9/#10).
 
 Sex/age stays on ADR-0008's `Disaggregation` where the figure is a splittable
 people-count (family separation, shelter condition, access-constrained

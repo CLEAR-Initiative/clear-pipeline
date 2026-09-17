@@ -611,6 +611,12 @@ def _propagate_breakdown_scope(merged: Any) -> int:
                     _inherit_scope_into_cell(cell, fig, total, cell_name)
                     count += 1
         # Categorical breakdowns — every `by_<axis>` map on this figure.
+        # INVARIANT (reviewer P7): every field named `by_*` on a NumericField leaf
+        # is a `dict[<AxisEnum>, NumericField]` categorical breakdown (ADR-0009 §3)
+        # whose cells inherit the parent's scope/source. Enforced by the schema
+        # (the only `by_*` fields are those maps) + the `isinstance(cell, dict)`
+        # guard below (a non-cell `by_*` value is skipped, never mis-propagated).
+        # Any future `by_*` field that is NOT such a map must be renamed.
         for key, mp in fig.items():
             if not (key.startswith("by_") and isinstance(mp, dict)):
                 continue
@@ -930,12 +936,13 @@ def extract_datapoints_for_one_report(
         report_id, src_resolved, src_named, publisher_name, publisher_source_id,
     )
 
-    # SADD (ADR-0008): after scope + source are resolved on the parent figures,
-    # propagate them into each figure's breakdown cells so the cells inherit the
-    # parent's incident key and aggregate. Must run AFTER both resolvers above.
+    # Breakdown scope (ADR-0008 SADD + ADR-0009 categorical): after scope + source
+    # are resolved on the parent figures, propagate them into each figure's
+    # sex/age and `by_<axis>` cells so the cells inherit the parent's incident key
+    # and aggregate. Must run AFTER both resolvers above.
     bd_cells = _propagate_breakdown_scope(merged)
     if bd_cells:
-        log.info("[%s] SADD: propagated scope/source into %d breakdown cells", report_id, bd_cells)
+        log.info("[%s] propagated scope/source into %d breakdown cells", report_id, bd_cells)
 
     timing = merged.get("timing_and_scope") or {}
     # Constrain to the disaster_types level_2 taxonomy (drops off-taxonomy tags,

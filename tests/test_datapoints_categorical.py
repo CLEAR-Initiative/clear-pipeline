@@ -16,13 +16,15 @@ from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     AccessAndIncidents,
     AccessConstrainedField,
     Displacement,
-    DisplacementNumericField,
     FamilySeparationField,
+    IdpStockField,
     HousingCount,
     HousingDamage,
     MovementFigure,
+    NewDisplacementField,
     NumericField,
     SectorNeeds,
+    ShelterConditionField,
     SiteCountFigure,
 )
 
@@ -70,14 +72,15 @@ class TestSchema:
         assert sorted(h.by_dwelling_type) == ["house", "other"]  # "House"→"house"
         assert h.by_dwelling_type["other"].value == 50
 
-    def test_key_collision_keeps_first_cell(self):
-        # Two source labels normalizing onto the same key: keep the first.
+    def test_key_collision_sums_into_other(self):
+        # Two off-vocab labels fold to the same key ("other") — the counts SUM
+        # (reviewer P4 / ADR §2 'nothing is dropped'), not keep-first.
         h = HousingCount.model_validate(_housing_dict(90, {
             "hut": {"value": 60, "unit": "dwellings", "confidence": "reported", "source_quote": "first"},
             "shack": {"value": 30, "unit": "dwellings", "confidence": "reported", "source_quote": "second"},
         }))
         assert list(h.by_dwelling_type) == ["other"]
-        assert h.by_dwelling_type["other"].value == 60  # first wins
+        assert h.by_dwelling_type["other"].value == 90  # 60 + 30
 
     def test_maps_default_null(self):
         h = HousingCount(value=1, unit="dwellings", confidence="reported", source_quote="q")
@@ -163,7 +166,7 @@ class TestDisplacementAxes:
             },
             by_intention={"return": {"value": 6000, "unit": "people", "confidence": "reported", "source_quote": "q"}},
         )})
-        assert isinstance(d.idp_stock, DisplacementNumericField)
+        assert isinstance(d.idp_stock, IdpStockField)
         assert sorted(d.idp_stock.by_accommodation_type) == ["collective_centre", "host_family"]
         assert d.idp_stock.by_intention["return"].value == 6000
 
@@ -294,3 +297,64 @@ class TestCasualtiesAndFacilities:
         })
         assert ai.power_facilities.destroyed.value == 3
         assert ai.communication_facilities.damaged.value == 2
+
+
+# ── robustness + P8 shelter + P3 list fallbacks ─────────────────────────────
+
+class TestRobustnessAndAdditions:
+    def _c(self, value, unit="dwellings"):
+        return {"value": value, "unit": unit, "confidence": "reported", "source_quote": "q"}
+
+    def test_malformed_cell_dropped_domain_survives(self):
+        # P1: one unparseable cell must NOT null the whole map/domain — it drops
+        # in isolation and the good cells + the parent total survive.
+        ai = AccessAndIncidents.model_validate({"housing": {"destroyed": {
+            **self._c(200), "by_dwelling_type": {
+                "house": self._c(150),
+                "apartment": "garbage-not-a-cell",  # unparseable
+                "mobile": {"value": "not-a-number"},  # invalid NumericField
+            },
+        }}})
+        assert ai.housing.destroyed.value == 200  # parent intact
+        assert sorted(ai.housing.destroyed.by_dwelling_type) == ["house"]  # only the good cell
+
+    def test_null_cell_dropped_not_raised(self):
+        ai = AccessAndIncidents.model_validate({"housing": {"destroyed": {
+            **self._c(200), "by_dwelling_type": {"house": self._c(150), "apartment": None},
+        }}})
+        assert list(ai.housing.destroyed.by_dwelling_type) == ["house"]
+
+    def test_shelter_condition_field(self):
+        # P8: indicator #19 now exists.
+        ai = AccessAndIncidents.model_validate({"shelter_condition_people": {
+            **self._c(5000, "people"),
+            "by_shelter_condition": {"overcrowded": self._c(3000, "people"), "unsafe": self._c(2000, "people")},
+            "breakdown": {"female": self._c(2600, "people")},
+        }})
+        assert isinstance(ai.shelter_condition_people, ShelterConditionField)
+        assert sorted(ai.shelter_condition_people.by_shelter_condition) == ["overcrowded", "unsafe"]
+        assert ai.shelter_condition_people.breakdown.female.value == 2600  # SADD-splittable
+
+    def test_countless_list_fallbacks_fold_and_dedupe(self):
+        # P3: a report naming intentions/accommodation/cause WITHOUT numbers lands
+        # in the presence lists; off-vocab folds to "other", dupes removed.
+        d = Displacement.model_validate({
+            "intentions": ["return", "Made up", "return"],
+            "accommodation_types": ["host family", "collective centre"],
+            "displacement_causes": ["conflict"],
+        })
+        assert d.intentions == ["return", "other"]
+        assert d.accommodation_types == ["host_family", "collective_centre"]
+        assert d.displacement_causes == ["conflict"]
+
+    def test_split_displacement_fields_expose_only_intended_axes(self):
+        # P12: idp_stock has accommodation+intention, new_displacements has cause;
+        # neither carries the other's axis.
+        d = Displacement.model_validate({
+            "idp_stock": {**self._c(100, "people"), "by_intention": {"return": self._c(60, "people")}},
+            "new_displacements": {**self._c(50, "people"), "by_cause": {"conflict": self._c(50, "people")}},
+        })
+        assert isinstance(d.idp_stock, IdpStockField)
+        assert isinstance(d.new_displacements, NewDisplacementField)
+        assert hasattr(d.idp_stock, "by_accommodation_type") and not hasattr(d.idp_stock, "by_cause")
+        assert hasattr(d.new_displacements, "by_cause") and not hasattr(d.new_displacements, "by_intention")
