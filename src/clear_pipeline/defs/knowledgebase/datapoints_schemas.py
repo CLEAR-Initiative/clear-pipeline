@@ -16,7 +16,7 @@ it here — it drifts). Bumping it triggers targeted re-extraction (see §7
 of the design doc).
 """
 
-from typing import Literal, Optional
+from typing import Literal, Optional, get_args
 
 import json
 import logging
@@ -66,12 +66,21 @@ _EVENT_TYPE_TAXONOMY = ", ".join(level2_values())
 #            needs_and_funding.{overall_pin, overall_affected}.
 #          - Phase 2: needs_and_funding.<sector>.{people_in_need, people_targeted,
 #            people_reached} and displacement.{returnee_stock, new_returns}.
+#   v5 — constrained-indicator coverage (ADR-0009): the missing CSV indicators +
+#        closed-vocab categorical disaggregation. New: housing damage
+#        (AccessAndIncidents.housing), displacement movement/sites +
+#        accommodation/intention/cause axes, access-constrained population +
+#        barriers, routes blocked, service-disruption people, family separation,
+#        response gap (SectorNeeds.people_not_reached). Categorical axes are
+#        `by_<axis>` maps of NumericField cells keyed by a closed Literal (each
+#        with an `other` bucket); cells inherit the parent's scope/source like
+#        SADD. Partly shape-changing, so a real version (not a v4 additive wave).
 #
 # Pre-launch the corpus is a handful of test reports we wipe and re-extract on
 # every change, so the version mainly documents the shape. Aggregation still
 # combines only same-version rows, so the bump keeps any remaining older rows
-# from mixing with the re-extracted v4 rows.
-SCHEMA_VERSION = "v4"
+# from mixing with the re-extracted v5 rows.
+SCHEMA_VERSION = "v5"
 
 
 def _tolerate_stringified_json(v: Any) -> Any:
@@ -173,6 +182,109 @@ SafSector = Literal[
 # Access status — the OCHA convention. Enforced so the dashboard can
 # render a fixed colour map.
 AccessStatus = Literal["open", "constrained", "partial", "blocked", "unknown"]
+
+
+# ── Closed-vocab categorical disaggregation (ADR-0009) ───────────────
+# Each categorical axis is a fixed `Literal` — the LLM normalizes source wording
+# onto it at extraction time (unknown → known), which is what makes the cells
+# aggregate deterministically on fixed keys downstream instead of fragmenting.
+# Every axis ends in "other" so an unanticipated category is NOT dropped (unlike
+# `event_types`, which drops off-taxonomy): the cell lands in "other" with its
+# source_quote preserved. A persistently heavy "other" bucket is the signal to
+# promote a value into the enum in a later schema bump. Values are transcribed
+# from `docs/indicators_constrained.csv`.
+DwellingType = Literal[
+    "house", "apartment", "makeshift", "traditional", "mobile", "other",
+]
+DamageSeverity = Literal["severe", "moderate", "minor", "other"]
+
+# Displacement axes.
+MovementType = Literal["evacuation", "relocation", "other"]
+SiteType = Literal[
+    "site", "settlement", "collective_centre", "reception_centre", "camp", "other",
+]
+AccommodationType = Literal[
+    "host_family", "rented", "collective_centre", "reception_centre",
+    "formal_site", "informal_site", "public_building", "open_air", "other",
+]
+DisplacementCause = Literal[
+    "conflict", "violence", "natural_hazard", "eviction", "housing_destruction",
+    "loss_of_services", "livelihood_loss", "other",
+]
+Intention = Literal[
+    "return", "remain", "move_onward", "relocate", "undecided", "other",
+]
+
+# Access / protection / service axes.
+AccessClassification = Literal[
+    "hard_to_reach", "inaccessible", "besieged", "isolated", "constrained", "other",
+]
+AccessBarrier = Literal[
+    "insecurity", "road_damage", "checkpoints", "administrative_restrictions",
+    "denial", "weather", "distance", "transport", "discrimination",
+    "lack_of_information", "other",
+]
+InfrastructureType = Literal[
+    "road", "route", "bridge", "crossing", "transport_link", "other",
+]
+ServiceType = Literal[
+    "water", "healthcare", "education", "energy", "markets", "communications",
+    "transport", "other",
+]
+SeparationCategory = Literal["unaccompanied", "separated", "other"]
+
+# Casualty axes.
+CasualtyStatus = Literal["confirmed", "presumed", "unverified", "other"]
+MissingCaseStatus = Literal["new", "active", "resolved", "other"]
+
+
+def _coerce_categorical_keys(allowed: frozenset[str]):
+    """Build a ``mode="before"`` validator for a ``dict[<AxisEnum>, NumericField]``
+    categorical breakdown. Normalizes each key (snake-case) and folds any value
+    outside the axis enum to ``"other"`` rather than letting an off-taxonomy key
+    raise a ``ValidationError`` that would null the whole domain. Mirrors the
+    lenient ``_coerce_qualifier`` / ``_coerce_measure_type`` field coercers, and
+    decodes a stringified map first (the Claude tool_use quirk)."""
+    def _coerce(v: Any) -> Any:
+        v = _tolerate_stringified_json(v)
+        if not isinstance(v, dict):
+            return v
+        out: dict[str, Any] = {}
+        for k, cell in v.items():
+            key = re.sub(r"[\s-]+", "_", str(k).strip().lower())
+            if key not in allowed:
+                key = "other"
+            if key in out:
+                # Two source labels normalized onto the same enum key (typically
+                # both → "other"). Keep the first; a merge of two NumericField
+                # cells is ill-defined. Log so the drop is observable.
+                logger.warning(
+                    "[DATAPOINTS] categorical key collision on %r — keeping first cell", key,
+                )
+                continue
+            out[key] = cell
+        return out
+    return _coerce
+
+
+def _coerce_categorical_list(allowed: frozenset[str]):
+    """Build a ``mode="before"`` validator for a ``list[<AxisEnum>]`` presence set
+    (the count-less categorical fallback, ADR-0009 §3). Snake-cases each item,
+    folds off-taxonomy values to ``"other"`` (never raises), and de-dupes while
+    preserving order — so one stray token can't null the domain."""
+    def _coerce(v: Any) -> Any:
+        v = _tolerate_stringified_json(v)
+        if not isinstance(v, list):
+            return v
+        out: list[str] = []
+        for item in v:
+            key = re.sub(r"[\s-]+", "_", str(item).strip().lower())
+            if key not in allowed:
+                key = "other"
+            if key not in out:
+                out.append(key)
+        return out
+    return _coerce
 
 
 class NumericField(BaseModel):
@@ -638,10 +750,61 @@ class CasualtyDisaggregation(BaseModel):
     )
 
 
+class KilledTotal(NumericField):
+    """Death total with an optional split by verification status (ADR-0009 #11).
+    ``by_casualty_status`` hangs off this leaf, so its cells inherit scope/source
+    via propagation like every other `by_<axis>` map."""
+    by_casualty_status: Optional[dict[CasualtyStatus, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of the death total by verification status (confirmed / "
+            "presumed / unverified / other), ONLY when the report grades it. "
+            "Cells inherit this figure's scope/source."
+        ),
+    )
+
+    _coerce_by_casualty_status = field_validator("by_casualty_status", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(CasualtyStatus))),
+    )
+
+
+class MissingTotal(NumericField):
+    """Missing-persons total with an optional split by case status (ADR-0009 #13),
+    e.g. new reports vs active unresolved cases."""
+    by_case_status: Optional[dict[MissingCaseStatus, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of the missing total by case status (new / active / resolved / "
+            "other), ONLY when the report distinguishes them. Cells inherit this "
+            "figure's scope/source."
+        ),
+    )
+
+    _coerce_by_case_status = field_validator("by_case_status", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(MissingCaseStatus))),
+    )
+
+
+class KilledDisaggregation(CasualtyDisaggregation):
+    """Killed counts — sex/age cells plus a status-split total (ADR-0009 #11)."""
+    total: Optional[KilledTotal] = Field(
+        default=None,
+        description="Report-stated death total, optionally split by verification status.",
+    )
+
+
+class MissingDisaggregation(CasualtyDisaggregation):
+    """Missing-persons counts — sex/age cells plus a case-status total (#13)."""
+    total: Optional[MissingTotal] = Field(
+        default=None,
+        description="Report-stated missing total, optionally split by case status.",
+    )
+
+
 class Casualties(BaseModel):
-    killed: Optional[CasualtyDisaggregation] = None
+    killed: Optional[KilledDisaggregation] = None
     injured: Optional[CasualtyDisaggregation] = None
-    missing: Optional[CasualtyDisaggregation] = None
+    missing: Optional[MissingDisaggregation] = None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -661,6 +824,90 @@ class DisplacementFlow(BaseModel):
     value: NumericField
 
 
+class DisplacementNumericField(DisaggregatedNumericField):
+    """A displacement count (IDP stock / new displacements) that may carry BOTH a
+    sex/age ``breakdown`` (ADR-0008) and closed-vocab displacement axes (ADR-0009).
+
+    The category-unit CSV rows are NOT separate figures — their numbers are these
+    displacement counts, split by an axis (ADR-0009 §3): accommodation (#8) and
+    intentions (#10) split the current IDP stock; cause (#9) splits new
+    displacement. Populate only the axis the report actually gives for THIS count;
+    all default null."""
+    by_accommodation_type: Optional[dict[AccommodationType, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of this displaced population by where they are living, ONLY "
+            "when the report gives it (e.g. '5,000 in collective centres, 3,000 "
+            "with host families'). Keys: host_family, rented, collective_centre, "
+            "reception_centre, formal_site, informal_site, public_building, "
+            "open_air, other. Cells inherit this figure's scope/source."
+        ),
+    )
+    by_intention: Optional[dict[Intention, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of this displaced population by stated movement intention, "
+            "ONLY when the report gives counts (e.g. 'of 10,000 IDPs, 6,000 "
+            "intend to return'). Keys: return, remain, move_onward, relocate, "
+            "undecided, other. Use only for a STOCK; leave null for flows."
+        ),
+    )
+    by_cause: Optional[dict[DisplacementCause, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of this displacement by its stated primary cause, ONLY when "
+            "the report gives counts by cause. Keys: conflict, violence, "
+            "natural_hazard, eviction, housing_destruction, loss_of_services, "
+            "livelihood_loss, other. Most relevant for new displacement (#9)."
+        ),
+    )
+
+    _coerce_by_accommodation_type = field_validator("by_accommodation_type", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(AccommodationType))),
+    )
+    _coerce_by_intention = field_validator("by_intention", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(Intention))),
+    )
+    _coerce_by_cause = field_validator("by_cause", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(DisplacementCause))),
+    )
+
+
+class MovementFigure(NumericField):
+    """People evacuated or relocated because of the crisis (ADR-0009, CSV #6),
+    with an optional split by movement type. Distinct from displacement stock/flow
+    — keep evacuation/relocation labels as the source states them."""
+    by_movement_type: Optional[dict[MovementType, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split by movement type (evacuation / relocation / other), ONLY when "
+            "the report separates them. Cells inherit this figure's scope/source."
+        ),
+    )
+
+    _coerce_by_movement_type = field_validator("by_movement_type", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(MovementType))),
+    )
+
+
+class SiteCountFigure(NumericField):
+    """Number of displacement sites / locations hosting displaced people
+    (ADR-0009, CSV #7), with an optional split by site type. ``value`` is a count
+    of LOCATIONS, not people."""
+    by_site_type: Optional[dict[SiteType, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of the site count by site type (site, settlement, "
+            "collective_centre, reception_centre, camp, other), ONLY when the "
+            "report gives it. Cells inherit this figure's scope/source."
+        ),
+    )
+
+    _coerce_by_site_type = field_validator("by_site_type", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(SiteType))),
+    )
+
+
 class Displacement(BaseModel):
     """IDPs, refugees, returnees — carefully distinguished.
 
@@ -673,11 +920,11 @@ class Displacement(BaseModel):
     Conflating a running total with a per-period count over-counts (the exact
     returnee bug ADR-0005 §4a fixes), so never put a cumulative total in a flow.
     """
-    idp_stock: Optional[DisaggregatedNumericField] = Field(
+    idp_stock: Optional[DisplacementNumericField] = Field(
         default=None,
         description="Currently-displaced IDP population at the END of the reporting period.",
     )
-    new_displacements: Optional[DisaggregatedNumericField] = Field(
+    new_displacements: Optional[DisplacementNumericField] = Field(
         default=None,
         description="People newly displaced DURING the reporting period.",
     )
@@ -705,6 +952,21 @@ class Displacement(BaseModel):
         default_factory=list,
         description="Origin→destination pairs when the report names both endpoints.",
     )
+    movement: Optional[MovementFigure] = Field(
+        default=None,
+        description=(
+            "People evacuated or relocated because of the crisis (ADR-0009 #6) — "
+            "distinct from displacement stock/flow. Null unless the report states "
+            "an evacuation/relocation count."
+        ),
+    )
+    displacement_sites: Optional[SiteCountFigure] = Field(
+        default=None,
+        description=(
+            "Number of displacement SITES/locations hosting displaced people "
+            "(ADR-0009 #7) — a count of locations, not people. Null unless stated."
+        ),
+    )
 
     _tolerate_flows = field_validator("flows", mode="before")(_tolerate_stringified_json)
 
@@ -725,6 +987,15 @@ class SectorNeeds(BaseModel):
     people_in_need: Optional[DisaggregatedNumericField] = None
     people_targeted: Optional[DisaggregatedNumericField] = None
     people_reached: Optional[DisaggregatedNumericField] = None
+    people_not_reached: Optional[DisaggregatedNumericField] = Field(
+        default=None,
+        description=(
+            "Response gap (ADR-0009 #25): in-sector people in need who were NOT "
+            "reached / were cut off / without assistance, ONLY when the report "
+            "states such a figure. Do NOT compute it as need − reached; extract "
+            "only a stated gap. SADD-splittable."
+        ),
+    )
     operational_presence: Optional[NumericField] = Field(
         default=None,
         description="Number of partner organisations delivering in-sector aid.",
@@ -802,6 +1073,152 @@ class InfrastructureDamage(BaseModel):
     non_functional: Optional[NumericField] = None
 
 
+class HousingCount(NumericField):
+    """A dwelling-count total (destroyed / damaged / uninhabitable) with optional
+    closed-vocab categorical breakdowns (ADR-0009).
+
+    Housing damage is civilian dwellings, distinct from the service-facility
+    counts in ``InfrastructureDamage`` (schools/health/water). `value` is the
+    headline dwelling count; the optional ``by_*`` maps carry the reported
+    split. Each cell is a full ``NumericField`` (provenance + interval envelope)
+    and inherits this figure's scope/source post-extraction — the LLM does NOT
+    emit scope/source on cells (ADR-0009 §4)."""
+    by_dwelling_type: Optional[dict[DwellingType, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of this dwelling count by dwelling type, ONLY when the report "
+            "states it (e.g. '200 houses and 50 apartments destroyed'). Keys: "
+            "house, apartment, makeshift, traditional, mobile, other. Emit only "
+            "the types the report gives; null when it gives no type split. Do NOT "
+            "set scope/source on the cells — they inherit this figure's."
+        ),
+    )
+    by_severity: Optional[dict[DamageSeverity, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split by damage severity (severe / moderate / minor / other), ONLY "
+            "when the report grades it. Applies to damaged / uninhabitable "
+            "counts; leave null for 'destroyed' (already the severest) and "
+            "whenever no severity grading is given."
+        ),
+    )
+
+    _coerce_by_dwelling_type = field_validator("by_dwelling_type", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(DwellingType))),
+    )
+    _coerce_by_severity = field_validator("by_severity", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(DamageSeverity))),
+    )
+
+
+class HousingDamage(BaseModel):
+    """Civilian housing/dwelling impact (ADR-0009, CSV indicators 15–17).
+
+    Three mutually-distinct statuses, each a dwelling count with its own optional
+    categorical breakdowns. 'destroyed' and 'damaged' should not overlap; a
+    report that grades 'severely damaged' as uninhabitable puts it in
+    ``uninhabitable`` only if it says so, else in ``damaged`` — do not infer
+    habitability the source did not state."""
+    destroyed: Optional[HousingCount] = Field(
+        default=None,
+        description="Houses/dwellings classified as destroyed. Dwelling count.",
+    )
+    damaged: Optional[HousingCount] = Field(
+        default=None,
+        description="Houses/dwellings damaged but not destroyed. Dwelling count.",
+    )
+    uninhabitable: Optional[HousingCount] = Field(
+        default=None,
+        description=(
+            "Houses/dwellings reported unsafe to occupy. Only when the source "
+            "states uninhabitability — do NOT infer it from a damage category."
+        ),
+    )
+
+
+class AccessConstrainedField(DisaggregatedNumericField):
+    """People in hard-to-reach / inaccessible areas (ADR-0009, CSV #20), with
+    optional splits by access classification and by the barrier causing the
+    constraint (#22). SADD-splittable via the inherited ``breakdown``."""
+    by_access_classification: Optional[dict[AccessClassification, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split by access classification (hard_to_reach, inaccessible, "
+            "besieged, isolated, constrained, other), ONLY when the report gives "
+            "counts per class. Cells inherit this figure's scope/source."
+        ),
+    )
+    by_barrier: Optional[dict[AccessBarrier, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of this access-constrained population by the barrier causing "
+            "it (#22), ONLY when the report gives counts per barrier. For barriers "
+            "reported WITHOUT numbers, use AccessAndIncidents.access_barriers "
+            "(the presence list) instead. Cells inherit scope/source."
+        ),
+    )
+
+    _coerce_by_access_classification = field_validator("by_access_classification", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(AccessClassification))),
+    )
+    _coerce_by_barrier = field_validator("by_barrier", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(AccessBarrier))),
+    )
+
+
+class RoutesBlockedField(NumericField):
+    """Count of roads/routes/bridges reported blocked or impassable (ADR-0009,
+    CSV #23), with an optional split by infrastructure type. ``value`` is a count
+    of routes/infrastructure points, not people."""
+    by_infrastructure_type: Optional[dict[InfrastructureType, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split by infrastructure type (road, route, bridge, crossing, "
+            "transport_link, other), ONLY when the report gives it. Cells inherit "
+            "this figure's scope/source."
+        ),
+    )
+
+    _coerce_by_infrastructure_type = field_validator("by_infrastructure_type", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(InfrastructureType))),
+    )
+
+
+class ServiceDisruptionField(DisaggregatedNumericField):
+    """People affected by disruption of essential services (ADR-0009, CSV #27) —
+    distinct from ``markets_disrupted`` (a facility count). Split by service type;
+    SADD-splittable via the inherited ``breakdown``."""
+    by_service_type: Optional[dict[ServiceType, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split of the affected people by disrupted service (water, "
+            "healthcare, education, energy, markets, communications, transport, "
+            "other), ONLY when the report gives counts per service. Cells inherit "
+            "scope/source."
+        ),
+    )
+
+    _coerce_by_service_type = field_validator("by_service_type", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(ServiceType))),
+    )
+
+
+class FamilySeparationField(DisaggregatedNumericField):
+    """Separated / unaccompanied people (ADR-0009, CSV #14) — a protection figure.
+    Split by separation category; SADD-splittable (sex/age) via ``breakdown``."""
+    by_separation_category: Optional[dict[SeparationCategory, NumericField]] = Field(
+        default=None,
+        description=(
+            "Split by category (unaccompanied / separated / other), ONLY when the "
+            "report distinguishes them. Cells inherit this figure's scope/source."
+        ),
+    )
+
+    _coerce_by_separation_category = field_validator("by_separation_category", mode="before")(
+        _coerce_categorical_keys(frozenset(get_args(SeparationCategory))),
+    )
+
+
 class AccessAndIncidents(BaseModel):
     access_by_location: list[AccessByLocation] = Field(
         default_factory=list,
@@ -825,7 +1242,71 @@ class AccessAndIncidents(BaseModel):
     schools: Optional[InfrastructureDamage] = None
     health_facilities: Optional[InfrastructureDamage] = None
     water_facilities: Optional[InfrastructureDamage] = None
+    # Power + communications facilities (ADR-0009 #26) — added alongside the
+    # existing schools/health/water rather than restructuring them into a dict,
+    # so their clear-api FieldRules are untouched. Closes the power/comms gap.
+    power_facilities: Optional[InfrastructureDamage] = None
+    communication_facilities: Optional[InfrastructureDamage] = None
     markets_disrupted: Optional[NumericField] = None
+
+    # Civilian housing/dwelling impact (ADR-0009, CSV 15–17) — distinct from the
+    # service-facility counts above. Dwelling counts, with optional dwelling-type
+    # / severity breakdowns.
+    housing: Optional[HousingDamage] = None
+
+    # ── Access / protection / service indicators (ADR-0009) ──────────────────
+    access_constrained_population: Optional[AccessConstrainedField] = Field(
+        default=None,
+        description=(
+            "People in hard-to-reach / inaccessible / besieged areas (#20). Null "
+            "unless the report states such a population count."
+        ),
+    )
+    access_barriers: list[AccessBarrier] = Field(
+        default_factory=list,
+        description=(
+            "Presence list of humanitarian access barriers the report names WITHOUT "
+            "a count (#22) — insecurity, road_damage, checkpoints, "
+            "administrative_restrictions, denial, weather, distance, transport, "
+            "discrimination, lack_of_information, other. When a barrier IS given a "
+            "count, put it in access_constrained_population.by_barrier instead. "
+            "Empty list if none named."
+        ),
+    )
+    routes_blocked: Optional[RoutesBlockedField] = Field(
+        default=None,
+        description=(
+            "Count of roads/routes/bridges reported blocked or impassable (#23) — "
+            "a count of infrastructure points, not people. Null unless stated."
+        ),
+    )
+    service_disruption_people: Optional[ServiceDisruptionField] = Field(
+        default=None,
+        description=(
+            "People affected by disruption of an essential service (#27) — "
+            "distinct from markets_disrupted (a facility count). Null unless "
+            "the report states a people count."
+        ),
+    )
+    family_separation: Optional[FamilySeparationField] = Field(
+        default=None,
+        description=(
+            "Separated / unaccompanied people reported (#14, protection). Null "
+            "unless stated."
+        ),
+    )
+    inaccessible_locations_count: Optional[NumericField] = Field(
+        default=None,
+        description=(
+            "Count of locations inaccessible to humanitarian actors (#21) — a "
+            "count, distinct from the per-location statuses in access_by_location. "
+            "Null unless the report states a count."
+        ),
+    )
+
+    _coerce_access_barriers = field_validator("access_barriers", mode="before")(
+        _coerce_categorical_list(frozenset(get_args(AccessBarrier))),
+    )
 
     # This is the domain where we saw the JSON-string-as-list failure
     # in the wild — verified with report 4221396. Both the nested list

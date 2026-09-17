@@ -27,8 +27,10 @@ from clear_pipeline.defs.knowledgebase.datapoints_extract import (
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     AccessAndIncidents,
     Casualties,
-    CasualtyDisaggregation,
+    KilledDisaggregation,
+    KilledTotal,
     DisaggregatedNumericField,
+    DisplacementNumericField,
     Disaggregation,
     Displacement,
     LocationRef,
@@ -70,7 +72,7 @@ def _canned_domain_output(domain_name: str):
         )
     if domain_name == "casualties":
         return Casualties(
-            killed=CasualtyDisaggregation(total=NumericField(
+            killed=KilledDisaggregation(total=KilledTotal(
                 value=15, unit="people", confidence="verified",
                 source_quote="15 killed", chunk_index=1, page_number=2,
             )),
@@ -78,7 +80,7 @@ def _canned_domain_output(domain_name: str):
     if domain_name == "displacement":
         # idp_stock carries a SADD breakdown (v4) so the happy path also
         # exercises scope propagation into cells; new_displacements has none.
-        idp = DisaggregatedNumericField(
+        idp = DisplacementNumericField(
             value=42000, unit="people", confidence="reported",
             source_quote="42,000 IDPs in Kordofan, 22,000 women.",
             chunk_index=0, page_number=2, scope_location_name="Kordofan",
@@ -91,7 +93,7 @@ def _canned_domain_output(domain_name: str):
         )
         return Displacement(
             idp_stock=idp,
-            new_displacements=DisaggregatedNumericField(
+            new_displacements=DisplacementNumericField(
                 value=42000, unit="people", confidence="reported",
                 source_quote="42,000 IDPs in Kordofan.", chunk_index=0, page_number=2,
             ),

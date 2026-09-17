@@ -223,6 +223,15 @@ SYSTEM_PROMPT_TEMPLATE = (
     "  or `source_name` — a cell inherits its parent figure's scope + source. "
     "  Convert a percentage to a count only when the total is known and the "
     "  report frames the split as shares of that total.\n"
+    "- CATEGORICAL BREAKDOWN (`by_<axis>` maps, e.g. housing `by_dwelling_type` / "
+    "  `by_severity`): fill these ONLY when the report splits a count along that "
+    "  axis (e.g. '200 houses and 50 apartments destroyed'). Each map is keyed by "
+    "  a FIXED vocabulary — pick the closest key and use `other` (never invent a "
+    "  key) for anything outside it; put the source wording in that cell's "
+    "  `source_quote`. Emit only the categories the report states; leave the map "
+    "  null when it gives no split. Like sex/age cells, a `by_<axis>` cell is a "
+    "  normal numeric figure but does NOT carry its own `scope_location_name` / "
+    "  `source_name` — it inherits the parent figure's.\n"
     "- `confidence` is a tier: verified > reported > estimated > media > "
     "  unverified. Use `verified` only when the report explicitly attributes "
     "  the figure to a UN or government mission verification. `reported` "
@@ -549,47 +558,66 @@ _INHERITED_FILL_KEYS = (
 )
 
 
+def _inherit_scope_into_cell(cell: dict, fig: dict, total: Any, label: str) -> None:
+    """Copy a parent figure's scope/source/basis-period into one breakdown cell
+    (SADD or categorical), and flag a cell that exceeds its own total. Shared by
+    both breakdown kinds so they inherit the parent's incident key identically."""
+    for k in _INHERITED_OVERWRITE_KEYS:
+        cell[k] = fig.get(k)
+    for k in _INHERITED_FILL_KEYS:
+        if fig.get(k) is not None and cell.get(k) is None:
+            cell[k] = fig[k]
+    # A cell larger than its own total is a likely extraction error (bad
+    # percentage→count, hallucinated cell) — surface it rather than ship a
+    # breakdown that reads as bigger than the whole.
+    cval = cell.get("value")
+    if (
+        isinstance(cval, (int, float))
+        and isinstance(total, (int, float))
+        and cval > total
+    ):
+        logger.warning(
+            "[DATAPOINTS] breakdown cell %s=%s exceeds its total %s (scope=%s) — likely extraction error",
+            label, cval, total, fig.get("scope_location_id"),
+        )
+
+
 def _propagate_breakdown_scope(merged: Any) -> int:
     """Copy each disaggregated figure's resolved scope/source/basis-period down
-    into its SADD ``breakdown`` cells (ADR-0008 §2), so the cells share the
-    parent's incident key and roll up (an unscoped cell is dropped by the
-    aggregator). Reuses the shared ``_collect_numeric_fields`` walker (which
-    stops at a figure leaf — it does NOT descend into ``breakdown``), matching
-    the sibling resolvers, then fills each figure's own cells. Returns the number
-    of cells propagated (for logging).
+    into its breakdown cells, so the cells share the parent's incident key and
+    roll up (an unscoped cell is dropped by the aggregator). Covers BOTH kinds:
+
+    - SADD ``breakdown`` cells — the fixed sex/age marginals (ADR-0008 §2).
+    - Closed-vocab categorical breakdowns — any ``by_<axis>`` map of
+      ``dict[<AxisEnum>, NumericField]`` (ADR-0009 §4), e.g. housing
+      ``by_dwelling_type`` / ``by_severity``.
+
+    Reuses the shared ``_collect_numeric_fields`` walker (which stops at a figure
+    leaf — it does NOT descend into ``breakdown`` or the ``by_*`` maps), then
+    fills each figure's own cells. Returns the number of cells propagated.
     """
     figures: list[dict] = []
     _collect_numeric_fields(merged, figures)
 
     count = 0
     for fig in figures:
-        breakdown = fig.get("breakdown")
-        if not isinstance(breakdown, dict):
-            continue
         total = fig.get("value")
-        for cell_name in _BREAKDOWN_CELLS:
-            cell = breakdown.get(cell_name)
-            if not isinstance(cell, dict):
+        # SADD sex/age marginals — a fixed set of named cells.
+        breakdown = fig.get("breakdown")
+        if isinstance(breakdown, dict):
+            for cell_name in _BREAKDOWN_CELLS:
+                cell = breakdown.get(cell_name)
+                if isinstance(cell, dict):
+                    _inherit_scope_into_cell(cell, fig, total, cell_name)
+                    count += 1
+        # Categorical breakdowns — every `by_<axis>` map on this figure.
+        for key, mp in fig.items():
+            if not (key.startswith("by_") and isinstance(mp, dict)):
                 continue
-            for k in _INHERITED_OVERWRITE_KEYS:
-                cell[k] = fig.get(k)
-            for k in _INHERITED_FILL_KEYS:
-                if fig.get(k) is not None and cell.get(k) is None:
-                    cell[k] = fig[k]
-            # A marginal larger than its own total is a likely extraction error
-            # (bad percentage→count, hallucinated cell) — surface it rather than
-            # ship a breakdown that reads as bigger than the whole.
-            cval = cell.get("value")
-            if (
-                isinstance(cval, (int, float))
-                and isinstance(total, (int, float))
-                and cval > total
-            ):
-                logger.warning(
-                    "[DATAPOINTS] SADD cell %s=%s exceeds its total %s (scope=%s) — likely extraction error",
-                    cell_name, cval, total, fig.get("scope_location_id"),
-                )
-            count += 1
+            for cat, cell in mp.items():
+                if isinstance(cell, dict):
+                    _inherit_scope_into_cell(cell, fig, total, f"{key}.{cat}")
+                    count += 1
     return count
 
 
