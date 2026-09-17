@@ -41,6 +41,24 @@ def test_strict_schema_does_not_mutate_input():
     assert raw.get("additionalProperties") is not False  # original untouched
 
 
+def test_strict_schema_expands_closed_key_categorical_maps():
+    # ADR-0009 categorical maps render as `additionalProperties:<schema>` +
+    # `propertyNames.enum` (no `properties`) — invalid for strict mode. The
+    # transform must expand them into explicit nullable properties (reviewer P2),
+    # else the v5 backfill 400s on any domain carrying one.
+    from clear_pipeline.defs.knowledgebase.datapoints_schemas import HousingCount
+    strict = _to_strict_json_schema(HousingCount.model_json_schema())
+    mp = strict["properties"]["by_dwelling_type"]["anyOf"][0]
+    assert "propertyNames" not in mp
+    assert mp["additionalProperties"] is False
+    assert set(mp["required"]) == set(mp["properties"])  # strict: every key required
+    assert {"house", "other"} <= set(mp["properties"])
+    assert mp["properties"]["house"] == {
+        "anyOf": [{"$ref": "#/$defs/NumericField"}, {"type": "null"}],  # nullable cell
+    }
+    assert _every_object_is_strict(strict)
+
+
 # ── need_sectors: map synonyms, drop unknowns, never reject the extraction ──
 
 def test_need_sectors_maps_synonyms_and_drops_unknown():
