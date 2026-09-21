@@ -1,19 +1,21 @@
-# Medallion pipeline implementation: architecture and first source (Dataminr)
+# Medallion pipeline implementation: architecture and sources wired in
 
 Documents what got built in `defs/gx_pipeline/` — a generic bronze → silver →
-gold factory, GX-gated at every promotion, with Dataminr as the first
-source wired in. ("Medallion" names the layering pattern; the package and
-class names below describe what the code is instead of which pattern built
-it — see §3.) Companion to the per-source projected-pipeline docs
-(`data-quality-dataminr-pipeline-map.md`, `-acled-`, `-darfur24-`), which
-describe the *target*; this doc describes what's actually running.
+gold factory, GX-gated at every promotion. Dataminr, ACLED, and Darfur24 are
+wired in; IDMC is deliberately not (§3). ("Medallion" names the layering
+pattern; the package and class names below describe what the code is
+instead of which pattern built it — see §3.) Companion to the per-source
+projected-pipeline docs (`data-quality-dataminr-pipeline-map.md`, `-acled-`,
+`-darfur24-`), which describe the *target*; this doc describes what's
+actually running.
 
 ## 1. Scope
 
 Implements the bronze/silver/gold layers and the incremental push to
-clear-api for one source (Dataminr), built as a **generic factory** so
-ACLED, Darfur24, and IDMC are additive, not copy-paste. Nothing here writes
-to clear-api until the final push step — bronze, silver, and gold are all
+clear-api for Dataminr, ACLED, and Darfur24, built as a **generic
+factory** so each source is additive, not copy-paste — see §3 for the
+recipe and for why IDMC isn't wired in yet. Nothing here writes to
+clear-api until the final push step — bronze, silver, and gold are all
 S3 artifacts.
 
 Not covered: per-source quality-rule thresholds, aggregations for
@@ -27,7 +29,9 @@ src/clear_pipeline/defs/gx_pipeline/
 ├── sources.py    # GXSource protocol + per-source adapters (ONLY per-source code)
 ├── factory.py    # build_gx_source_assets(source) -> 8 assets + 6 GX checks + 1 job
 ├── gx_utils.py   # Great Expectations Core helper, fully source-agnostic
-├── iceberg_events.py  # gold events, SCD2 (§6) — technology-specific, not pattern-named
+├── iceberg_catalog.py  # shared PyIceberg catalog/namespace for both gold tables
+├── iceberg_events.py   # gold events, SCD2 (§6) — technology-specific, not pattern-named
+├── iceberg_signals.py  # gold signals, Type-1 upsert (§6)
 └── assets.py     # loops GX_SOURCES -> module globals, for Dagster auto-discovery
 ```
 
@@ -122,9 +126,9 @@ flowchart TB
     Reg --> Factory["factory.py::build_gx_source_assets(source)<br/>— reads only, never changes"]
 ```
 
-Dotted lines mark what doesn't exist yet (ACLED shown as the worked
-example — Darfur24/IDMC follow the same shape). Adding a source touches
-`sources.py` only:
+ACLED and Darfur24 are both built now (`ACLEDGXSource`, `Darfur24GXSource`
+in `sources.py`) — the diagram above is what it looked like mid-build, kept
+as the illustration of the general recipe:
 
 1. In `sources.py`, write a small adapter class that calls the source's
    `providers/<source>.py` module directly for everything bronze already
@@ -135,10 +139,22 @@ example — Darfur24/IDMC follow the same shape). Adding a source touches
 2. Register the adapter in `GX_SOURCES`.
 3. Nothing else changes — `factory.py` and `assets.py` are source-agnostic.
 
-For ACLED and Darfur24, step 1 needs a `promote: bool = False`-style
-passthrough added to `build_acled_signal_input` / `build_darfur24_signal_input`
-first, mirroring the fix already made to `build_signal_input` (§4). Darfur24
-never calls the geoparser at all, so it may not need one.
+ACLED needed the `promote: bool = False` passthrough added to
+`build_acled_signal_input` (§4's fix, mirrored). Darfur24 didn't — it
+never calls the geoparser at all (news articles carry no coordinates to
+enrich from), so `build_darfur24_signal_input` needed no change.
+`Darfur24GXSource` is the one adapter that isn't `frozen`: it caches the
+resolved country L0 location id on first use, the same reasoning
+production's `Darfur24Connector._resolve_location_id` already used.
+
+**IDMC is deliberately not registered.** Production's own `IDMCConnector`
+sets `drained=False` for a real reason: "grouping signals into events
+works differently for IDMC and needs new features that aren't built yet."
+This factory has no equivalent of that flag — every registered source runs
+the full classify/geo/temporal/match chain, which *is* event-grouping — so
+adding an `IDMCGXSource` today would build on the same unresolved gap
+production explicitly deferred, not just reuse a pattern. Add it once
+IDMC's event-grouping has an actual design.
 
 **On `defs/signals/`'s remaining dependency**: `factory.py` still imports
 `defs/signals/lake.py` for generic S3 read/write/list helpers
@@ -214,7 +230,7 @@ outside clear-api, swap it into the geo stage and drop the heuristic.
 sequenceDiagram
     participant Geo as &lt;source&gt;_geo
     participant Match as &lt;source&gt;_match
-    participant Gold as &lt;source&gt;_gold (S3)
+    participant Gold as &lt;source&gt;_gold (Iceberg)
     participant Push as &lt;source&gt;_push
     participant API as clear-api
 
@@ -243,22 +259,24 @@ today.
   wraps its equivalent step in `redis_lock`). Fine for one Dagster run at a
   time; add a lock if this ever runs concurrently.
 
-## 6. Gold events persistence: SCD2, decided but not yet built
+## 6. Gold persistence: Iceberg tables, not S3 JSON
 
-Today's committed code writes `gold/<source>/events/<eventId>.json` as a
-single mutable file, overwritten in place every time a new signal merges
-in — no history retained. That's fine for `<source>_push`'s own needs (it
-only ever reads the current state), but it means there's no way to answer
-"what did this Event look like before signal X merged in," which matters
-for audit and debugging severity/title changes after the fact.
+Bronze and silver stay plain S3 JSON — raw and cleansed per-record blobs,
+fine as write-once files. Gold is different: both its tables are Apache
+Iceberg, but for opposite reasons, which is why gold is two tables and not
+one:
 
-**Not everything in gold needs this** — only the events table is a genuine
-slowly-changing dimension:
+| Gold table | Nature | SCD2? | Write path |
+|---|---|---|---|
+| `signals` | written once, `pushedAt` flips null → timestamp — one status flip, no history worth keeping | No — Type-1 | `Table.upsert` keyed on `externalId` (`iceberg_signals.py`) |
+| `events` | title/description/severity/population/signalIds all change as signals merge in over the active window | **Yes** | append/overwrite versioning (`iceberg_events.py`) |
 
-| Gold table | Nature | SCD2? |
-|---|---|---|
-| `signals` | written once, `pushedAt` flips null → timestamp | No — one status flip, Type-1 overwrite stays fine |
-| `events` | title/description/severity/population/signalIds all change as signals merge in over the active window | **Yes** |
+Both still had to be Iceberg, not one Iceberg and one S3 JSON: `push`
+queries "every unpushed signal" and "every open event" as filtered scans,
+not point reads by key, and gold is the layer clear-api's incremental push
+depends on — worth one query surface, not two storage formats picked
+per-table on a whim. The SCD2 machinery below (§6.2/§6.3) is specific to
+`events`; `signals` is a plain `Table.upsert`, no versioning columns.
 
 ### 6.1 Format decision: Apache Iceberg, not Delta Lake
 
@@ -329,8 +347,19 @@ flowchart TD
 
 ### 6.3 Status
 
-Built (`defs/gx_pipeline/iceberg_events.py`), wired into `factory.py`, verified
-on Dataminr.
+`iceberg_signals.py` (Type-1) is built, wired into `factory.py`, verified on
+Dataminr, ACLED, and Darfur24.
+
+`iceberg_events.py` (SCD2) was built and verified the same way, then
+**stubbed** — every function is now a no-op (see the module's docstring).
+Reason: a real gold events table and clear-api's own `Event` table would
+both be written independently with no single source of truth, and that
+synchronization question isn't decided yet. `_push` pushes signals only
+until it is; `_temporal`/`_match`/`_gold` still run their in-memory
+event-clustering logic (within a single run — cross-run merging is lost
+along with the persistence), so `eventId`/`districtKey`/etc. keep flowing
+through gold, they just don't reach clear-api or Iceberg. The real
+implementation is one `git revert` away once the sync design lands.
 
 **§6.1's caveat resolved, not assumed.** Before writing any pipeline code,
 PyIceberg 0.12.0 was installed and its actual write API checked directly:
@@ -445,6 +474,6 @@ directly.
   task 2.
 - Aggregations for ontology business objects beyond Signal/Event/Alert →
   task 3 (blocked on business-side ontology clarifications).
-- ACLED / Darfur24 / IDMC adapters → §3's recipe, not yet written.
-- Iceberg-backed gold events (SCD2) → §6, decided, not yet built.
+- IDMC adapter → §3, blocked on an actual event-grouping design (not a
+  recipe gap — ACLED/Darfur24 followed the same recipe and are done).
 - Integration tests against real S3/clear-api → task 6.

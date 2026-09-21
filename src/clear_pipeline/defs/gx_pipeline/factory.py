@@ -1,9 +1,12 @@
 """Generic GX-gated bronze -> silver -> gold asset factory.
 ``build_gx_source_assets(source)`` produces one source's full pipeline: 8
 assets + 6 GX checks + 1 job. Nothing writes to clear-api until
-``<source>_push``. Gold signals are S3 JSON; gold events is an Iceberg
-SCD2 table (`iceberg_events.py`) — see
-docs/data-quality-medallion-implementation.md §6 for why.
+``<source>_push``. Bronze/silver stay S3 JSON; gold signals are Iceberg,
+Type-1 (`iceberg_signals.py`). Gold events persistence is STUBBED for now
+(`iceberg_events.py`) pending a decision on keeping it synchronous with
+clear-api's own Event table — see that module's docstring and
+docs/data-quality-medallion-implementation.md §6. ``_push`` only pushes
+signals until that lands.
 
 **Add a data source = add a ``GXSource`` to ``sources.py``** — this
 module needs no change, mirroring ``defs/signals/factory.py``'s
@@ -27,19 +30,14 @@ import dagster as dg
 import great_expectations as gx
 import pandas as pd
 
-from clear_pipeline.defs.gx_pipeline import iceberg_events
+from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
 from clear_pipeline.defs.gx_pipeline.sources import GXSource
 from clear_pipeline.defs.signals import lake
-from clear_pipeline.providers.alert import escalate_to_alert, is_stale_signal
 from clear_pipeline.providers.classify import classify_locally
-from clear_pipeline.providers.clear_api import create_event, create_signal, update_event
-from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS, resolve_signal_admin2
+from clear_pipeline.providers.clear_api import create_signal
+from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
-
-# Mirrors defs/signals/stages.py's private _ALERT_MIN_SEVERITY — duplicated
-# rather than imported since that name is underscore-private to that module.
-ALERT_MIN_SEVERITY = 4
 
 _BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
 _SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
@@ -205,6 +203,10 @@ def build_gx_source_assets(source: GXSource) -> list:
         for row in current_df.to_dict("records"):
             try:
                 last_touched = datetime.fromisoformat(str(row["lastSignalCreatedAt"]).replace("Z", "+00:00"))
+                if last_touched.tzinfo is None:
+                    # Some sources (e.g. ACLED's event_date) are date-only,
+                    # no offset — treat as UTC like the rest of the pipeline.
+                    last_touched = last_touched.replace(tzinfo=UTC)
             except (KeyError, ValueError, AttributeError, TypeError):
                 continue
             if last_touched < cutoff:
@@ -328,14 +330,14 @@ def build_gx_source_assets(source: GXSource) -> list:
         name=f"{src}_gold",
         group_name=group,
         ins={"bundles": dg.AssetIn(key=f"{src}_match")},
-        description="Write signal rows to S3, merge event rows into the Iceberg SCD2 table (§6).",
+        description="Upsert signal rows (Type-1) into Iceberg (§6). Event persistence is stubbed (iceberg_events.py).",
     )
     def _gold(context: dg.AssetExecutionContext, bundles: list[dict]) -> pd.DataFrame:
         if not bundles:
             return pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"])
 
-        s3, bucket = _s3()
         events_table = iceberg_events.get_events_table(src)
+        signals_table = iceberg_signals.get_signals_table(src)
         signal_rows: list[dict] = []
         new_versions = no_op_versions = 0
         for bundle in bundles:
@@ -349,8 +351,8 @@ def build_gx_source_assets(source: GXSource) -> list:
                 sig_row["populationAffectedContribution"] = None
                 sig_row["casualtiesContribution"] = (sig_row["signalInput"] or {}).get("casualties")
                 sig_row["severity"] = bundle["severity"]
-                lake.write_json(s3, bucket, f"gold/{src}/signals/{sig_row['externalId']}.json", sig_row)
                 signal_rows.append(sig_row)
+        iceberg_signals.upsert_signals(signals_table, signal_rows)
 
         context.add_output_metadata({
             "events_written": len(bundles), "signals_written": len(signal_rows),
@@ -360,118 +362,40 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     # ══════════════════════════════════════════════════════════════════════
     # Push: the ONLY stage that writes to clear-api. Incremental — only rows
-    # with pushedAt IS NULL.
+    # with pushedAt IS NULL. Signals only — event push is stubbed, see
+    # iceberg_events.py's module docstring.
     # ══════════════════════════════════════════════════════════════════════
     @dg.asset(
         name=f"{src}_push",
         group_name=group,
         deps=[f"{src}_gold"],
-        description="Push unpushed gold rows (pushedAt IS NULL) to clear-api, then stamp them pushed.",
+        description="Push unpushed gold signals (pushedAt IS NULL) to clear-api. Event push is stubbed (iceberg_events.py).",
     )
     def _push(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-        s3, bucket = _s3()
-        events_table = iceberg_events.get_events_table(src)
-        unpushed: list[dict] = []
-        for key in lake.list_keys(s3, bucket, f"gold/{src}/signals/"):
-            row = lake.read_json(s3, bucket, key)
-            if row and row.get("pushedAt") is None:
-                unpushed.append(row)
+        signals_table = iceberg_signals.get_signals_table(src)
+        unpushed = iceberg_signals.unpushed_signals(signals_table)
 
         if not unpushed:
             context.log.info("[%s push] nothing to push", src)
-            return dg.MaterializeResult(metadata={"pushed_signals": 0, "pushed_events": 0})
+            return dg.MaterializeResult(metadata={"pushed_signals": 0})
 
-        by_event: dict[str, list[dict]] = {}
+        pushed_signals = failed = 0
+        to_upsert: list[dict] = []
+        now_iso = datetime.now(UTC).isoformat()
         for row in unpushed:
-            by_event.setdefault(row["eventId"], []).append(row)
-
-        pushed_signals = pushed_events = alerted = failed = 0
-        for event_id, sig_rows in by_event.items():
             try:
-                # Iceberg current version — push only ever reads it (iceberg_events.py).
-                event_row = iceberg_events.current_event(events_table, event_id)
-                if not event_row:
-                    context.log.warning(
-                        "[%s push] gold event %s missing — skipping its %d signal(s)",
-                        src, event_id, len(sig_rows),
-                    )
-                    continue
-                # clearApiEventId is push state, not SCD2 content — kept separate.
-                push_state_key = f"gold/{src}/events_push_state/{event_id}.json"
-                push_state = lake.read_json(s3, bucket, push_state_key) or {}
-
-                created_signals = [
-                    create_signal(row["signalInput"])
-                    for row in sorted(sig_rows, key=lambda r: r["createdAt"])
-                ]
-
-                # Authoritative admin-2, now that createSignal resolved a real location.
-                location_id = None
-                for created in created_signals:
-                    location_id = resolve_signal_admin2(created)
-                    if location_id:
-                        break
-
-                event_input = {
-                    "signalIds": event_row["signalIds"],
-                    "title": event_row["title"],
-                    "description": event_row["description"],
-                    "severity": event_row["severity"],
-                    "rank": event_row["severity"] / 5.0,
-                    "types": [event_row.get("glideCode") or "ot"],
-                    "locationId": location_id,
-                    "validFrom": event_row["firstSignalCreatedAt"],
-                    "validTo": (
-                        datetime.fromisoformat(event_row["firstSignalCreatedAt"].replace("Z", "+00:00"))
-                        + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
-                    ).isoformat(),
-                    "firstSignalCreatedAt": event_row["firstSignalCreatedAt"],
-                    "lastSignalCreatedAt": event_row["lastSignalCreatedAt"],
-                    "startedAt": event_row["startedAt"],
-                }
-                if event_row.get("casualties") is not None:
-                    event_input["casualties"] = event_row["casualties"]
-
-                if push_state.get("clearApiEventId"):
-                    clear_event = update_event(push_state["clearApiEventId"], {
-                        "signalIds": event_row["signalIds"],
-                        "title": event_input["title"],
-                        "description": event_input["description"],
-                        "severity": event_input["severity"],
-                        "rank": event_input["rank"],
-                        "lastSignalCreatedAt": event_input["lastSignalCreatedAt"],
-                        **({"casualties": event_input["casualties"]} if "casualties" in event_input else {}),
-                    })
-                else:
-                    clear_event = create_event(event_input)
-                    push_state["clearApiEventId"] = clear_event["id"]
-                pushed_events += 1
-
-                if (
-                    event_row["severity"] >= ALERT_MIN_SEVERITY
-                    and not is_stale_signal(event_row["lastSignalCreatedAt"])
-                ):
-                    escalate_to_alert(clear_event)
-                    alerted += 1
-
-                now_iso = datetime.now(UTC).isoformat()
-                for sig_row in sig_rows:
-                    sig_row["pushedAt"] = now_iso
-                    lake.write_json(s3, bucket, f"gold/{src}/signals/{sig_row['externalId']}.json", sig_row)
-                    pushed_signals += 1
-                lake.write_json(s3, bucket, push_state_key, push_state)
-            except Exception:  # noqa: BLE001 — isolate one event's push failure; its rows stay unpushed for retry
-                context.log.exception("[%s push] event %s failed — its signals stay unpushed for retry", src, event_id)
+                create_signal(row["signalInput"])
+                row["pushedAt"] = now_iso
+                to_upsert.append(row)
+                pushed_signals += 1
+            except Exception:  # noqa: BLE001 — isolate one signal's push failure; it stays unpushed for retry
+                context.log.exception("[%s push] signal %s failed — stays unpushed for retry", src, row["externalId"])
                 failed += 1
 
-        context.log.info(
-            "[%s push] pushed_signals=%d pushed_events=%d alerted=%d failed=%d",
-            src, pushed_signals, pushed_events, alerted, failed,
-        )
-        return dg.MaterializeResult(metadata={
-            "pushed_signals": pushed_signals, "pushed_events": pushed_events,
-            "alerted": alerted, "failed_events": failed,
-        })
+        iceberg_signals.upsert_signals(signals_table, to_upsert)
+
+        context.log.info("[%s push] pushed_signals=%d failed=%d", src, pushed_signals, failed)
+        return dg.MaterializeResult(metadata={"pushed_signals": pushed_signals, "failed_signals": failed})
 
     # ══════════════════════════════════════════════════════════════════════
     # GX asset checks — blocking at bronze/silver/gold, observational at

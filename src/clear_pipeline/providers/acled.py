@@ -379,8 +379,12 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("acled:last_synced", ts.isoformat())
 
 
-def build_acled_signal_input(event: dict, source_id: str) -> dict:
-    """Convert a parsed ACLED event into a CLEAR CreateSignalInput dict."""
+def build_acled_signal_input(event: dict, source_id: str, *, promote: bool = True) -> dict:
+    """Convert a parsed ACLED event into a CLEAR CreateSignalInput dict.
+
+    `promote` threads through to `enrich_with_geoparser` (default True,
+    today's behavior). See `signal.py::build_signal_input`'s docstring —
+    same parameter, same reason."""
     # Parse event_date into ISO-8601
     event_date = event.get("event_date", "")
     try:
@@ -422,6 +426,7 @@ def build_acled_signal_input(event: dict, source_id: str) -> dict:
         input_data,
         title=event["title"],
         description=event.get("description"),
+        promote=promote,
         log_tag=f"acled:{event.get('acled_id')}",
     )
 
