@@ -48,6 +48,7 @@ from clear_pipeline.providers.clear_api import (
     mark_translated,
     pending_signals,
     pending_translations,
+    sync_event_cards,
 )
 from clear_pipeline.providers.event import group_signal
 from clear_pipeline.providers.redis_lock import redis_lock
@@ -163,7 +164,7 @@ _DROP_DONE = "drop_done"       # legacy no-blob row (already processed by Celery
 _DROP_FAILED = "drop_failed"   # unknown/undrained source → mark FAILED (anomaly)
 
 
-def _process_one_signal(created: dict) -> str:
+def _process_one_signal(created: dict, touched_events: set[str]) -> str:
     projected = _project(created)
     if isinstance(projected, str):
         # Permanent skip — mark it out of the queue so it can't poison the head.
@@ -176,6 +177,10 @@ def _process_one_signal(created: dict) -> str:
         event = _group(view, created)
         if event:
             _enqueue_translations("event", event["id"])
+            # Record the event as touched so the incident-tier KB card is
+            # refreshed once per changed event at the end of the drain
+            # (ADR-0006), not once per grouped signal.
+            touched_events.add(event["id"])
             loc_id = _event_location_id(created)
             if loc_id:
                 _enqueue_translations("location", loc_id)
@@ -203,8 +208,29 @@ def _drain_signals(context) -> dg.MaterializeResult:
         return _drain_signals_locked(context)
 
 
+def _sync_event_cards(context, touched_events: set[str]) -> None:
+    """Best-effort refresh of the incident-tier KB cards for every event this
+    drain created or revised (ADR-0006). One embed per changed event. Never
+    fails the drain — grouping already succeeded; a KB-card blip just means the
+    incident tier is briefly stale, corrected on the next touch."""
+    if not touched_events:
+        return
+    try:
+        result = sync_event_cards(list(touched_events))
+        context.log.info(
+            "[classify_group] synced %d event cards (%d skipped)",
+            result.get("synced", 0), result.get("skipped", 0),
+        )
+    except Exception:  # noqa: BLE001 — KB-card sync must never fail the drain
+        context.log.exception(
+            "[classify_group] event-card sync failed for %d events — incident tier stale until next touch",
+            len(touched_events),
+        )
+
+
 def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = 0
+    touched_events: set[str] = set()
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
         if not batch:
@@ -213,7 +239,7 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         failed_ids: list[str] = []
         for created in batch:
             try:
-                outcome = _process_one_signal(created)
+                outcome = _process_one_signal(created, touched_events)
             except Exception:  # noqa: BLE001 — isolate one signal's failure
                 # Transient (S3/clear-api blip) vs persistent: retry up to
                 # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely
@@ -260,6 +286,10 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         # so a cutover backlog of legacy no-blob rows drains instead of deadlocking.
         if not done_ids and not failed_ids:
             break
+
+    # Refresh the incident-tier KB cards once for every event this drain touched
+    # (ADR-0006) — deduped, so an event that absorbed several signals embeds once.
+    _sync_event_cards(context, touched_events)
 
     context.log.info(
         "[classify_group] processed=%d dropped=%d requeued=%d failed=%d",

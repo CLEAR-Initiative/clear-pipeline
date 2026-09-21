@@ -217,7 +217,7 @@ def test_drain_legacy_no_blob_backlog_does_not_deadlock():
     marked: list[tuple[str, list[str]]] = []
     batches = [[{"id": "legacy1"}, {"id": "legacy2"}], [{"id": "real"}], []]
 
-    def outcome(created):
+    def outcome(created, touched_events):
         return stages._PROCESSED if created["id"] == "real" else stages._DROP_DONE
 
     with (
@@ -252,7 +252,7 @@ def test_drain_transient_failure_requeues_not_failed():
 
 
 def test_drain_marks_failed_after_max_attempts_and_keeps_going():
-    def process(created):
+    def process(created, touched_events):
         if created["id"] == "bad":
             raise RuntimeError("boom")
         return stages._PROCESSED
@@ -272,6 +272,40 @@ def test_drain_marks_failed_after_max_attempts_and_keeps_going():
     assert ("FAILED", ["bad"]) in marked            # bad one FAILED at max attempts
     assert result.metadata["processed"] == 1
     assert result.metadata["failed"] == 1
+
+
+def test_drain_syncs_event_cards_for_touched_events_once():
+    # ADR-0006: the drain refreshes the incident-tier KB card once per event it
+    # touched (deduped), via sync_event_cards, after the batch loop.
+    def process(created, touched_events):
+        touched_events.add(f"event-of-{created['id']}")
+        return stages._PROCESSED
+
+    calls: list[list[str]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "s1"}, {"id": "s2"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder([])),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages, "sync_event_cards", side_effect=lambda ids: calls.append(sorted(ids)) or {"synced": len(ids), "skipped": 0}),
+    ):
+        _run()
+
+    assert calls == [["event-of-s1", "event-of-s2"]]  # one call, both touched events
+
+
+def test_drain_event_card_sync_failure_never_fails_the_drain():
+    def process(created, touched_events):
+        touched_events.add("e1")
+        return stages._PROCESSED
+
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "s1"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder([])),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages, "sync_event_cards", side_effect=RuntimeError("clear-api down")),
+    ):
+        result = _run()  # must NOT raise
+    assert result.metadata["processed"] == 1
 
 
 # ── translate drain — no repeated LLM calls on a stuck entity ────────────────
