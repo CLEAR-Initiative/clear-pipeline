@@ -208,24 +208,38 @@ def _drain_signals(context) -> dg.MaterializeResult:
         return _drain_signals_locked(context)
 
 
+# Chunk the sync so a cutover/backfill (touched_events in the hundreds–thousands)
+# doesn't send one giant GraphQL call that blows the 60s _execute timeout and
+# loses EVERY card all-or-nothing (reviewer E5). ~100 events/embeds per call
+# stays well under the timeout and gives partial progress across chunks.
+_SYNC_CHUNK_SIZE = 100
+
+
 def _sync_event_cards(context, touched_events: set[str]) -> None:
     """Best-effort refresh of the incident-tier KB cards for every event this
-    drain created or revised (ADR-0006). One embed per changed event. Never
-    fails the drain — grouping already succeeded; a KB-card blip just means the
-    incident tier is briefly stale, corrected on the next touch."""
+    drain created or revised (ADR-0006). One embed per changed event, chunked so
+    a large backfill makes partial progress. Never fails the drain — grouping
+    already succeeded; a KB-card blip just means the incident tier is briefly
+    stale, corrected on the next touch."""
     if not touched_events:
         return
-    try:
-        result = sync_event_cards(list(touched_events))
-        context.log.info(
-            "[classify_group] synced %d event cards (%d skipped)",
-            result.get("synced", 0), result.get("skipped", 0),
-        )
-    except Exception:  # noqa: BLE001 — KB-card sync must never fail the drain
-        context.log.exception(
-            "[classify_group] event-card sync failed for %d events — incident tier stale until next touch",
-            len(touched_events),
-        )
+    ids = list(touched_events)
+    synced = skipped = 0
+    for start in range(0, len(ids), _SYNC_CHUNK_SIZE):
+        chunk = ids[start:start + _SYNC_CHUNK_SIZE]
+        try:
+            result = sync_event_cards(chunk)
+            synced += result.get("synced", 0)
+            skipped += result.get("skipped", 0)
+        except Exception:  # noqa: BLE001 — a chunk failure must not fail the drain or later chunks
+            context.log.exception(
+                "[classify_group] event-card sync failed for a chunk of %d — those cards stale until next touch",
+                len(chunk),
+            )
+    context.log.info(
+        "[classify_group] synced %d event cards (%d skipped) across %d chunk(s)",
+        synced, skipped, (len(ids) + _SYNC_CHUNK_SIZE - 1) // _SYNC_CHUNK_SIZE,
+    )
 
 
 def _drain_signals_locked(context) -> dg.MaterializeResult:
