@@ -2034,6 +2034,47 @@ def upsert_ground_threads(inputs: list[dict]) -> list[str | None]:
     return result.get("upsertGroundThreads") or []
 
 
+PIPELINE_GROUND_SOURCE_IDS = """
+query PipelineGroundSourceIds($kind: String, $isActive: Boolean) {
+  pipelineGroundSourceIds(kind: $kind, isActive: $isActive)
+}
+"""
+
+
+def pipeline_ground_source_ids(
+    kind: str | None = None,
+    is_active: bool | None = True,
+) -> list[str]:
+    """Enumerate ground source ids for the hotline enrichment drain to
+    poll — a minimal projection (ids only, no consent/policy fields) next
+    to the admin/analyst-facing `groundSources` query."""
+    variables: dict = {}
+    if kind is not None:
+        variables["kind"] = kind
+    if is_active is not None:
+        variables["isActive"] = is_active
+    result = _execute(PIPELINE_GROUND_SOURCE_IDS, variables)
+    return result.get("pipelineGroundSourceIds") or []
+
+
+UPSERT_GROUND_THREAD_DRAFTS = """
+mutation UpsertGroundThreadDrafts($inputs: [GroundThreadDraftInput!]!) {
+  upsertGroundThreadDrafts(inputs: $inputs)
+}
+"""
+
+
+def upsert_ground_thread_drafts(inputs: list[dict]) -> int:
+    """Write enrichment drafts back to clear-api. Each input row shapes as
+    {threadId, draftTitle, draftSeverity, draftLocationId,
+    draftDisasterType} — omit/None fields leave the existing draft value
+    unchanged. Returns the number of threads updated."""
+    if not inputs:
+        return 0
+    result = _execute(UPSERT_GROUND_THREAD_DRAFTS, {"inputs": inputs})
+    return result.get("upsertGroundThreadDrafts") or 0
+
+
 def upsert_translations(
     entity_type: str,
     entity_id: str,
