@@ -242,6 +242,28 @@ mutation UpsertSituationAnalysis($input: UpsertSituationAnalysisInput!) {
 }
 """
 
+_UPSERT_ANALYSIS = """
+mutation UpsertAnalysis($input: UpsertAnalysisInput!) {
+  upsertAnalysis(input: $input) {
+    analysisId
+    supersededPrevious
+  }
+}
+"""
+
+_GET_ANALYSIS = """
+query GetAnalysis($frame: AnalysisFrameInput!, $schemaVersion: String) {
+  analysis(frame: $frame, schemaVersion: $schemaVersion) {
+    id
+    data
+    generatedAt
+    windowStart
+    windowEnd
+    schemaVersion
+  }
+}
+"""
+
 _SEARCH_KNOWLEDGEBASE = """
 query SearchKnowledgebaseForSituation(
   $query: String!,
@@ -850,6 +872,153 @@ def upsert_situation_analysis(
     }
     result = _execute(_UPSERT_SITUATION_ANALYSIS, {"input": payload})
     return result["upsertSituationAnalysis"]
+
+
+def upsert_analysis(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+    data: dict[str, Any],
+    source_report_ids: list[str],
+    generated_by_model: str,
+    generation_cost_usd: float | None,
+    schema_version: str,
+) -> dict[str, Any]:
+    """Insert a unified frame-scoped analysis snapshot and supersede the
+    previous "current" row for the same (frame, schema_version) — ADR-0007's
+    generalisation of `upsert_situation_analysis`. One transaction on the
+    clear-api side.
+
+    The frame is the array columns + window: clear-api canonicalises the arrays
+    (sort + de-dupe) the same way `frame.Frame` does, and `window_end=None`
+    addresses the rolling ("to present") row. Returns
+    ``{analysisId, supersededPrevious}``.
+    """
+    payload = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+        "data": data,
+        "sourceReportIds": source_report_ids,
+        "generatedByModel": generated_by_model,
+        "generationCostUsd": generation_cost_usd,
+        "schemaVersion": schema_version,
+    }
+    result = _execute(_UPSERT_ANALYSIS, {"input": payload})
+    return result["upsertAnalysis"]
+
+
+def get_analysis(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+    schema_version: str,
+) -> dict[str, Any] | None:
+    """Read the current unified analysis for a frame (ADR-0007). Used to fetch
+    the prior generation to diff "what changed" against — called BEFORE
+    ``upsert_analysis`` supersedes it. Returns the row (incl. ``data`` +
+    ``generatedAt``) or None when no analysis exists for the frame yet."""
+    frame = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+    }
+    data = _execute(_GET_ANALYSIS, {"frame": frame, "schemaVersion": schema_version})
+    return data.get("analysis")
+
+
+_PENDING_ANALYSES = """
+query PendingAnalyses($limit: Int) {
+  pendingAnalyses(limit: $limit) {
+    id
+    locationIds
+    eventTypes
+    needSectors
+    windowStart
+    windowEnd
+    teamId
+  }
+}
+"""
+
+_MARK_ANALYSIS_REQUEST_GENERATED = """
+mutation MarkAnalysisRequestGenerated($id: String!) {
+  markAnalysisRequestGenerated(id: $id) { id status }
+}
+"""
+
+_MARK_ANALYSIS_REQUEST_FAILED = """
+mutation MarkAnalysisRequestFailed($id: String!, $error: String) {
+  markAnalysisRequestFailed(id: $id, error: $error) { id status attempts }
+}
+"""
+
+
+def get_pending_analyses(*, limit: int = 20) -> list[dict[str, Any]]:
+    """Drain the on-demand analysis request queue (ADR-0007 §4). Returns the
+    oldest PENDING requests (each a frame) for the generation sensor to process."""
+    data = _execute(_PENDING_ANALYSES, {"limit": limit})
+    return data.get("pendingAnalyses") or []
+
+
+def mark_analysis_request_generated(request_id: str) -> dict[str, Any]:
+    """Mark a drained request GENERATED after its analysis was upserted."""
+    result = _execute(_MARK_ANALYSIS_REQUEST_GENERATED, {"id": request_id})
+    return result["markAnalysisRequestGenerated"]
+
+
+def mark_analysis_request_failed(request_id: str, error: str | None = None) -> dict[str, Any]:
+    """Record a generation failure on a request (bumps its attempt counter)."""
+    result = _execute(
+        _MARK_ANALYSIS_REQUEST_FAILED, {"id": request_id, "error": error}
+    )
+    return result["markAnalysisRequestFailed"]
+
+
+_DUE_ANALYSIS_AUTOMATIONS = """
+query DueAnalysisAutomations($limit: Int) {
+  dueAnalysisAutomations(limit: $limit) {
+    id
+    locationIds
+    eventTypes
+    needSectors
+    windowStart
+    cadence
+    teamId
+  }
+}
+"""
+
+_MARK_ANALYSIS_AUTOMATIONS_RAN = """
+mutation MarkAnalysisAutomationsRan($ids: [String!]!) {
+  markAnalysisAutomationsRan(ids: $ids)
+}
+"""
+
+
+def get_due_analysis_automations(*, limit: int = 100) -> list[dict[str, Any]]:
+    """Drain the scheduler queue (ADR-0007 §5): enabled automations that are DUE
+    (never run, or nextRunAt passed). Each is a rolling frame; the drain groups
+    them by frame and regenerates each at the minimum cadence."""
+    data = _execute(_DUE_ANALYSIS_AUTOMATIONS, {"limit": limit})
+    return data.get("dueAnalysisAutomations") or []
+
+
+def mark_analysis_automations_ran(ids: list[str]) -> int:
+    """Stamp lastRunAt + nextRunAt (per each row's cadence) on the automations
+    whose frame was just regenerated. Returns the count updated."""
+    result = _execute(_MARK_ANALYSIS_AUTOMATIONS_RAN, {"ids": ids})
+    return result.get("markAnalysisAutomationsRan") or 0
 
 
 def _require_env(name: str) -> str:
@@ -1820,6 +1989,15 @@ query SituationAnalysisById($id: String!) {
 }
 """
 
+GET_ANALYSIS_CANONICAL = """
+query AnalysisById($id: String!) {
+  analysisById(id: $id) {
+    id
+    data
+  }
+}
+"""
+
 
 def get_crisis_canonical(crisis_id: str) -> dict | None:
     """Fetch only the four translatable fields of a crisis. Used by the
@@ -1862,6 +2040,19 @@ def get_situation_canonical(situation_analysis_id: str) -> dict | None:
     """
     result = _execute(GET_SITUATION_CANONICAL, {"id": situation_analysis_id})
     row = result.get("situationAnalysisById")
+    if not row:
+        return None
+    return extract_situation_prose(row.get("data") or {})
+
+
+def get_analysis_canonical(analysis_id: str) -> dict | None:
+    """Fetch a unified analysis (ADR-0007) by id and project it to its
+    translatable prose. The payload shares the situation-analysis taxonomy, so
+    the same prose extractor applies (scenarios prose lands here once Phase 3
+    adds it to extract_situation_prose). Same pipeline-language ('en') invariant
+    as get_situation_canonical."""
+    result = _execute(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
+    row = result.get("analysisById")
     if not row:
         return None
     return extract_situation_prose(row.get("data") or {})

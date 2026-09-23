@@ -39,11 +39,17 @@ from clear_pipeline.defs.situation.narrative import (
     generate_context_risks,
     generate_displacement_narrative,
     generate_hazards_and_vulnerabilities,
+    generate_scenarios,
 )
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
 from clear_pipeline.defs.situation.changes import generate_changes
+from clear_pipeline.defs.situation.frame import (
+    Frame,
+    build_rag_filters,
+    country_frame,
+)
 from clear_pipeline.defs.situation.sectors import generate_all_sectors
 from clear_pipeline.defs.situation.schemas import (
     SCHEMA_VERSION,
@@ -450,70 +456,48 @@ def _log_component_summary(
     return all_empty
 
 
-def generate_and_upsert_for_country_window(
+def generate_and_upsert_for_frame(
     *,
-    country_name: str,
-    country_pcode: str | None = None,
-    window_start: str,
-    window_end: str,
-    window_kind: str,
+    frame: Frame,
+    scope_label: str,
     period_label: str,
+    aggregated: dict[str, Any] | None,
+    rag_filters: dict[str, Any] | None,
     log_context=None,
 ) -> dict | None:
-    """Generate and upsert one situation-analysis snapshot for
-    (country_name, window_kind, window_start). The wrappers below
-    (`generate_and_upsert_for_country_year` / `_month`) supply the calendar
-    window + a human `period_label` ("2026" / "July 2026") used in the LLM
-    prompts and prompt-cache key.
+    """Generate + upsert one unified analysis snapshot for a FRAME (ADR-0007) —
+    the generalisation of the situation generator. Instead of a (country,
+    calendar window) it takes a ``Frame`` plus the pre-resolved retrieval scope
+    (``rag_filters``) and deterministic numbers (``aggregated`` — a matching
+    aggregated_datapoints bucket, or None → narrative-only, decision #2).
+    ``scope_label`` is the human label the LLM prompts frame on (a country name
+    for the default; a derived label for a custom frame).
 
-    Returns the summary dict the asset appends, or ``None`` when the
-    country's A0 location can't be resolved (fresh env / locations not
-    backfilled yet). Cascades every failure it can catch to a returned-None
-    so a caller iterating multiple countries doesn't crash on one bad row.
+    Writes to the ``analyses`` table via ``upsertAnalysis`` (bitemporal
+    supersede-then-insert). Returns a summary dict, or None on unrecoverable
+    failure / an all-empty normal run (which must not supersede a good row).
     """
     log = log_context or logger
 
     log.info(
-        "[situation] %s (%s): starting generation (window_kind=%s window_start=%s)",
-        country_name, period_label, window_kind, window_start,
-    )
-
-    country_id = clear_api.resolve_country_location_id(country_name, pcode=country_pcode)
-    if not country_id:
-        log.warning(
-            "[situation] %s (pcode=%s): no A0 location resolved - skipping (backfill locations first)",
-            country_name, country_pcode or "-",
-        )
-        return None
-    log.debug("[situation] %s: resolved country_id=%s", country_name, country_id)
-
-    aggregated: dict[str, Any] | None = None
-    try:
-        aggregated = clear_api.get_aggregated_datapoint(
-            location_id=country_id,
-            window_start=window_start,
-            window_end=window_end,
-            window_kind=window_kind,
-            # Read the aggregation schema the knowledgebase pipeline
-            # writes, not the situation-analysis output schema -
-            # otherwise this reads stale buckets of the wrong version.
-            schema_version=AGGREGATION_SCHEMA_VERSION,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "[situation] %s: aggregated_datapoint fetch failed (%s) - proceeding with empty datapoints",
-            country_name, exc,
-        )
-    log.debug(
-        "[situation] %s: aggregated_datapoint %s (%d contributing reports)",
-        country_name, "found" if aggregated else "none/empty",
-        len((aggregated or {}).get("contributingReportIds") or []),
+        "[analysis] %s (%s): starting generation (locs=%d events=%d sectors=%d window=%s..%s)",
+        scope_label, period_label,
+        len(frame.location_ids), len(frame.event_types), len(frame.need_sectors),
+        frame.window_start, frame.window_end or "present",
     )
 
     datapoints_component = _build_datapoints(aggregated)
     deterministic_source_ids = (aggregated or {}).get("contributingReportIds") or []
     report_meta = _fetch_report_meta(deterministic_source_ids)
     sources_component = _build_sources(deterministic_source_ids, report_meta)
+
+    # Stable frame key for the Anthropic prompt cache — byte-identical across a
+    # run's component calls so calls 2..N read from cache.
+    frame_key = ":".join([
+        "|".join(frame.location_ids), "|".join(frame.event_types),
+        "|".join(frame.need_sectors), frame.window_start, frame.window_end or "",
+    ])
+    cache_key = f"analysis:{frame_key}:{SCHEMA_VERSION}"
 
     skip = _skip_narrative()
     # Stays False for a deliberate deterministic-only (skip) run — that IS a valid
@@ -522,53 +506,52 @@ def generate_and_upsert_for_country_window(
     all_empty = False
     if skip:
         log.warning(
-            "[situation] %s: %s set - shipping deterministic-only row",
-            country_name, _SKIP_NARRATIVE_ENV,
+            "[analysis] %s: %s set - shipping deterministic-only row",
+            scope_label, _SKIP_NARRATIVE_ENV,
         )
         ai_summary_component = None
         context_risks_component = None
         hazards_component = None
         displacement_component = None
         sectors_component = None
+        scenarios_component = None
         generated_by_model = f"deterministic:{SCHEMA_VERSION}"
     else:
         llm = make_llm_provider("narrative")
-        cache_key = f"situation:{country_id}:{window_kind}:{period_label}:{SCHEMA_VERSION}"
         log.info(
-            "[situation] %s (%s): generating LLM components (provider=%s model=%s)",
-            country_name, period_label, llm.provider_name, llm.model,
+            "[analysis] %s (%s): generating LLM components (provider=%s model=%s)",
+            scope_label, period_label, llm.provider_name, llm.model,
         )
-        log.debug("[situation] %s: generating ai_summary", country_name)
         ai_summary_component = generate_ai_summary(
-            llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
         )
-        log.debug("[situation] %s: generating context_risks", country_name)
         context_risks_component = generate_context_risks(
-            llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
         )
-        log.debug("[situation] %s: generating hazards_and_vulnerabilities", country_name)
         hazards_component = generate_hazards_and_vulnerabilities(
-            llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
         )
-        log.debug("[situation] %s: generating displacement", country_name)
         displacement_component = generate_displacement_narrative(
-            llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
         )
-        log.debug("[situation] %s: generating sectors", country_name)
         sectors_component = generate_all_sectors(
-            llm, country_name=country_name, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, country_id=country_id,
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
+        )
+        scenarios_component = generate_scenarios(
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
         )
         generated_by_model = llm.model
-        # Populated-vs-empty summary at INFO. This is the line that makes an
-        # all-null run (e.g. RAG returning nothing because clear-api's EMBEDDING_*
-        # is misconfigured) obvious at a glance instead of a silent bad row.
+        # Populated-vs-empty summary at INFO — makes an all-null run (e.g. RAG
+        # returning nothing because clear-api's EMBEDDING_* is misconfigured)
+        # obvious at a glance instead of a silent bad row.
         all_empty = _log_component_summary(
-            log, country_name, period_label,
+            log, scope_label, period_label,
             ai_summary=ai_summary_component,
             context_risks=context_risks_component,
             hazards=hazards_component,
@@ -578,16 +561,15 @@ def generate_and_upsert_for_country_window(
 
     # Don't let a failed generation supersede the previous good row. A normal run
     # whose narrative + sectors ALL came back empty is treated as unsuccessful:
-    # skip the upsert entirely so clear-api never stamps validTo on the previous
-    # current row. It stays current until a generation actually produces content.
-    # (A deliberate SITUATION_SKIP_NARRATIVE run keeps all_empty=False and still
-    # writes its intentional deterministic-only row.)
+    # skip the upsert so clear-api never stamps validTo on the previous current
+    # row. (A deliberate SITUATION_SKIP_NARRATIVE run keeps all_empty=False and
+    # still writes its intentional deterministic-only row.)
     if all_empty:
         log.warning(
-            "[situation] %s (%s): all narrative/sector components empty — SKIPPING upsert "
+            "[analysis] %s (%s): all narrative/sector components empty — SKIPPING upsert "
             "(NOT superseding the previous row). Likely RAG returned no hits; check "
             "clear-api EMBEDDING_* + logs.",
-            country_name, period_label,
+            scope_label, period_label,
         )
         return None
 
@@ -605,44 +587,38 @@ def generate_and_upsert_for_country_window(
         payload_kwargs["displacement"] = displacement_component
     if sectors_component is not None:
         payload_kwargs["sectors"] = sectors_component
+    if scenarios_component is not None:
+        payload_kwargs["scenarios"] = scenarios_component
     payload = SituationAnalysisPayload(**payload_kwargs)
 
-    # "What changed" notes, for every bucket kind rather than yearly only -
-    # the monthly bucket is the one where a period-over-period diff actually
-    # means something. `_resolve_comparison` prefers the preceding bucket and
-    # falls back to this bucket's prior version, recording which in `basis`
-    # so the dashboard can label the strip honestly.
-    #
-    # Needs the LLM, so skipped on deterministic-only rows. Best-effort
-    # throughout: change notes never block the upsert.
+    # "What changed" vs the frame's PRIOR GENERATION (ADR-0007 §8): the current
+    # `analyses` row for this frame IS the prior generation — read here, before
+    # the upsert below supersedes it. Needs the LLM, so skipped on
+    # deterministic-only rows. Best-effort: change notes never block the upsert.
     if not skip:
         try:
-            comparison = _resolve_comparison(
-                country_id=country_id,
-                window_kind=window_kind,
-                window_start=window_start,
-                period_label=period_label,
+            prior = clear_api.get_analysis(
+                schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
             )
-            if comparison is not None:
-                prior, basis, compared_start, compared_label = comparison
+            if prior and prior.get("data"):
                 payload.changes = generate_changes(
                     llm,
                     prior_payload=prior["data"],
                     new_payload=payload.model_dump(mode="json"),
-                    basis=basis,
+                    basis="previous_generation",
                     prior_generated_at=prior.get("generatedAt") or "",
-                    compared_to_window_start=compared_start,
-                    compared_to_label=compared_label,
+                    compared_to_window_start=frame.window_start,
+                    compared_to_label=period_label,
                     cache_key=cache_key,
                 )
                 log.info(
-                    "[situation] %s: change notes vs %s (%s), %d section(s)",
-                    country_name, compared_label, basis, len(payload.changes.notes),
+                    "[analysis] %s: change notes vs prior generation, %d section(s)",
+                    scope_label, len(payload.changes.notes),
                 )
         except Exception as exc:  # noqa: BLE001 - change notes never block the upsert
             log.warning(
-                "[situation] %s: change-note generation failed (%s); shipping without",
-                country_name, exc,
+                "[analysis] %s: change-note generation failed (%s); shipping without",
+                scope_label, exc,
             )
 
     sector_source_ids: list[str] = []
@@ -661,68 +637,125 @@ def generate_and_upsert_for_country_window(
         *(hazards_component.hazards[0].source_report_ids if hazards_component and hazards_component.hazards else []),
         *(displacement_component.push_factors[0].source_report_ids if displacement_component and displacement_component.push_factors else []),
         *sector_source_ids,
+        *(scenarios_component.source_report_ids if scenarios_component else []),
     ]))
 
     try:
-        result = clear_api.upsert_situation_analysis(
-            country_location_id=country_id,
-            window_start=window_start,
-            window_end=window_end,
-            window_kind=window_kind,
+        result = clear_api.upsert_analysis(
             data=payload.model_dump(mode="json"),
             source_report_ids=all_source_ids,
-            aggregated_datapoint_id=(aggregated or {}).get("id"),
             generated_by_model=generated_by_model,
             generation_cost_usd=None,
             schema_version=SCHEMA_VERSION,
+            **frame.upsert_kwargs(),
         )
     except clear_api.ClearApiError as exc:
-        log.error(
-            "[situation] %s: clear-api rejected upsert (non-retryable): %s",
-            country_name, exc,
-        )
+        log.error("[analysis] %s: clear-api rejected upsert (non-retryable): %s", scope_label, exc)
         return None
     except Exception as exc:  # noqa: BLE001
-        log.error(
-            "[situation] %s: upsert failed after retries: %s",
-            country_name, exc,
-        )
+        log.error("[analysis] %s: upsert failed after retries: %s", scope_label, exc)
         return None
 
+    analysis_id = result["analysisId"]
     log.info(
-        "[situation] %s (%s): wrote analysis %s (superseded=%s, %d deterministic sources, %d total, model=%s)",
-        country_name, period_label, result["situationAnalysisId"],
-        result["supersededPrevious"],
+        "[analysis] %s (%s): wrote analysis %s (superseded=%s, %d deterministic sources, %d total, model=%s)",
+        scope_label, period_label, analysis_id, result["supersededPrevious"],
         len(deterministic_source_ids), len(all_source_ids), generated_by_model,
     )
 
     # Enqueue the freshly-written analysis for translation at every configured
-    # target locale. Each regeneration is a new row id, so this always enqueues
-    # the current generation; the translate drain fetches its canonical prose,
-    # translates, and upserts the overlay. Never fail the write on an enqueue
-    # error — the analysis still ships in English, and the read-miss path will
-    # re-enqueue on the next non-English read.
-    analysis_id = result["situationAnalysisId"]
+    # locale. Best-effort — the analysis still ships in English on failure, and
+    # the read-miss path re-enqueues on the next non-English read.
     for locale in configured_target_locales():
         try:
-            clear_api.enqueue_translation("situationAnalysis", analysis_id, locale)
+            clear_api.enqueue_translation("analysis", analysis_id, locale)
         except Exception:  # noqa: BLE001 — translation enqueue must not fail generation
             log.warning(
-                "[situation] %s: enqueue_translation failed for analysis %s (%s) — translation skipped",
-                country_name, analysis_id, locale, exc_info=True,
+                "[analysis] %s: enqueue_translation failed for analysis %s (%s) — skipped",
+                scope_label, analysis_id, locale, exc_info=True,
             )
 
     return {
-        "country_name": country_name,
-        "country_location_id": country_id,
-        "window_kind": window_kind,
+        "scope_label": scope_label,
+        "location_ids": list(frame.location_ids),
         "period": period_label,
-        "situation_analysis_id": result["situationAnalysisId"],
+        "analysis_id": analysis_id,
         "superseded_previous": result["supersededPrevious"],
         "report_count": len(deterministic_source_ids),
         "total_source_count": len(all_source_ids),
         "generated_by_model": generated_by_model,
     }
+
+
+def generate_and_upsert_for_country_window(
+    *,
+    country_name: str,
+    country_pcode: str | None = None,
+    window_start: str,
+    window_end: str,
+    window_kind: str,
+    period_label: str,
+    log_context=None,
+) -> dict | None:
+    """Country-default analysis: resolve the A0, read its (yearly/monthly ×
+    country) aggregated_datapoint bucket, and generate over a country FRAME.
+    Retrieval stays country-scoped (countryLocationId subtree, no time filter —
+    decision #1); the write goes to the unified `analyses` table (decision #3).
+    Thin wrapper over `generate_and_upsert_for_frame`.
+
+    Returns the summary dict (augmented with the country identity the weekly
+    asset + callers key on), or None when the A0 can't be resolved.
+    """
+    log = log_context or logger
+
+    log.info(
+        "[analysis] %s (%s): country generation (window_kind=%s window_start=%s)",
+        country_name, period_label, window_kind, window_start,
+    )
+
+    country_id = clear_api.resolve_country_location_id(country_name, pcode=country_pcode)
+    if not country_id:
+        log.warning(
+            "[analysis] %s (pcode=%s): no A0 location resolved - skipping (backfill locations first)",
+            country_name, country_pcode or "-",
+        )
+        return None
+    log.debug("[analysis] %s: resolved country_id=%s", country_name, country_id)
+
+    aggregated: dict[str, Any] | None = None
+    try:
+        aggregated = clear_api.get_aggregated_datapoint(
+            location_id=country_id,
+            window_start=window_start,
+            window_end=window_end,
+            window_kind=window_kind,
+            # Read the aggregation schema the knowledgebase pipeline writes, not
+            # the analysis output schema — otherwise this reads stale buckets.
+            schema_version=AGGREGATION_SCHEMA_VERSION,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "[analysis] %s: aggregated_datapoint fetch failed (%s) - proceeding with empty datapoints",
+            country_name, exc,
+        )
+
+    frame = country_frame(country_id, window_start=window_start, window_end=window_end)
+    rag_filters = build_rag_filters(frame, country_scope_id=country_id, include_time_range=False)
+    result = generate_and_upsert_for_frame(
+        frame=frame,
+        scope_label=country_name,
+        period_label=period_label,
+        aggregated=aggregated,
+        rag_filters=rag_filters,
+        log_context=log_context,
+    )
+    if result is None:
+        return None
+    # Augment with the country identity the weekly asset + existing callers key on.
+    result["country_name"] = country_name
+    result["country_location_id"] = country_id
+    result["window_kind"] = window_kind
+    return result
 
 
 def generate_and_upsert_for_country_year(
