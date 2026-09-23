@@ -29,6 +29,7 @@ PROSE_COMPONENTS = (
     "displacement",
     "sectors",
     "changes",
+    "scenarios",
 )
 
 
@@ -92,6 +93,16 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
     changes = data.get("changes") or {}
     changes_out = {"notes": changes.get("notes", {}) or {}}
 
+    # Scenarios prose (ADR-0007 §4). The four trajectory fields are prose;
+    # source_report_ids / contributing_sources are ids and stay canonical.
+    scen = data.get("scenarios") or {}
+    scenarios = {
+        "most_likely": scen.get("most_likely", ""),
+        "best_case": scen.get("best_case", ""),
+        "worst_case": scen.get("worst_case", ""),
+        "description": scen.get("description", ""),
+    }
+
     return {
         "ai_summary": ai_summary,
         "context_risks": context_risks,
@@ -99,4 +110,5 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
         "displacement": displacement,
         "sectors": sectors,
         "changes": changes_out,
+        "scenarios": scenarios,
     }

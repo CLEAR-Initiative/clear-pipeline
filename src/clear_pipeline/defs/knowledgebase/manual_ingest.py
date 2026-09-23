@@ -525,7 +525,7 @@ def manual_document_situation_analysis(
 
     context.log.info(
         "manual situation-analysis regen complete: analysis_id=%s superseded=%s",
-        summary["situation_analysis_id"], summary["superseded_previous"],
+        summary["analysis_id"], summary["superseded_previous"],
     )
     return {
         **agg_result,

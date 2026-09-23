@@ -47,6 +47,7 @@ from clear_pipeline.defs.situation.schemas import (
     DisplacementNarrative,
     HazardsAndVulnerabilities,
     RiskDomain,
+    Scenarios,
     SourcedBullet,
 )
 from clear_pipeline.providers.llm import LLMProvider
@@ -150,6 +151,26 @@ class _DisplacementLLM(BaseModel):
             "return - willingness, blockers, conditions. Terse fragment "
             "per bullet."
         ),
+    )
+
+
+class _ScenariosLLM(BaseModel):
+    """Forward-looking trajectories. Prose only — no bullets, no markers."""
+    most_likely: str = Field(
+        default="",
+        description="The most likely trajectory over the coming weeks/months, 2–4 sentences, grounded in the evidence.",
+    )
+    best_case: str = Field(
+        default="",
+        description="A plausible best-case trajectory if drivers ease / response scales, 2–4 sentences.",
+    )
+    worst_case: str = Field(
+        default="",
+        description="A plausible worst-case trajectory if drivers intensify / access collapses, 2–4 sentences.",
+    )
+    description: str = Field(
+        default="",
+        description="The key variables / assumptions the scenarios hinge on (access, funding, escalation, seasonality).",
     )
 
 
@@ -275,6 +296,7 @@ def generate_ai_summary(
     aggregated: dict[str, Any] | None,
     cache_key: str,
     country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
 ) -> AISummary:
     """2–4 paragraph narrative synthesis grounded in a broad RAG search."""
     rag = fetch_rag_context(
@@ -284,6 +306,7 @@ def generate_ai_summary(
         ),
         limit=12,
         country_id=country_id,
+        filters=rag_filters,
     )
     if rag.is_empty:
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
@@ -328,6 +351,7 @@ def generate_context_risks(
     aggregated: dict[str, Any] | None,
     cache_key: str,
     country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
 ) -> ContextRisks:
     """Eight risk domains in one LLM call. Single broad RAG search
     covers cross-domain context — separate per-domain searches would
@@ -339,6 +363,7 @@ def generate_context_risks(
         ),
         limit=15,
         country_id=country_id,
+        filters=rag_filters,
     )
     if rag.is_empty:
         return ContextRisks()
@@ -401,6 +426,7 @@ def generate_hazards_and_vulnerabilities(
     aggregated: dict[str, Any] | None,
     cache_key: str,
     country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
 ) -> HazardsAndVulnerabilities:
     rag = fetch_rag_context(
         query=(
@@ -409,6 +435,7 @@ def generate_hazards_and_vulnerabilities(
         ),
         limit=10,
         country_id=country_id,
+        filters=rag_filters,
     )
     if rag.is_empty:
         return HazardsAndVulnerabilities()
@@ -454,6 +481,7 @@ def generate_displacement_narrative(
     aggregated: dict[str, Any] | None,
     cache_key: str,
     country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
 ) -> DisplacementNarrative:
     rag = fetch_rag_context(
         query=(
@@ -462,6 +490,7 @@ def generate_displacement_narrative(
         ),
         limit=10,
         country_id=country_id,
+        filters=rag_filters,
     )
     if rag.is_empty:
         return DisplacementNarrative()
@@ -491,4 +520,62 @@ def generate_displacement_narrative(
         push_factors=push,
         return_intention=ret,
         contributing_sources=merge_contributing(push_contrib, ret_contrib),
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+# Component 8 — Scenarios (forward-looking, ADR-0007 §4)
+# ────────────────────────────────────────────────────────────────────
+
+
+def generate_scenarios(
+    llm: LLMProvider,
+    *,
+    country_name: str,
+    period_label: str,
+    aggregated: dict[str, Any] | None,
+    cache_key: str,
+    country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
+) -> Scenarios:
+    """Forward-looking most-likely / best / worst trajectories for the frame.
+    Prose-only; coarse provenance (the RAG report union) since projections are
+    not per-line citations. Empty component when there's no evidence."""
+    rag = fetch_rag_context(
+        query=(
+            f"{country_name} outlook trajectory scenario forecast risk escalation "
+            f"humanitarian access response capacity {period_label}"
+        ),
+        limit=10,
+        country_id=country_id,
+        filters=rag_filters,
+    )
+    if rag.is_empty:
+        return Scenarios()
+
+    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
+    user = (
+        f"Produce the forward-looking Scenarios component for {country_name}, "
+        f"{period_label}. Emit four short prose fields: `most_likely`, `best_case`, "
+        "`worst_case` (each a 2–4 sentence trajectory over the coming weeks / "
+        "months) and `description` (the key variables the scenarios hinge on). "
+        "Ground every projection in the retrieved evidence; do not invent figures.\n"
+        "\n"
+        "RETRIEVED EVIDENCE:\n"
+        f"{rag.formatted_for_prompt}"
+    )
+    try:
+        result = _run_component(
+            llm, system_prompt=system, user_prompt=user,
+            schema=_ScenariosLLM, cache_key=cache_key, max_tokens=2000,
+        )
+    except Exception:  # noqa: BLE001 — component-level isolation
+        logger.exception("[situation:scenarios] LLM call failed — returning empty component")
+        return Scenarios()
+    return Scenarios(
+        most_likely=result.most_likely,
+        best_case=result.best_case,
+        worst_case=result.worst_case,
+        description=result.description,
+        source_report_ids=rag.contributing_report_ids,
     )
