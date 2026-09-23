@@ -85,6 +85,15 @@ class GXSource(Protocol):
         without a direct production equivalent."""
         ...
 
+    def mark_seen(self, external_id: str) -> None:
+        """Mark this record ingested in the source's own seen-set, called
+        only after ``_push`` confirms the create. No-op for sources with no
+        seen-set (matches production's connectors — Dataminr dedups on
+        watermark alone). Sources with one (ACLED, Darfur24) must not rely
+        on `defs/signals`' drain populating it — this pipeline runs
+        independently and needs its own mark."""
+        ...
+
 
 @dataclass(frozen=True)
 class DataminrGXSource:
@@ -126,6 +135,9 @@ class DataminrGXSource:
         # docstring for what `promote` controls.
         return build_signal_input(record, source_id, promote=False)
 
+    def mark_seen(self, external_id: str) -> None:
+        pass  # no seen-set — production's DataminrConnector doesn't mark_seen either
+
 
 @dataclass(frozen=True)
 class ACLEDGXSource:
@@ -161,6 +173,9 @@ class ACLEDGXSource:
 
     def to_silver_input(self, record: Any, source_id: str) -> dict:
         return acled.build_acled_signal_input(record, source_id, promote=False)
+
+    def mark_seen(self, external_id: str) -> None:
+        acled.mark_seen(external_id)
 
 
 @dataclass
@@ -212,6 +227,9 @@ class Darfur24GXSource:
         # No promote param — darfur24 never calls the geoparser at all
         # (news articles carry no coordinates to enrich from).
         return darfur24.build_darfur24_signal_input(record, source_id, self._resolve_location_id())
+
+    def mark_seen(self, external_id: str) -> None:
+        darfur24.mark_seen(external_id)
 
 
 # IDMC is NOT registered below, on purpose — not just "not yet written".

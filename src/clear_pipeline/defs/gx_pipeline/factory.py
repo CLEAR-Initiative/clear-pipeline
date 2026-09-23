@@ -352,6 +352,17 @@ def build_gx_source_assets(source: GXSource) -> list:
                 sig_row["casualtiesContribution"] = (sig_row["signalInput"] or {}).get("casualties")
                 sig_row["severity"] = bundle["severity"]
                 signal_rows.append(sig_row)
+
+        # A re-merged signal (matchOutcome="merged") already has a gold row
+        # — preserve its pushedAt rather than letting the Type-1 upsert
+        # reset an already-pushed signal back to NULL (re-push loop).
+        already_pushed = iceberg_signals.existing_pushed_at(
+            signals_table, [r["externalId"] for r in signal_rows]
+        )
+        for sig_row in signal_rows:
+            existing = already_pushed.get(sig_row["externalId"])
+            if existing is not None:
+                sig_row["pushedAt"] = existing
         iceberg_signals.upsert_signals(signals_table, signal_rows)
 
         context.add_output_metadata({
@@ -385,6 +396,7 @@ def build_gx_source_assets(source: GXSource) -> list:
         for row in unpushed:
             try:
                 create_signal(row["signalInput"])
+                source.mark_seen(row["externalId"])
                 row["pushedAt"] = now_iso
                 to_upsert.append(row)
                 pushed_signals += 1
@@ -417,6 +429,10 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_bronze, blocking=True, name="bronze_shape")
     def _bronze_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        if df.empty:
+            # An empty poll is the normal steady state, not a shape defect —
+            # skip the row-count gate so a quiet run doesn't fail the job.
+            return dg.AssetCheckResult(passed=True, metadata={"row_count": 0, "skipped": "empty poll"})
         result = validate_dataframe(
             df, suite_name=f"{src}_bronze",
             expectations=[

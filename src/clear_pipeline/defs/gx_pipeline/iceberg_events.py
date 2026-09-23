@@ -9,8 +9,11 @@ event-clustering logic (so `eventId`/`districtKey`/etc. keep flowing through
 gold), but nothing about events is persisted or pushed to clear-api —
 `_push` only pushes signals now.
 
-To restore the real SCD2 implementation once the sync design lands, see
-this file's git history (the commit that introduced this stub).
+To restore the real SCD2 implementation once the sync design lands:
+`git checkout 2bba996 -- src/clear_pipeline/defs/gx_pipeline/iceberg_events.py`
+(2bba996 is the last commit with the real implementation; the stub commit
+also wired in ACLED/Darfur24 and moved gold signals onto Iceberg, so
+reverting it would undo unrelated work too).
 """
 
 import pandas as pd

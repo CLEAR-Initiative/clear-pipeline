@@ -359,7 +359,10 @@ until it is; `_temporal`/`_match`/`_gold` still run their in-memory
 event-clustering logic (within a single run — cross-run merging is lost
 along with the persistence), so `eventId`/`districtKey`/etc. keep flowing
 through gold, they just don't reach clear-api or Iceberg. The real
-implementation is one `git revert` away once the sync design lands.
+implementation is recoverable with
+`git checkout 2bba996 -- src/clear_pipeline/defs/gx_pipeline/iceberg_events.py`
+once the sync design lands — not a `git revert` of the stub commit, which
+also wired in ACLED/Darfur24 and moved gold signals onto Iceberg.
 
 **§6.1's caveat resolved, not assumed.** Before writing any pipeline code,
 PyIceberg 0.12.0 was installed and its actual write API checked directly:

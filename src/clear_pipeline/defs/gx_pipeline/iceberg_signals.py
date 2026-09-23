@@ -14,6 +14,7 @@ import json
 
 import pandas as pd
 import pyarrow as pa
+from pyiceberg.expressions import In
 from pyiceberg.schema import Schema
 from pyiceberg.types import DoubleType, LongType, NestedField, StringType
 
@@ -77,3 +78,21 @@ def unpushed_signals(table) -> list[dict]:
     """Every signal row still awaiting push (`pushedAt IS NULL`)."""
     df = table.scan(row_filter="pushedAt IS NULL").to_pandas()
     return [_from_column_dict(row) for row in df.to_dict("records")]
+
+
+def existing_pushed_at(table, external_ids: list[str]) -> dict[str, str | None]:
+    """Current `pushedAt` for these `externalId`s. `upsert_signals` is a
+    Type-1 MERGE that overwrites every column — a caller re-upserting a
+    signal that re-enters gold (e.g. merged into another event) must read
+    this first and carry the value forward, or it clobbers an already-
+    pushed row's `pushedAt` back to NULL and the signal gets re-pushed."""
+    if not external_ids:
+        return {}
+    df = table.scan(
+        row_filter=In("externalId", external_ids),
+        selected_fields=("externalId", "pushedAt"),
+    ).to_pandas()
+    return {
+        row["externalId"]: (None if pd.isna(row["pushedAt"]) else row["pushedAt"])
+        for row in df.to_dict("records")
+    }

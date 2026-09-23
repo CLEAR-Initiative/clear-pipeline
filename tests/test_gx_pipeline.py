@@ -95,6 +95,9 @@ class FakeSource:
     def set_watermark(self, ts):
         self._watermark = ts
 
+    def mark_seen(self, external_id):
+        pass
+
     def to_silver_input(self, record, source_id):
         return {
             "sourceId": source_id,
@@ -176,6 +179,58 @@ def test_gx_pipeline_end_to_end(tmp_path):
         second_result = dg.materialize([push_asset], selection=[push_asset])
         assert second_result.success
     assert len(created_signals) == 2, "second push run must not re-push already-pushed rows"
+
+
+class DupSource(FakeSource):
+    """Like FakeSource but `poll` keeps returning the same 2 records every
+    call, unconditionally — simulates a feed with no dedup (G2), so a
+    second full run re-processes already-pushed externalIds through gold."""
+
+    def poll(self, since):
+        return self._records
+
+
+def test_gx_pipeline_rerun_does_not_repush_already_pushed_signal(tmp_path):
+    """G1 regression: `_match` always emits `pushedAt: None` for a record
+    it processes, so a signal that re-enters gold on a later run (e.g. a
+    source without dedup re-delivering it) must keep the `pushedAt` its
+    first run set — not have it reset to NULL by the Type-1 upsert and
+    get pushed to clear-api again."""
+    fake_s3 = FakeS3()
+    iceberg_warehouse = f"file://{tmp_path / 'warehouse'}"
+    iceberg_catalog_uri = f"sqlite:///{tmp_path / 'catalog.db'}"
+    created_signals = []
+
+    def fake_create_signal(input_data):
+        row = {**input_data, "id": f"sig-{len(created_signals)}", "generalLocation": {"id": "loc-1", "level": 2, "ancestorIds": []}}
+        created_signals.append(row)
+        return row
+
+    defs_list = build_gx_source_assets(DupSource())
+    assets = [d for d in defs_list if isinstance(d, dg.AssetsDefinition)]
+    checks = [d for d in defs_list if isinstance(d, dg.AssetChecksDefinition)]
+
+    def _run():
+        with (
+            patch("clear_pipeline.defs.gx_pipeline.factory.lake.s3_client", return_value=fake_s3),
+            patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
+            patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
+            patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
+            patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=fake_create_signal),
+            patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
+        ):
+            mock_classify.return_value.relevance = 0.9
+            mock_classify.return_value.type_level_2 = "conflict"
+            mock_classify.return_value.disaster_types = ["cv"]
+            return dg.materialize(assets + checks)
+
+    first = _run()
+    assert first.success
+    assert len(created_signals) == 2
+
+    second = _run()
+    assert second.success
+    assert len(created_signals) == 2, "second full run must not re-push already-pushed signals"
 
 
 def test_iceberg_events_stubbed():
