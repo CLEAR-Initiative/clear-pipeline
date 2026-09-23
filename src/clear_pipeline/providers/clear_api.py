@@ -74,6 +74,15 @@ mutation UpsertKnowledgebaseChunks(
 }
 """
 
+_SYNC_EVENT_CARDS = """
+mutation SyncEventCards($eventIds: [String!]!) {
+  syncEventCards(eventIds: $eventIds) {
+    synced
+    skipped
+  }
+}
+"""
+
 _UPSERT_REPORT_DATAPOINTS = """
 mutation UpsertReportDatapoints($input: UpsertReportDatapointsInput!) {
   upsertReportDatapoints(input: $input) {
@@ -580,6 +589,19 @@ def upsert_knowledgebase_chunks(
         "chunksDeleted": int(result["chunksDeleted"]),
         "chunksInserted": int(result["chunksInserted"]),
     }
+
+
+def sync_event_cards(event_ids: list[str]) -> dict[str, int]:
+    """Synthesise + embed + upsert incident-tier "event cards" into
+    ``events_index`` for the given events (ADR-0006, incident tier of
+    searchKnowledgebase). Called after the signal→event grouping drain so the
+    incident tier stays fresh. Idempotent (replace-on-revise, keyed by event id).
+    Returns ``{synced, skipped}``."""
+    if not event_ids:
+        return {"synced": 0, "skipped": 0}
+    data = _execute(_SYNC_EVENT_CARDS, {"eventIds": list(event_ids)})
+    result = data["syncEventCards"]
+    return {"synced": int(result["synced"]), "skipped": int(result["skipped"])}
 
 
 def get_situation_analysis(
