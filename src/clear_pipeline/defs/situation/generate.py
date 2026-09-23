@@ -157,73 +157,6 @@ def _calendar_month_window(year: int, month: int) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
-def _previous_window(window_kind: str, window_start: str) -> tuple[str, str] | None:
-    """Start (ISO) and period label of the bucket immediately preceding
-    `window_start` for the same kind, or None for a kind we cannot step.
-
-    This is what "what changed" should compare against. Diffing a bucket
-    against an earlier version of ITSELF answers "what did we learn since
-    the last run", which tracks pipeline cadence - regenerate twice in an
-    hour and the notes go empty even if the situation is deteriorating.
-    Diffing against the period before answers "what changed on the ground",
-    which is what the dashboard claims to show.
-    """
-    start = datetime.fromisoformat(window_start)
-    if window_kind == "yearly":
-        prev_year = start.year - 1
-        return _calendar_year_window(prev_year)[0], str(prev_year)
-    if window_kind == "monthly":
-        prev_year, prev_month = (
-            (start.year - 1, 12) if start.month == 1
-            else (start.year, start.month - 1)
-        )
-        return (
-            _calendar_month_window(prev_year, prev_month)[0],
-            f"{_MONTH_NAMES[prev_month - 1]} {prev_year}",
-        )
-    return None
-
-
-def _resolve_comparison(
-    *,
-    country_id: str,
-    window_kind: str,
-    window_start: str,
-    period_label: str,
-) -> tuple[dict[str, Any], str, str, str] | None:
-    """Pick the snapshot to diff the new payload against.
-
-    Returns (prior_row, basis, compared_to_window_start, label), or None
-    when there is nothing to compare against at all. Prefers the preceding
-    bucket of the same kind; falls back to the prior version of this same
-    bucket, which is all that exists for the first period we ever generate.
-
-    The same-bucket read is safe here only because it runs BEFORE the
-    upsert - it returns the row this generation is about to supersede.
-    """
-    prev = _previous_window(window_kind, window_start)
-    if prev is not None:
-        prev_start, prev_label = prev
-        prior = clear_api.get_situation_analysis(
-            country_location_id=country_id,
-            window_kind=window_kind,
-            window_start=prev_start,
-            schema_version=SCHEMA_VERSION,
-        )
-        if prior and prior.get("data"):
-            return prior, "previous_period", prev_start, prev_label
-
-    prior = clear_api.get_situation_analysis(
-        country_location_id=country_id,
-        window_kind=window_kind,
-        window_start=window_start,
-        schema_version=SCHEMA_VERSION,
-    )
-    if prior and prior.get("data"):
-        return prior, "previous_generation", window_start, period_label
-    return None
-
-
 def _coerce_float(raw: Any) -> float | None:
     """Best-effort float coercion that swallows the untyped-JSONB hazards
     (None, strings, set-union shapes) instead of raising — `_build_datapoints`
@@ -650,11 +583,15 @@ def generate_and_upsert_for_frame(
             **frame.upsert_kwargs(),
         )
     except clear_api.ClearApiError as exc:
+        # Re-raise (don't swallow to None): a None return means "empty, nothing to
+        # supersede", so a caller can't distinguish it from a failure. Raising lets
+        # the on-demand drain mark the request FAILED and the automation scheduler
+        # leave the frame DUE (retry) instead of advancing its cadence past a blip.
         log.error("[analysis] %s: clear-api rejected upsert (non-retryable): %s", scope_label, exc)
-        return None
+        raise
     except Exception as exc:  # noqa: BLE001
         log.error("[analysis] %s: upsert failed after retries: %s", scope_label, exc)
-        return None
+        raise
 
     analysis_id = result["analysisId"]
     log.info(
@@ -741,14 +678,18 @@ def generate_and_upsert_for_country_window(
 
     frame = country_frame(country_id, window_start=window_start, window_end=window_end)
     rag_filters = build_rag_filters(frame, country_scope_id=country_id, include_time_range=False)
-    result = generate_and_upsert_for_frame(
-        frame=frame,
-        scope_label=country_name,
-        period_label=period_label,
-        aggregated=aggregated,
-        rag_filters=rag_filters,
-        log_context=log_context,
-    )
+    try:
+        result = generate_and_upsert_for_frame(
+            frame=frame,
+            scope_label=country_name,
+            period_label=period_label,
+            aggregated=aggregated,
+            rag_filters=rag_filters,
+            log_context=log_context,
+        )
+    except Exception as exc:  # noqa: BLE001 — the weekly asset iterates countries; one country's failure must not crash the run
+        log.error("[analysis] %s: generation failed (%s) — skipping this country", country_name, exc)
+        return None
     if result is None:
         return None
     # Augment with the country identity the weekly asset + existing callers key on.

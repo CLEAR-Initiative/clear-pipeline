@@ -110,8 +110,10 @@ def build_rag_filters(
     retrieval stays identical to today's behaviour: knowledgebase chunks are
     tagged at admin-2, so a literal ``locationIds=[A0]`` filter would match
     almost nothing, whereas the subtree expansion is what actually scopes to
-    the country. Custom frames (specific admin ids) pass their ``location_ids``
-    through as ``locationIds``.
+    the country. A **single-location** custom frame likewise scopes by subtree
+    (via ``countryLocationId``, below) — so a country-level on-demand analysis
+    actually retrieves. A multi-location frame passes its ``location_ids``
+    through as ``locationIds`` (literal overlap).
 
     ``include_time_range`` — off by default so the country path's retrieval is
     unchanged (it never time-filtered RAG; the window governs the numeric
@@ -122,6 +124,13 @@ def build_rag_filters(
     filters: dict[str, Any] = {}
     if country_scope_id:
         filters["countryLocationId"] = country_scope_id
+    elif len(frame.location_ids) == 1:
+        # A single-location custom frame (e.g. a country-level on-demand analysis)
+        # scopes by its SUBTREE, not a literal match: KB chunks are tagged at
+        # admin-2, so a literal locationIds=[A0] would match almost nothing.
+        # clear-api's countryLocationId expands ANY id to its descendants (a leaf
+        # expands to itself, so this is a no-op for an admin-2 frame).
+        filters["countryLocationId"] = frame.location_ids[0]
     elif frame.location_ids:
         filters["locationIds"] = list(frame.location_ids)
     if frame.event_types:

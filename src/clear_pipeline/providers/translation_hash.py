@@ -42,7 +42,7 @@ HASH_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     # Unified frame-scoped analysis (ADR-0007) — same prose projection as
     # situationAnalysis (extract_situation_prose). Keep aligned with clear-api's
-    # HASH_FIELDS["analysis"]; add "scenarios" once Phase 3 lands the component.
+    # HASH_FIELDS["analysis"] (includes "scenarios", ADR-0007 §4).
     "analysis": (
         "ai_summary",
         "context_risks",

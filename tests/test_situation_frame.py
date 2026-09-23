@@ -70,7 +70,14 @@ class TestBuildRagFilters:
         assert filters == {"countryLocationId": "sudan-a0"}
         assert "locationIds" not in filters  # subtree expansion, not literal match
 
-    def test_custom_frame_uses_location_ids(self):
+    def test_single_location_frame_expands_to_subtree(self):
+        # A single-location custom frame (e.g. a country-level analysis) scopes by
+        # its subtree via countryLocationId — a literal locationIds=[A0] would miss
+        # the admin-2-tagged chunks.
+        f = Frame.build(window_start="2026-01-01", location_ids=["sudan-a0"])
+        assert build_rag_filters(f) == {"countryLocationId": "sudan-a0"}
+
+    def test_multi_location_frame_uses_location_ids(self):
         f = Frame.build(window_start="2026-01-01", location_ids=["khartoum", "darfur"])
         filters = build_rag_filters(f)
         assert filters == {"locationIds": ["darfur", "khartoum"]}  # canonical order

@@ -22,8 +22,6 @@ from clear_pipeline.defs.situation.generate import (
     _calendar_year_window,
     _fetch_report_meta,
     _field_range,
-    _previous_window,
-    _resolve_comparison,
 )
 from clear_pipeline.defs.situation.rag_helper import (
     _format_hits_for_prompt,
@@ -103,106 +101,6 @@ class TestCalendarYearWindow:
         start, end = _calendar_year_window(2024)
         assert start.startswith("2024-01-01")
         assert end.startswith("2024-12-31")
-
-
-# ────────────────────────────────────────────────────────────────────
-# _previous_window / _resolve_comparison - what "what changed" diffs against
-# ────────────────────────────────────────────────────────────────────
-
-
-class TestPreviousWindow:
-    def test_yearly_steps_back_one_year(self):
-        start, label = _previous_window("yearly", "2026-01-01T00:00:00+00:00")
-        assert start.startswith("2025-01-01T00:00:00")
-        assert label == "2025"
-
-    def test_monthly_steps_back_one_month(self):
-        start, label = _previous_window("monthly", "2026-07-01T00:00:00+00:00")
-        assert start.startswith("2026-06-01T00:00:00")
-        assert label == "June 2026"
-
-    def test_monthly_january_wraps_to_previous_december(self):
-        start, label = _previous_window("monthly", "2026-01-01T00:00:00+00:00")
-        assert start.startswith("2025-12-01T00:00:00")
-        assert label == "December 2025"
-
-    def test_returns_midnight_aligned_start(self):
-        # The start is matched for equality against what clear-api stored,
-        # so a non-midnight instant here finds nothing at all.
-        start, _ = _previous_window("monthly", "2026-03-01T00:00:00+00:00")
-        assert "T00:00:00" in start
-
-    def test_unknown_kind_returns_none(self):
-        assert _previous_window("all_time", "2026-01-01T00:00:00+00:00") is None
-
-
-class TestResolveComparison:
-    """The behaviour Praj's PR comment asked for: a monthly window should
-    diff against last month, not against an earlier generation of itself."""
-
-    def _patch_get(self, side_effect):
-        return patch(
-            "clear_pipeline.defs.situation.generate.clear_api.get_situation_analysis",
-            side_effect=side_effect,
-        )
-
-    def test_prefers_preceding_bucket(self):
-        prior = {"data": {"x": 1}, "generatedAt": "2026-07-01T00:00:00Z"}
-        with self._patch_get(lambda **kw: prior) as mock_get:
-            result = _resolve_comparison(
-                country_id="sudan-a0",
-                window_kind="monthly",
-                window_start="2026-07-01T00:00:00+00:00",
-                period_label="July 2026",
-            )
-        row, basis, compared_start, label = result
-        assert basis == "previous_period"
-        assert label == "June 2026"
-        assert compared_start.startswith("2026-06-01")
-        # Asked clear-api for the PRECEDING bucket, not the current one.
-        assert mock_get.call_args.kwargs["window_start"].startswith("2026-06-01")
-        assert mock_get.call_args.kwargs["window_kind"] == "monthly"
-        assert row is prior
-
-    def test_falls_back_to_same_bucket_when_no_preceding_snapshot(self):
-        # First month we ever generated: nothing precedes it, so the only
-        # thing to diff against is this bucket's own prior version.
-        prior = {"data": {"x": 1}, "generatedAt": "2026-07-01T00:00:00Z"}
-
-        def _get(**kw):
-            return None if kw["window_start"].startswith("2026-06-01") else prior
-
-        with self._patch_get(_get):
-            result = _resolve_comparison(
-                country_id="sudan-a0",
-                window_kind="monthly",
-                window_start="2026-07-01T00:00:00+00:00",
-                period_label="July 2026",
-            )
-        _, basis, compared_start, label = result
-        assert basis == "previous_generation"
-        assert label == "July 2026"
-        assert compared_start.startswith("2026-07-01")
-
-    def test_returns_none_when_nothing_to_compare(self):
-        with self._patch_get(lambda **kw: None):
-            assert _resolve_comparison(
-                country_id="sudan-a0",
-                window_kind="monthly",
-                window_start="2026-07-01T00:00:00+00:00",
-                period_label="July 2026",
-            ) is None
-
-    def test_ignores_snapshot_row_with_no_payload(self):
-        # A row can exist with a null/empty data blob; diffing against it
-        # would report every section as newly appeared.
-        with self._patch_get(lambda **kw: {"data": None, "generatedAt": "x"}):
-            assert _resolve_comparison(
-                country_id="sudan-a0",
-                window_kind="yearly",
-                window_start="2026-01-01T00:00:00+00:00",
-                period_label="2026",
-            ) is None
 
 
 # ────────────────────────────────────────────────────────────────────

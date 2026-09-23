@@ -2048,9 +2048,8 @@ def get_situation_canonical(situation_analysis_id: str) -> dict | None:
 def get_analysis_canonical(analysis_id: str) -> dict | None:
     """Fetch a unified analysis (ADR-0007) by id and project it to its
     translatable prose. The payload shares the situation-analysis taxonomy, so
-    the same prose extractor applies (scenarios prose lands here once Phase 3
-    adds it to extract_situation_prose). Same pipeline-language ('en') invariant
-    as get_situation_canonical."""
+    the same prose extractor applies (including the scenarios prose). Same
+    pipeline-language ('en') invariant as get_situation_canonical."""
     result = _execute(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
     row = result.get("analysisById")
     if not row:

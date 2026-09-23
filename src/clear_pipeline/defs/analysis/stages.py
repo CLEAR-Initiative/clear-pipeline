@@ -110,12 +110,18 @@ def _process_one_request(context, req: dict) -> str:
             rag_filters=rag_filters,
             log_context=context.log,
         )
-    except Exception as exc:  # noqa: BLE001 — isolate one request's failure
-        context.log.exception("[drain_analysis] request %s generation raised", request_id)
+    except clear_api.ClearApiError as exc:
+        # Non-retryable (bad frame / rejected payload) — fail terminally.
+        context.log.error("[drain_analysis] request %s rejected (non-retryable): %s", request_id, exc)
         return _FAILED if _mark(context, clear_api.mark_analysis_request_failed, request_id, str(exc)) else _REQUEUE
+    except Exception as exc:  # noqa: BLE001 — transient (LLM / clear-api blip): leave PENDING to retry
+        context.log.warning(
+            "[drain_analysis] request %s failed transiently — leaving PENDING for retry: %s", request_id, exc,
+        )
+        return _REQUEUE
 
     if result is None:
-        # All-empty / unrecoverable generation — mark FAILED so it leaves the queue.
+        # All-empty generation — no evidence for this frame; terminal.
         ok = _mark(
             context, clear_api.mark_analysis_request_failed, request_id,
             "generation produced no content",
