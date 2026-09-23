@@ -41,6 +41,9 @@ dependencies = [
     "shapely>=2.0", # geometry ops for population + grouping
     "numpy>=1.26", # raster/vector math
     "psycopg[binary]>=3.3.4",
+    "great-expectations>=1.22,<2",
+    "pandas>=2.3.3",
+    "pyiceberg[pyarrow,sql-sqlite]>=0.12.0",
 ]
 
 [dependency-groups]
@@ -50,6 +53,7 @@ dependencies = [
 dev = [
     "dagster-dg-cli",
     "pytest>=8.0",
+    "ty>=0.0.79",
 ]
 
 [tool.pytest.ini_options]
