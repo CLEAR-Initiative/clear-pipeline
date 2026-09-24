@@ -26,8 +26,10 @@ from clear_pipeline.providers.clear_api import (
     get_events,
     update_event,
 )
+from clear_pipeline.providers import insights
 from clear_pipeline.providers.llm import make_llm_provider
 from clear_pipeline.providers.prompts.rewrite import (
+    REWRITE_PROMPT_VERSION,
     SYSTEM_PROMPT as REWRITE_SYSTEM,
 )
 from clear_pipeline.providers.prompts.rewrite import build_rewrite_prompt
@@ -482,9 +484,12 @@ def _rewrite_event(
     )
 
     try:
-        result = make_llm_provider("signal").complete_structured(
-            system=REWRITE_SYSTEM, user=prompt, schema=EventRewrite
-        )
+        with insights.scope(
+            stage="signal.rewrite", prompt_version=REWRITE_PROMPT_VERSION, event_id=event_id,
+        ):
+            result = make_llm_provider("signal").complete_structured(
+                system=REWRITE_SYSTEM, user=prompt, schema=EventRewrite
+            )
         return result, signals
     except Exception as e:
         logger.error(

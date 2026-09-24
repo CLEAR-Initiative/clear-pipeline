@@ -12,8 +12,11 @@ import logging
 
 from clear_pipeline.defs.crisis.population import compute_population_in_area
 from clear_pipeline.defs.crisis.prompts import (
+    CRISIS_PROMPT_VERSION,
     NARRATIVE_SYSTEM_PROMPT,
+    NEEDS_ANALYSIS_PROMPT_VERSION,
     NEEDS_ANALYSIS_SYSTEM_PROMPT,
+    SCENARIOS_PROMPT_VERSION,
     SCENARIOS_SYSTEM_PROMPT,
     build_narrative_prompt,
     build_needs_analysis_prompt,
@@ -26,7 +29,7 @@ from clear_pipeline.defs.crisis.schemas import (
     CrisisScenarios,
 )
 from clear_pipeline.defs.situation.rag_helper import fetch_rag_context
-from clear_pipeline.providers import clear_api, make_llm_provider
+from clear_pipeline.providers import clear_api, insights, make_llm_provider
 from clear_pipeline.providers.llm import TRANSIENT_LLM_ERRORS, LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -179,10 +182,11 @@ def generate_narrative(
     )
     user = build_narrative_prompt(events, locations, evidence)
     try:
-        return llm.complete_structured(
-            system=NARRATIVE_SYSTEM_PROMPT, user=user, schema=CrisisNarrative,
-            max_tokens=_NARRATIVE_MAX_TOKENS, cache_key=cache_key,
-        )
+        with insights.scope(stage="crisis.narrative", prompt_version=CRISIS_PROMPT_VERSION):
+            return llm.complete_structured(
+                system=NARRATIVE_SYSTEM_PROMPT, user=user, schema=CrisisNarrative,
+                max_tokens=_NARRATIVE_MAX_TOKENS, cache_key=cache_key,
+            )
     except TRANSIENT_LLM_ERRORS:
         # Transient provider outage (survived the per-call retry) — let it
         # propagate so the drain's attempt-bounded retry re-runs the whole
@@ -203,10 +207,11 @@ def generate_scenarios(
     )
     user = build_scenarios_prompt(events, locations, evidence)
     try:
-        return llm.complete_structured(
-            system=SCENARIOS_SYSTEM_PROMPT, user=user, schema=CrisisScenarios,
-            max_tokens=_SCENARIOS_MAX_TOKENS, cache_key=cache_key,
-        )
+        with insights.scope(stage="crisis.scenarios", prompt_version=SCENARIOS_PROMPT_VERSION):
+            return llm.complete_structured(
+                system=SCENARIOS_SYSTEM_PROMPT, user=user, schema=CrisisScenarios,
+                max_tokens=_SCENARIOS_MAX_TOKENS, cache_key=cache_key,
+            )
     except TRANSIENT_LLM_ERRORS:
         raise  # transient — let the drain retry the whole crisis (see generate_narrative)
     except Exception:  # noqa: BLE001
@@ -227,10 +232,11 @@ def generate_needs_analysis(
     )
     user = build_needs_analysis_prompt(events, locations, evidence)
     try:
-        return llm.complete_structured(
-            system=NEEDS_ANALYSIS_SYSTEM_PROMPT, user=user, schema=CrisisNeedsAnalysis,
-            max_tokens=_NEEDS_MAX_TOKENS, cache_key=cache_key,
-        )
+        with insights.scope(stage="crisis.needs", prompt_version=NEEDS_ANALYSIS_PROMPT_VERSION):
+            return llm.complete_structured(
+                system=NEEDS_ANALYSIS_SYSTEM_PROMPT, user=user, schema=CrisisNeedsAnalysis,
+                max_tokens=_NEEDS_MAX_TOKENS, cache_key=cache_key,
+            )
     except TRANSIENT_LLM_ERRORS:
         raise  # transient — let the drain retry the whole crisis (see generate_narrative)
     except Exception:  # noqa: BLE001
