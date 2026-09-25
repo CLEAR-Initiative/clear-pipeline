@@ -111,6 +111,16 @@ class Settings(BaseSettings):
     # overrides + the v1/Claude path were removed in the Dagster port.
     anthropic_api_key: str = ""
 
+    # Speech-to-text (OpenAI Whisper) — hotline voice-note transcription
+    # (defs/ground/transcribe.py). Dedicated provider, not one of the
+    # LLM_<ROLE>_* roles: Whisper's API is audio-in/text-out, not a chat
+    # completion, so providers/llm.py's abstraction doesn't fit.
+    stt_api_key: str = ""
+    stt_model: str = "whisper-1"
+    # Empty uses the OpenAI SDK default (https://api.openai.com/v1). Set to
+    # point at an OpenAI-compatible Whisper endpoint instead.
+    stt_base_url: str = ""
+
     # Translation — comma-separated BCP-47 codes. 'en' is the canonical source and
     # is never a target. Empty string disables translation entirely. Default on.
     target_locales: str = "ar,fr"

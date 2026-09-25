@@ -87,6 +87,25 @@ def test_drain_processes_only_unclassified_messages():
     assert process.call_args.args[1]["id"] == "m1"
 
 
+def test_drain_holds_out_untranscribed_voice_messages():
+    rows = [
+        message("voice_pending", voiceMediaKeys=["ground/gs1/a.ogg"], transcript=None),
+        message("voice_ready", voiceMediaKeys=["ground/gs1/b.ogg"], transcript="we need water"),
+        message("text_only"),
+    ]
+    with (
+        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
+        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
+        patch.object(stages, "ground_messages_for_classification", return_value=rows),
+        patch.object(stages, "_process_one_message", return_value=stages._PROCESSED) as process,
+    ):
+        result = _run()
+
+    assert result.metadata["processed"] == 2
+    processed_ids = {call.args[1]["id"] for call in process.call_args_list}
+    assert processed_ids == {"voice_ready", "text_only"}
+
+
 def test_drain_transient_error_requeues_without_consuming_attempts():
     with (
         patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
@@ -180,3 +199,38 @@ def test_process_one_message_requeues_on_lock_contention():
 
     assert outcome == stages._REQUEUE
     enrich_mock.assert_not_called()
+
+
+# ── transcript preferred over text once present ────────────────────────────
+
+
+def test_enrich_one_message_prefers_transcript_over_text():
+    with patch.object(stages, "build_hotline_enrich_prompt") as build_prompt:
+        stages._enrich_one_message(
+            MagicMock(complete_structured=MagicMock(return_value=enrichment())),
+            message("m1", text="", transcript="we need water", hasMedia=True),
+        )
+    assert build_prompt.call_args.args[0] == "we need water"
+
+
+def test_enrich_one_message_falls_back_to_text_without_transcript():
+    with patch.object(stages, "build_hotline_enrich_prompt") as build_prompt:
+        stages._enrich_one_message(
+            MagicMock(complete_structured=MagicMock(return_value=enrichment())),
+            message("m1", text="plain text", transcript=None),
+        )
+    assert build_prompt.call_args.args[0] == "plain text"
+
+
+def test_process_one_message_geoparses_the_transcript_when_present():
+    with (
+        patch.object(stages, "redis_lock", _lock_acquired),
+        patch.object(stages, "_enrich_one_message", return_value=enrichment()),
+        patch.object(stages, "_geoparse_one_message", return_value="loc_1") as geoparse,
+        patch.object(stages, "upsert_ground_thread_drafts"),
+        patch.object(stages, "upsert_ground_message_classifications"),
+    ):
+        stages._process_one_message(
+            MagicMock(), message("m1", text="", transcript="flooding in Nyala")
+        )
+    geoparse.assert_called_once_with("flooding in Nyala")

@@ -62,9 +62,14 @@ _HOTLINE_SOURCE_KIND = "hotline"
 
 def _enrich_one_message(llm: LLMProvider, msg: dict) -> HotlineEnrichment:
     """Classify + suggest a headline/severity/disaster-type for one message.
-    Raises on failure — the caller isolates it (see `_process_one_message`)."""
+    Raises on failure — the caller isolates it (see `_process_one_message`).
+
+    Uses the voice-note transcript in place of `text` when one exists — the
+    caller (`_drain_hotline_enrich_locked`) already holds a message with an
+    untranscribed voice note out of `pending`, so by the time this runs,
+    `transcript` is either the real content or the message never had one."""
     user = build_hotline_enrich_prompt(
-        msg["text"],
+        msg.get("transcript") or msg["text"],
         sender_ref=msg["senderRef"],
         sent_at=msg["sentAt"],
         has_media=msg["hasMedia"],
@@ -130,7 +135,7 @@ def _process_one_message(llm: LLMProvider, msg: dict) -> str:
             return _REQUEUE  # a peer holds it — leave unclassified
 
         enrichment = _enrich_one_message(llm, msg)
-        location_id = _geoparse_one_message(msg["text"])
+        location_id = _geoparse_one_message(msg.get("transcript") or msg["text"])
 
         # Write the draft FIRST, classification LAST: classification-non-null
         # is what stops this message being selected next run, so writing it
@@ -169,7 +174,16 @@ def _drain_hotline_enrich_locked(context) -> dg.MaterializeResult:
         if capped:
             break
         page = ground_messages_for_classification(source_id, limit=_FETCH_LIMIT)
-        pending = [m for m in page if m.get("classification") is None]
+        # Hold a message with an untranscribed voice note out of enrichment —
+        # its `text` is usually empty, so enriching now would waste an LLM
+        # call on no content. ground_transcribe (transcribe.py) drains it
+        # first; once `transcript` lands, the next tick picks it up here.
+        pending = [
+            m
+            for m in page
+            if m.get("classification") is None
+            and not (m.get("voiceMediaKeys") and m.get("transcript") is None)
+        ]
 
         for msg in pending:
             if processed >= _MAX_PROCESSED_PER_RUN:

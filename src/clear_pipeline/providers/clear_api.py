@@ -1939,6 +1939,8 @@ query GroundMessagesForClassification($groundSourceId: String!, $limit: Int) {
     sentAt
     senderRef
     hasMedia
+    voiceMediaKeys
+    transcript
     classification
     threadId
   }
@@ -2073,6 +2075,23 @@ def upsert_ground_thread_drafts(inputs: list[dict]) -> int:
         return 0
     result = _execute(UPSERT_GROUND_THREAD_DRAFTS, {"inputs": inputs})
     return result.get("upsertGroundThreadDrafts") or 0
+
+
+UPSERT_GROUND_MESSAGE_TRANSCRIPTS = """
+mutation UpsertGroundMessageTranscripts($inputs: [GroundMessageTranscriptInput!]!) {
+  upsertGroundMessageTranscripts(inputs: $inputs)
+}
+"""
+
+
+def upsert_ground_message_transcripts(inputs: list[dict]) -> int:
+    """Write voice-note transcriptions back to clear-api. Each input row
+    shapes as {messageId, transcript}. Returns the number of messages
+    updated."""
+    if not inputs:
+        return 0
+    result = _execute(UPSERT_GROUND_MESSAGE_TRANSCRIPTS, {"inputs": inputs})
+    return result.get("upsertGroundMessageTranscripts") or 0
 
 
 def upsert_translations(
