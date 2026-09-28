@@ -25,7 +25,10 @@ from pydantic import BaseModel, Field
 # v3: numeric headline datapoints carry the full range envelope
 # (value + low/high + range_width + bias + confidence) instead of a flattened
 # point — stops discarding the ADR-0007 band the aggregate already carries.
-SCHEMA_VERSION = "v3"
+# v4: adds the forward-looking `scenarios` component (ADR-0007 §4, unified
+# analysis) — folded in from the crisis path so a "crisis overview" analysis
+# carries the same outlook.
+SCHEMA_VERSION = "v4"
 
 Severity = Literal["low", "medium", "high", "critical"]
 
@@ -288,6 +291,20 @@ class Sources(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
+class Scenarios(BaseModel):
+    """Forward-looking scenario analysis (folded in from the crisis path,
+    ADR-0007 §4): the most-likely / best-case / worst-case trajectories plus a
+    scenario-variables summary. Prose-only, grounded in the frame's evidence.
+    Empty strings when a run didn't populate it (always-present, like the other
+    components)."""
+    most_likely: str = ""
+    best_case: str = ""
+    worst_case: str = ""
+    description: str = ""
+    source_report_ids: list[str] = Field(default_factory=list)
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class SituationChanges(BaseModel):
     """Per-section "what changed" notes, generated in one LLM call over the
     before/after payloads (see situation/changes.py). Empty when there is
@@ -329,3 +346,6 @@ class SituationAnalysisPayload(BaseModel):
     sectors: Sectors = Field(default_factory=Sectors)
     sources: Sources = Field(default_factory=Sources)
     changes: SituationChanges = Field(default_factory=SituationChanges)
+    # Forward-looking scenarios (ADR-0007 §4) — folded in from the crisis path so
+    # a "crisis overview" analysis carries the same outlook the crisis used to.
+    scenarios: Scenarios = Field(default_factory=Scenarios)

@@ -219,7 +219,7 @@ def _generate_one_sector(
     period_label: str,
     aggregated_context: str,
     cache_key: str,
-    country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
 ) -> SectorAnalysis:
     """One LLM call, one sector. Returns the empty default on any
     failure so a single bad sector never drops the other five."""
@@ -234,8 +234,7 @@ def _generate_one_sector(
             "affected populations vulnerable groups interventions"
         ),
         limit=12,
-        filters={"needSectors": [sector_display_name]},
-        country_id=country_id,
+        filters={**(rag_filters or {}), "needSectors": [sector_display_name]},
     )
 
     # If the sector-scoped search returned nothing, fall back to an
@@ -254,7 +253,7 @@ def _generate_one_sector(
         rag = fetch_rag_context(
             query=f"{country_name} {sector_display_name} humanitarian needs",
             limit=8,
-            country_id=country_id,
+            filters=rag_filters,
         )
 
     if rag.is_empty:
@@ -339,7 +338,7 @@ def generate_all_sectors(
     period_label: str,
     aggregated: dict[str, Any] | None,
     cache_key: str,
-    country_id: str | None = None,
+    rag_filters: dict[str, Any] | None = None,
 ) -> Sectors:
     """Fan out one LLM call per sector; assemble into the `Sectors`
     payload. Order preserved from _SECTOR_KEYS so the dashboard's tab
@@ -370,7 +369,7 @@ def generate_all_sectors(
             period_label=period_label,
             aggregated_context=aggregated_context,
             cache_key=cache_key,
-            country_id=country_id,
+            rag_filters=rag_filters,
         )
         outputs[sector_key] = sector
         logger.debug(

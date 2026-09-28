@@ -29,6 +29,7 @@ from clear_pipeline.defs.situation.schemas import (
     ContextRisks,
     AISummary,
     DisplacementNarrative,
+    Scenarios,
     Sectors,
 )
 
@@ -91,6 +92,24 @@ def _patch_narrative_generators(stub_source_ids: list[str] | None = None):
                 "clear_pipeline.defs.situation.generate.generate_all_sectors",
                 return_value=Sectors(),
             ),
+        "generate_scenarios":
+            patch(
+                "clear_pipeline.defs.situation.generate.generate_scenarios",
+                return_value=Scenarios(),
+            ),
+        # No prior generation to diff "what changed" against (ADR-0007 §8).
+        # Mocked so the changes-step lookup doesn't make a real network call.
+        "get_analysis":
+            patch(
+                "clear_pipeline.defs.situation.generate.clear_api.get_analysis",
+                return_value=None,
+            ),
+        # Translation enqueue is fire-and-forget; mock so it doesn't retry
+        # against a real clear-api during the test.
+        "enqueue_translation":
+            patch(
+                "clear_pipeline.defs.situation.generate.clear_api.enqueue_translation",
+            ),
     }
 
 
@@ -104,7 +123,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value=None,
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
             ) as mock_upsert,
         ):
             result = generate_and_upsert_for_country_year(
@@ -135,10 +154,9 @@ class TestGenerateAndUpsertForCountryYear:
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
                 return_value={
-                    "situationAnalysisId": "sit-1",
-                    "countryLocationId": "sudan-a0",
+                    "analysisId": "sit-1",
                     "supersededPrevious": False,
                 },
             ) as mock_upsert,
@@ -147,6 +165,9 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
+            patches["generate_scenarios"],
+            patches["get_analysis"],
+            patches["enqueue_translation"],
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
             result = generate_and_upsert_for_country_year(
@@ -192,15 +213,21 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
+            patches["generate_scenarios"],
+            patches["get_analysis"],
+            patches["enqueue_translation"],
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
             ) as mock_upsert,
         ):
             generate_and_upsert_for_country_year(country_name="Sudan", year=2026)
 
         kwargs = mock_upsert.call_args.kwargs
-        assert kwargs["window_kind"] == "yearly"
+        # upsert_analysis writes the FRAME (no window_kind column): the
+        # country-default frame is the single A0 location over the calendar year.
+        assert kwargs["location_ids"] == ["sudan-a0"]
         assert kwargs["window_start"] == "2026-01-01T00:00:00+00:00"
+        assert kwargs["window_end"] == "2026-12-31T23:59:59+00:00"
 
     def test_all_empty_generation_skips_upsert_to_preserve_previous(self):
         # Regression guard for the prod incident: when RAG returns nothing (e.g.
@@ -246,7 +273,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value=Sectors(),
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
             ) as mock_upsert,
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
@@ -274,13 +301,13 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
                 return_value={
-                    "situationAnalysisId": "sit-det",
-                    "countryLocationId": "sudan-a0",
+                    "analysisId": "sit-det",
                     "supersededPrevious": True,
                 },
             ) as mock_upsert,
+            patch("clear_pipeline.defs.situation.generate.clear_api.enqueue_translation"),
         ):
             result = generate_and_upsert_for_country_year(country_name="Sudan", year=2026)
 
@@ -314,8 +341,11 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
+            patches["generate_scenarios"],
+            patches["get_analysis"],
+            patches["enqueue_translation"],
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
             ) as mock_upsert,
         ):
             generate_and_upsert_for_country_month(
@@ -325,9 +355,9 @@ class TestGenerateAndUpsertForCountryYear:
         # Reads the monthly bucket for the same window.
         assert mock_agg.call_args.kwargs["window_kind"] == "monthly"
         assert mock_agg.call_args.kwargs["window_start"] == "2026-07-01T00:00:00+00:00"
-        # Writes it back with the monthly window_kind + start.
+        # Writes the frame back with the monthly window_start (no window_kind col).
         kwargs = mock_upsert.call_args.kwargs
-        assert kwargs["window_kind"] == "monthly"
+        assert kwargs["location_ids"] == ["sudan-a0"]
         assert kwargs["window_start"] == "2026-07-01T00:00:00+00:00"
 
     def test_skip_narrative_kill_switch_ships_deterministic_only(self):
@@ -352,13 +382,13 @@ class TestGenerateAndUpsertForCountryYear:
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
                 return_value={
-                    "situationAnalysisId": "sit-2",
-                    "countryLocationId": "sudan-a0",
+                    "analysisId": "sit-2",
                     "supersededPrevious": True,
                 },
             ) as mock_upsert,
+            patch("clear_pipeline.defs.situation.generate.clear_api.enqueue_translation"),
         ):
             result = generate_and_upsert_for_country_year(
                 country_name="Sudan", year=2026,
@@ -403,10 +433,9 @@ class TestGenerateAndUpsertForCountryYear:
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
                 return_value={
-                    "situationAnalysisId": "sit-3",
-                    "countryLocationId": "sudan-a0",
+                    "analysisId": "sit-3",
                     "supersededPrevious": False,
                 },
             ) as mock_upsert,
@@ -415,6 +444,9 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
+            patches["generate_scenarios"],
+            patches["get_analysis"],
+            patches["enqueue_translation"],
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
             result = generate_and_upsert_for_country_year(
@@ -431,7 +463,7 @@ class TestGenerateAndUpsertForCountryYear:
         assert set(payload.keys()) == {
             "datapoints", "ai_summary", "context_risks",
             "hazards_and_vulnerabilities", "displacement", "sectors", "sources",
-            "changes",
+            "changes", "scenarios",
         }
 
         # 2. Datapoints hoisted correctly.
@@ -447,13 +479,12 @@ class TestGenerateAndUpsertForCountryYear:
         # contributes ["r-2", "r-4"] → r-4 appended at end, no r-2 dup.
         assert kwargs["source_report_ids"] == ["r-1", "r-2", "r-3", "r-4"]
 
-        # 5. aggregated_datapoint_id linkage recorded.
-        assert kwargs["aggregated_datapoint_id"] == "agg-123"
-        # 6. Model marker reflects the actual LLM.
+        # 5. Model marker reflects the actual LLM. (No aggregated_datapoint_id:
+        # a frame can span many aggregated buckets — provenance lives in `data`.)
         assert kwargs["generated_by_model"] == "claude-sonnet-4-6"
 
         # Summary carries the identity + counts back to the caller.
-        assert result["situation_analysis_id"] == "sit-3"
+        assert result["analysis_id"] == "sit-3"
         assert result["superseded_previous"] is False
 
     def test_upsert_clear_api_error_returns_none_without_crashing(self):
@@ -478,7 +509,7 @@ class TestGenerateAndUpsertForCountryYear:
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
-                "clear_pipeline.defs.situation.generate.clear_api.upsert_situation_analysis",
+                "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
                 side_effect=ClearApiError("400 bad request"),
             ),
             patches["generate_ai_summary"],
@@ -486,6 +517,9 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
             patches["generate_all_sectors"],
+            patches["generate_scenarios"],
+            patches["get_analysis"],
+            patches["enqueue_translation"],
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
             result = generate_and_upsert_for_country_year(
@@ -516,11 +550,11 @@ class TestWeeklySituationAnalysesAsset:
         ):
             mock_year.return_value = {
                 "country_name": "Sudan", "window_kind": "yearly",
-                "situation_analysis_id": "sit-year",
+                "analysis_id": "sit-year",
             }
             mock_month.return_value = {
                 "country_name": "Sudan", "window_kind": "monthly",
-                "situation_analysis_id": "sit-month",
+                "analysis_id": "sit-month",
             }
             ctx = dg.build_asset_context(partition_key="sdn")
             result = weekly_situation_analyses(
@@ -530,7 +564,7 @@ class TestWeeklySituationAnalysesAsset:
         assert mock_month.call_count == 1
         assert mock_year.call_args.kwargs["country_name"] == "Sudan"
         assert mock_month.call_args.kwargs["country_name"] == "Sudan"
-        assert {r["situation_analysis_id"] for r in result} == {"sit-year", "sit-month"}
+        assert {r["analysis_id"] for r in result} == {"sit-year", "sit-month"}
 
     def test_unknown_partition_fails_loud(self):
         # A partition iso3 not in pipelineCountries can't resolve a name.
