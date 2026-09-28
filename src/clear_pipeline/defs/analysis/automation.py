@@ -21,10 +21,9 @@ from datetime import datetime, timezone
 
 import dagster as dg
 
-from clear_pipeline.defs.analysis.stages import _resolve_frame_aggregated
+from clear_pipeline.defs.analysis.stages import _run_frame_generation
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_pipeline.defs.situation.frame import Frame, build_rag_filters
-from clear_pipeline.defs.situation.generate import generate_and_upsert_for_frame
+from clear_pipeline.defs.situation.frame import Frame
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.signals.config import settings
@@ -46,27 +45,14 @@ def _frame_from_automation(auto: dict) -> Frame:
     )
 
 
-def _frame_group_key(frame: Frame) -> tuple:
-    return (frame.location_ids, frame.event_types, frame.need_sectors, frame.window_start)
-
-
 def _process_frame(context, frame: Frame, automation_ids: list[str], now_iso: str) -> bool:
     """Regenerate one frame over [window_start, now] and mark its automations
     ran. Returns True on a successful generation. Best-effort — one frame's
     failure doesn't stop the others."""
-    rag_filters = build_rag_filters(frame, include_time_range=True, effective_end=now_iso)
-    aggregated = _resolve_frame_aggregated(frame, effective_end=now_iso)
     try:
-        result = generate_and_upsert_for_frame(
-            frame=frame,
-            # TODO: resolve location names for richer prompt framing (as for the
-            # on-demand drain); retrieval is already scoped by the location filter.
-            scope_label="the selected area",
-            period_label=f"{frame.window_start[:10]} to present",
-            aggregated=aggregated,
-            rag_filters=rag_filters,
-            log_context=context.log,
-        )
+        # Rolling frame: materialise "now" as the window end for retrieval +
+        # datapoint aggregation (the frame's stored window_end is None).
+        result = _run_frame_generation(context, frame, effective_end=now_iso)
     except Exception:  # noqa: BLE001 — isolate one frame's failure
         context.log.exception("[drain_automations] frame %s generation raised", frame.location_ids)
         return False
@@ -94,14 +80,15 @@ def _drain(context) -> dg.MaterializeResult:
 
         # Group due automations by canonical frame — run each frame once (the
         # minimum cadence across its subscribers subsumes the coarser ones).
-        by_frame: dict[tuple, list[dict]] = {}
+        # Frame is a frozen, canonicalised dataclass, so it keys the group map
+        # directly (rolling automations all share window_end=None).
+        by_frame: dict[Frame, list[dict]] = {}
         for auto in due:
-            by_frame.setdefault(_frame_group_key(_frame_from_automation(auto)), []).append(auto)
+            by_frame.setdefault(_frame_from_automation(auto), []).append(auto)
 
         now_iso = datetime.now(timezone.utc).isoformat()
         generated = empty = 0
-        for autos in by_frame.values():
-            frame = _frame_from_automation(autos[0])
+        for frame, autos in by_frame.items():
             ids = [a["id"] for a in autos]
             if _process_frame(context, frame, ids, now_iso):
                 generated += 1

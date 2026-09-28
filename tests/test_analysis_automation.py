@@ -1,10 +1,7 @@
 """Unit tests for the analysis automation drain (ADR-0007 §5) — rolling-frame
 construction and the min-cadence-by-frame grouping. Pure logic."""
 
-from clear_pipeline.defs.analysis.automation import (
-    _frame_from_automation,
-    _frame_group_key,
-)
+from clear_pipeline.defs.analysis.automation import _frame_from_automation
 
 
 class TestFrameFromAutomation:
@@ -19,22 +16,26 @@ class TestFrameFromAutomation:
 
 
 class TestFrameGrouping:
+    # The drain groups due automations with ``by_frame.setdefault(frame, [])``,
+    # so grouping == Frame's own equality + hash (a frozen, canonicalised
+    # dataclass). These assert that identity so co-frame subscribers collapse to
+    # one run and distinct frames stay separate.
     def test_same_frame_groups_together(self):
         a = _frame_from_automation({"id": "a", "windowStart": "2026-01-01", "locationIds": ["x"]})
         b = _frame_from_automation({"id": "b", "windowStart": "2026-01-01", "locationIds": ["x"]})
-        assert _frame_group_key(a) == _frame_group_key(b)  # daily+weekly on same frame → one run
+        assert a == b and hash(a) == hash(b)  # daily+weekly on same frame → one run
 
     def test_order_insensitive(self):
         a = _frame_from_automation({"id": "a", "windowStart": "2026-01-01", "locationIds": ["x", "y"]})
         b = _frame_from_automation({"id": "b", "windowStart": "2026-01-01", "locationIds": ["y", "x"]})
-        assert _frame_group_key(a) == _frame_group_key(b)
+        assert a == b and hash(a) == hash(b)
 
     def test_different_window_separates(self):
         a = _frame_from_automation({"id": "a", "windowStart": "2026-01-01", "locationIds": ["x"]})
         b = _frame_from_automation({"id": "b", "windowStart": "2026-02-01", "locationIds": ["x"]})
-        assert _frame_group_key(a) != _frame_group_key(b)
+        assert a != b
 
     def test_different_event_types_separate(self):
         a = _frame_from_automation({"id": "a", "windowStart": "2026-01-01", "locationIds": ["x"], "eventTypes": ["FL"]})
         b = _frame_from_automation({"id": "b", "windowStart": "2026-01-01", "locationIds": ["x"], "eventTypes": ["EQ"]})
-        assert _frame_group_key(a) != _frame_group_key(b)
+        assert a != b

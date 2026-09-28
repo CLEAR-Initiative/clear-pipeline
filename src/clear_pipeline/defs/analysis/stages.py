@@ -8,6 +8,10 @@ import logging
 
 import dagster as dg
 
+from clear_pipeline.defs.analysis.combine import (
+    combine_aggregated_buckets,
+    dedupe_nested_locations,
+)
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
@@ -47,23 +51,14 @@ def _period_label(frame: Frame) -> str:
     return f"{frame.window_start[:10]} to {end}"
 
 
-def _resolve_frame_aggregated(frame: Frame, *, effective_end: str | None = None) -> dict | None:
-    """Leverage structured datapoints when available (decision #2). For a
-    single-location frame clear-api returns the precomputed bucket if one matches
-    or an on-demand roll-up over ``report_datapoints`` in the window scoped to
-    that location; a multi-location / location-less frame falls back to KB-only
-    (None) — a combined-location roll-up is a later refinement.
-
-    ``effective_end`` materialises the window end for a rolling frame (an
-    automation's "to present"), which otherwise has no stored ``window_end``."""
-    end = effective_end or frame.window_end
-    if len(frame.location_ids) != 1 or not end:
-        return None
+def _fetch_one_bucket(location_id: str, window_start: str, window_end: str) -> dict | None:
+    """One location's aggregated bucket, or None on miss/error (best-effort —
+    the KB narrative fills in when structured datapoints are unavailable)."""
     try:
         return clear_api.get_aggregated_datapoint(
-            location_id=frame.location_ids[0],
-            window_start=frame.window_start,
-            window_end=end,
+            location_id=location_id,
+            window_start=window_start,
+            window_end=window_end,
             # A custom window won't hit a precomputed tier bucket; clear-api then
             # rolls up report_datapoints in the window on demand.
             window_kind="custom",
@@ -71,10 +66,76 @@ def _resolve_frame_aggregated(frame: Frame, *, effective_end: str | None = None)
         )
     except Exception:  # noqa: BLE001 — datapoints are best-effort; KB narrative fills in
         logger.warning(
-            "[drain_analysis] aggregated fetch failed for %s — proceeding KB-only",
-            frame.location_ids, exc_info=True,
+            "[drain_analysis] aggregated fetch failed for %s — proceeding without it",
+            location_id, exc_info=True,
         )
         return None
+
+
+def _resolve_frame_aggregated(frame: Frame, *, effective_end: str | None = None) -> dict | None:
+    """Leverage structured datapoints when available (decision #2). Each frame
+    location gets its own aggregated bucket (clear-api returns a precomputed
+    bucket if one matches, else an on-demand roll-up over ``report_datapoints``
+    in the window scoped to that location's subtree). A single-location frame
+    returns that one bucket unchanged; a multi-location frame de-nests (drops any
+    location that is a descendant of another it also lists, so subtree roll-ups
+    don't double-count) then sums the buckets into one. A location-less frame
+    falls back to KB-only (None).
+
+    ``effective_end`` materialises the window end for a rolling frame (an
+    automation's "to present"), which otherwise has no stored ``window_end``."""
+    end = effective_end or frame.window_end
+    if not frame.location_ids or not end:
+        return None
+
+    location_ids = list(frame.location_ids)
+    if len(location_ids) > 1:
+        try:
+            parent_of = clear_api.get_location_parents()
+            location_ids = dedupe_nested_locations(location_ids, parent_of)
+        except Exception:  # noqa: BLE001 — if the hierarchy lookup fails, sum as-is
+            logger.warning(
+                "[drain_analysis] location de-nest failed for %s — summing all listed locations",
+                frame.location_ids, exc_info=True,
+            )
+
+    buckets = [
+        b for lid in location_ids
+        if (b := _fetch_one_bucket(lid, frame.window_start, end))
+    ]
+    if not buckets:
+        return None
+    if len(buckets) == 1:
+        return buckets[0]
+    return combine_aggregated_buckets(buckets)
+
+
+def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = None):
+    """Shared core of both analysis drains (on-demand + automation): scope
+    retrieval + structured datapoints to the frame and (re)generate its analysis,
+    returning the ``generate_and_upsert_for_frame`` result (``None`` = all-empty).
+
+    Retrieval time-filters to the window and leverages structured datapoints when
+    present (decisions #1/#2). ``effective_end`` materialises a rolling frame's
+    window end ("to present") for the automation path; the on-demand path leaves
+    it ``None`` (the frame carries a fixed ``window_end``). The human period label
+    is derived from the frame itself, so a rolling frame reads "… to present".
+
+    Raises on generation failure — the caller owns the outcome/marking policy
+    (terminal vs. retry), which differs between the two drains.
+    """
+    rag_filters = build_rag_filters(frame, include_time_range=True, effective_end=effective_end)
+    aggregated = _resolve_frame_aggregated(frame, effective_end=effective_end)
+    return generate_and_upsert_for_frame(
+        frame=frame,
+        # TODO: resolve the frame's location names for richer prompt framing;
+        # retrieval is already correctly scoped by the location filter.
+        scope_label="the selected area",
+        period_label=_period_label(frame),
+        aggregated=aggregated,
+        rag_filters=rag_filters,
+        log_context=context.log,
+    )
 
 
 def _mark(context, fn, request_id: str, *args) -> bool:
@@ -94,22 +155,9 @@ def _mark(context, fn, request_id: str, *args) -> bool:
 def _process_one_request(context, req: dict) -> str:
     request_id = req["id"]
     frame = _frame_from_request(req)
-    # Custom frames match locations literally and time-filter retrieval to the
-    # window (decision #1); structured datapoints are leveraged when present.
-    rag_filters = build_rag_filters(frame, include_time_range=True)
-    aggregated = _resolve_frame_aggregated(frame)
-
     try:
-        result = generate_and_upsert_for_frame(
-            frame=frame,
-            # TODO: resolve the frame's location names for richer prompt framing;
-            # retrieval is already correctly scoped by the location filter.
-            scope_label="the selected area",
-            period_label=_period_label(frame),
-            aggregated=aggregated,
-            rag_filters=rag_filters,
-            log_context=context.log,
-        )
+        # On-demand frame: fixed window_end, so no effective_end to materialise.
+        result = _run_frame_generation(context, frame)
     except clear_api.ClearApiError as exc:
         # Non-retryable (bad frame / rejected payload) — fail terminally.
         context.log.error("[drain_analysis] request %s rejected (non-retryable): %s", request_id, exc)

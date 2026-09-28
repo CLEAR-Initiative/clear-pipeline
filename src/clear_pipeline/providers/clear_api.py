@@ -1608,6 +1608,18 @@ def get_locations() -> list[dict]:
     return result.get("locations", [])
 
 
+def get_location_parents() -> dict[str, str | None]:
+    """Map every ``locations.id`` to its immediate parent id (``None`` at the
+    root). Used to de-nest a multi-location analysis frame — dropping a location
+    that is a descendant of another location the frame also lists — so summing
+    per-location aggregated buckets doesn't double-count a subtree (ADR-0007)."""
+    return {
+        loc["id"]: (loc.get("parent") or {}).get("id")
+        for loc in get_locations()
+        if loc.get("id")
+    }
+
+
 def get_data_sources() -> list[dict]:
     result = _execute(GET_DATA_SOURCES)
     return result.get("dataSources", [])

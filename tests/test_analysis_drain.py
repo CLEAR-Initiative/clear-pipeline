@@ -59,11 +59,39 @@ class TestResolveFrameAggregated:
         assert kwargs["window_start"] == "2026-01-01"
         assert kwargs["window_end"] == "2026-03-31"
 
-    def test_multi_location_frame_falls_back_to_kb_only(self):
+    def test_multi_location_frame_denests_and_combines(self):
+        # b is a descendant of a → de-nested away (a's subtree bucket already
+        # covers it); only a is fetched, and its single bucket is returned.
         f = Frame.build(window_start="2026-01-01", window_end="2026-03-31", location_ids=["a", "b"])
-        with patch("clear_pipeline.defs.analysis.stages.clear_api.get_aggregated_datapoint") as mock_agg:
-            assert _resolve_frame_aggregated(f) is None
-        mock_agg.assert_not_called()
+        with patch(
+            "clear_pipeline.defs.analysis.stages.clear_api.get_location_parents",
+            return_value={"a": None, "b": "a"},
+        ), patch(
+            "clear_pipeline.defs.analysis.stages.clear_api.get_aggregated_datapoint",
+            return_value={"reportCount": 4, "data": {}},
+        ) as mock_agg:
+            result = _resolve_frame_aggregated(f)
+        assert result == {"reportCount": 4, "data": {}}
+        assert [c.kwargs["location_id"] for c in mock_agg.call_args_list] == ["a"]
+
+    def test_multi_location_siblings_are_summed(self):
+        # a and b are siblings (neither an ancestor of the other) → both fetched
+        # and summed into one bucket.
+        f = Frame.build(window_start="2026-01-01", window_end="2026-03-31", location_ids=["a", "b"])
+        buckets = {
+            "a": {"reportCount": 2, "contributingReportIds": ["r1"], "data": {}},
+            "b": {"reportCount": 3, "contributingReportIds": ["r2"], "data": {}},
+        }
+        with patch(
+            "clear_pipeline.defs.analysis.stages.clear_api.get_location_parents",
+            return_value={"a": None, "b": None},
+        ), patch(
+            "clear_pipeline.defs.analysis.stages.clear_api.get_aggregated_datapoint",
+            side_effect=lambda **kw: buckets[kw["location_id"]],
+        ):
+            result = _resolve_frame_aggregated(f)
+        assert result["reportCount"] == 5
+        assert result["contributingReportIds"] == ["r1", "r2"]
 
     def test_rolling_frame_has_no_bucket(self):
         f = Frame.build(window_start="2026-01-01", window_end=None, location_ids=["khartoum"])
