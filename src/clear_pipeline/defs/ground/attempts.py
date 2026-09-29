@@ -10,8 +10,10 @@ starts with a fresh set of attempts.
 
 *Parking* is only the fallback for when that mark call itself fails: the
 counter is left at `max_attempts` and the drain skips the message before
-any paid call (`parked_ids`) until the counter expires. After that it gets
-another set of attempts, and the mark is tried again when they run out.
+any paid call (`parked_ids`). Each run retries the mark for the page's
+parked messages in one batched call (`mark_parked`, no paid call), so a
+park lasts only until clear-api accepts the mark. The same sweep marks
+messages the pre-marker Redis stopgap parked.
 """
 
 import logging
@@ -78,4 +80,30 @@ def give_up(
         r.set(key, max_attempts, ex=ATTEMPTS_TTL_SECONDS)
         return False
     r.delete(key)
+    return True
+
+
+# The exception text isn't kept in Redis, so a mark retried from the park
+# can only say that the attempts ran out.
+PARKED_ERROR = "Gave up after repeated failures (reason not retained: marked from the Redis park)"
+
+
+def mark_parked(r: redis.Redis, keys_by_id: dict[str, str], *, stage: str) -> bool:
+    """Retry the mark for parked messages (`keys_by_id` holds only parked
+    ids) in one batched call, clearing their counters once it lands.
+    Returns True once marked; on failure, logs it and leaves them parked.
+    Never raises."""
+    if not keys_by_id:
+        return True
+    try:
+        mark_ground_messages_failed([
+            {"messageId": mid, "stage": stage, "error": PARKED_ERROR} for mid in keys_by_id
+        ])
+    except Exception:  # noqa: BLE001 — they stay parked; next run retries
+        logger.exception(
+            "[ground] couldn't mark %d parked message(s) failed (%s) — still parked",
+            len(keys_by_id), stage,
+        )
+        return False
+    r.delete(*keys_by_id.values())
     return True

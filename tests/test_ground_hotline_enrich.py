@@ -187,14 +187,20 @@ def test_drain_parks_in_redis_when_marking_fails(fake_redis, mark_failed):
     process.assert_not_called()
 
 
-def test_drain_skips_a_parked_message_without_calling_it(fake_redis):
+def test_drain_marks_a_parked_message_without_calling_it(fake_redis, mark_failed):
+    # Parked on an earlier run (mark call failed), or by the pre-marker
+    # stopgap: the mark is retried without another paid call.
     fake_redis.store["ground:attempts:bad"] = stages._MAX_MESSAGE_ATTEMPTS
     p = _drain_patches([message("bad"), message("good")], return_value=stages._PROCESSED)
     with p[0], p[1], p[2], p[3] as process:
         result = _run()
 
-    assert result.metadata == {"processed": 1, "requeued": 0, "failed": 0, "parked": 1}
+    assert result.metadata == {"processed": 1, "requeued": 0, "failed": 1, "parked": 0}
     assert [call.args[1]["id"] for call in process.call_args_list] == ["good"]
+    mark_failed.assert_called_once_with(
+        [{"messageId": "bad", "stage": "ENRICH", "error": attempts.PARKED_ERROR}]
+    )
+    assert "ground:attempts:bad" not in fake_redis.store
 
 
 def test_drain_attempt_ttl_is_set_once_not_refreshed(fake_redis):

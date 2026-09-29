@@ -18,7 +18,13 @@ import logging
 import dagster as dg
 import redis
 
-from clear_pipeline.defs.ground.attempts import error_text, give_up, parked_ids, record_failure
+from clear_pipeline.defs.ground.attempts import (
+    error_text,
+    give_up,
+    mark_parked,
+    parked_ids,
+    record_failure,
+)
 from clear_pipeline.defs.ground.prompts import (
     HOTLINE_ENRICH_PROMPT_VERSION,
     HOTLINE_ENRICH_SYSTEM_PROMPT,
@@ -216,11 +222,21 @@ def _drain_hotline_enrich_locked(context) -> dg.MaterializeResult:
         skip = parked_ids(
             _redis, {m["id"]: _attempts_key(m["id"]) for m in pending}, _MAX_MESSAGE_ATTEMPTS,
         )
+        # Parked = marking failed on an earlier run (or parked by the
+        # pre-marker stopgap). Retry the mark for all of them in one call —
+        # no paid call — so a park lasts only until clear-api accepts it.
+        # They're skipped this run either way (still in this page).
+        parked_marked = mark_parked(
+            _redis, {mid: _attempts_key(mid) for mid in skip}, stage=_STAGE,
+        )
 
         for msg in pending:
             mid = msg["id"]
             if mid in skip:
-                parked += 1
+                if parked_marked:
+                    failed += 1  # marked failed just now
+                else:
+                    parked += 1
                 continue
             if attempted >= _MAX_ATTEMPTED_PER_RUN:
                 context.log.warning(

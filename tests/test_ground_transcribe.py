@@ -163,15 +163,21 @@ def test_drain_parks_in_redis_when_marking_fails(fake_redis, mark_failed):
     process.assert_not_called()
 
 
-def test_drain_skips_a_parked_message_without_calling_it(fake_redis):
+def test_drain_marks_a_parked_message_without_calling_it(fake_redis, mark_failed):
+    # Parked on an earlier run (mark call failed), or by the pre-marker
+    # stopgap: the mark is retried without another paid call.
     fake_redis.store["ground:transcribe:attempts:bad"] = transcribe._MAX_MESSAGE_ATTEMPTS
     rows = [message("bad", voice_media_keys=["a.amr"]), message("good", voice_media_keys=["b.ogg"])]
     p = _drain_patches(rows, return_value=transcribe._PROCESSED)
     with p[0], p[1], p[2] as process:
         result = _run()
 
-    assert result.metadata == {**_EMPTY, "processed": 1, "parked": 1}
+    assert result.metadata == {**_EMPTY, "processed": 1, "failed": 1}
     assert [call.args[0]["id"] for call in process.call_args_list] == ["good"]
+    mark_failed.assert_called_once_with(
+        [{"messageId": "bad", "stage": "TRANSCRIBE", "error": attempts.PARKED_ERROR}]
+    )
+    assert "ground:transcribe:attempts:bad" not in fake_redis.store
 
 
 def test_drain_stops_at_per_run_cap():

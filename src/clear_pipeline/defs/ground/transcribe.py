@@ -18,7 +18,13 @@ import os
 import dagster as dg
 import redis
 
-from clear_pipeline.defs.ground.attempts import error_text, give_up, parked_ids, record_failure
+from clear_pipeline.defs.ground.attempts import (
+    error_text,
+    give_up,
+    mark_parked,
+    parked_ids,
+    record_failure,
+)
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ground_messages_for_classification,
@@ -111,6 +117,13 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
         skip = parked_ids(
             _redis, {m["id"]: _attempts_key(m["id"]) for m in page}, _MAX_MESSAGE_ATTEMPTS,
         )
+        # Parked = marking failed on an earlier run (or parked by the
+        # pre-marker stopgap). Retry the mark for all of them in one call —
+        # no paid call — so a park lasts only until clear-api accepts it.
+        # They're skipped this run either way (still in this page).
+        parked_marked = mark_parked(
+            _redis, {mid: _attempts_key(mid) for mid in skip}, stage=_STAGE,
+        )
 
         for msg in page:
             mid = msg["id"]
@@ -121,7 +134,10 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
                 not_ready += 1
                 continue
             if mid in skip:
-                parked += 1
+                if parked_marked:
+                    failed += 1  # marked failed just now
+                else:
+                    parked += 1
                 continue
             if attempted >= _MAX_ATTEMPTED_PER_RUN:
                 context.log.warning(
