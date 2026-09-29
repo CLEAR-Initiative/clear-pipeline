@@ -148,11 +148,20 @@ def _build_asset_context():
 
 
 @pytest.fixture(autouse=True)
-def _clean_env():
+def _clean_env(monkeypatch):
     # Guardrail env vars leak between tests otherwise — the skip flag
     # in particular must default off.
     for var in ("KB_SKIP_CONTEXTUALIZATION", "KB_MAX_CHUNKS_PER_REPORT"):
         os.environ.pop(var, None)
+    # The asset reads its S3 config from the environment, and builds the
+    # client even when there's nothing to read. Default both so the tests
+    # don't depend on the developer's shell (or reach real S3); tests that
+    # need document bodies patch _s3_client themselves.
+    monkeypatch.setenv("S3_BUCKET", "test-bucket")
+    monkeypatch.setattr(
+        "clear_pipeline.defs.knowledgebase.datapoints_extract._s3_client",
+        lambda: MagicMock(),
+    )
     yield
 
 
