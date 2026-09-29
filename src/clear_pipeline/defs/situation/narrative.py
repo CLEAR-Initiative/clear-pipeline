@@ -325,13 +325,34 @@ MIN_CITED_FINDINGS = 4
 FINDING_MAX_WORDS = 35
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    """ISO-8601 string (a trailing `Z` included) to an aware datetime, else None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _recent_window(rag_filters: dict[str, Any] | None, *, days: int) -> tuple[datetime, datetime]:
+    """The last `days` of the ANALYSIS window, not of today: ends at the
+    frame's `timeRange.to` (a fixed past window stays in its period) or now
+    when the frame is open-ended, and never starts before `timeRange.from`."""
+    window = (rag_filters or {}).get("timeRange") or {}
+    end = _parse_iso(window.get("to")) or datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    window_start = _parse_iso(window.get("from"))
+    if window_start and window_start > start:
+        start = window_start
+    return start, end
+
+
 def _recent_filters(rag_filters: dict[str, Any] | None, *, days: int) -> dict[str, Any]:
-    """The scope's retrieval filters narrowed to the last `days`."""
-    now = datetime.now(timezone.utc)
-    return {
-        **(rag_filters or {}),
-        "timeRange": {"from": (now - timedelta(days=days)).isoformat(), "to": now.isoformat()},
-    }
+    """The scope's retrieval filters narrowed to the recent window."""
+    start, end = _recent_window(rag_filters, days=days)
+    return {**(rag_filters or {}), "timeRange": {"from": start.isoformat(), "to": end.isoformat()}}
 
 
 def _summary_evidence(scope_label: str, rag_filters: dict[str, Any] | None) -> RAGContext:
@@ -348,9 +369,13 @@ def _summary_evidence(scope_label: str, rag_filters: dict[str, Any] | None) -> R
     return merge_rag_contexts(recent, *themed, max_per_report=MAX_CHUNKS_PER_REPORT)
 
 
+def _cited_count(findings: list[SourcedBullet]) -> int:
+    return sum(1 for f in findings if f.source_report_ids)
+
+
 def _summary_problems(text: str, findings: list[SourcedBullet]) -> list[str]:
     problems = []
-    cited_findings = sum(1 for f in findings if f.source_report_ids)
+    cited_findings = _cited_count(findings)
     long_findings = [f.description for f in findings if len(f.description.split()) > FINDING_MAX_WORDS]
     words = len(text.split())
     if words > SUMMARY_MAX_WORDS:
@@ -403,6 +428,7 @@ def generate_ai_summary(
     summary is too long or too few findings are cited."""
     del aggregated  # see docstring
     rag = _summary_evidence(country_name, rag_filters)
+    _, recent_end = _recent_window(rag_filters, days=RECENT_DAYS)
     if rag.is_empty:
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
         return AISummary()
@@ -419,8 +445,9 @@ def generate_ai_summary(
         "only as evidence: for a country, group incidents across regions "
         "(e.g. 'drone strikes on markets across Darfur and Kordofan'); for a "
         "district or locality, single dated incidents are fine.\n"
-        f"Lead with developments from the last {RECENT_DAYS} days and give "
-        "dates. Use older evidence only as background. Do not present "
+        f"Lead with developments from the {RECENT_DAYS} days up to "
+        f"{recent_end:%d %B %Y} and give dates. Use older evidence only as "
+        "background, and nothing dated after that day. Do not present "
         "cumulative multi-year totals (e.g. counts since 2023) as findings.\n"
         "Every key finding must come from RETRIEVED EVIDENCE and end with its "
         "[Rn] marker(s); a finding you cannot cite will be discarded. Draw on "
@@ -440,16 +467,29 @@ def generate_ai_summary(
         return text, contributing, findings, findings_contributing
 
     try:
-        text, contributing, findings, findings_contributing = run(user)
-        problems = _summary_problems(text, findings)
-        if problems:
-            logger.info("[situation:ai_summary] retrying once: %s", " ".join(problems))
-            text, contributing, findings, findings_contributing = run(
-                user + "\n\nYOUR PREVIOUS ANSWER HAD THESE PROBLEMS, FIX THEM:\n- " + "\n- ".join(problems)
-            )
+        first = run(user)
     except Exception:  # noqa: BLE001 — component-level isolation
         logger.exception("[situation:ai_summary] LLM call failed — returning empty component")
         return AISummary()
+    text, contributing, findings, findings_contributing = first
+    problems = _summary_problems(text, findings)
+    if problems:
+        logger.info("[situation:ai_summary] retrying once: %s", " ".join(problems))
+        try:
+            second = run(
+                user + "\n\nYOUR PREVIOUS ANSWER HAD THESE PROBLEMS, FIX THEM:\n- " + "\n- ".join(problems)
+            )
+        except Exception:  # noqa: BLE001 — a failed retry must not discard a usable first answer
+            logger.warning("[situation:ai_summary] retry failed — keeping the first answer", exc_info=True)
+        else:
+            # Keep the retry only if it is no worse: no more guardrail problems
+            # and no fewer cited findings than the first answer.
+            if len(_summary_problems(second[0], second[2])) <= len(problems) and (
+                _cited_count(second[2]) >= _cited_count(findings)
+            ):
+                text, contributing, findings, findings_contributing = second
+            else:
+                logger.info("[situation:ai_summary] retry was worse — keeping the first answer")
 
     if len(text.split()) > SUMMARY_MAX_WORDS:
         text, contributing = _trim_sentences(text, contributing, SUMMARY_MAX_SENTENCES)

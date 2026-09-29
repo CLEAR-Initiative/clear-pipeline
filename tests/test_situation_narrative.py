@@ -161,11 +161,37 @@ class TestGenerateAISummary:
         assert all(c.kwargs["filters"] == {"countryLocationId": "sdn"} for c in themed)
         assert all("mode" not in c.kwargs for c in themed)
         call = llm.complete_structured.call_args.kwargs
-        assert "last 30 days" in call["user"]
+        assert "30 days up to" in call["user"]
         assert "cumulative multi-year totals" in call["user"]
         assert "patterns at the level of the analysed area" in call["user"]
         # The aggregated figures never reach the summary prompt.
         assert "health_facilities_damaged" not in call["system"]
+
+    def test_failed_retry_keeps_the_first_answer(self):
+        result, llm, _ = _summary([
+            _AISummaryLLM(text="First answer. [R1]", key_findings=FOUR_CITED[:3]),
+            RuntimeError("429 from provider"),
+        ])
+        assert llm.complete_structured.call_count == 2
+        assert result.text == "First answer."
+        assert len(result.key_findings) == 3
+
+    def test_worse_retry_is_discarded(self):
+        result, llm, _ = _summary([
+            _AISummaryLLM(text="First answer. [R1]", key_findings=FOUR_CITED[:3]),
+            _AISummaryLLM(text="Second answer. [R1]", key_findings=FOUR_CITED[:1]),
+        ])
+        assert llm.complete_structured.call_count == 2
+        assert result.text == "First answer."
+        assert len(result.key_findings) == 3
+
+    def test_better_retry_is_kept(self):
+        result, _, _ = _summary([
+            _AISummaryLLM(text="First answer. [R1]", key_findings=FOUR_CITED[:3]),
+            _AISummaryLLM(text="Second answer. [R1]", key_findings=FOUR_CITED),
+        ])
+        assert result.text == "Second answer."
+        assert len(result.key_findings) == 4
 
     def test_llm_error_returns_empty_component(self):
         # A failed narrative call shouldn't drop the whole analysis —
@@ -375,3 +401,43 @@ class TestGenerateDisplacementNarrative:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestRecentWindow:
+    """The recent band is the last 30 days OF THE ANALYSIS WINDOW (review #75)."""
+
+    def test_country_path_without_time_range_ends_now(self):
+        from datetime import datetime, timezone
+
+        from clear_pipeline.defs.situation.narrative import _recent_filters
+
+        f = _recent_filters({"countryLocationId": "sdn"}, days=30)
+        start = datetime.fromisoformat(f["timeRange"]["from"])
+        end = datetime.fromisoformat(f["timeRange"]["to"])
+        assert f["countryLocationId"] == "sdn"
+        assert (end - start).days == 30
+        assert abs((datetime.now(timezone.utc) - end).total_seconds()) < 60
+
+    def test_fixed_past_window_stays_inside_the_window(self):
+        from clear_pipeline.defs.situation.narrative import _recent_filters
+
+        f = _recent_filters(
+            {"locationIds": ["shk"], "timeRange": {"from": "2026-01-01T00:00:00Z", "to": "2026-03-31T23:59:59Z"}},
+            days=30,
+        )
+        assert f["timeRange"] == {"from": "2026-03-01T23:59:59+00:00", "to": "2026-03-31T23:59:59+00:00"}
+
+    def test_short_window_clamps_to_its_start(self):
+        from clear_pipeline.defs.situation.narrative import _recent_filters
+
+        f = _recent_filters({"timeRange": {"from": "2026-03-20T00:00:00Z", "to": "2026-03-31T00:00:00Z"}}, days=30)
+        assert f["timeRange"] == {"from": "2026-03-20T00:00:00+00:00", "to": "2026-03-31T00:00:00+00:00"}
+
+    def test_prompt_names_the_window_end(self):
+        _, llm, _ = _summary(
+            [_AISummaryLLM(text="x. [R1]", key_findings=FOUR_CITED)],
+            rag_filters={"timeRange": {"from": "2026-01-01T00:00:00Z", "to": "2026-03-31T23:59:59Z"}},
+        )
+        user = llm.complete_structured.call_args.kwargs["user"]
+        assert "30 days up to 31 March 2026" in user
+        assert "nothing dated after that day" in user

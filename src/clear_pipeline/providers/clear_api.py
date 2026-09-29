@@ -264,7 +264,32 @@ query GetAnalysis($frame: AnalysisFrameInput!, $schemaVersion: String) {
 }
 """
 
+# Without `$mode`: works against a clear-api that predates the
+# KnowledgebaseSearchMode enum (ADR-0006). Only searches that set a mode need it.
 _SEARCH_KNOWLEDGEBASE = """
+query SearchKnowledgebaseForSituation(
+  $query: String!,
+  $filters: KnowledgebaseFilters,
+  $limit: Int,
+) {
+  searchKnowledgebase(query: $query, filters: $filters, limit: $limit) {
+    id
+    reportId
+    reportTitle
+    sourceUrl
+    publishedAt
+    pageStart
+    pageEnd
+    chunkText
+    score
+    locationIds
+    eventTypes
+    needSectors
+  }
+}
+"""
+
+_SEARCH_KNOWLEDGEBASE_WITH_MODE = """
 query SearchKnowledgebaseForSituation(
   $query: String!,
   $filters: KnowledgebaseFilters,
@@ -833,10 +858,10 @@ def search_knowledgebase(
     knowledgebase rows are tagged at admin-2 level but our scope is
     the country (A0); semantic relevance handles the geo scoping.
     """
-    data = _execute(
-        _SEARCH_KNOWLEDGEBASE,
-        {"query": query, "filters": filters, "limit": limit, "mode": mode},
-    )
+    variables: dict[str, Any] = {"query": query, "filters": filters, "limit": limit}
+    if mode:
+        variables["mode"] = mode
+    data = _execute(_SEARCH_KNOWLEDGEBASE_WITH_MODE if mode else _SEARCH_KNOWLEDGEBASE, variables)
     return data.get("searchKnowledgebase") or []
 
 

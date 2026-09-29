@@ -400,3 +400,26 @@ class TestMergeRagContexts:
 def fetch_rag_context_empty():
     with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase", return_value=[]):
         return fetch_rag_context(query="x")
+
+
+class TestSearchKnowledgebaseQueryShape:
+    """Only a search that sets a mode may declare `$mode` (review #75): an older
+    clear-api without the enum must still serve every other search."""
+
+    def test_no_mode_sends_the_mode_free_document(self):
+        from clear_pipeline.providers import clear_api
+
+        with patch("clear_pipeline.providers.clear_api._execute", return_value={"searchKnowledgebase": []}) as ex:
+            clear_api.search_knowledgebase(query="q", filters=None, limit=5)
+        query, variables = ex.call_args.args
+        assert "KnowledgebaseSearchMode" not in query
+        assert "mode" not in variables
+
+    def test_mode_sends_the_mode_document(self):
+        from clear_pipeline.providers import clear_api
+
+        with patch("clear_pipeline.providers.clear_api._execute", return_value={"searchKnowledgebase": []}) as ex:
+            clear_api.search_knowledgebase(query="", filters={"countryLocationId": "sdn"}, limit=5, mode="FRAME")
+        query, variables = ex.call_args.args
+        assert "$mode: KnowledgebaseSearchMode" in query
+        assert variables["mode"] == "FRAME"
