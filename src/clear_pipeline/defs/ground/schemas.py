@@ -8,11 +8,14 @@ already-extracted title/description that hotline messages don't have.
 """
 
 import json
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
 from clear_pipeline.providers.classify import DEFAULT_TAXONOMY_PATH
+
+logger = logging.getLogger(__name__)
 
 # clear-api's GROUND_CLASSIFICATIONS set (src/resolvers/ground.resolver.ts) —
 # must match exactly, the mutation rejects anything else.
@@ -55,6 +58,13 @@ class HotlineEnrichment(BaseModel):
     @field_validator("disaster_type")
     @classmethod
     def _validate_disaster_type(cls, v: str | None) -> str | None:
-        if v is not None and v not in VALID_DISASTER_TYPE_CODES:
-            raise ValueError(f"disaster_type {v!r} is not a known glide code")
-        return v
+        """Normalise case; degrade an unknown code to None. It's an optional
+        suggestion, so an off-list value mustn't throw away the rest of the
+        enrichment (and cost the message a retry)."""
+        if v is None:
+            return None
+        code = v.strip().lower()
+        if code not in VALID_DISASTER_TYPE_CODES:
+            logger.warning("[ground:enrich] dropping unknown disaster_type %r", v)
+            return None
+        return code

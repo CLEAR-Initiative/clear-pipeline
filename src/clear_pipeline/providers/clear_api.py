@@ -1932,14 +1932,25 @@ def get_entities_missing_translation(
 # stripped at persistence); senderRef is pseudonymous.
 
 GROUND_MESSAGES_FOR_CLASSIFICATION = """
-query GroundMessagesForClassification($groundSourceId: String!, $limit: Int) {
-  groundMessagesForClassification(groundSourceId: $groundSourceId, limit: $limit) {
+query GroundMessagesForClassification(
+  $groundSourceId: String!
+  $limit: Int
+  $unclassifiedOnly: Boolean
+  $awaitingTranscript: Boolean
+) {
+  groundMessagesForClassification(
+    groundSourceId: $groundSourceId
+    limit: $limit
+    unclassifiedOnly: $unclassifiedOnly
+    awaitingTranscript: $awaitingTranscript
+  ) {
     id
     text
     sentAt
     senderRef
     hasMedia
     voiceMediaKeys
+    hasVoice
     transcript
     classification
     threadId
@@ -1959,16 +1970,25 @@ mutation UpsertGroundMessageClassifications(
 def ground_messages_for_classification(
     ground_source_id: str,
     limit: int | None = None,
+    *,
+    unclassified_only: bool = False,
+    awaiting_transcript: bool = False,
 ) -> list[dict]:
-    """Fetch a ground source's messages awaiting classification/threading.
+    """Fetch a ground source's messages, oldest first, up to `limit`.
 
-    The server scopes the result to the source and orders by sentAt; rows
-    carry `classification` / `threadId` as null until this pipeline fills
-    them in.
+    With no filter this is ALL of the source's messages (classified or
+    not), so the window is the oldest `limit` rows and stops moving once
+    those are done. Drains must pass the filter for their own queue:
+    `unclassified_only` (classification null) or `awaiting_transcript`
+    (hotline voice note with no transcript). Filtering happens server-side.
     """
     variables: dict = {"groundSourceId": ground_source_id}
     if limit is not None:
         variables["limit"] = limit
+    if unclassified_only:
+        variables["unclassifiedOnly"] = True
+    if awaiting_transcript:
+        variables["awaitingTranscript"] = True
     result = _execute(GROUND_MESSAGES_FOR_CLASSIFICATION, variables)
     return result.get("groundMessagesForClassification") or []
 

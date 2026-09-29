@@ -2,8 +2,9 @@
 for the overview.
 
 Structurally identical to `defs/ground/stages.py`'s `ground_hotline_enrich`
-drain (single-flight Redis lock, per-run processing cap, per-item exception
-isolation with a Redis attempt counter) — a separate asset/sensor rather
+drain (single-flight Redis lock, per-run attempt cap, per-item exception
+isolation with a Redis attempt counter that parks a message once it's
+exhausted — see `attempts.py`) — a separate asset/sensor rather
 than folded into that one so a slow/expensive transcription doesn't block
 enrichment throughput for text-only messages on the same source.
 
@@ -17,6 +18,7 @@ import os
 import dagster as dg
 import redis
 
+from clear_pipeline.defs.ground.attempts import parked_ids, record_failure
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ground_messages_for_classification,
@@ -39,13 +41,14 @@ def _s3_client():
 
 _MESSAGE_LOCK_TTL_SECONDS = 120
 # Same rationale as ground_hotline_enrich's _FETCH_LIMIT (see stages.py):
-# groundMessagesForClassification has no cursor, so the full backlog is
-# fetched per source and bounded by the per-run cap instead.
+# groundMessagesForClassification(awaitingTranscript: true) returns the
+# oldest-first voice notes with no transcript, up to 2000, and has no
+# cursor — so it's one fetch per source, bounded by the per-run cap.
 _FETCH_LIMIT = 2000
 # Lower than ground_hotline_enrich's 200: an audio upload + transcription
 # call runs longer and costs more per item than a short structured-output
-# text completion.
-_MAX_PROCESSED_PER_RUN = 100
+# text completion. Counts failures too, like stages.py.
+_MAX_ATTEMPTED_PER_RUN = 100
 _MAX_MESSAGE_ATTEMPTS = 5
 
 _HOTLINE_SOURCE_KIND = "hotline"
@@ -67,7 +70,7 @@ def _transcribe_one_message(msg: dict) -> str:
 # Per-message drain outcomes.
 _PROCESSED = "processed"  # transcribed + wrote transcript → done
 _REQUEUE = "requeue"      # transient (lock contention / retryable failure) → retry next run
-_DROP_FAILED = "drop_failed"  # permanently bad (exhausted retries) → mark FAILED
+_DROP_FAILED = "drop_failed"  # permanently bad (exhausted retries) → parked
 
 
 def _process_one_message(msg: dict) -> str:
@@ -89,38 +92,53 @@ def _drain_ground_transcribe(context) -> dg.MaterializeResult:
         return _drain_ground_transcribe_locked(context)
 
 
+def _attempts_key(message_id: str) -> str:
+    return f"ground:transcribe:attempts:{message_id}"
+
+
 def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
     source_ids = pipeline_ground_source_ids(kind=_HOTLINE_SOURCE_KIND, is_active=True)
 
-    processed = requeued = failed = 0
+    attempted = processed = requeued = failed = parked = not_ready = 0
     capped = False
     for source_id in source_ids:
         if capped:
             break
-        page = ground_messages_for_classification(source_id, limit=_FETCH_LIMIT)
-        pending = [
-            m for m in page if m.get("voiceMediaKeys") and m.get("transcript") is None
-        ]
+        page = ground_messages_for_classification(
+            source_id, limit=_FETCH_LIMIT, awaiting_transcript=True,
+        )
+        skip = parked_ids(
+            _redis, {m["id"]: _attempts_key(m["id"]) for m in page}, _MAX_MESSAGE_ATTEMPTS,
+        )
 
-        for msg in pending:
-            if processed >= _MAX_PROCESSED_PER_RUN:
+        for msg in page:
+            mid = msg["id"]
+            if not msg.get("voiceMediaKeys"):
+                # hasVoice but the audio isn't in S3 yet — hotline ingest
+                # creates the row first and stores media after. Not a
+                # failure: skip without spending an attempt.
+                not_ready += 1
+                continue
+            if mid in skip:
+                parked += 1
+                continue
+            if attempted >= _MAX_ATTEMPTED_PER_RUN:
                 context.log.warning(
-                    "[ground:transcribe] hit per-run cap of %d processed — remainder drains next run",
-                    _MAX_PROCESSED_PER_RUN,
+                    "[ground:transcribe] hit per-run cap of %d attempted — remainder drains next run",
+                    _MAX_ATTEMPTED_PER_RUN,
                 )
                 capped = True
                 break
+            attempted += 1
             try:
                 outcome = _process_one_message(msg)
             except TRANSIENT_LLM_ERRORS:
                 outcome = _REQUEUE
             except Exception:  # noqa: BLE001 — isolate one message's failure
-                mid = msg["id"]
-                attempts = _redis.incr(f"ground:transcribe:attempts:{mid}")
-                _redis.expire(f"ground:transcribe:attempts:{mid}", 86400)
+                attempts = record_failure(_redis, _attempts_key(mid))
                 if attempts >= _MAX_MESSAGE_ATTEMPTS:
                     context.log.exception(
-                        "[ground:transcribe] message %s failed %d× — giving up", mid, attempts,
+                        "[ground:transcribe] message %s failed %d× — parking it", mid, attempts,
                     )
                     outcome = _DROP_FAILED
                 else:
@@ -133,18 +151,25 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
             if outcome == _PROCESSED:
                 processed += 1
             elif outcome == _DROP_FAILED:
-                # Same as ground_hotline_enrich: no status column, so a
-                # dropped message is logged and left with transcript NULL.
-                # An operator has to intervene.
+                # Same as ground_hotline_enrich: no status column, so it
+                # stays transcript NULL and parked. Enrichment keeps
+                # holding it out too. An operator has to intervene.
                 failed += 1
             else:
                 requeued += 1
 
     context.log.info(
-        "[ground:transcribe] processed=%d requeued=%d failed=%d", processed, requeued, failed,
+        "[ground:transcribe] processed=%d requeued=%d failed=%d parked=%d not_ready=%d",
+        processed, requeued, failed, parked, not_ready,
     )
     return dg.MaterializeResult(
-        metadata={"processed": processed, "requeued": requeued, "failed": failed}
+        metadata={
+            "processed": processed,
+            "requeued": requeued,
+            "failed": failed,
+            "parked": parked,
+            "not_ready": not_ready,
+        }
     )
 
 

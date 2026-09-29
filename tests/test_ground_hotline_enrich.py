@@ -12,8 +12,27 @@ under test.
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-from clear_pipeline.defs.ground import stages
+import pytest
+
+from clear_pipeline.defs.ground import attempts, stages
 from clear_pipeline.defs.ground.schemas import HotlineEnrichment
+
+
+@pytest.fixture(autouse=True)
+def _patch_redis(fake_redis):
+    with patch.object(stages, "_redis", fake_redis):
+        yield
+
+
+def _drain_patches(rows, **process_kwargs):
+    """The patches every drain-loop test needs: one active source whose
+    unclassified page is `rows`, and a stubbed `_process_one_message`."""
+    return (
+        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
+        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
+        patch.object(stages, "ground_messages_for_classification", return_value=rows),
+        patch.object(stages, "_process_one_message", **process_kwargs),
+    )
 
 
 def _run():
@@ -69,36 +88,33 @@ def test_drain_no_active_sources_returns_zero_counts():
         patch.object(stages, "make_llm_provider", return_value=MagicMock()),
     ):
         result = _run()
-    assert result.metadata == {"processed": 0, "requeued": 0, "failed": 0}
+    assert result.metadata == {"processed": 0, "requeued": 0, "failed": 0, "parked": 0}
 
 
-def test_drain_processes_only_unclassified_messages():
-    rows = [message("m1", classification=None), message("m2", classification="chatter")]
+def test_drain_asks_the_server_for_unclassified_messages_only():
+    # The unfiltered query returns the source's oldest 2000 messages; once
+    # those are all classified, message #2001 would never be seen. The
+    # filter has to be server-side for the window to advance.
     with (
         patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
         patch.object(stages, "make_llm_provider", return_value=MagicMock()),
-        patch.object(stages, "ground_messages_for_classification", return_value=rows),
-        patch.object(stages, "_process_one_message", return_value=stages._PROCESSED) as process,
+        patch.object(stages, "ground_messages_for_classification", return_value=[]) as fetch,
     ):
-        result = _run()
-
-    assert result.metadata["processed"] == 1
-    process.assert_called_once()
-    assert process.call_args.args[1]["id"] == "m1"
+        _run()
+    fetch.assert_called_once_with("gs1", limit=stages._FETCH_LIMIT, unclassified_only=True)
 
 
-def test_drain_holds_out_untranscribed_voice_messages():
+def test_drain_holds_out_voice_messages_until_transcribed():
     rows = [
-        message("voice_pending", voiceMediaKeys=["ground/gs1/a.ogg"], transcript=None),
-        message("voice_ready", voiceMediaKeys=["ground/gs1/b.ogg"], transcript="we need water"),
-        message("text_only"),
+        message("voice_pending", hasVoice=True, voiceMediaKeys=["ground/gs1/a.ogg"], transcript=None),
+        # Media not stored yet: voiceMediaKeys still empty, but hasVoice is
+        # set at row creation — must not be enriched as a text message.
+        message("voice_media_not_stored", hasVoice=True, voiceMediaKeys=[], transcript=None),
+        message("voice_ready", hasVoice=True, voiceMediaKeys=["ground/gs1/b.ogg"], transcript="we need water"),
+        message("text_only", hasVoice=False),
     ]
-    with (
-        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
-        patch.object(stages, "ground_messages_for_classification", return_value=rows),
-        patch.object(stages, "_process_one_message", return_value=stages._PROCESSED) as process,
-    ):
+    p = _drain_patches(rows, return_value=stages._PROCESSED)
+    with p[0], p[1], p[2], p[3] as process:
         result = _run()
 
     assert result.metadata["processed"] == 2
@@ -106,58 +122,74 @@ def test_drain_holds_out_untranscribed_voice_messages():
     assert processed_ids == {"voice_ready", "text_only"}
 
 
-def test_drain_transient_error_requeues_without_consuming_attempts():
-    with (
-        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
-        patch.object(stages, "ground_messages_for_classification", return_value=[message("m1")]),
-        patch.object(stages, "TRANSIENT_LLM_ERRORS", (_FakeTransientError,)),
-        patch.object(stages, "_process_one_message", side_effect=_FakeTransientError("boom")),
-        patch.object(stages._redis, "incr") as incr,
-    ):
+def test_drain_transient_error_requeues_without_consuming_attempts(fake_redis):
+    p = _drain_patches([message("m1")], side_effect=_FakeTransientError("boom"))
+    with p[0], p[1], p[2], p[3], patch.object(stages, "TRANSIENT_LLM_ERRORS", (_FakeTransientError,)):
         result = _run()
 
-    assert result.metadata == {"processed": 0, "requeued": 1, "failed": 0}
-    incr.assert_not_called()
+    assert result.metadata == {"processed": 0, "requeued": 1, "failed": 0, "parked": 0}
+    assert fake_redis.store == {}
 
 
-def test_drain_generic_failure_requeues_then_fails_after_max_attempts():
-    with (
-        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
-        patch.object(stages, "ground_messages_for_classification", return_value=[message("bad")]),
-        patch.object(stages, "_process_one_message", side_effect=RuntimeError("boom")),
-        patch.object(stages._redis, "incr", return_value=1),
-        patch.object(stages._redis, "expire"),
-    ):
+def test_drain_generic_failure_requeues_then_parks_after_max_attempts(fake_redis):
+    key = "ground:attempts:bad"
+    for attempt in range(1, stages._MAX_MESSAGE_ATTEMPTS):
+        p = _drain_patches([message("bad")], side_effect=RuntimeError("boom"))
+        with p[0], p[1], p[2], p[3]:
+            result = _run()
+        assert result.metadata["requeued"] == 1
+        assert fake_redis.store[key] == attempt
+
+    p = _drain_patches([message("bad")], side_effect=RuntimeError("boom"))
+    with p[0], p[1], p[2], p[3]:
         result = _run()
-    assert result.metadata == {"processed": 0, "requeued": 1, "failed": 0}
+    assert result.metadata == {"processed": 0, "requeued": 0, "failed": 1, "parked": 0}
 
-    with (
-        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
-        patch.object(stages, "ground_messages_for_classification", return_value=[message("bad")]),
-        patch.object(stages, "_process_one_message", side_effect=RuntimeError("boom")),
-        patch.object(stages._redis, "incr", return_value=stages._MAX_MESSAGE_ATTEMPTS),
-        patch.object(stages._redis, "expire"),
-    ):
+
+def test_drain_skips_a_parked_message_without_calling_it(fake_redis):
+    fake_redis.store["ground:attempts:bad"] = stages._MAX_MESSAGE_ATTEMPTS
+    p = _drain_patches([message("bad"), message("good")], return_value=stages._PROCESSED)
+    with p[0], p[1], p[2], p[3] as process:
         result = _run()
-    assert result.metadata == {"processed": 0, "requeued": 0, "failed": 1}
+
+    assert result.metadata == {"processed": 1, "requeued": 0, "failed": 0, "parked": 1}
+    assert [call.args[1]["id"] for call in process.call_args_list] == ["good"]
 
 
-def test_drain_stops_at_per_run_processed_cap():
+def test_drain_attempt_ttl_is_set_once_not_refreshed(fake_redis):
+    p = _drain_patches([message("bad")], side_effect=RuntimeError("boom"))
+    with p[0], p[1], p[2], p[3], patch.object(fake_redis, "expire", wraps=fake_redis.expire) as expire:
+        _run()
+        _run()
+    expire.assert_called_once_with("ground:attempts:bad", attempts.ATTEMPTS_TTL_SECONDS)
+
+
+def test_drain_parks_a_message_with_no_thread_immediately(fake_redis):
+    p = _drain_patches([message("orphan", thread_id=None)], return_value=stages._DROP_FAILED)
+    with p[0], p[1], p[2], p[3]:
+        result = _run()
+    assert result.metadata["failed"] == 1
+    assert fake_redis.store["ground:attempts:orphan"] == stages._MAX_MESSAGE_ATTEMPTS
+
+
+def test_drain_stops_at_per_run_cap():
     rows = [message("m1"), message("m2")]
-    with (
-        patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(stages, "make_llm_provider", return_value=MagicMock()),
-        patch.object(stages, "ground_messages_for_classification", return_value=rows),
-        patch.object(stages, "_MAX_PROCESSED_PER_RUN", 1),
-        patch.object(stages, "_process_one_message", return_value=stages._PROCESSED) as process,
-    ):
+    p = _drain_patches(rows, return_value=stages._PROCESSED)
+    with p[0], p[1], p[2], p[3] as process, patch.object(stages, "_MAX_ATTEMPTED_PER_RUN", 1):
         result = _run()
 
     assert result.metadata["processed"] == 1
     process.assert_called_once()  # second message left for next run
+
+
+def test_drain_failures_count_against_the_per_run_cap():
+    rows = [message(f"m{i}") for i in range(5)]
+    p = _drain_patches(rows, side_effect=RuntimeError("boom"))
+    with p[0], p[1], p[2], p[3] as process, patch.object(stages, "_MAX_ATTEMPTED_PER_RUN", 2):
+        result = _run()
+
+    assert process.call_count == 2
+    assert result.metadata["requeued"] == 2
 
 
 # ── _process_one_message: write ordering + guard rails ────────────────────
@@ -234,3 +266,40 @@ def test_process_one_message_geoparses_the_transcript_when_present():
             MagicMock(), message("m1", text="", transcript="flooding in Nyala")
         )
     geoparse.assert_called_once_with("flooding in Nyala")
+
+
+# ── geoparse: country-scoped, never creates a location ─────────────────────
+
+
+def test_geoparse_scopes_to_the_hotline_country_and_resolves_existing_location():
+    geo = MagicMock(candidate="Nyala", kind="admin", importance=0.8, lat=12.0, lng=24.9)
+    with (
+        patch.object(stages.settings, "ground_hotline_country_codes", "SD"),
+        patch.object(stages, "geoparse_signal", return_value=geo) as geoparse,
+        patch.object(stages, "geoparse_to_dict", return_value={}),
+        patch.object(stages, "resolve_location", return_value="loc_nyala") as resolve,
+    ):
+        location_id = stages._geoparse_one_message("flooding in Nyala")
+
+    assert location_id == "loc_nyala"
+    assert geoparse.call_args.kwargs["expected_country_codes"] == {"sd"}
+    resolve.assert_called_once_with(name="Nyala")
+    assert not hasattr(stages, "find_or_create_landmark_l4")
+
+
+def test_geoparse_lookup_failure_is_swallowed():
+    geo = MagicMock(candidate="Nyala", kind="admin", importance=0.8)
+    with (
+        patch.object(stages, "geoparse_signal", return_value=geo),
+        patch.object(stages, "geoparse_to_dict", return_value={}),
+        patch.object(stages, "resolve_location", side_effect=RuntimeError("api down")),
+    ):
+        assert stages._geoparse_one_message("flooding in Nyala") is None
+
+
+# ── schema: disaster_type degrades instead of failing the enrichment ───────
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("FL", "fl"), (" fl ", "fl"), ("flood", None), (None, None)])
+def test_disaster_type_is_normalised_or_dropped(raw, expected):
+    assert enrichment(disaster_type=raw).disaster_type == expected

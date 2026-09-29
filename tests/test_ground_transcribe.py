@@ -10,7 +10,25 @@ lock wrapper) via a MagicMock context.
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from clear_pipeline.defs.ground import transcribe
+
+
+@pytest.fixture(autouse=True)
+def _patch_redis(fake_redis):
+    with patch.object(transcribe, "_redis", fake_redis):
+        yield
+
+
+def _drain_patches(rows, **process_kwargs):
+    """One active source whose awaiting-transcript page is `rows`, and a
+    stubbed `_process_one_message`."""
+    return (
+        patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
+        patch.object(transcribe, "ground_messages_for_classification", return_value=rows),
+        patch.object(transcribe, "_process_one_message", **process_kwargs),
+    )
 
 
 def _run():
@@ -23,7 +41,8 @@ def message(id_, *, voice_media_keys=None, transcript=None, **overrides):
         "text": "",
         "sentAt": "2026-09-15T10:00:00Z",
         "senderRef": "s_abc123",
-        "hasMedia": bool(voice_media_keys),
+        "hasMedia": True,
+        "hasVoice": True,
         "voiceMediaKeys": voice_media_keys or [],
         "transcript": transcript,
         "classification": None,
@@ -50,98 +69,90 @@ class _FakeTransientError(Exception):
 
 # ── drain-loop control flow ───────────────────────────────────────────────
 
+_EMPTY = {"processed": 0, "requeued": 0, "failed": 0, "parked": 0, "not_ready": 0}
+
 
 def test_drain_no_active_sources_returns_zero_counts():
     with patch.object(transcribe, "pipeline_ground_source_ids", return_value=[]):
         result = _run()
-    assert result.metadata == {"processed": 0, "requeued": 0, "failed": 0}
+    assert result.metadata == _EMPTY
 
 
-def test_drain_processes_only_untranscribed_voice_messages():
-    rows = [
-        message("no_voice"),
-        message("already_transcribed", voice_media_keys=["a.ogg"], transcript="hello"),
-        message("pending", voice_media_keys=["b.ogg"], transcript=None),
-    ]
+def test_drain_asks_the_server_for_voice_notes_awaiting_transcript():
+    # Filtering client-side over the source's oldest 2000 messages stalls
+    # once those are done — the filter has to be server-side.
     with (
         patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(transcribe, "ground_messages_for_classification", return_value=rows),
-        patch.object(
-            transcribe, "_process_one_message", return_value=transcribe._PROCESSED
-        ) as process,
+        patch.object(transcribe, "ground_messages_for_classification", return_value=[]) as fetch,
     ):
+        _run()
+    fetch.assert_called_once_with("gs1", limit=transcribe._FETCH_LIMIT, awaiting_transcript=True)
+
+
+def test_drain_skips_voice_notes_whose_media_is_not_stored_yet(fake_redis):
+    rows = [message("not_stored", voice_media_keys=[]), message("ready", voice_media_keys=["a.ogg"])]
+    p = _drain_patches(rows, return_value=transcribe._PROCESSED)
+    with p[0], p[1], p[2] as process:
         result = _run()
 
-    assert result.metadata["processed"] == 1
-    process.assert_called_once()
-    assert process.call_args.args[0]["id"] == "pending"
+    assert result.metadata == {**_EMPTY, "processed": 1, "not_ready": 1}
+    assert [call.args[0]["id"] for call in process.call_args_list] == ["ready"]
+    assert fake_redis.store == {}  # no attempt spent on the not-ready one
 
 
-def test_drain_transient_error_requeues_without_consuming_attempts():
-    with (
-        patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(
-            transcribe,
-            "ground_messages_for_classification",
-            return_value=[message("m1", voice_media_keys=["a.ogg"])],
-        ),
-        patch.object(transcribe, "TRANSIENT_LLM_ERRORS", (_FakeTransientError,)),
-        patch.object(transcribe, "_process_one_message", side_effect=_FakeTransientError("boom")),
-        patch.object(transcribe._redis, "incr") as incr,
-    ):
+def test_drain_transient_error_requeues_without_consuming_attempts(fake_redis):
+    p = _drain_patches([message("m1", voice_media_keys=["a.ogg"])], side_effect=_FakeTransientError("boom"))
+    with p[0], p[1], p[2], patch.object(transcribe, "TRANSIENT_LLM_ERRORS", (_FakeTransientError,)):
         result = _run()
 
-    assert result.metadata == {"processed": 0, "requeued": 1, "failed": 0}
-    incr.assert_not_called()
+    assert result.metadata == {**_EMPTY, "requeued": 1}
+    assert fake_redis.store == {}
 
 
-def test_drain_generic_failure_requeues_then_fails_after_max_attempts():
-    with (
-        patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(
-            transcribe,
-            "ground_messages_for_classification",
-            return_value=[message("bad", voice_media_keys=["a.ogg"])],
-        ),
-        patch.object(transcribe, "_process_one_message", side_effect=RuntimeError("boom")),
-        patch.object(transcribe._redis, "incr", return_value=1),
-        patch.object(transcribe._redis, "expire"),
-    ):
+def test_drain_generic_failure_requeues_then_parks_after_max_attempts(fake_redis):
+    key = "ground:transcribe:attempts:bad"
+    for attempt in range(1, transcribe._MAX_MESSAGE_ATTEMPTS):
+        p = _drain_patches([message("bad", voice_media_keys=["a.ogg"])], side_effect=RuntimeError("boom"))
+        with p[0], p[1], p[2]:
+            result = _run()
+        assert result.metadata["requeued"] == 1
+        assert fake_redis.store[key] == attempt
+
+    p = _drain_patches([message("bad", voice_media_keys=["a.ogg"])], side_effect=RuntimeError("boom"))
+    with p[0], p[1], p[2]:
         result = _run()
-    assert result.metadata == {"processed": 0, "requeued": 1, "failed": 0}
+    assert result.metadata == {**_EMPTY, "failed": 1}
 
-    with (
-        patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(
-            transcribe,
-            "ground_messages_for_classification",
-            return_value=[message("bad", voice_media_keys=["a.ogg"])],
-        ),
-        patch.object(transcribe, "_process_one_message", side_effect=RuntimeError("boom")),
-        patch.object(transcribe._redis, "incr", return_value=transcribe._MAX_MESSAGE_ATTEMPTS),
-        patch.object(transcribe._redis, "expire"),
-    ):
+
+def test_drain_skips_a_parked_message_without_calling_it(fake_redis):
+    fake_redis.store["ground:transcribe:attempts:bad"] = transcribe._MAX_MESSAGE_ATTEMPTS
+    rows = [message("bad", voice_media_keys=["a.amr"]), message("good", voice_media_keys=["b.ogg"])]
+    p = _drain_patches(rows, return_value=transcribe._PROCESSED)
+    with p[0], p[1], p[2] as process:
         result = _run()
-    assert result.metadata == {"processed": 0, "requeued": 0, "failed": 1}
+
+    assert result.metadata == {**_EMPTY, "processed": 1, "parked": 1}
+    assert [call.args[0]["id"] for call in process.call_args_list] == ["good"]
 
 
-def test_drain_stops_at_per_run_processed_cap():
-    rows = [
-        message("m1", voice_media_keys=["a.ogg"]),
-        message("m2", voice_media_keys=["b.ogg"]),
-    ]
-    with (
-        patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
-        patch.object(transcribe, "ground_messages_for_classification", return_value=rows),
-        patch.object(transcribe, "_MAX_PROCESSED_PER_RUN", 1),
-        patch.object(
-            transcribe, "_process_one_message", return_value=transcribe._PROCESSED
-        ) as process,
-    ):
+def test_drain_stops_at_per_run_cap():
+    rows = [message("m1", voice_media_keys=["a.ogg"]), message("m2", voice_media_keys=["b.ogg"])]
+    p = _drain_patches(rows, return_value=transcribe._PROCESSED)
+    with p[0], p[1], p[2] as process, patch.object(transcribe, "_MAX_ATTEMPTED_PER_RUN", 1):
         result = _run()
 
     assert result.metadata["processed"] == 1
     process.assert_called_once()  # second message left for next run
+
+
+def test_drain_failures_count_against_the_per_run_cap():
+    rows = [message(f"m{i}", voice_media_keys=["a.ogg"]) for i in range(5)]
+    p = _drain_patches(rows, side_effect=RuntimeError("boom"))
+    with p[0], p[1], p[2] as process, patch.object(transcribe, "_MAX_ATTEMPTED_PER_RUN", 2):
+        result = _run()
+
+    assert process.call_count == 2
+    assert result.metadata["requeued"] == 2
 
 
 # ── _process_one_message ────────────────────────────────────────────────

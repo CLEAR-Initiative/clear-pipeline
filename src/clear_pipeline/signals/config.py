@@ -232,6 +232,10 @@ class Settings(BaseSettings):
     # cross-country mis-resolution is still caught downstream by clear-api's
     # same-A2 check against the signal's source coordinates.
     geoparser_country_codes: str = "sd,ve,af"
+    # Country scope for geoparsing hotline messages (defs/ground/stages.py).
+    # Hotline messages carry no coordinates, so unlike signals the country
+    # can't be inferred per message. Comma-separated ISO-3166-1 alpha-2.
+    ground_hotline_country_codes: str = "sd"
     # Hybrid geo-resolver: try the offline GeoNames gazetteer in clear-api
     # (`resolveGazetteerLocation`) before LocationIQ. Transliteration-tolerant
     # and quota-free; LocationIQ then only handles the landmarks/POIs the
