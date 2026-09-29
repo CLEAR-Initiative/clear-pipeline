@@ -195,7 +195,7 @@ def _build_system_prompt(
     return (
         f"{_BASE_INSTRUCTIONS}\n"
         f"---\n"
-        f"COUNTRY: {country_name}\n"
+        f"AREA: {country_name}\n"
         f"PERIOD: {period_label}\n"
         f"SECTOR: {sector_display_name}\n"
         f"---\n"

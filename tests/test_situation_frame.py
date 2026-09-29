@@ -5,6 +5,7 @@ from clear_pipeline.defs.situation.frame import (
     Frame,
     build_rag_filters,
     country_frame,
+    scope_label,
 )
 
 
@@ -110,3 +111,38 @@ class TestBuildRagFilters:
     def test_empty_frame_yields_no_filters(self):
         f = Frame.build(window_start="2026-01-01")
         assert build_rag_filters(f) is None
+
+
+LOCS = {
+    "sdn": {"id": "sdn", "name": "Sudan", "parent": None},
+    "nk": {"id": "nk", "name": "North Kordofan", "parent": {"id": "sdn"}},
+    "wk": {"id": "wk", "name": "West Kordofan", "parent": {"id": "sdn"}},
+    "shk": {"id": "shk", "name": "Sheikan", "parent": {"id": "nk"}},
+    "umr": {"id": "umr", "name": "Um Rawaba", "parent": {"id": "nk"}},
+    "bar": {"id": "bar", "name": "Bara", "parent": {"id": "nk"}},
+    "grs": {"id": "grs", "name": "Gebrat Al Sheikh", "parent": {"id": "nk"}},
+    "abz": {"id": "abz", "name": "Abu Zabad", "parent": {"id": "wk"}},
+}
+
+
+class TestScopeLabel:
+    def test_single_district_reads_with_its_ancestors(self):
+        assert scope_label(["shk"], LOCS) == "Sheikan, North Kordofan, Sudan"
+
+    def test_country(self):
+        assert scope_label(["sdn"], LOCS) == "Sudan"
+
+    def test_districts_in_one_state_share_its_ancestors(self):
+        assert scope_label(["shk", "umr"], LOCS) == "Sheikan and Um Rawaba, North Kordofan, Sudan"
+
+    def test_districts_across_states_share_only_the_country(self):
+        assert scope_label(["shk", "abz"], LOCS) == "Sheikan and Abu Zabad, Sudan"
+
+    def test_long_lists_are_counted(self):
+        assert scope_label(["shk", "umr", "bar", "grs", "abz"], LOCS) == (
+            "Sheikan, Um Rawaba, Bara and 2 more, Sudan"
+        )
+
+    def test_unknown_ids_fall_back(self):
+        assert scope_label(["nope"], LOCS) == "the selected area"
+        assert scope_label(["nope", "shk"], LOCS) == "Sheikan, North Kordofan, Sudan"

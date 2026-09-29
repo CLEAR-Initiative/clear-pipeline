@@ -234,7 +234,7 @@ def _build_system_prompt(country_name: str, period_label: str, agg_context: str)
     return (
         f"{_BASE_INSTRUCTIONS}\n"
         f"---\n"
-        f"COUNTRY: {country_name}\n"
+        f"AREA: {country_name}\n"
         f"PERIOD: {period_label}\n"
         f"---\n"
         f"AGGREGATED HEADLINE FIGURES (cached; do not repeat back):\n"

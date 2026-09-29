@@ -2,7 +2,7 @@
 construction, window labelling, and the leverage-structured-datapoints-when-
 available rule (decision #2). Pure logic + a mocked clear_api."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from clear_pipeline.defs.analysis.stages import (
     _frame_from_request,
@@ -106,3 +106,30 @@ class TestResolveFrameAggregated:
             side_effect=RuntimeError("clear-api 500"),
         ):
             assert _resolve_frame_aggregated(f) is None  # KB narrative fills in
+
+
+class TestScopeLabelInGeneration:
+    def test_generation_is_framed_on_the_area_name(self):
+        from clear_pipeline.defs.analysis.stages import _run_frame_generation
+
+        frame = Frame.build(window_start="2026-01-01T00:00:00Z", window_end=None, location_ids=["shk"])
+        locations = [
+            {"id": "sdn", "name": "Sudan", "parent": None},
+            {"id": "nk", "name": "North Kordofan", "parent": {"id": "sdn"}},
+            {"id": "shk", "name": "Sheikan", "parent": {"id": "nk"}},
+        ]
+        with patch("clear_pipeline.defs.analysis.stages.clear_api.get_locations", return_value=locations), \
+             patch("clear_pipeline.defs.analysis.stages._resolve_frame_aggregated", return_value=None), \
+             patch("clear_pipeline.defs.analysis.stages.generate_and_upsert_for_frame") as gen:
+            _run_frame_generation(MagicMock(), frame, effective_end="2026-09-29T00:00:00Z")
+        assert gen.call_args.kwargs["scope_label"] == "Sheikan, North Kordofan, Sudan"
+
+    def test_name_lookup_failure_does_not_block_generation(self):
+        from clear_pipeline.defs.analysis.stages import _run_frame_generation
+
+        frame = Frame.build(window_start="2026-01-01T00:00:00Z", window_end=None, location_ids=["shk"])
+        with patch("clear_pipeline.defs.analysis.stages.clear_api.get_locations", side_effect=RuntimeError("down")), \
+             patch("clear_pipeline.defs.analysis.stages._resolve_frame_aggregated", return_value=None), \
+             patch("clear_pipeline.defs.analysis.stages.generate_and_upsert_for_frame") as gen:
+            _run_frame_generation(MagicMock(), frame, effective_end="2026-09-29T00:00:00Z")
+        assert gen.call_args.kwargs["scope_label"] == "the selected area"

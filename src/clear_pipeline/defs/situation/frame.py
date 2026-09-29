@@ -147,3 +147,51 @@ def build_rag_filters(
             time_range["to"] = end
         filters["timeRange"] = time_range
     return filters or None
+
+
+FALLBACK_SCOPE_LABEL = "the selected area"
+
+
+def _ancestor_names(loc_id: str, locations: dict[str, dict[str, Any]]) -> list[str]:
+    """Names from the location's parent up to the root, nearest first."""
+    names: list[str] = []
+    seen = {loc_id}
+    cur = ((locations.get(loc_id) or {}).get("parent") or {}).get("id")
+    while cur and cur not in seen and cur in locations:
+        seen.add(cur)
+        names.append(locations[cur]["name"])
+        cur = (locations[cur].get("parent") or {}).get("id")
+    return names
+
+
+def scope_label(
+    location_ids: Iterable[str],
+    locations: dict[str, dict[str, Any]],
+    *,
+    max_names: int = 3,
+) -> str:
+    """Human label for a frame's area, used to frame the LLM prompts.
+
+    ``locations`` maps id → ``{name, parent: {id}}`` (clear-api ``locations``).
+    One location reads "Sheikan, North Kordofan, Sudan"; several read
+    "Sheikan and Um Rawaba, North Kordofan, Sudan", followed by the ancestors
+    they all share. Past ``max_names`` the rest are counted ("… and 2 more").
+    Unknown ids are skipped; none known falls back to "the selected area"."""
+    known = [i for i in dict.fromkeys(location_ids) if i in locations and locations[i].get("name")]
+    if not known:
+        return FALLBACK_SCOPE_LABEL
+    names = [locations[i]["name"] for i in known]
+    if len(names) > max_names:
+        listed = f"{', '.join(names[:max_names])} and {len(names) - max_names} more"
+    elif len(names) > 1:
+        listed = f"{', '.join(names[:-1])} and {names[-1]}"
+    else:
+        listed = names[0]
+    chains = [_ancestor_names(i, locations) for i in known]
+    # Shared ancestors, compared from the root down, then read nearest first.
+    shared: list[str] = []
+    for level in zip(*(list(reversed(c)) for c in chains)):
+        if len(set(level)) != 1:
+            break
+        shared.append(level[0])
+    return ", ".join([listed, *reversed(shared)])
