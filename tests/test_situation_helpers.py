@@ -386,6 +386,13 @@ class TestMergeRagContexts:
         assert search.call_args_list[0].kwargs["mode"] == "FRAME"
         assert "mode" not in search.call_args_list[1].kwargs
 
+    def test_caps_chunks_per_report(self):
+        hits = [self._hit(f"h{i}", "r-big", f"chunk {i}") for i in range(4)] + [self._hit("x", "r-other", "other")]
+        with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase", return_value=hits):
+            ctx = fetch_rag_context(query="q")
+        merged = merge_rag_contexts(ctx, max_per_report=2)
+        assert merged.hit_report_ids == ["r-big", "r-big", "r-other"]
+
     def test_empty_inputs_stay_empty(self):
         assert merge_rag_contexts(fetch_rag_context_empty(), fetch_rag_context_empty()).is_empty
 

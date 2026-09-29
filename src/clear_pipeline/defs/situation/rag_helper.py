@@ -133,22 +133,29 @@ def _context_from_hits(hits: list[dict[str, Any]]) -> RAGContext:
     )
 
 
-def merge_rag_contexts(*contexts: RAGContext) -> RAGContext:
+def merge_rag_contexts(*contexts: RAGContext, max_per_report: int | None = None) -> RAGContext:
     """Merge several searches into one evidence list, in the order given, with
     duplicate hits dropped and `[Rn]` renumbered across the whole list.
+    ``max_per_report`` caps how many chunks one report may contribute, so a
+    long report can't crowd out other sources.
 
     Contexts built without raw hits (e.g. test doubles) can't be renumbered;
     the first non-empty one is returned unchanged."""
     if not any(c.hits for c in contexts):
         return next((c for c in contexts if not c.is_empty), contexts[0] if contexts else RAGContext(""))
     seen: set[str] = set()
+    per_report: dict[str, int] = {}
     merged: list[dict[str, Any]] = []
     for ctx in contexts:
         for hit in ctx.hits:
             key = str(hit.get("id") or f"{hit.get('reportId')}|{hit.get('chunkText')}")
             if key in seen:
                 continue
+            rid = str(hit.get("reportId") or key)
+            if max_per_report is not None and per_report.get(rid, 0) >= max_per_report:
+                continue
             seen.add(key)
+            per_report[rid] = per_report.get(rid, 0) + 1
             merged.append(hit)
     return _context_from_hits(merged)
 

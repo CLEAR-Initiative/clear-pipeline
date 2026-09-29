@@ -53,6 +53,29 @@ def _fake_rag_context(
 # ────────────────────────────────────────────────────────────────────
 
 
+FOUR_CITED = [
+    "Drone strikes on civilian sites: markets hit in Darfur and Kordofan in August. [R2]",
+    "Cholera: new hotspot in West Kordofan. [R3][R1]",
+    "Displacement: 3,650 fled Umm Badr on 23 Sep. [R1]",
+    "Access: rains cut the Habila road. [R2]",
+]
+
+
+def _summary(llm_results, *, hits=3, report_ids=("r-a", "r-b", "r-c"), rag_filters=None, aggregated=None):
+    """Run generate_ai_summary with every search returning the same fake context."""
+    with patch(
+        "clear_pipeline.defs.situation.narrative.fetch_rag_context",
+        return_value=_fake_rag_context(hits=hits, report_ids=list(report_ids)),
+    ) as fetch:
+        llm = MagicMock()
+        llm.complete_structured.side_effect = llm_results
+        result = generate_ai_summary(
+            llm, country_name="Sudan", period_label="2026",
+            aggregated=aggregated, cache_key="k", rag_filters=rag_filters,
+        )
+    return result, llm, fetch
+
+
 class TestGenerateAISummary:
     def test_empty_rag_returns_empty_default(self):
         # If the search returns nothing, we DO NOT call the LLM —
@@ -71,88 +94,78 @@ class TestGenerateAISummary:
         assert result.source_report_ids == []
         llm.complete_structured.assert_not_called()
 
-    def test_happy_path_populates_text_and_source_ids(self):
-        with patch(
-            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
-            return_value=_fake_rag_context(hits=3, report_ids=["r-a", "r-b", "r-c"]),
-        ):
-            llm = MagicMock()
-            llm.complete_structured.return_value = _AISummaryLLM(
-                text="A concise briefing paragraph.",
-            )
-            result = generate_ai_summary(
-                llm, country_name="Sudan", period_label="2026",
-                aggregated={"reportCount": 5}, cache_key="k",
-            )
-        assert result.text == "A concise briefing paragraph."
-        # source_report_ids come from RAG dedup, NOT from the LLM —
-        # this is the load-bearing invariant of coarse-grained citation.
-        assert result.source_report_ids == ["r-a", "r-b", "r-c"]
+    def test_happy_path_populates_text_findings_and_sources(self):
+        result, llm, _ = _summary([_AISummaryLLM(text="A concise briefing. [R1]", key_findings=FOUR_CITED)])
+        assert result.text == "A concise briefing."
+        assert len(result.key_findings) == 4
+        assert set(result.source_report_ids) == {"r-a", "r-b", "r-c"}
         llm.complete_structured.assert_called_once()
 
     def test_key_findings_carry_their_own_sources(self):
-        # Findings are resolved per item (not sentence-split like the prose),
-        # so each keeps its own [Rn] sources and the "Subject:" label.
-        with patch(
-            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
-            return_value=_fake_rag_context(hits=3, report_ids=["r-a", "r-b", "r-c"]),
-        ):
-            llm = MagicMock()
-            llm.complete_structured.return_value = _AISummaryLLM(
-                text="Conflict is spreading east. [R1]",
-                key_findings=[
-                    "Drone strikes on civilian sites: markets hit in Darfur and Kordofan in August. [R2]",
-                    "Cholera: new hotspot in West Kordofan. [R3][R1]",
-                    "Access: rains block roads.",
-                ],
-            )
-            result = generate_ai_summary(
-                llm, country_name="Sudan", period_label="2026",
-                aggregated=None, cache_key="k",
-            )
-        assert [f.description for f in result.key_findings] == [
-            "Drone strikes on civilian sites: markets hit in Darfur and Kordofan in August.",
-            "Cholera: new hotspot in West Kordofan.",
-            "Access: rains block roads.",
-        ]
-        assert [f.source_report_ids for f in result.key_findings] == [["r-b"], ["r-c", "r-a"], []]
+        result, _, _ = _summary([_AISummaryLLM(text="Conflict is spreading east. [R1]", key_findings=FOUR_CITED)])
+        assert result.key_findings[0].description == (
+            "Drone strikes on civilian sites: markets hit in Darfur and Kordofan in August."
+        )
+        assert [f.source_report_ids for f in result.key_findings][:2] == [["r-b"], ["r-c", "r-a"]]
         # The summary's sentence citations and the findings' share one map.
         assert "Conflict is spreading east." in result.contributing_sources["r-a"]
         assert "Cholera: new hotspot in West Kordofan." in result.contributing_sources["r-a"]
 
-    def test_prompt_asks_for_scope_level_patterns(self):
-        with patch(
-            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
-            return_value=_fake_rag_context(hits=1),
-        ):
-            llm = MagicMock()
-            llm.complete_structured.return_value = _AISummaryLLM(text="x.")
-            generate_ai_summary(llm, country_name="Sudan", period_label="2026", aggregated=None, cache_key="k")
-        user = llm.complete_structured.call_args.kwargs["user"]
-        assert "key findings" in user
-        assert "patterns at the level of the analysed area" in user
+    def test_uncited_findings_are_dropped(self):
+        result, _, _ = _summary([_AISummaryLLM(
+            text="x. [R1]",
+            key_findings=[*FOUR_CITED, "Health: 224 facilities damaged since 2023."],
+        )])
+        assert "Health: 224 facilities damaged since 2023." not in [f.description for f in result.key_findings]
+        assert all(f.source_report_ids for f in result.key_findings)
+        assert all(
+            "Health: 224 facilities damaged since 2023." not in lines
+            for lines in result.contributing_sources.values()
+        )
 
-    def test_leads_with_a_recent_frame_search(self):
-        with patch(
-            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
-            return_value=_fake_rag_context(hits=1),
-        ) as fetch:
-            llm = MagicMock()
-            llm.complete_structured.return_value = _AISummaryLLM(text="x.")
-            generate_ai_summary(
-                llm, country_name="Sudan", period_label="2026", aggregated=None,
-                cache_key="k", rag_filters={"countryLocationId": "sdn"},
-            )
-        recent, broad = fetch.call_args_list
+    def test_retries_once_when_too_long_or_undercited_then_trims(self):
+        long_text = " ".join(f"Sentence number {i} has quite a few words in it for length. [R1]" for i in range(8))
+        result, llm, _ = _summary([
+            _AISummaryLLM(text=long_text, key_findings=FOUR_CITED[:1]),
+            _AISummaryLLM(text=long_text, key_findings=FOUR_CITED),
+        ])
+        assert llm.complete_structured.call_count == 2
+        retry_prompt = llm.complete_structured.call_args_list[1].kwargs["user"]
+        assert "PREVIOUS ANSWER HAD THESE PROBLEMS" in retry_prompt
+        assert "words" in retry_prompt and "citation" in retry_prompt
+        # Still too long after the retry: cut to the first three sentences.
+        assert result.text.count("Sentence number") == 3
+        assert len(result.key_findings) == 4
+
+    def test_retries_when_findings_are_too_long(self):
+        wordy = "Displacement: " + " ".join(["word"] * 40) + ". [R1]"
+        _, llm, _ = _summary([
+            _AISummaryLLM(text="x. [R1]", key_findings=[*FOUR_CITED, wordy]),
+            _AISummaryLLM(text="x. [R1]", key_findings=FOUR_CITED),
+        ])
+        assert llm.complete_structured.call_count == 2
+        assert "exceed 35 words" in llm.complete_structured.call_args_list[1].kwargs["user"]
+
+    def test_evidence_is_recent_frame_band_then_themed_searches(self):
+        _, llm, fetch = _summary(
+            [_AISummaryLLM(text="x. [R1]", key_findings=FOUR_CITED)],
+            rag_filters={"countryLocationId": "sdn"},
+            aggregated={"data": {"health_facilities_damaged": {"value": 224}}},
+        )
+        recent, *themed = fetch.call_args_list
         assert recent.kwargs["mode"] == "FRAME"
         assert recent.kwargs["query"] == ""
         assert recent.kwargs["filters"]["countryLocationId"] == "sdn"
         assert set(recent.kwargs["filters"]["timeRange"]) == {"from", "to"}
-        assert broad.kwargs["filters"] == {"countryLocationId": "sdn"}
-        assert "mode" not in broad.kwargs
-        user = llm.complete_structured.call_args.kwargs["user"]
-        assert "last 30 days" in user
-        assert "cumulative multi-year totals" in user
+        assert len(themed) == 5
+        assert all(c.kwargs["filters"] == {"countryLocationId": "sdn"} for c in themed)
+        assert all("mode" not in c.kwargs for c in themed)
+        call = llm.complete_structured.call_args.kwargs
+        assert "last 30 days" in call["user"]
+        assert "cumulative multi-year totals" in call["user"]
+        assert "patterns at the level of the analysed area" in call["user"]
+        # The aggregated figures never reach the summary prompt.
+        assert "health_facilities_damaged" not in call["system"]
 
     def test_llm_error_returns_empty_component(self):
         # A failed narrative call shouldn't drop the whole analysis —
