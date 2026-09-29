@@ -1,23 +1,38 @@
-"""Per-message failure counters shared by the ground drains (`stages.py`,
+"""Per-message failure handling shared by the ground drains (`stages.py`,
 `transcribe.py`).
 
-clear-api has no failure status on `ground_messages`, so a message that
-keeps failing stays in its drain's queue. These counters are what stop the
-drain from paying for it again: once a message reaches `max_attempts` it is
-*parked*, and the drain skips it before making any LLM/S3/Whisper call.
+Redis counts a message's failed attempts toward `max_attempts`. Once
+they're used up, the drain gives up on it (`give_up`): it marks the message
+failed in clear-api (`markGroundMessagesFailed`), which durably takes it
+out of the drain's queue and shows the failure in the review inbox, where a
+reviewer can retry it. The counter is then cleared, so a retried message
+starts with a fresh set of attempts.
 
-A parked message stays parked until its counter expires (`ATTEMPTS_TTL`),
-then gets a fresh set of attempts. The TTL is set only when the counter is
-created, so repeated failures don't keep pushing the expiry back.
+*Parking* is only the fallback for when that mark call itself fails: the
+counter is left at `max_attempts` and the drain skips the message before
+any paid call (`parked_ids`) until the counter expires. After that it gets
+another set of attempts, and the mark is tried again when they run out.
 """
+
+import logging
 
 import redis
 
+from clear_pipeline.providers.clear_api import mark_ground_messages_failed
+
+logger = logging.getLogger(__name__)
+
+# Counter lifetime: how long a fallback-parked message is skipped, and how
+# long a counter lingers for a message that failed a few times and then
+# succeeded. Set only when the counter is created, so repeated failures
+# don't keep pushing the expiry back.
 ATTEMPTS_TTL_SECONDS = 7 * 86400
 
 
 def parked_ids(r: redis.Redis, keys_by_id: dict[str, str], max_attempts: int) -> set[str]:
-    """Ids whose counter has reached `max_attempts`. One MGET per page."""
+    """Ids whose counter has reached `max_attempts` — messages parked
+    because marking them failed in clear-api didn't work. One MGET per
+    page."""
     if not keys_by_id:
         return set()
     ids = list(keys_by_id)
@@ -33,6 +48,34 @@ def record_failure(r: redis.Redis, key: str) -> int:
     return attempts
 
 
-def park(r: redis.Redis, key: str, max_attempts: int) -> None:
-    """Park a message that can never succeed (no retry would help)."""
-    r.set(key, max_attempts, ex=ATTEMPTS_TTL_SECONDS)
+def error_text(exc: BaseException) -> str:
+    """What a reviewer sees as the failure reason (clear-api truncates it)."""
+    return f"{type(exc).__name__}: {exc}"
+
+
+def give_up(
+    r: redis.Redis,
+    key: str,
+    *,
+    message_id: str,
+    stage: str,
+    error: str,
+    max_attempts: int,
+) -> bool:
+    """Mark a message failed for `stage` ("ENRICH" | "TRANSCRIBE") in
+    clear-api and clear its counter. Returns True once marked.
+
+    Never raises: if the mark call fails, logs it and parks the message in
+    Redis instead (returns False), so one bad message can't crash the
+    drain."""
+    try:
+        mark_ground_messages_failed([{"messageId": message_id, "stage": stage, "error": error}])
+    except Exception:  # noqa: BLE001 — parking is the fallback
+        logger.exception(
+            "[ground] couldn't mark message %s failed (%s) in clear-api — parking it in Redis",
+            message_id, stage,
+        )
+        r.set(key, max_attempts, ex=ATTEMPTS_TTL_SECONDS)
+        return False
+    r.delete(key)
+    return True

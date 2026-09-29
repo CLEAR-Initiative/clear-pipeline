@@ -3,11 +3,11 @@
 Modeled on `defs/signals/stages.py`'s `classify_group` drain
 (`_drain_signals_locked` / `_process_one_signal`): single-flight Redis lock,
 a per-run attempt cap (cost guardrail), and per-item exception isolation
-with a Redis attempt counter. clear-api has no failure status on
-ground_messages, so a message that exhausts its attempts stays in the
-queue; it is *parked* (skipped before any LLM call) rather than removed —
-see `attempts.py`. One difference: there's no batch-and-requery loop here —
-see the `_FETCH_LIMIT` comment below for why.
+with a Redis attempt counter. A message that exhausts its attempts is
+marked failed in clear-api (`enrichFailedAt`), which drops it out of the
+queue until a reviewer retries it — see `attempts.py`. One difference:
+there's no batch-and-requery loop here — see the `_FETCH_LIMIT` comment
+below for why.
 
 No `from __future__ import annotations` — Dagster inspects the `context`
 annotation on assets (same reason `defs/signals/stages.py` omits it).
@@ -18,7 +18,7 @@ import logging
 import dagster as dg
 import redis
 
-from clear_pipeline.defs.ground.attempts import park, parked_ids, record_failure
+from clear_pipeline.defs.ground.attempts import error_text, give_up, parked_ids, record_failure
 from clear_pipeline.defs.ground.prompts import (
     HOTLINE_ENRICH_PROMPT_VERSION,
     HOTLINE_ENRICH_SYSTEM_PROMPT,
@@ -59,9 +59,10 @@ _FETCH_LIMIT = 2000
 # so a failure storm is bounded the same as a success run.
 _MAX_ATTEMPTED_PER_RUN = 200
 # Bound per-message retries so a transient failure (LLM/clear-api blip) is
-# retried, but a persistently-bad message is parked instead of re-billed
-# every tick (see attempts.py).
+# retried, but a persistently-bad message is marked failed instead of
+# re-billed every tick (see attempts.py).
 _MAX_MESSAGE_ATTEMPTS = 5
+_STAGE = "ENRICH"  # GroundPipelineStage for markGroundMessagesFailed
 _LLM_MAX_TOKENS = 400  # short structured output — headline + a few enum fields
 
 _HOTLINE_SOURCE_KIND = "hotline"
@@ -139,7 +140,7 @@ def _geoparse_one_message(text: str) -> str | None:
 # Per-message drain outcomes.
 _PROCESSED = "processed"  # enriched + wrote draft + classification → done
 _REQUEUE = "requeue"      # transient (lock contention / retryable failure) → retry next run
-_DROP_FAILED = "drop_failed"  # permanently bad (no threadId, or exhausted retries) → parked
+_DROP_FAILED = "drop_failed"  # permanently bad (no threadId, or exhausted retries) → marked failed
 
 
 def _process_one_message(llm: LLMProvider, msg: dict) -> str:
@@ -206,6 +207,9 @@ def _drain_hotline_enrich_locked(context) -> dg.MaterializeResult:
         # `hasVoice` (not `voiceMediaKeys`) because it's set when the row
         # is created, before the media lands. ground_transcribe
         # (transcribe.py) drains it first; the next tick picks it up here.
+        # A voice note whose transcription was marked failed isn't in the
+        # page at all — the server leaves it out of the enrichment queue
+        # (so it can't sit here forever) until a reviewer retries it.
         pending = [
             m for m in page if not (m.get("hasVoice") and m.get("transcript") is None)
         ]
@@ -230,11 +234,15 @@ def _drain_hotline_enrich_locked(context) -> dg.MaterializeResult:
                 outcome = _process_one_message(llm, msg)
             except TRANSIENT_LLM_ERRORS:
                 outcome = _REQUEUE
-            except Exception:  # noqa: BLE001 — isolate one message's failure
+            except Exception as exc:  # noqa: BLE001 — isolate one message's failure
                 attempts = record_failure(_redis, _attempts_key(mid))
                 if attempts >= _MAX_MESSAGE_ATTEMPTS:
                     context.log.exception(
-                        "[ground:enrich] message %s failed %d× — parking it", mid, attempts,
+                        "[ground:enrich] message %s failed %d× — marking it failed", mid, attempts,
+                    )
+                    give_up(
+                        _redis, _attempts_key(mid), message_id=mid, stage=_STAGE,
+                        error=error_text(exc), max_attempts=_MAX_MESSAGE_ATTEMPTS,
                     )
                     outcome = _DROP_FAILED
                 else:
@@ -246,15 +254,18 @@ def _drain_hotline_enrich_locked(context) -> dg.MaterializeResult:
             else:
                 if outcome == _DROP_FAILED:
                     # Deterministic (no threadId) — no retry will help.
-                    park(_redis, _attempts_key(mid), _MAX_MESSAGE_ATTEMPTS)
+                    give_up(
+                        _redis, _attempts_key(mid), message_id=mid, stage=_STAGE,
+                        error="message has no threadId", max_attempts=_MAX_MESSAGE_ATTEMPTS,
+                    )
 
             if outcome == _PROCESSED:
                 processed += 1
             elif outcome == _DROP_FAILED:
-                # Still classification NULL in clear-api (no status column
-                # on groundMessages), so it stays in the page — the parked
-                # counter is what keeps later runs from paying for it again.
-                # An operator has to intervene.
+                # Marked failed in clear-api, so later runs don't see it —
+                # or, if the mark call failed, parked in Redis (`parked`
+                # counts those on later runs, so a non-zero `parked` means
+                # marking is broken and an operator should look).
                 failed += 1
             else:
                 requeued += 1

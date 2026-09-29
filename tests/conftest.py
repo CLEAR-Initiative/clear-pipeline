@@ -24,6 +24,11 @@ class FakeRedis:
         if ex is not None:
             self.ttls[key] = ex
 
+    def delete(self, *keys):
+        for key in keys:
+            self.store.pop(key, None)
+            self.ttls.pop(key, None)
+
 
 @pytest.fixture
 def fake_redis():

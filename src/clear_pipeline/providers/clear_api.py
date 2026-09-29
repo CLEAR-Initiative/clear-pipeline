@@ -2316,6 +2316,27 @@ def upsert_ground_message_transcripts(inputs: list[dict]) -> int:
     return result.get("upsertGroundMessageTranscripts") or 0
 
 
+MARK_GROUND_MESSAGES_FAILED = """
+mutation MarkGroundMessagesFailed($inputs: [GroundMessageFailureInput!]!) {
+  markGroundMessagesFailed(inputs: $inputs)
+}
+"""
+
+
+def mark_ground_messages_failed(inputs: list[dict]) -> int:
+    """Durably mark messages a ground drain has given up on. Each input row
+    shapes as {messageId, stage, error} — stage is "ENRICH" or
+    "TRANSCRIBE". A marked message drops out of that stage's queue in
+    `ground_messages_for_classification` until a reviewer retries it; the
+    server stores `error` truncated and phone-redacted, and leaves a
+    message whose stage already succeeded unmarked. Returns the number of
+    messages marked."""
+    if not inputs:
+        return 0
+    result = _execute(MARK_GROUND_MESSAGES_FAILED, {"inputs": inputs})
+    return result.get("markGroundMessagesFailed") or 0
+
+
 def upsert_translations(
     entity_type: str,
     entity_id: str,

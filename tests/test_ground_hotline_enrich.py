@@ -24,6 +24,14 @@ def _patch_redis(fake_redis):
         yield
 
 
+@pytest.fixture(autouse=True)
+def mark_failed():
+    """clear-api's markGroundMessagesFailed, stubbed for every test so a
+    give-up never reaches the network."""
+    with patch.object(attempts, "mark_ground_messages_failed", return_value=1) as mark:
+        yield mark
+
+
 def _drain_patches(rows, **process_kwargs):
     """The patches every drain-loop test needs: one active source whose
     unclassified page is `rows`, and a stubbed `_process_one_message`."""
@@ -94,7 +102,11 @@ def test_drain_no_active_sources_returns_zero_counts():
 def test_drain_asks_the_server_for_unclassified_messages_only():
     # The unfiltered query returns the source's oldest 2000 messages; once
     # those are all classified, message #2001 would never be seen. The
-    # filter has to be server-side for the window to advance.
+    # filter has to be server-side for the window to advance. It's also
+    # what keeps marked-failed messages (enrichFailedAt, or a voice note's
+    # transcribeFailedAt) away from _process_one_message: the server drops
+    # them from the unclassifiedOnly queue, and the drain has no other
+    # filter for them.
     with (
         patch.object(stages, "pipeline_ground_source_ids", return_value=["gs1"]),
         patch.object(stages, "make_llm_provider", return_value=MagicMock()),
@@ -131,7 +143,8 @@ def test_drain_transient_error_requeues_without_consuming_attempts(fake_redis):
     assert fake_redis.store == {}
 
 
-def test_drain_generic_failure_requeues_then_parks_after_max_attempts(fake_redis):
+def _fail_until_exhausted(fake_redis):
+    """Run the drain until message "bad" has used its last attempt."""
     key = "ground:attempts:bad"
     for attempt in range(1, stages._MAX_MESSAGE_ATTEMPTS):
         p = _drain_patches([message("bad")], side_effect=RuntimeError("boom"))
@@ -142,8 +155,36 @@ def test_drain_generic_failure_requeues_then_parks_after_max_attempts(fake_redis
 
     p = _drain_patches([message("bad")], side_effect=RuntimeError("boom"))
     with p[0], p[1], p[2], p[3]:
-        result = _run()
+        return _run()
+
+
+def test_drain_requeues_then_marks_failed_after_max_attempts(fake_redis, mark_failed):
+    result = _fail_until_exhausted(fake_redis)
+
     assert result.metadata == {"processed": 0, "requeued": 0, "failed": 1, "parked": 0}
+    mark_failed.assert_called_once_with(
+        [{"messageId": "bad", "stage": "ENRICH", "error": "RuntimeError: boom"}]
+    )
+    # Counter reset, so a reviewer's retry gets a fresh set of attempts
+    # instead of being skipped as parked.
+    assert "ground:attempts:bad" not in fake_redis.store
+
+
+def test_drain_parks_in_redis_when_marking_fails(fake_redis, mark_failed):
+    mark_failed.side_effect = RuntimeError("clear-api down")
+    result = _fail_until_exhausted(fake_redis)  # must not raise
+
+    assert result.metadata["failed"] == 1
+    assert fake_redis.store["ground:attempts:bad"] == stages._MAX_MESSAGE_ATTEMPTS
+    assert fake_redis.ttls["ground:attempts:bad"] == attempts.ATTEMPTS_TTL_SECONDS
+
+    # Still unclassified and unmarked on the server, so the next page
+    # returns it — the park keeps it from another paid call.
+    p = _drain_patches([message("bad")], return_value=stages._PROCESSED)
+    with p[0], p[1], p[2], p[3] as process:
+        result = _run()
+    assert result.metadata["parked"] == 1
+    process.assert_not_called()
 
 
 def test_drain_skips_a_parked_message_without_calling_it(fake_redis):
@@ -164,7 +205,19 @@ def test_drain_attempt_ttl_is_set_once_not_refreshed(fake_redis):
     expire.assert_called_once_with("ground:attempts:bad", attempts.ATTEMPTS_TTL_SECONDS)
 
 
-def test_drain_parks_a_message_with_no_thread_immediately(fake_redis):
+def test_drain_marks_a_message_with_no_thread_failed_immediately(fake_redis, mark_failed):
+    p = _drain_patches([message("orphan", thread_id=None)], return_value=stages._DROP_FAILED)
+    with p[0], p[1], p[2], p[3]:
+        result = _run()
+    assert result.metadata["failed"] == 1
+    mark_failed.assert_called_once_with(
+        [{"messageId": "orphan", "stage": "ENRICH", "error": "message has no threadId"}]
+    )
+    assert fake_redis.store == {}
+
+
+def test_drain_parks_a_message_with_no_thread_when_marking_fails(fake_redis, mark_failed):
+    mark_failed.side_effect = RuntimeError("clear-api down")
     p = _drain_patches([message("orphan", thread_id=None)], return_value=stages._DROP_FAILED)
     with p[0], p[1], p[2], p[3]:
         result = _run()
