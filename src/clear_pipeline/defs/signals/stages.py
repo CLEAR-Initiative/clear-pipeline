@@ -42,6 +42,7 @@ from clear_pipeline.providers.clear_api import (
     events_pending_alert,
     get_crisis_canonical,
     get_event_canonical,
+    get_analysis_canonical,
     get_location_canonical,
     get_situation_canonical,
     mark_signals_processed,
@@ -379,6 +380,7 @@ _CANONICAL_FETCH = {
     "crisis": get_crisis_canonical,
     "location": get_location_canonical,
     "situationAnalysis": get_situation_canonical,
+    "analysis": get_analysis_canonical,
 }
 
 
