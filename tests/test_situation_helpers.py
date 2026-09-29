@@ -27,6 +27,7 @@ from clear_pipeline.defs.situation.rag_helper import (
     _format_hits_for_prompt,
     _pages_range,
     fetch_rag_context,
+    merge_rag_contexts,
 )
 from clear_pipeline.defs.situation.schemas import Source
 
@@ -362,3 +363,33 @@ class TestFormatHitsForPrompt:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestMergeRagContexts:
+    @staticmethod
+    def _hit(hid, rid, text):
+        return {"id": hid, "reportId": rid, "reportTitle": rid, "publishedAt": "2026-09", "pageStart": 1, "pageEnd": 1, "chunkText": text}
+
+    def test_merges_in_order_dedupes_and_renumbers(self):
+        with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase") as search:
+            search.side_effect = [
+                [self._hit("h1", "event:e1", "recent incident"), self._hit("h2", "r-2", "recent report")],
+                [self._hit("h2", "r-2", "recent report"), self._hit("h3", "r-3", "background")],
+            ]
+            recent = fetch_rag_context(query="", mode="FRAME")
+            broad = fetch_rag_context(query="overview")
+        merged = merge_rag_contexts(recent, broad)
+        assert merged.hit_report_ids == ["event:e1", "r-2", "r-3"]
+        assert merged.hit_count == 3
+        # [Rn] numbering runs across the merged list, recent first.
+        assert merged.formatted_for_prompt.index("[R1] event:e1") < merged.formatted_for_prompt.index("[R3] r-3")
+        assert search.call_args_list[0].kwargs["mode"] == "FRAME"
+        assert "mode" not in search.call_args_list[1].kwargs
+
+    def test_empty_inputs_stay_empty(self):
+        assert merge_rag_contexts(fetch_rag_context_empty(), fetch_rag_context_empty()).is_empty
+
+
+def fetch_rag_context_empty():
+    with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase", return_value=[]):
+        return fetch_rag_context(query="x")

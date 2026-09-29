@@ -132,6 +132,28 @@ class TestGenerateAISummary:
         assert "key findings" in user
         assert "patterns at the level of the analysed area" in user
 
+    def test_leads_with_a_recent_frame_search(self):
+        with patch(
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
+            return_value=_fake_rag_context(hits=1),
+        ) as fetch:
+            llm = MagicMock()
+            llm.complete_structured.return_value = _AISummaryLLM(text="x.")
+            generate_ai_summary(
+                llm, country_name="Sudan", period_label="2026", aggregated=None,
+                cache_key="k", rag_filters={"countryLocationId": "sdn"},
+            )
+        recent, broad = fetch.call_args_list
+        assert recent.kwargs["mode"] == "FRAME"
+        assert recent.kwargs["query"] == ""
+        assert recent.kwargs["filters"]["countryLocationId"] == "sdn"
+        assert set(recent.kwargs["filters"]["timeRange"]) == {"from", "to"}
+        assert broad.kwargs["filters"] == {"countryLocationId": "sdn"}
+        assert "mode" not in broad.kwargs
+        user = llm.complete_structured.call_args.kwargs["user"]
+        assert "last 30 days" in user
+        assert "cumulative multi-year totals" in user
+
     def test_llm_error_returns_empty_component(self):
         # A failed narrative call shouldn't drop the whole analysis —
         # the caller (`generate_and_upsert_for_country_year`) still

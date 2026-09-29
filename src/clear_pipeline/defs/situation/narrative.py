@@ -28,6 +28,7 @@ empty default. One bad LLM call doesn't drop the other three.
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -40,6 +41,7 @@ from clear_pipeline.defs.situation.citations import (
 from clear_pipeline.defs.situation.rag_helper import (
     RAGContext,
     fetch_rag_context,
+    merge_rag_contexts,
 )
 from clear_pipeline.defs.situation.schemas import (
     AISummary,
@@ -76,11 +78,12 @@ class _AISummaryLLM(BaseModel):
     flash reports."""
     text: str = Field(
         description=(
-            "Executive summary: 3 or 4 sentences, one paragraph, prose only. "
-            "What is happening now, where it is concentrated, the main driver, "
-            "and whether the situation is worsening, stable or improving. Do "
-            "not restate the headline displaced, people-in-need or funding "
-            "figures; the dashboard shows them."
+            "Executive summary: 3 short sentences, at most 70 words, one "
+            "paragraph, prose only. What is happening now, where it is "
+            "concentrated, the main driver, and whether the situation is "
+            "worsening, stable or improving. Do not restate the headline "
+            "displaced, people-in-need or funding figures; the dashboard "
+            "shows them."
         ),
     )
     key_findings: list[str] = Field(
@@ -88,8 +91,8 @@ class _AISummaryLLM(BaseModel):
         description=(
             "4 to 6 key findings, most important first. Each item is "
             "'Subject: finding', where Subject is a 2–5 word label for the "
-            "pattern (e.g. 'Drone strikes on civilian sites'). One or two "
-            "sentences each, with places and dates as evidence."
+            "pattern (e.g. 'Drone strikes on civilian sites'). One sentence "
+            "each, at most 30 words, with places and dates as evidence."
         ),
     )
 
@@ -298,6 +301,18 @@ def _sourced_bullets(
 # Component 2 — AI Summary
 # ────────────────────────────────────────────────────────────────────
 
+# The window the summary leads with: developments this recent come first.
+RECENT_DAYS = 30
+
+
+def _recent_filters(rag_filters: dict[str, Any] | None, *, days: int) -> dict[str, Any]:
+    """The scope's retrieval filters narrowed to the last `days`."""
+    now = datetime.now(timezone.utc)
+    return {
+        **(rag_filters or {}),
+        "timeRange": {"from": (now - timedelta(days=days)).isoformat(), "to": now.isoformat()},
+    }
+
 
 def generate_ai_summary(
     llm: LLMProvider,
@@ -308,8 +323,17 @@ def generate_ai_summary(
     cache_key: str,
     rag_filters: dict[str, Any] | None = None,
 ) -> AISummary:
-    """2–4 paragraph narrative synthesis grounded in a broad RAG search."""
-    rag = fetch_rag_context(
+    """Executive summary + key findings. Grounded in two searches merged into
+    one evidence list: the scope's last `RECENT_DAYS` in FRAME mode first (a
+    recency-ordered report band plus a guaranteed incident band, ADR-0006),
+    then the broad topical overview for background."""
+    recent = fetch_rag_context(
+        query="",
+        limit=12,
+        filters=_recent_filters(rag_filters, days=RECENT_DAYS),
+        mode="FRAME",
+    )
+    broad = fetch_rag_context(
         query=(
             f"humanitarian situation overview {country_name} {period_label} "
             "conflict displacement needs response funding"
@@ -317,6 +341,7 @@ def generate_ai_summary(
         limit=12,
         filters=rag_filters,
     )
+    rag = merge_rag_contexts(recent, broad)
     if rag.is_empty:
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
         return AISummary()
@@ -324,14 +349,16 @@ def generate_ai_summary(
     system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
         f"Produce the AI Summary component for {country_name}, {period_label}. "
-        "Write an executive summary of 3 or 4 sentences and 4 to 6 key "
+        "Write an executive summary of 3 short sentences and 4 to 6 key "
         "findings, as in an NRC flash report. A program manager should read "
         "it in under a minute. No filler, no restating the task.\n"
         "Describe patterns at the level of the analysed area and name places "
         "only as evidence: for a country, group incidents across regions "
         "(e.g. 'drone strikes on markets across Darfur and Kordofan'); for a "
-        "district or locality, single dated incidents are fine. Prefer the "
-        "most recent developments, and give dates.\n"
+        "district or locality, single dated incidents are fine.\n"
+        f"Lead with developments from the last {RECENT_DAYS} days and give "
+        "dates. Use older evidence only as background. Do not present "
+        "cumulative multi-year totals (e.g. counts since 2023) as findings.\n"
         "\n"
         "RETRIEVED EVIDENCE:\n"
         f"{rag.formatted_for_prompt}"

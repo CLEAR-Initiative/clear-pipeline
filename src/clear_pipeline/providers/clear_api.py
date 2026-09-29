@@ -269,8 +269,9 @@ query SearchKnowledgebaseForSituation(
   $query: String!,
   $filters: KnowledgebaseFilters,
   $limit: Int,
+  $mode: KnowledgebaseSearchMode,
 ) {
-  searchKnowledgebase(query: $query, filters: $filters, limit: $limit) {
+  searchKnowledgebase(query: $query, filters: $filters, limit: $limit, mode: $mode) {
     id
     reportId
     reportTitle
@@ -814,8 +815,13 @@ def search_knowledgebase(
     query: str,
     filters: dict[str, Any] | None = None,
     limit: int = 10,
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid dense + BM25 retrieval over the knowledgebase.
+
+    ``mode`` selects clear-api's report/incident merge (ADR-0006): None lets
+    the API decide (AUTO), ``"FRAME"`` returns a recency-ordered report band
+    plus a guaranteed incident band for a location/time frame.
 
     Returns a list of hits ordered by RRF score, each carrying its
     source report metadata + page range so the narrative generator
@@ -829,7 +835,7 @@ def search_knowledgebase(
     """
     data = _execute(
         _SEARCH_KNOWLEDGEBASE,
-        {"query": query, "filters": filters, "limit": limit},
+        {"query": query, "filters": filters, "limit": limit, "mode": mode},
     )
     return data.get("searchKnowledgebase") or []
 
