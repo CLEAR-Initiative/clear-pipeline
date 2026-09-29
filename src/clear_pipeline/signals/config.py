@@ -111,6 +111,16 @@ class Settings(BaseSettings):
     # overrides + the v1/Claude path were removed in the Dagster port.
     anthropic_api_key: str = ""
 
+    # Speech-to-text (OpenAI Whisper) — hotline voice-note transcription
+    # (defs/ground/transcribe.py). Dedicated provider, not one of the
+    # LLM_<ROLE>_* roles: Whisper's API is audio-in/text-out, not a chat
+    # completion, so providers/llm.py's abstraction doesn't fit.
+    stt_api_key: str = ""
+    stt_model: str = "whisper-1"
+    # Empty uses the OpenAI SDK default (https://api.openai.com/v1). Set to
+    # point at an OpenAI-compatible Whisper endpoint instead.
+    stt_base_url: str = ""
+
     # Translation — comma-separated BCP-47 codes. 'en' is the canonical source and
     # is never a target. Empty string disables translation entirely. Default on.
     target_locales: str = "ar,fr"
@@ -244,6 +254,10 @@ class Settings(BaseSettings):
     # cross-country mis-resolution is still caught downstream by clear-api's
     # same-A2 check against the signal's source coordinates.
     geoparser_country_codes: str = "sd,ve,af"
+    # Country scope for geoparsing hotline messages (defs/ground/stages.py).
+    # Hotline messages carry no coordinates, so unlike signals the country
+    # can't be inferred per message. Comma-separated ISO-3166-1 alpha-2.
+    ground_hotline_country_codes: str = "sd"
     # Hybrid geo-resolver: try the offline GeoNames gazetteer in clear-api
     # (`resolveGazetteerLocation`) before LocationIQ. Transliteration-tolerant
     # and quota-free; LocationIQ then only handles the landmarks/POIs the
