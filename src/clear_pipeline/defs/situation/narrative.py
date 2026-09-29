@@ -72,13 +72,24 @@ logger = logging.getLogger(__name__)
 
 
 class _AISummaryLLM(BaseModel):
-    """2–4 paragraph narrative synthesis. Prose only, no bullets."""
+    """Executive summary + key findings, in the shape of NRC's incident and
+    flash reports."""
     text: str = Field(
         description=(
-            "Two or three tight paragraphs on the country's humanitarian "
-            "situation for the target year. Open with the headline figures, "
-            "then drivers, then outlook. Prose only, no bullet lists or "
-            "section headings. Concise: cut filler, do not restate the task."
+            "Executive summary: 3 or 4 sentences, one paragraph, prose only. "
+            "What is happening now, where it is concentrated, the main driver, "
+            "and whether the situation is worsening, stable or improving. Do "
+            "not restate the headline displaced, people-in-need or funding "
+            "figures; the dashboard shows them."
+        ),
+    )
+    key_findings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "4 to 6 key findings, most important first. Each item is "
+            "'Subject: finding', where Subject is a 2–5 word label for the "
+            "pattern (e.g. 'Drone strikes on civilian sites'). One or two "
+            "sentences each, with places and dates as evidence."
         ),
     )
 
@@ -313,9 +324,14 @@ def generate_ai_summary(
     system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
     user = (
         f"Produce the AI Summary component for {country_name}, {period_label}. "
-        "Two or three tight paragraphs. Lead with the headline figures, "
-        "then drivers, then outlook. A program manager should read it in "
-        "under a minute. No filler, no restating the task.\n"
+        "Write an executive summary of 3 or 4 sentences and 4 to 6 key "
+        "findings, as in an NRC flash report. A program manager should read "
+        "it in under a minute. No filler, no restating the task.\n"
+        "Describe patterns at the level of the analysed area and name places "
+        "only as evidence: for a country, group incidents across regions "
+        "(e.g. 'drone strikes on markets across Darfur and Kordofan'); for a "
+        "district or locality, single dated incidents are fine. Prefer the "
+        "most recent developments, and give dates.\n"
         "\n"
         "RETRIEVED EVIDENCE:\n"
         f"{rag.formatted_for_prompt}"
@@ -329,8 +345,11 @@ def generate_ai_summary(
         logger.exception("[situation:ai_summary] LLM call failed — returning empty component")
         return AISummary()
     clean_text, contributing = resolve_prose(result.text, rag.hit_report_ids)
+    findings, findings_contributing = _sourced_bullets(result.key_findings, rag)
+    contributing = merge_contributing(contributing, findings_contributing)
     return AISummary(
         text=clean_text,
+        key_findings=findings,
         source_report_ids=list(contributing) or rag.contributing_report_ids,
         contributing_sources=contributing,
     )

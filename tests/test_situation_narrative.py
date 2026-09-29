@@ -90,6 +90,48 @@ class TestGenerateAISummary:
         assert result.source_report_ids == ["r-a", "r-b", "r-c"]
         llm.complete_structured.assert_called_once()
 
+    def test_key_findings_carry_their_own_sources(self):
+        # Findings are resolved per item (not sentence-split like the prose),
+        # so each keeps its own [Rn] sources and the "Subject:" label.
+        with patch(
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
+            return_value=_fake_rag_context(hits=3, report_ids=["r-a", "r-b", "r-c"]),
+        ):
+            llm = MagicMock()
+            llm.complete_structured.return_value = _AISummaryLLM(
+                text="Conflict is spreading east. [R1]",
+                key_findings=[
+                    "Drone strikes on civilian sites: markets hit in Darfur and Kordofan in August. [R2]",
+                    "Cholera: new hotspot in West Kordofan. [R3][R1]",
+                    "Access: rains block roads.",
+                ],
+            )
+            result = generate_ai_summary(
+                llm, country_name="Sudan", period_label="2026",
+                aggregated=None, cache_key="k",
+            )
+        assert [f.description for f in result.key_findings] == [
+            "Drone strikes on civilian sites: markets hit in Darfur and Kordofan in August.",
+            "Cholera: new hotspot in West Kordofan.",
+            "Access: rains block roads.",
+        ]
+        assert [f.source_report_ids for f in result.key_findings] == [["r-b"], ["r-c", "r-a"], []]
+        # The summary's sentence citations and the findings' share one map.
+        assert "Conflict is spreading east." in result.contributing_sources["r-a"]
+        assert "Cholera: new hotspot in West Kordofan." in result.contributing_sources["r-a"]
+
+    def test_prompt_asks_for_scope_level_patterns(self):
+        with patch(
+            "clear_pipeline.defs.situation.narrative.fetch_rag_context",
+            return_value=_fake_rag_context(hits=1),
+        ):
+            llm = MagicMock()
+            llm.complete_structured.return_value = _AISummaryLLM(text="x.")
+            generate_ai_summary(llm, country_name="Sudan", period_label="2026", aggregated=None, cache_key="k")
+        user = llm.complete_structured.call_args.kwargs["user"]
+        assert "key findings" in user
+        assert "patterns at the level of the analysed area" in user
+
     def test_llm_error_returns_empty_component(self):
         # A failed narrative call shouldn't drop the whole analysis —
         # the caller (`generate_and_upsert_for_country_year`) still

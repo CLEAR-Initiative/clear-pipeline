@@ -52,7 +52,10 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
     data = data or {}
 
     ai = data.get("ai_summary") or {}
-    ai_summary = {"text": ai.get("text", "")}
+    ai_summary = {
+        "text": ai.get("text", ""),
+        "key_findings": _bullet_descriptions(ai.get("key_findings")),
+    }
 
     context_risks = {
         domain: {"bullets": (block or {}).get("bullets", []) or []}
