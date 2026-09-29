@@ -427,6 +427,18 @@ class TestRecentWindow:
         )
         assert f["timeRange"] == {"from": "2026-03-01T23:59:59+00:00", "to": "2026-03-31T23:59:59+00:00"}
 
+    def test_window_ending_in_the_future_ends_now(self):
+        from datetime import datetime, timezone
+
+        from clear_pipeline.defs.situation.narrative import _recent_filters
+
+        year = datetime.now(timezone.utc).year
+        f = _recent_filters(
+            {"timeRange": {"from": f"{year}-01-01T00:00:00Z", "to": f"{year + 1}-12-31T23:59:59Z"}}, days=30,
+        )
+        end = datetime.fromisoformat(f["timeRange"]["to"])
+        assert abs((datetime.now(timezone.utc) - end).total_seconds()) < 60
+
     def test_short_window_clamps_to_its_start(self):
         from clear_pipeline.defs.situation.narrative import _recent_filters
 

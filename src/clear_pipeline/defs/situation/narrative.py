@@ -339,9 +339,11 @@ def _parse_iso(value: Any) -> datetime | None:
 def _recent_window(rag_filters: dict[str, Any] | None, *, days: int) -> tuple[datetime, datetime]:
     """The last `days` of the ANALYSIS window, not of today: ends at the
     frame's `timeRange.to` (a fixed past window stays in its period) or now
-    when the frame is open-ended, and never starts before `timeRange.from`."""
+    when the frame is open-ended or ends in the future (a calendar-year frame
+    runs to 31 Dec), and never starts before `timeRange.from`."""
     window = (rag_filters or {}).get("timeRange") or {}
-    end = _parse_iso(window.get("to")) or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    end = min(_parse_iso(window.get("to")) or now, now)
     start = end - timedelta(days=days)
     window_start = _parse_iso(window.get("from"))
     if window_start and window_start > start:
