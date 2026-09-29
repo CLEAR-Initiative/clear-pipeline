@@ -12,13 +12,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clear_pipeline.defs.ground import transcribe
+from clear_pipeline.defs.ground import attempts, transcribe
 
 
 @pytest.fixture(autouse=True)
 def _patch_redis(fake_redis):
     with patch.object(transcribe, "_redis", fake_redis):
         yield
+
+
+@pytest.fixture(autouse=True)
+def mark_failed():
+    """clear-api's markGroundMessagesFailed, stubbed for every test so a
+    give-up never reaches the network."""
+    with patch.object(attempts, "mark_ground_messages_failed", return_value=1) as mark:
+        yield mark
 
 
 def _drain_patches(rows, **process_kwargs):
@@ -80,7 +88,10 @@ def test_drain_no_active_sources_returns_zero_counts():
 
 def test_drain_asks_the_server_for_voice_notes_awaiting_transcript():
     # Filtering client-side over the source's oldest 2000 messages stalls
-    # once those are done — the filter has to be server-side.
+    # once those are done — the filter has to be server-side. It also keeps
+    # marked-failed voice notes (transcribeFailedAt) away from
+    # _process_one_message: the server drops them from the
+    # awaitingTranscript queue, and the drain has no other filter for them.
     with (
         patch.object(transcribe, "pipeline_ground_source_ids", return_value=["gs1"]),
         patch.object(transcribe, "ground_messages_for_classification", return_value=[]) as fetch,
@@ -109,30 +120,64 @@ def test_drain_transient_error_requeues_without_consuming_attempts(fake_redis):
     assert fake_redis.store == {}
 
 
-def test_drain_generic_failure_requeues_then_parks_after_max_attempts(fake_redis):
-    key = "ground:transcribe:attempts:bad"
+_KEY = "ground:transcribe:attempts:bad"
+
+
+def _fail_until_exhausted(fake_redis):
+    """Run the drain until voice note "bad" has used its last attempt."""
     for attempt in range(1, transcribe._MAX_MESSAGE_ATTEMPTS):
-        p = _drain_patches([message("bad", voice_media_keys=["a.ogg"])], side_effect=RuntimeError("boom"))
+        p = _drain_patches([message("bad", voice_media_keys=["a.amr"])], side_effect=RuntimeError("boom"))
         with p[0], p[1], p[2]:
             result = _run()
         assert result.metadata["requeued"] == 1
-        assert fake_redis.store[key] == attempt
+        assert fake_redis.store[_KEY] == attempt
 
-    p = _drain_patches([message("bad", voice_media_keys=["a.ogg"])], side_effect=RuntimeError("boom"))
+    p = _drain_patches(
+        [message("bad", voice_media_keys=["a.amr"])], side_effect=RuntimeError("unsupported format: amr"),
+    )
     with p[0], p[1], p[2]:
-        result = _run()
+        return _run()
+
+
+def test_drain_requeues_then_marks_failed_after_max_attempts(fake_redis, mark_failed):
+    result = _fail_until_exhausted(fake_redis)
+
     assert result.metadata == {**_EMPTY, "failed": 1}
+    mark_failed.assert_called_once_with(
+        [{"messageId": "bad", "stage": "TRANSCRIBE", "error": "RuntimeError: unsupported format: amr"}]
+    )
+    assert _KEY not in fake_redis.store  # a reviewer's retry starts fresh
 
 
-def test_drain_skips_a_parked_message_without_calling_it(fake_redis):
+def test_drain_parks_in_redis_when_marking_fails(fake_redis, mark_failed):
+    mark_failed.side_effect = RuntimeError("clear-api down")
+    result = _fail_until_exhausted(fake_redis)  # must not raise
+
+    assert result.metadata == {**_EMPTY, "failed": 1}
+    assert fake_redis.store[_KEY] == transcribe._MAX_MESSAGE_ATTEMPTS
+
+    p = _drain_patches([message("bad", voice_media_keys=["a.amr"])], return_value=transcribe._PROCESSED)
+    with p[0], p[1], p[2] as process:
+        result = _run()
+    assert result.metadata == {**_EMPTY, "parked": 1}
+    process.assert_not_called()
+
+
+def test_drain_marks_a_parked_message_without_calling_it(fake_redis, mark_failed):
+    # Parked on an earlier run (mark call failed), or by the pre-marker
+    # stopgap: the mark is retried without another paid call.
     fake_redis.store["ground:transcribe:attempts:bad"] = transcribe._MAX_MESSAGE_ATTEMPTS
     rows = [message("bad", voice_media_keys=["a.amr"]), message("good", voice_media_keys=["b.ogg"])]
     p = _drain_patches(rows, return_value=transcribe._PROCESSED)
     with p[0], p[1], p[2] as process:
         result = _run()
 
-    assert result.metadata == {**_EMPTY, "processed": 1, "parked": 1}
+    assert result.metadata == {**_EMPTY, "processed": 1, "failed": 1}
     assert [call.args[0]["id"] for call in process.call_args_list] == ["good"]
+    mark_failed.assert_called_once_with(
+        [{"messageId": "bad", "stage": "TRANSCRIBE", "error": attempts.PARKED_ERROR}]
+    )
+    assert "ground:transcribe:attempts:bad" not in fake_redis.store
 
 
 def test_drain_stops_at_per_run_cap():

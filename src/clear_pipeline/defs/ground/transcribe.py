@@ -3,8 +3,8 @@ for the overview.
 
 Structurally identical to `defs/ground/stages.py`'s `ground_hotline_enrich`
 drain (single-flight Redis lock, per-run attempt cap, per-item exception
-isolation with a Redis attempt counter that parks a message once it's
-exhausted — see `attempts.py`) — a separate asset/sensor rather
+isolation with a Redis attempt counter; a message that exhausts it is
+marked failed in clear-api — see `attempts.py`) — a separate asset/sensor rather
 than folded into that one so a slow/expensive transcription doesn't block
 enrichment throughput for text-only messages on the same source.
 
@@ -18,7 +18,13 @@ import os
 import dagster as dg
 import redis
 
-from clear_pipeline.defs.ground.attempts import parked_ids, record_failure
+from clear_pipeline.defs.ground.attempts import (
+    error_text,
+    give_up,
+    mark_parked,
+    parked_ids,
+    record_failure,
+)
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ground_messages_for_classification,
@@ -50,6 +56,7 @@ _FETCH_LIMIT = 2000
 # text completion. Counts failures too, like stages.py.
 _MAX_ATTEMPTED_PER_RUN = 100
 _MAX_MESSAGE_ATTEMPTS = 5
+_STAGE = "TRANSCRIBE"  # GroundPipelineStage for markGroundMessagesFailed
 
 _HOTLINE_SOURCE_KIND = "hotline"
 
@@ -70,7 +77,7 @@ def _transcribe_one_message(msg: dict) -> str:
 # Per-message drain outcomes.
 _PROCESSED = "processed"  # transcribed + wrote transcript → done
 _REQUEUE = "requeue"      # transient (lock contention / retryable failure) → retry next run
-_DROP_FAILED = "drop_failed"  # permanently bad (exhausted retries) → parked
+_DROP_FAILED = "drop_failed"  # permanently bad (exhausted retries) → marked failed
 
 
 def _process_one_message(msg: dict) -> str:
@@ -110,6 +117,13 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
         skip = parked_ids(
             _redis, {m["id"]: _attempts_key(m["id"]) for m in page}, _MAX_MESSAGE_ATTEMPTS,
         )
+        # Parked = marking failed on an earlier run (or parked by the
+        # pre-marker stopgap). Retry the mark for all of them in one call —
+        # no paid call — so a park lasts only until clear-api accepts it.
+        # They're skipped this run either way (still in this page).
+        parked_marked = mark_parked(
+            _redis, {mid: _attempts_key(mid) for mid in skip}, stage=_STAGE,
+        )
 
         for msg in page:
             mid = msg["id"]
@@ -120,7 +134,10 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
                 not_ready += 1
                 continue
             if mid in skip:
-                parked += 1
+                if parked_marked:
+                    failed += 1  # marked failed just now
+                else:
+                    parked += 1
                 continue
             if attempted >= _MAX_ATTEMPTED_PER_RUN:
                 context.log.warning(
@@ -134,11 +151,15 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
                 outcome = _process_one_message(msg)
             except TRANSIENT_LLM_ERRORS:
                 outcome = _REQUEUE
-            except Exception:  # noqa: BLE001 — isolate one message's failure
+            except Exception as exc:  # noqa: BLE001 — isolate one message's failure
                 attempts = record_failure(_redis, _attempts_key(mid))
                 if attempts >= _MAX_MESSAGE_ATTEMPTS:
                     context.log.exception(
-                        "[ground:transcribe] message %s failed %d× — parking it", mid, attempts,
+                        "[ground:transcribe] message %s failed %d× — marking it failed", mid, attempts,
+                    )
+                    give_up(
+                        _redis, _attempts_key(mid), message_id=mid, stage=_STAGE,
+                        error=error_text(exc), max_attempts=_MAX_MESSAGE_ATTEMPTS,
                     )
                     outcome = _DROP_FAILED
                 else:
@@ -151,9 +172,10 @@ def _drain_ground_transcribe_locked(context) -> dg.MaterializeResult:
             if outcome == _PROCESSED:
                 processed += 1
             elif outcome == _DROP_FAILED:
-                # Same as ground_hotline_enrich: no status column, so it
-                # stays transcript NULL and parked. Enrichment keeps
-                # holding it out too. An operator has to intervene.
+                # Marked failed in clear-api (or parked, if that call
+                # failed — same as ground_hotline_enrich). The server also
+                # drops it from the enrichment queue, so the inbox shows it
+                # as "transcription failed" until a reviewer retries it.
                 failed += 1
             else:
                 requeued += 1
