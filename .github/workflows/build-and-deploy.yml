@@ -10,6 +10,17 @@ on:
     branches: [dev, staging]
   workflow_dispatch: # manual re-deploy without a code change
 
+# One deploy per branch at a time. Two merges in quick succession otherwise
+# run two deploys against the same VM at once; both recreate the Dagster
+# containers and both fail ("removal of container … is already in
+# progress"), as on 2026-09-30 with #78/#79. Queue rather than cancel: an
+# interrupted deploy leaves the containers half-recreated. GitHub keeps only
+# the newest pending run, which is the one worth deploying (`:dev` always
+# points at the latest image).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
