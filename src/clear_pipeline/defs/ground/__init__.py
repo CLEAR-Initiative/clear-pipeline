@@ -23,7 +23,11 @@ NULL` until labelled. Two independent drains consume that queue:
     slow/expensive transcription doesn't block classification throughput
     for text-only messages on the same source.
 
-Both mirror `defs/signals/stages.py`: a single-flight Redis lock, per-item
+`ground_hotline_backfill_drafts` (backfill.py) is a manual-only, one-off
+asset: it writes drafts for threads classified before the enrichment drain
+existed, which the drain (unclassified messages only) never revisits.
+
+Both drains mirror `defs/signals/stages.py`: a single-flight Redis lock, per-item
 failure isolation (a message that keeps failing is marked failed in
 clear-api — out of the queue, visible in the inbox, retryable — instead of
 re-billed every tick; see `attempts.py`), and a poll sensor (hotline messages arrive via a webhook,

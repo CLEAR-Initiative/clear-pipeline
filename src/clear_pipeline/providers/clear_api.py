@@ -2268,6 +2268,25 @@ def ground_threads_for_source(
     return result.get("groundThreadsForSource") or []
 
 
+GROUND_THREAD_DRAFTS_FOR_SOURCE = """
+query GroundThreadDraftsForSource($groundSourceId: String!) {
+  groundThreadsForSource(groundSourceId: $groundSourceId) {
+    id
+    reviewState
+    draftTitle
+  }
+}
+"""
+
+
+def ground_thread_drafts_for_source(ground_source_id: str) -> list[dict]:
+    """A source's threads with just enough to tell whether each has an
+    enrichment draft yet (`draftTitle` null = none). Used by the one-off
+    draft backfill (defs/ground/backfill.py)."""
+    result = _execute(GROUND_THREAD_DRAFTS_FOR_SOURCE, {"groundSourceId": ground_source_id})
+    return result.get("groundThreadsForSource") or []
+
+
 UPSERT_GROUND_THREADS = """
 mutation UpsertGroundThreads($inputs: [GroundThreadUpsertInput!]!) {
   upsertGroundThreads(inputs: $inputs)
