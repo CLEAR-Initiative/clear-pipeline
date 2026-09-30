@@ -168,6 +168,20 @@ _PREP_PATTERN = re.compile(
     rf"({_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,4}})",
 )
 
+# Relative / movement phrasing, as field reports put it:
+#   "the road out of Mukjar"        →  "Mukjar"
+#   "villages east of Um Dukhun"    →  "Um Dukhun"
+#   "families arriving from Kutum"  →  "Kutum"
+# Opt-in (`relative_phrases=True`): hotline text reads like this, while news
+# headlines rarely do, and "from"/"to" + a capitalised word is often not a
+# place in wire copy ("statement from UNICEF", "to Reuters"). The phrase is
+# matched case-insensitively; the name still has to be capitalised.
+_RELATIVE_PATTERN = re.compile(
+    r"\b((?i:(?:north|south|east|west)(?:[- ]?(?:east|west))?\s+of|out\s+of|"
+    r"from|towards?|into|to))\s+"
+    rf"({_NAME_TOKEN}(?:\s+{_NAME_TOKEN}){{0,4}})",
+)
+
 # Comma-separated hierarchical patterns:
 #   "Al Fasher, North Darfur, Sudan"  →  emits "Al Fasher" (deepest part)
 #   "al-Obeid, Sudan"                 →  emits "al-Obeid"
@@ -214,8 +228,14 @@ def _is_stopword(name: str) -> bool:
     return name.lower().strip() in STOPWORDS
 
 
-def _extract_from_text(text: str, field: Literal["title", "body"]) -> list[Candidate]:
-    """Run both extraction patterns over `text` and return surviving candidates.
+def _extract_from_text(
+    text: str,
+    field: Literal["title", "body"],
+    *,
+    relative_phrases: bool = False,
+) -> list[Candidate]:
+    """Run the extraction patterns over `text` and return surviving candidates.
+    `relative_phrases` adds `_RELATIVE_PATTERN` (hotline text; see there).
 
     Stopwords are filtered here so they never enter the ranking stage.
     Duplicates (same lowercase name in same field) are deduplicated, keeping
@@ -238,6 +258,19 @@ def _extract_from_text(text: str, field: Literal["title", "body"]) -> list[Candi
             position=match.start(2),
             extraction_reason=f"after_{prep}",
         ))
+
+    # Pass 1b (opt-in): relative / movement phrasing
+    if relative_phrases:
+        for match in _RELATIVE_PATTERN.finditer(text):
+            name = match.group(2).strip().rstrip(".,;:!?")
+            if _is_stopword(name):
+                continue
+            raw.append(Candidate(
+                name=name,
+                field=field,
+                position=match.start(2),
+                extraction_reason="after_" + re.sub(r"\W+", "_", match.group(1).lower()),
+            ))
 
     # Pass 2: comma-separated hierarchical patterns — take the leading part
     for match in _COMMA_PATTERN.finditer(text):
@@ -611,8 +644,13 @@ def geoparse_signal(
     description: str | None = None,
     *,
     expected_country_codes: set[str] | None = None,
+    relative_phrases: bool = False,
 ) -> GeoparseResult | None:
     """Parse a signal's title + description into a single resolved location.
+
+    `relative_phrases` also extracts places after "east of", "out of",
+    "from", "to" etc. (see `_RELATIVE_PATTERN`). Off for signals; the
+    hotline turns it on.
 
     Returns None for any failure path:
       - empty inputs
@@ -629,8 +667,8 @@ def geoparse_signal(
     expected = expected_country_codes or _configured_country_codes()
 
     candidates: list[Candidate] = []
-    candidates.extend(_extract_from_text(title or "", "title"))
-    candidates.extend(_extract_from_text(description or "", "body"))
+    candidates.extend(_extract_from_text(title or "", "title", relative_phrases=relative_phrases))
+    candidates.extend(_extract_from_text(description or "", "body", relative_phrases=relative_phrases))
 
     if not candidates:
         logger.info("[geoparser] no candidates extracted from text")
