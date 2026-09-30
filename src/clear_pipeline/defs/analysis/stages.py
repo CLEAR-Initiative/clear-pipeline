@@ -5,6 +5,7 @@ annotation on the asset.
 """
 
 import logging
+from datetime import datetime, timezone
 
 import dagster as dg
 
@@ -167,9 +168,13 @@ def _mark(context, fn, request_id: str, *args) -> bool:
 def _process_one_request(context, req: dict) -> str:
     request_id = req["id"]
     frame = _frame_from_request(req)
+    # A rolling request (no window_end) generates an automation's frame ahead
+    # of its hourly poll: materialise "now" as the end, as the automation drain
+    # does, so datapoints aggregate over [window_start, now] instead of being
+    # skipped. A fixed window needs no effective_end.
+    effective_end = None if frame.window_end else datetime.now(timezone.utc).isoformat()
     try:
-        # On-demand frame: fixed window_end, so no effective_end to materialise.
-        result = _run_frame_generation(context, frame)
+        result = _run_frame_generation(context, frame, effective_end=effective_end)
     except clear_api.ClearApiError as exc:
         # Non-retryable (bad frame / rejected payload) — fail terminally.
         context.log.error("[drain_analysis] request %s rejected (non-retryable): %s", request_id, exc)
