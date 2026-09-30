@@ -25,7 +25,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import json
 
-from clear_pipeline.providers import acled, darfur24, dataminr
+from clear_pipeline.providers import acled, darfur24, dataminr, idmc
 from clear_pipeline.providers.clear_api import get_locations_by_level, get_source_id_by_name
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
@@ -232,17 +232,90 @@ class Darfur24GXSource:
         darfur24.mark_seen(external_id)
 
 
-# IDMC is NOT registered below, on purpose — not just "not yet written".
-# Production's own IDMCConnector (defs/signals/connectors.py) sets
-# drained=False for the same reason: grouping IDMC signals into events
-# needs design work that hasn't happened ("needs new features that aren't
-# built yet"). This factory has no equivalent of that flag — every
-# registered source runs the full classify/geo/temporal/match chain, which
-# IS event-grouping — so registering an IDMCGXSource today would build on
-# the exact gap production explicitly deferred, not just reuse a pattern.
-# Add it once IDMC event-grouping has a real design, not before.
+@dataclass(frozen=True)
+class IDMCGXSource:
+    """Calls `providers/idmc.py` directly — same recipe as `ACLEDGXSource`.
+    Treated as immutable for now: IDU rows can revise in place (same
+    `idu_id`, new content), but this adapter doesn't yet detect or push
+    revisions — see GX_SOURCES' comment below and mark_seen's docstring."""
+
+    @property
+    def source(self) -> str:
+        return settings.idmc_source_name
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        return idmc.fetch_idu_records(since=since)
+
+    def external_id(self, record: Any) -> str:
+        return record["idu_id"]
+
+    def published_at(self, record: Any) -> str:
+        return record.get("created_at") or ""
+
+    def raw_bytes(self, record: Any) -> bytes:
+        return json.dumps(record).encode("utf-8")
+
+    def parse(self, raw: bytes) -> Any:
+        return json.loads(raw)
+
+    def api_source_id(self) -> str:
+        return get_source_id_by_name(settings.idmc_source_name)
+
+    def last_synced(self) -> datetime | None:
+        return idmc.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        idmc.set_last_synced(ts)
+
+    def to_silver_input(self, record: Any, source_id: str) -> dict:
+        return idmc.build_idmc_signal_input(record, source_id, promote=False)
+
+    def mark_seen(self, external_id: str) -> None:
+        # Deliberately a no-op for now — see class docstring. IDMC is
+        # treated as immutable: a record that comes back on a later poll
+        # is silently re-created (idempotent get-or-create on
+        # (sourceId, externalId) — no duplicate signal, just wasted
+        # re-processing). Revisit once (id, content_hash)-aware dedup
+        # (matching production's IDMCConnector.post_create) is added.
+        pass
+
+    def filter_records(self, records: list[Any]) -> list[Any]:
+        """IDMC-specific: one IDU `event_id` can have several role-tagged
+        rows (Recommended figure vs Triangulation) — no other source has
+        this shape, so no other adapter needs this. See
+        providers/idmc.py::filter_by_role for the rule.
+
+        Optional hook, deliberately NOT part of the `GXSource` Protocol —
+        `factory.py`'s `_silver` probes for it via `getattr(source,
+        "filter_records", None)`, so Dataminr/ACLED/Darfur24 need no
+        change at all to stay unaffected."""
+        return idmc.filter_by_role(records)
+
+
+# IDMC is registered for the classify/geo/QA/filtering slice of this
+# pipeline: IDU figures flow through classify -> geo -> temporal -> match ->
+# gold -> push, giving QA visibility and letting low-quality/irrelevant
+# signals be filtered before clear-api sees them — same as ACLED/Darfur24.
+# Two things this deliberately does NOT mean:
+#   1. IDMC-native event-grouping is designed. `_temporal`/`_match`'s
+#      district+type heuristic runs for IDMC exactly as it does for every
+#      other source; whether that's semantically right for IDU figures is
+#      still open — the same question production's own IDMCConnector defers
+#      via `drained=False` (defs/signals/connectors.py). This pipeline's
+#      gold *events* table is a QA-only Iceberg sandbox that never writes to
+#      clear-api (only `_push` does, and only Signal rows), so nothing here
+#      creates real clear-api Events either way.
+#   2. IDU revisions (same idu_id, new content) are handled. IDMCGXSource
+#      currently treats IDMC signals as immutable — see its mark_seen
+#      docstring. A revision reaching `_push` would silently no-op against
+#      clear-api's idempotent create, and `_gold`'s Type-1 upsert freezes
+#      `pushedAt` once set, so nothing ever re-pushes it. Add
+#      (id, content_hash) dedup (mirroring IDMCConnector.post_create) and an
+#      update path in `_push` before IDMC data is expected to reflect
+#      revisions.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),
     Darfur24GXSource(),
+    IDMCGXSource(),
 ]

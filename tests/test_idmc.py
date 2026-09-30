@@ -12,6 +12,7 @@ from clear_pipeline.providers.idmc import (
     _parse_event,
     build_idmc_signal_input,
     build_signal_content_update,
+    filter_by_role,
 )
 
 
@@ -98,6 +99,56 @@ def test_malformed_latitude_discards_valid_longitude_too():
     assert result is not None
     assert result["lat"] is None
     assert result["lng"] is None
+
+
+# ── filter_by_role: event_id/role group filtering ──────────────────────────
+# gx_pipeline-only pre-filter (see IDMCGXSource.filter_records) — a
+# Recommended figure supersedes Triangulation rows in the same event_id
+# group; an all-Triangulation group collapses to its most recent row.
+
+
+def _record(**overrides) -> dict:
+    result = _parse_event(_raw(**overrides))
+    assert result is not None
+    return result
+
+
+def test_recommended_figure_drops_triangulation_in_same_group():
+    recommended = _record(id=1, event_id="ev-1", role="Recommended figure")
+    triangulation = _record(id=2, event_id="ev-1", role="Triangulation")
+    other_group = _record(id=3, event_id="ev-2", role="Triangulation")
+
+    result = filter_by_role([recommended, triangulation, other_group])
+
+    assert recommended in result
+    assert triangulation not in result
+    assert other_group in result  # untouched — different event_id, no recommended figure there
+
+
+def test_all_triangulation_group_keeps_only_most_recent():
+    older = _record(id=1, event_id="ev-1", role="Triangulation", created_at="2026-01-01T00:00:00Z")
+    newer = _record(id=2, event_id="ev-1", role="Triangulation", created_at="2026-01-05T00:00:00Z")
+
+    result = filter_by_role([older, newer])
+
+    assert result == [newer]
+
+
+def test_record_with_no_event_id_passes_through():
+    record = _record(id=1, event_id=None, role="Triangulation")
+    assert filter_by_role([record]) == [record]
+
+
+def test_mixed_roles_with_no_recommended_figure_pass_through_unchanged():
+    """Neither rule applies (no Recommended figure, not ALL Triangulation)
+    — the group is left untouched rather than guessed at."""
+    triangulation = _record(id=1, event_id="ev-1", role="Triangulation")
+    other = _record(id=2, event_id="ev-1", role="Some other role")
+
+    result = filter_by_role([triangulation, other])
+
+    assert triangulation in result
+    assert other in result
 
 
 # ── _content_hash / _round_centroid: coordinate-noise rounding ────────────
@@ -224,6 +275,17 @@ def test_calls_enrich_with_geoparser():
         build_idmc_signal_input(parsed, source_id="src-1")
 
     mock_geoparse.assert_called_once()
+
+
+def test_promote_defaults_true_and_threads_through_to_geoparser():
+    parsed = _parsed()
+    with patch("clear_pipeline.providers.idmc.enrich_with_geoparser") as mock_geoparse:
+        build_idmc_signal_input(parsed, source_id="src-1")
+    assert mock_geoparse.call_args.kwargs["promote"] is True
+
+    with patch("clear_pipeline.providers.idmc.enrich_with_geoparser") as mock_geoparse:
+        build_idmc_signal_input(parsed, source_id="src-1", promote=False)
+    assert mock_geoparse.call_args.kwargs["promote"] is False
 
 
 # ── build_signal_content_update ──────────────────────────────────────────

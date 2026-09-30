@@ -10,7 +10,11 @@ signals until that lands.
 
 **Add a data source = add a ``GXSource`` to ``sources.py``** — this
 module needs no change, mirroring ``defs/signals/factory.py``'s
-``build_source_assets(connector)``.
+``build_source_assets(connector)``. One exception: ``_silver`` probes for
+an optional ``filter_records`` method via ``getattr`` (not part of the
+``GXSource`` Protocol) — a source with no batch-level filtering need (i.e.
+every source except IDMC today) simply doesn't define it and is
+unaffected; see ``IDMCGXSource.filter_records``.
 
 Simplifications, each with an upgrade path (details in the doc §5):
 
@@ -25,6 +29,7 @@ Simplifications, each with an upgrade path (details in the doc §5):
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import dagster as dg
 import great_expectations as gx
@@ -119,18 +124,37 @@ def build_gx_source_assets(source: GXSource) -> list:
 
         source_id = source.api_source_id()
         s3, bucket = _s3()
+
+        # Parse every bronze row first, keeping it paired with its bronze
+        # metadata (externalId/publishedAt) for the second pass below.
+        parsed: list[tuple[dict, Any]] = []
+        for bronze_row in bronze_df.to_dict("records"):
+            raw = s3.get_object(Bucket=bucket, Key=bronze_row["s3Key"])["Body"].read()
+            parsed.append((bronze_row, source.parse(raw)))
+
+        # Optional, source-specific batch filter over the parsed records —
+        # e.g. IDMCGXSource groups by event_id to drop redundant
+        # Triangulation rows a Recommended figure already supersedes.
+        # Deliberately NOT part of the GXSource Protocol: probing via
+        # getattr means sources that don't define it (everything but IDMC
+        # today) need zero changes, now or for any future such filter.
+        filter_records = getattr(source, "filter_records", None)
+        if filter_records is not None:
+            records = filter_records([record for _, record in parsed])
+            kept_ids = {source.external_id(record) for record in records}
+            parsed = [(bronze_row, record) for bronze_row, record in parsed
+                      if bronze_row["externalId"] in kept_ids]
+
         rows: list[dict] = []
-        for row in bronze_df.to_dict("records"):
-            raw = s3.get_object(Bucket=bucket, Key=row["s3Key"])["Body"].read()
-            record = source.parse(raw)
+        for bronze_row, record in parsed:
             signal_input = source.to_silver_input(record, source_id)
 
-            key = lake.raw_key(src, row["publishedAt"], row["externalId"], layer="silver")
+            key = lake.raw_key(src, bronze_row["publishedAt"], bronze_row["externalId"], layer="silver")
             lake.write_json(s3, bucket, key, signal_input)
 
             rows.append({
-                "externalId": row["externalId"],
-                "publishedAt": row["publishedAt"],
+                "externalId": bronze_row["externalId"],
+                "publishedAt": bronze_row["publishedAt"],
                 "title": signal_input.get("title"),
                 "description": signal_input.get("description"),
                 "severity": signal_input.get("severity"),
@@ -140,7 +164,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "signalInput": signal_input,
             })
 
-        context.add_output_metadata({"rows": len(rows)})
+        context.add_output_metadata({"rows": len(rows), "dropped": len(bronze_df) - len(rows)})
         return pd.DataFrame(rows)
 
     # ══════════════════════════════════════════════════════════════════════

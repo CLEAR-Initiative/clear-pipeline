@@ -21,6 +21,7 @@ Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_last_180_days_r
 
 import hashlib
 import logging
+from collections import defaultdict
 from datetime import UTC, datetime
 
 import httpx
@@ -75,6 +76,7 @@ def _parse_event(raw: dict) -> dict | None:
 
     return {
         "idu_id": str(idu_id),
+        "event_id": raw.get("event_id"),
         "iso3": raw.get("iso3") or "",
         "displacement_type": raw.get("displacement_type") or "",
         "figure": figure,
@@ -92,6 +94,43 @@ def _parse_event(raw: dict) -> dict | None:
         "created_at": raw.get("created_at"),
         "raw": raw,
     }
+
+
+_ROLE_RECOMMENDED = "Recommended figure"
+_ROLE_TRIANGULATION = "Triangulation"
+
+
+def filter_by_role(records: list[dict]) -> list[dict]:
+    """Group parsed IDU records by `event_id`; within each group, drop
+    Triangulation rows a Recommended figure already supersedes, or collapse
+    an all-Triangulation group down to its single most recent row (by
+    `created_at`). Records with no `event_id`, or a group that's neither
+    case, pass through unchanged.
+
+    IDMC-specific: one IDU `event_id` can carry several role-tagged rows
+    (analyst-reviewed "Recommended figure" vs. corroborating
+    "Triangulation") — no other source has this shape. Used only by the
+    gx_pipeline medallion (`IDMCGXSource.filter_records`), not by
+    production's `fetch_idu_records`/`IDMCConnector`.
+    """
+    groups: dict[str, list[dict]] = defaultdict(list)
+    kept: list[dict] = []
+    for record in records:
+        event_id = record.get("event_id")
+        if not event_id:
+            kept.append(record)
+        else:
+            groups[event_id].append(record)
+
+    for group in groups.values():
+        roles = [r["role"] for r in group]
+        if _ROLE_RECOMMENDED in roles:
+            kept.extend(r for r, role in zip(group, roles) if role != _ROLE_TRIANGULATION)
+        elif all(role == _ROLE_TRIANGULATION for role in roles):
+            kept.append(max(group, key=lambda r: r.get("created_at") or ""))
+        else:
+            kept.extend(group)
+    return kept
 
 
 # IDMC's backend recomputes this row's centroid independently on every poll,
@@ -250,8 +289,12 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("idmc:last_synced", ts.isoformat())
 
 
-def build_idmc_signal_input(event: dict, source_id: str) -> dict:
-    """Convert a parsed IDU row into a CLEAR CreateSignalInput dict."""
+def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True) -> dict:
+    """Convert a parsed IDU row into a CLEAR CreateSignalInput dict.
+
+    `promote` threads through to `enrich_with_geoparser` (default True,
+    today's behavior). See `acled.py::build_acled_signal_input`'s docstring —
+    same parameter, same reason."""
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
 
     input_data: dict = {
@@ -288,6 +331,7 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
         input_data,
         title=event["title"],
         description=event.get("description"),
+        promote=promote,
         log_tag=f"idmc:{event.get('idu_id')}",
     )
 

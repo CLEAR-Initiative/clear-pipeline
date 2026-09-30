@@ -11,17 +11,50 @@ from unittest.mock import patch
 import dagster as dg
 
 from clear_pipeline.defs.gx_pipeline.factory import build_gx_source_assets
-from clear_pipeline.defs.gx_pipeline.sources import GX_SOURCES, GXSource
+from clear_pipeline.defs.gx_pipeline.sources import (
+    GX_SOURCES,
+    ACLEDGXSource,
+    Darfur24GXSource,
+    DataminrGXSource,
+    GXSource,
+    IDMCGXSource,
+)
 
 
 def test_registered_sources_conform_to_protocol():
     sources = {s.source: s for s in GX_SOURCES}
-    assert sources.keys() == {"dataminr", "acled", "darfur24"}
+    assert sources.keys() == {"dataminr", "acled", "darfur24", "idmc"}
     assert all(isinstance(s, GXSource) for s in sources.values())
-    # IDMC deliberately isn't registered — see sources.py's comment above
-    # GX_SOURCES: this factory has no equivalent of production's
-    # drained=False, and IDMC's event-grouping semantics aren't designed yet.
-    assert "idmc" not in sources
+
+
+def test_idmc_source_to_silver_input_is_pure_transform():
+    """`to_silver_input` must never promote a geoparser candidate to a real
+    L4 location row (that's a clear-api write, forbidden before `_push`) —
+    same contract ACLEDGXSource already satisfies."""
+    with patch(
+        "clear_pipeline.defs.gx_pipeline.sources.idmc.build_idmc_signal_input"
+    ) as mock_build:
+        IDMCGXSource().to_silver_input({"idu_id": "1"}, "source-1")
+    mock_build.assert_called_once_with({"idu_id": "1"}, "source-1", promote=False)
+
+
+def test_idmc_source_filter_records_delegates_to_provider():
+    with patch("clear_pipeline.defs.gx_pipeline.sources.idmc.filter_by_role") as mock_filter:
+        mock_filter.return_value = ["kept"]
+        result = IDMCGXSource().filter_records(["r1", "r2"])
+    mock_filter.assert_called_once_with(["r1", "r2"])
+    assert result == ["kept"]
+
+
+def test_only_idmc_source_defines_filter_records():
+    """filter_records is an optional, IDMC-only hook — deliberately not part
+    of the GXSource Protocol (factory.py's _silver probes for it via
+    getattr). Locks in "zero footprint on other sources" as a tested
+    property, not just a design comment."""
+    assert not hasattr(DataminrGXSource(), "filter_records")
+    assert not hasattr(ACLEDGXSource(), "filter_records")
+    assert not hasattr(Darfur24GXSource(), "filter_records")
+    assert hasattr(IDMCGXSource(), "filter_records")
 
 
 class FakeS3:
@@ -179,6 +212,53 @@ def test_gx_pipeline_end_to_end(tmp_path):
         second_result = dg.materialize([push_asset], selection=[push_asset])
         assert second_result.success
     assert len(created_signals) == 2, "second push run must not re-push already-pushed rows"
+
+
+class FilteringFakeSource(FakeSource):
+    """Like FakeSource but drops record "r2" via an optional
+    filter_records — confirms _silver's getattr(source, "filter_records")
+    wiring end to end (not just the pure function an adapter might delegate
+    to)."""
+
+    def filter_records(self, records):
+        return [r for r in records if r["id"] != "r2"]
+
+
+def test_silver_drops_filtered_records_before_silver_write(tmp_path):
+    fake_s3 = FakeS3()
+    iceberg_warehouse = f"file://{tmp_path / 'warehouse'}"
+    iceberg_catalog_uri = f"sqlite:///{tmp_path / 'catalog.db'}"
+    created_signals = []
+
+    def fake_create_signal(input_data):
+        row = {**input_data, "id": f"sig-{len(created_signals)}", "generalLocation": {"id": "loc-1", "level": 2, "ancestorIds": []}}
+        created_signals.append(row)
+        return row
+
+    defs_list = build_gx_source_assets(FilteringFakeSource())
+    assets = [d for d in defs_list if isinstance(d, dg.AssetsDefinition)]
+    checks = [d for d in defs_list if isinstance(d, dg.AssetChecksDefinition)]
+
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.factory.lake.s3_client", return_value=fake_s3),
+        patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
+        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=fake_create_signal),
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
+    ):
+        mock_classify.return_value.relevance = 0.9
+        mock_classify.return_value.type_level_2 = "conflict"
+        mock_classify.return_value.disaster_types = ["cv"]
+
+        result = dg.materialize(assets + checks)
+
+    assert result.success
+    # "r2" was dropped by filter_records before to_silver_input ever ran for
+    # it — no silver S3 blob written for it at all, not merely excluded from
+    # the final push count.
+    assert not any("r2" in key and "silver" in key for key in fake_s3.objects)
+    assert len(created_signals) == 1  # only "r1" made it all the way to push
 
 
 class DupSource(FakeSource):
