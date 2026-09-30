@@ -16,7 +16,10 @@ from clear_pipeline.providers.geoparser import (
     extract_top_candidate,
     geoparse_signal,
 )
-from clear_pipeline.providers.location import resolve_signal_location
+from clear_pipeline.providers.location import (
+    resolve_country_only_location,
+    resolve_signal_location,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +374,7 @@ def enrich_with_geoparser(
     extra_body_text: str | None = None,
     promote: bool = True,
     log_tag: str = "signal",
+    scope_country: str | None = None,
 ) -> GeoparseResult | None:
     """Run the geoparser on title+description and mutate `input_data`.
 
@@ -394,6 +398,10 @@ def enrich_with_geoparser(
     `input_data["lat"]`/`input_data["lng"]`, so callers must set those
     before invoking this helper.
 
+    `scope_country` (ISO2) pins the geocode's country when the caller knows it
+    but has no source coords to derive it from — a country-only signal whose
+    centroid coords were deliberately dropped.
+
     Returns the GeoparseResult (or None) so callers that need the candidate
     name for logging don't have to re-parse the dict.
     """
@@ -409,7 +417,9 @@ def enrich_with_geoparser(
     # correct one (Sudanese OSM entries score near-zero importance). Falls
     # back to all configured countries when coords are missing or land
     # outside every box.
-    scoped_country = country_from_coords(input_data.get("lat"), input_data.get("lng"))
+    scoped_country = scope_country or country_from_coords(
+        input_data.get("lat"), input_data.get("lng")
+    )
     expected = {scoped_country} if scoped_country else None
     try:
         geo_result = geoparse_signal(
@@ -529,11 +539,22 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
     # candidate's location and the source's coords.
     has_coords = False
     dataminr_location_name = None
+    country_location_id = None
+    scope_country = None
     if signal.estimatedEventLocation:
         dataminr_location_name = signal.estimatedEventLocation.name
-        if signal.estimatedEventLocation.coordinates:
-            coords = signal.estimatedEventLocation.coordinates
-            if len(coords) >= 2:
+        # A bare country name ("Sudan") means Dataminr could only place the
+        # alert at country level, and its coords are just the country centroid.
+        # Sending them would create an L4 point inside whichever district the
+        # centroid falls in (Sheikan, for Sudan) — so drop them and attach the
+        # signal to the country's L0 instead. The centroid still scopes the
+        # geocode to the right country.
+        country_location_id = resolve_country_only_location(dataminr_location_name)
+        coords = signal.estimatedEventLocation.coordinates
+        if coords and len(coords) >= 2:
+            if country_location_id:
+                scope_country = country_from_coords(coords[0], coords[1])
+            else:
                 input_data["lat"] = coords[0]
                 input_data["lng"] = coords[1]
                 has_coords = True
@@ -549,12 +570,22 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
         description=description,
         promote=promote,
         log_tag=f"dataminr:{signal.alertId}",
+        scope_country=scope_country,
     )
 
     if input_data.get("locationId"):
         # Geoparser promoted the signal to a precise L4 — clear-api will use
         # that locationId verbatim and skip its own createPointLocation path.
         logger.info("Signal location resolved via geoparser: %s", input_data["locationId"])
+    elif country_location_id:
+        # Country-only alert and the text named nowhere more precise. The
+        # geoparser may have set an "(unresolved)" pointName; with no coords
+        # clear-api would never use it, so drop it.
+        input_data.pop("pointName", None)
+        input_data["locationId"] = country_location_id
+        logger.info(
+            "Country-only signal (%r): locationId=%s", dataminr_location_name, country_location_id
+        )
     elif has_coords:
         # Source coords only — let the API's PostGIS geo-resolution handle it.
         # Skip the Claude displacement check: origin/destination aren't used
