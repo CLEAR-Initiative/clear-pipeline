@@ -121,7 +121,10 @@ def _geoparse_one_message(text: str) -> str | None:
     ("Nyala Airport" finds nothing) until promotion can create the L4."""
     try:
         geo_result = geoparse_signal(
-            None, text, expected_country_codes=_hotline_country_codes() or None,
+            None, text,
+            expected_country_codes=_hotline_country_codes() or None,
+            # Field reports say "east of Um Dukhun", "the road out of Mukjar".
+            relative_phrases=True,
         )
     except Exception:  # noqa: BLE001 — best-effort, never blocks enrichment
         logger.warning("[ground:enrich] geoparser failed (continuing without location)", exc_info=True)
