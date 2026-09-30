@@ -2041,6 +2041,16 @@ query AnalysisById($id: String!) {
 }
 """
 
+GET_GROUND_MESSAGE_CANONICAL = """
+query GroundMessageForTranslation($id: String!) {
+  groundMessageForTranslation(id: $id) {
+    id
+    text
+    language
+  }
+}
+"""
+
 
 def get_crisis_canonical(crisis_id: str) -> dict | None:
     """Fetch only the four translatable fields of a crisis. Used by the
@@ -2098,6 +2108,19 @@ def get_analysis_canonical(analysis_id: str) -> dict | None:
     if not row:
         return None
     return extract_situation_prose(row.get("data") or {})
+
+
+def get_ground_message_canonical(message_id: str) -> dict | None:
+    """Fetch a hotline message for on-demand translation: ``{text,
+    language}``. ``text`` is the reporter's original words (already
+    phone-redacted at ingest) — NOT English — and ``language`` is clear-api's
+    intake detection (``"ar"``, ``"en"``, …), None when unknown. No sender
+    identity is exposed. None when the message no longer exists."""
+    result = _execute(GET_GROUND_MESSAGE_CANONICAL, {"id": message_id})
+    row = result.get("groundMessageForTranslation")
+    if not row:
+        return None
+    return {"text": row.get("text") or "", "language": row.get("language")}
 
 
 # ─── Translations ─────────────────────────────────────────────────────────────

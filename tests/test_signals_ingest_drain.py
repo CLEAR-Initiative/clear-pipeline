@@ -318,7 +318,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
 
     calls = {"n": 0}
 
-    def fake_tu(entity_type, entity_id, canonical):
+    def fake_tu(entity_type, entity_id, canonical, requested_locales=None):
         calls["n"] += 1
         return tp.UNPARSEABLE  # rows cleared inside translate_and_upsert
 
