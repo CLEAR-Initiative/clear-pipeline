@@ -1,11 +1,12 @@
 """Location resolution: extract and resolve locations from signal text using Claude."""
 
 import logging
+import re
 
 from pydantic import BaseModel
 
 from clear_pipeline.providers.llm import make_llm_provider
-from clear_pipeline.providers.clear_api import get_locations
+from clear_pipeline.providers.clear_api import get_locations, get_locations_by_level
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,42 @@ def _get_locations() -> list[dict]:
 
 
 def invalidate_locations_cache() -> None:
-    global _locations_cache
+    global _locations_cache, _country_ids_cache
     _locations_cache = None
+    _country_ids_cache = None
+
+
+# Normalised admin-0 name → locations.id (cached in memory, like _locations_cache)
+_country_ids_cache: dict[str, str] | None = None
+
+
+def _normalise_country_name(name: str) -> str:
+    """Casefold and drop the decorations that differ between a source's country
+    label and the backfilled A0 name: a parenthetical long form ("Venezuela
+    (Bolivarian Republic of)") and a leading "the"."""
+    name = re.sub(r"\([^)]*\)", "", name).strip().casefold()
+    return re.sub(r"^the\s+", "", name)
+
+
+def resolve_country_only_location(name: str | None) -> str | None:
+    """Return the level-0 ``locations.id`` when `name` is nothing but a country
+    ("Sudan"), else None.
+
+    Dataminr labels an alert it could only place at country level with the bare
+    country name and puts the coordinates at that country's centroid. Sending
+    those coordinates to clear-api creates an L4 point inside whichever district
+    the centroid happens to fall in (Sudan's lands in Sheikan, North Kordofan),
+    so callers use this to attach the signal to the country instead."""
+    global _country_ids_cache
+    if not name or not name.strip():
+        return None
+    if _country_ids_cache is None:
+        _country_ids_cache = {
+            _normalise_country_name(loc["name"]): loc["id"]
+            for loc in get_locations_by_level(0)
+            if loc.get("name") and loc.get("id")
+        }
+    return _country_ids_cache.get(_normalise_country_name(name))
 
 
 # Bump whenever SYSTEM_PROMPT below changes (see CLASSIFY_PROMPT_VERSION for rationale).
