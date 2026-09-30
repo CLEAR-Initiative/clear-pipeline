@@ -402,8 +402,19 @@ def translate(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 def _drain_translations(context) -> dg.MaterializeResult:
     translated = cleared = requeued = failed = 0
     seen: set[tuple[str, str]] = set()  # entities attempted this run — never re-invoke
+
+    def next_page() -> list[dict]:
+        # On-demand requests jump the oldest-first queue: a reviewer is polling
+        # the inbox for each one, while bulk rows can back up behind heavy
+        # situation-analysis calls or a stuck head that ends the run early.
+        urgent = [
+            row for row in pending_translations(first=_BATCH_SIZE, entity_type="groundMessage")
+            if (row["entityType"], row["entityId"]) not in seen
+        ]
+        return urgent or pending_translations(first=_BATCH_SIZE)
+
     for _ in range(_MAX_BATCHES):
-        queue = pending_translations(first=_BATCH_SIZE)
+        queue = next_page()
         if not queue:
             break
         # Collapse per-(entity, locale) rows to one translate call per entity —
