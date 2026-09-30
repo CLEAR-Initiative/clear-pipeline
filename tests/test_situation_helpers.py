@@ -27,6 +27,7 @@ from clear_pipeline.defs.situation.rag_helper import (
     _format_hits_for_prompt,
     _pages_range,
     fetch_rag_context,
+    merge_rag_contexts,
 )
 from clear_pipeline.defs.situation.schemas import Source
 
@@ -362,3 +363,63 @@ class TestFormatHitsForPrompt:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestMergeRagContexts:
+    @staticmethod
+    def _hit(hid, rid, text):
+        return {"id": hid, "reportId": rid, "reportTitle": rid, "publishedAt": "2026-09", "pageStart": 1, "pageEnd": 1, "chunkText": text}
+
+    def test_merges_in_order_dedupes_and_renumbers(self):
+        with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase") as search:
+            search.side_effect = [
+                [self._hit("h1", "event:e1", "recent incident"), self._hit("h2", "r-2", "recent report")],
+                [self._hit("h2", "r-2", "recent report"), self._hit("h3", "r-3", "background")],
+            ]
+            recent = fetch_rag_context(query="", mode="FRAME")
+            broad = fetch_rag_context(query="overview")
+        merged = merge_rag_contexts(recent, broad)
+        assert merged.hit_report_ids == ["event:e1", "r-2", "r-3"]
+        assert merged.hit_count == 3
+        # [Rn] numbering runs across the merged list, recent first.
+        assert merged.formatted_for_prompt.index("[R1] event:e1") < merged.formatted_for_prompt.index("[R3] r-3")
+        assert search.call_args_list[0].kwargs["mode"] == "FRAME"
+        assert "mode" not in search.call_args_list[1].kwargs
+
+    def test_caps_chunks_per_report(self):
+        hits = [self._hit(f"h{i}", "r-big", f"chunk {i}") for i in range(4)] + [self._hit("x", "r-other", "other")]
+        with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase", return_value=hits):
+            ctx = fetch_rag_context(query="q")
+        merged = merge_rag_contexts(ctx, max_per_report=2)
+        assert merged.hit_report_ids == ["r-big", "r-big", "r-other"]
+
+    def test_empty_inputs_stay_empty(self):
+        assert merge_rag_contexts(fetch_rag_context_empty(), fetch_rag_context_empty()).is_empty
+
+
+def fetch_rag_context_empty():
+    with patch("clear_pipeline.defs.situation.rag_helper.clear_api.search_knowledgebase", return_value=[]):
+        return fetch_rag_context(query="x")
+
+
+class TestSearchKnowledgebaseQueryShape:
+    """Only a search that sets a mode may declare `$mode` (review #75): an older
+    clear-api without the enum must still serve every other search."""
+
+    def test_no_mode_sends_the_mode_free_document(self):
+        from clear_pipeline.providers import clear_api
+
+        with patch("clear_pipeline.providers.clear_api._execute", return_value={"searchKnowledgebase": []}) as ex:
+            clear_api.search_knowledgebase(query="q", filters=None, limit=5)
+        query, variables = ex.call_args.args
+        assert "KnowledgebaseSearchMode" not in query
+        assert "mode" not in variables
+
+    def test_mode_sends_the_mode_document(self):
+        from clear_pipeline.providers import clear_api
+
+        with patch("clear_pipeline.providers.clear_api._execute", return_value={"searchKnowledgebase": []}) as ex:
+            clear_api.search_knowledgebase(query="", filters={"countryLocationId": "sdn"}, limit=5, mode="FRAME")
+        query, variables = ex.call_args.args
+        assert "$mode: KnowledgebaseSearchMode" in query
+        assert variables["mode"] == "FRAME"

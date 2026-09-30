@@ -16,7 +16,7 @@ from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_pipeline.defs.situation.frame import Frame, build_rag_filters
+from clear_pipeline.defs.situation.frame import FALLBACK_SCOPE_LABEL, Frame, build_rag_filters, scope_label
 from clear_pipeline.defs.situation.generate import generate_and_upsert_for_frame
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.redis_lock import redis_lock
@@ -49,6 +49,20 @@ def _period_label(frame: Frame) -> str:
     period name)."""
     end = (frame.window_end or "present")[:10]
     return f"{frame.window_start[:10]} to {end}"
+
+
+def _scope_label(frame: Frame) -> str:
+    """The frame's area by name ("Sheikan and Um Rawaba, North Kordofan,
+    Sudan") so every prompt names the place it is analysing. Best-effort: a
+    lookup failure falls back to a generic label rather than failing the run."""
+    if not frame.location_ids:
+        return FALLBACK_SCOPE_LABEL
+    try:
+        locations = {loc["id"]: loc for loc in clear_api.get_locations() if loc.get("id")}
+    except Exception:  # noqa: BLE001 — naming is cosmetic; generation must still run
+        logger.warning("[drain_analysis] location names unavailable for %s", frame.location_ids, exc_info=True)
+        return FALLBACK_SCOPE_LABEL
+    return scope_label(frame.location_ids, locations)
 
 
 def _fetch_one_bucket(location_id: str, window_start: str, window_end: str) -> dict | None:
@@ -128,9 +142,7 @@ def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = 
     aggregated = _resolve_frame_aggregated(frame, effective_end=effective_end)
     return generate_and_upsert_for_frame(
         frame=frame,
-        # TODO: resolve the frame's location names for richer prompt framing;
-        # retrieval is already correctly scoped by the location filter.
-        scope_label="the selected area",
+        scope_label=_scope_label(frame),
         period_label=_period_label(frame),
         aggregated=aggregated,
         rag_filters=rag_filters,

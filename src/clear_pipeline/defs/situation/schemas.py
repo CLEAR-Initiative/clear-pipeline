@@ -157,10 +157,13 @@ class Datapoints(BaseModel):
 
 
 class AISummary(BaseModel):
-    """2–4 paragraph narrative synthesis. Empty string means the
-    generator failed or was skipped; the dashboard renders an empty
-    state rather than a missing key."""
+    """Executive summary (3–4 sentences) plus key findings. Empty string means
+    the generator failed or was skipped; the dashboard renders an empty state
+    rather than a missing key."""
     text: str = ""
+    # "Subject: finding" bullets, each with its own resolved sources. Additive:
+    # rows generated before this field simply lack it.
+    key_findings: list[SourcedBullet] = Field(default_factory=list)
     source_report_ids: list[str] = Field(default_factory=list)
     # report_id -> the generated sentences that report contributed to, resolved
     # from the LLM's inline [Rn] citations (v2). Empty when the model emitted no

@@ -264,6 +264,8 @@ query GetAnalysis($frame: AnalysisFrameInput!, $schemaVersion: String) {
 }
 """
 
+# Without `$mode`: works against a clear-api that predates the
+# KnowledgebaseSearchMode enum (ADR-0006). Only searches that set a mode need it.
 _SEARCH_KNOWLEDGEBASE = """
 query SearchKnowledgebaseForSituation(
   $query: String!,
@@ -271,6 +273,30 @@ query SearchKnowledgebaseForSituation(
   $limit: Int,
 ) {
   searchKnowledgebase(query: $query, filters: $filters, limit: $limit) {
+    id
+    reportId
+    reportTitle
+    sourceUrl
+    publishedAt
+    pageStart
+    pageEnd
+    chunkText
+    score
+    locationIds
+    eventTypes
+    needSectors
+  }
+}
+"""
+
+_SEARCH_KNOWLEDGEBASE_WITH_MODE = """
+query SearchKnowledgebaseForSituation(
+  $query: String!,
+  $filters: KnowledgebaseFilters,
+  $limit: Int,
+  $mode: KnowledgebaseSearchMode,
+) {
+  searchKnowledgebase(query: $query, filters: $filters, limit: $limit, mode: $mode) {
     id
     reportId
     reportTitle
@@ -814,8 +840,13 @@ def search_knowledgebase(
     query: str,
     filters: dict[str, Any] | None = None,
     limit: int = 10,
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid dense + BM25 retrieval over the knowledgebase.
+
+    ``mode`` selects clear-api's report/incident merge (ADR-0006): None lets
+    the API decide (AUTO), ``"FRAME"`` returns a recency-ordered report band
+    plus a guaranteed incident band for a location/time frame.
 
     Returns a list of hits ordered by RRF score, each carrying its
     source report metadata + page range so the narrative generator
@@ -827,10 +858,10 @@ def search_knowledgebase(
     knowledgebase rows are tagged at admin-2 level but our scope is
     the country (A0); semantic relevance handles the geo scoping.
     """
-    data = _execute(
-        _SEARCH_KNOWLEDGEBASE,
-        {"query": query, "filters": filters, "limit": limit},
-    )
+    variables: dict[str, Any] = {"query": query, "filters": filters, "limit": limit}
+    if mode:
+        variables["mode"] = mode
+    data = _execute(_SEARCH_KNOWLEDGEBASE_WITH_MODE if mode else _SEARCH_KNOWLEDGEBASE, variables)
     return data.get("searchKnowledgebase") or []
 
 

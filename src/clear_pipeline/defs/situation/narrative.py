@@ -28,11 +28,13 @@ empty default. One bad LLM call doesn't drop the other three.
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from clear_pipeline.defs.situation.citations import (
+    _SENTENCE_RE,
     merge_contributing,
     resolve_bullets,
     resolve_prose,
@@ -40,6 +42,7 @@ from clear_pipeline.defs.situation.citations import (
 from clear_pipeline.defs.situation.rag_helper import (
     RAGContext,
     fetch_rag_context,
+    merge_rag_contexts,
 )
 from clear_pipeline.defs.situation.schemas import (
     AISummary,
@@ -72,13 +75,27 @@ logger = logging.getLogger(__name__)
 
 
 class _AISummaryLLM(BaseModel):
-    """2–4 paragraph narrative synthesis. Prose only, no bullets."""
+    """Executive summary + key findings, in the shape of NRC's incident and
+    flash reports."""
     text: str = Field(
         description=(
-            "Two or three tight paragraphs on the country's humanitarian "
-            "situation for the target year. Open with the headline figures, "
-            "then drivers, then outlook. Prose only, no bullet lists or "
-            "section headings. Concise: cut filler, do not restate the task."
+            "Executive summary: 3 short sentences, at most 70 words, one "
+            "paragraph, prose only. What is happening now, where it is "
+            "concentrated, the main driver, and whether the situation is "
+            "worsening, stable or improving. Do not restate the headline "
+            "displaced, people-in-need or funding figures; the dashboard "
+            "shows them."
+        ),
+    )
+    key_findings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "4 to 6 key findings. Order: findings about the last 30 days "
+            "first (newest first), then the most important background. Each item is "
+            "'Subject: finding', where Subject is a 2–5 word label for the "
+            "pattern (e.g. 'Drone strikes on civilian sites'). One sentence "
+            "each, at most 30 words, one fact (no semicolon lists), with "
+            "places and dates as evidence."
         ),
     )
 
@@ -217,7 +234,7 @@ def _build_system_prompt(country_name: str, period_label: str, agg_context: str)
     return (
         f"{_BASE_INSTRUCTIONS}\n"
         f"---\n"
-        f"COUNTRY: {country_name}\n"
+        f"AREA: {country_name}\n"
         f"PERIOD: {period_label}\n"
         f"---\n"
         f"AGGREGATED HEADLINE FIGURES (cached; do not repeat back):\n"
@@ -287,6 +304,110 @@ def _sourced_bullets(
 # Component 2 — AI Summary
 # ────────────────────────────────────────────────────────────────────
 
+# The window the summary leads with: developments this recent come first.
+RECENT_DAYS = 30
+# Evidence breadth: the recent FRAME band, then one topical search per theme so
+# a country summary draws on many reports, not the top hits of one query.
+RECENT_LIMIT = 20
+THEME_LIMIT = 8
+MAX_CHUNKS_PER_REPORT = 2
+SUMMARY_THEMES = (
+    "armed conflict attacks drone strikes clashes civilian casualties",
+    "displacement movement IDPs returns refugees",
+    "disease outbreak cholera health facilities",
+    "food insecurity famine markets prices livelihoods",
+    "humanitarian access aid delivery response funding",
+)
+# Deterministic guardrails on the output.
+SUMMARY_MAX_WORDS = 80
+SUMMARY_MAX_SENTENCES = 3
+MIN_CITED_FINDINGS = 4
+FINDING_MAX_WORDS = 35
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """ISO-8601 string (a trailing `Z` included) to an aware datetime, else None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _recent_window(rag_filters: dict[str, Any] | None, *, days: int) -> tuple[datetime, datetime]:
+    """The last `days` of the ANALYSIS window, not of today: ends at the
+    frame's `timeRange.to` (a fixed past window stays in its period) or now
+    when the frame is open-ended or ends in the future (a calendar-year frame
+    runs to 31 Dec), and never starts before `timeRange.from`."""
+    window = (rag_filters or {}).get("timeRange") or {}
+    now = datetime.now(timezone.utc)
+    end = min(_parse_iso(window.get("to")) or now, now)
+    start = end - timedelta(days=days)
+    window_start = _parse_iso(window.get("from"))
+    if window_start and window_start > start:
+        start = window_start
+    return start, end
+
+
+def _recent_filters(rag_filters: dict[str, Any] | None, *, days: int) -> dict[str, Any]:
+    """The scope's retrieval filters narrowed to the recent window."""
+    start, end = _recent_window(rag_filters, days=days)
+    return {**(rag_filters or {}), "timeRange": {"from": start.isoformat(), "to": end.isoformat()}}
+
+
+def _summary_evidence(scope_label: str, rag_filters: dict[str, Any] | None) -> RAGContext:
+    recent = fetch_rag_context(
+        query="",
+        limit=RECENT_LIMIT,
+        filters=_recent_filters(rag_filters, days=RECENT_DAYS),
+        mode="FRAME",
+    )
+    themed = [
+        fetch_rag_context(query=f"{scope_label} {terms}", limit=THEME_LIMIT, filters=rag_filters)
+        for terms in SUMMARY_THEMES
+    ]
+    return merge_rag_contexts(recent, *themed, max_per_report=MAX_CHUNKS_PER_REPORT)
+
+
+def _cited_count(findings: list[SourcedBullet]) -> int:
+    return sum(1 for f in findings if f.source_report_ids)
+
+
+def _summary_problems(text: str, findings: list[SourcedBullet]) -> list[str]:
+    problems = []
+    cited_findings = _cited_count(findings)
+    long_findings = [f.description for f in findings if len(f.description.split()) > FINDING_MAX_WORDS]
+    words = len(text.split())
+    if words > SUMMARY_MAX_WORDS:
+        problems.append(
+            f"The executive summary has {words} words; it must be at most "
+            f"{SUMMARY_MAX_WORDS - 10} words in {SUMMARY_MAX_SENTENCES} short sentences."
+        )
+    if cited_findings < MIN_CITED_FINDINGS:
+        problems.append(
+            f"Only {cited_findings} key findings carry an [Rn] citation; give at "
+            f"least {MIN_CITED_FINDINGS}, each ending with its [Rn] marker(s)."
+        )
+    if long_findings:
+        problems.append(
+            f"{len(long_findings)} key findings exceed {FINDING_MAX_WORDS} words; each must be "
+            f"one sentence of at most {FINDING_MAX_WORDS - 5} words, one fact, no semicolon lists."
+        )
+    return problems
+
+
+def _trim_sentences(text: str, contributing: dict[str, list[str]], keep: int) -> tuple[str, dict[str, list[str]]]:
+    """Keep the first `keep` sentences, and drop citation lines for the rest."""
+    sentences = [s for s in _SENTENCE_RE.split(text.strip()) if s]
+    if len(sentences) <= keep:
+        return text, contributing
+    kept = sentences[:keep]
+    kept_set = set(kept)
+    trimmed = {rid: [ln for ln in lines if ln in kept_set] for rid, lines in contributing.items()}
+    return " ".join(kept), {rid: lines for rid, lines in trimmed.items() if lines}
+
 
 def generate_ai_summary(
     llm: LLMProvider,
@@ -297,40 +418,92 @@ def generate_ai_summary(
     cache_key: str,
     rag_filters: dict[str, Any] | None = None,
 ) -> AISummary:
-    """2–4 paragraph narrative synthesis grounded in a broad RAG search."""
-    rag = fetch_rag_context(
-        query=(
-            f"humanitarian situation overview {country_name} {period_label} "
-            "conflict displacement needs response funding"
-        ),
-        limit=12,
-        filters=rag_filters,
-    )
+    """Executive summary + key findings, NRC flash-report style.
+
+    Evidence: the scope's last `RECENT_DAYS` in FRAME mode (recency-ordered
+    reports plus a guaranteed incident band, ADR-0006) first, then one topical
+    search per theme, merged with at most `MAX_CHUNKS_PER_REPORT` chunks per
+    report. The aggregated-figures block is deliberately NOT given to this
+    component: the page shows those figures, and uncited numbers from it leaked
+    into findings. Output rules the prompt can't guarantee are enforced here:
+    findings without a citation are dropped, and one retry is made when the
+    summary is too long or too few findings are cited."""
+    del aggregated  # see docstring
+    rag = _summary_evidence(country_name, rag_filters)
+    _, recent_end = _recent_window(rag_filters, days=RECENT_DAYS)
     if rag.is_empty:
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
         return AISummary()
 
-    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
+    system = _build_system_prompt(
+        country_name, period_label, "(not provided for this component: use only RETRIEVED EVIDENCE)",
+    )
     user = (
         f"Produce the AI Summary component for {country_name}, {period_label}. "
-        "Two or three tight paragraphs. Lead with the headline figures, "
-        "then drivers, then outlook. A program manager should read it in "
-        "under a minute. No filler, no restating the task.\n"
+        "Write an executive summary of 3 short sentences and 4 to 6 key "
+        "findings, as in an NRC flash report. A program manager should read "
+        "it in under a minute. No filler, no restating the task.\n"
+        "Describe patterns at the level of the analysed area and name places "
+        "only as evidence: for a country, group incidents across regions "
+        "(e.g. 'drone strikes on markets across Darfur and Kordofan'); for a "
+        "district or locality, single dated incidents are fine.\n"
+        f"Lead with developments from the {RECENT_DAYS} days up to "
+        f"{recent_end:%d %B %Y} and give dates. Use older evidence only as "
+        "background, and nothing dated after that day. Do not present "
+        "cumulative multi-year totals (e.g. counts since 2023) as findings.\n"
+        "Every key finding must come from RETRIEVED EVIDENCE and end with its "
+        "[Rn] marker(s); a finding you cannot cite will be discarded. Draw on "
+        "as many different sources as the evidence supports.\n"
         "\n"
         "RETRIEVED EVIDENCE:\n"
         f"{rag.formatted_for_prompt}"
     )
-    try:
+
+    def run(prompt: str) -> tuple[str, dict[str, list[str]], list[SourcedBullet], dict[str, list[str]]]:
         result = _run_component(
-            llm, system_prompt=system, user_prompt=user,
+            llm, system_prompt=system, user_prompt=prompt,
             schema=_AISummaryLLM, cache_key=cache_key, max_tokens=1500,
         )
+        text, contributing = resolve_prose(result.text, rag.hit_report_ids)
+        findings, findings_contributing = _sourced_bullets(result.key_findings, rag)
+        return text, contributing, findings, findings_contributing
+
+    try:
+        first = run(user)
     except Exception:  # noqa: BLE001 — component-level isolation
         logger.exception("[situation:ai_summary] LLM call failed — returning empty component")
         return AISummary()
-    clean_text, contributing = resolve_prose(result.text, rag.hit_report_ids)
+    text, contributing, findings, findings_contributing = first
+    problems = _summary_problems(text, findings)
+    if problems:
+        logger.info("[situation:ai_summary] retrying once: %s", " ".join(problems))
+        try:
+            second = run(
+                user + "\n\nYOUR PREVIOUS ANSWER HAD THESE PROBLEMS, FIX THEM:\n- " + "\n- ".join(problems)
+            )
+        except Exception:  # noqa: BLE001 — a failed retry must not discard a usable first answer
+            logger.warning("[situation:ai_summary] retry failed — keeping the first answer", exc_info=True)
+        else:
+            # Keep the retry only if it is no worse: no more guardrail problems
+            # and no fewer cited findings than the first answer.
+            if len(_summary_problems(second[0], second[2])) <= len(problems) and (
+                _cited_count(second[2]) >= _cited_count(findings)
+            ):
+                text, contributing, findings, findings_contributing = second
+            else:
+                logger.info("[situation:ai_summary] retry was worse — keeping the first answer")
+
+    if len(text.split()) > SUMMARY_MAX_WORDS:
+        text, contributing = _trim_sentences(text, contributing, SUMMARY_MAX_SENTENCES)
+    cited = [f for f in findings if f.source_report_ids]
+    cited_lines = {f.description for f in cited}
+    findings_contributing = {
+        rid: [ln for ln in lines if ln in cited_lines] for rid, lines in findings_contributing.items()
+    }
+    contributing = merge_contributing(contributing, {r: ls for r, ls in findings_contributing.items() if ls})
     return AISummary(
-        text=clean_text,
+        text=text,
+        key_findings=cited,
         source_report_ids=list(contributing) or rag.contributing_report_ids,
         contributing_sources=contributing,
     )
