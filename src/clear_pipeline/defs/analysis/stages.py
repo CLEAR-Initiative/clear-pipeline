@@ -13,12 +13,14 @@ from clear_pipeline.defs.analysis.combine import (
     combine_aggregated_buckets,
     dedupe_nested_locations,
 )
+from clear_pipeline.defs.analysis.gate import GateDecision, decide_generation
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.defs.situation.frame import FALLBACK_SCOPE_LABEL, Frame, build_rag_filters, scope_label
 from clear_pipeline.defs.situation.generate import generate_and_upsert_for_frame
+from clear_pipeline.defs.situation.schemas import SCHEMA_VERSION as ANALYSIS_SCHEMA_VERSION
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.signals.config import settings
@@ -125,7 +127,7 @@ def _resolve_frame_aggregated(frame: Frame, *, effective_end: str | None = None)
     return combine_aggregated_buckets(buckets)
 
 
-def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = None):
+def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = None, force: bool = False):
     """Shared core of both analysis drains (on-demand + automation): scope
     retrieval + structured datapoints to the frame and (re)generate its analysis,
     returning the ``generate_and_upsert_for_frame`` result (``None`` = all-empty).
@@ -135,6 +137,7 @@ def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = 
     window end ("to present") for the automation path; the on-demand path leaves
     it ``None`` (the frame carries a fixed ``window_end``). The human period label
     is derived from the frame itself, so a rolling frame reads "… to present".
+    ``force`` bypasses clear-api's 24h regeneration floor (ADR-0008).
 
     Raises on generation failure — the caller owns the outcome/marking policy
     (terminal vs. retry), which differs between the two drains.
@@ -148,7 +151,45 @@ def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = 
         aggregated=aggregated,
         rag_filters=rag_filters,
         log_context=context.log,
+        force=force,
     )
+
+
+def evidence_gate(context, frame: Frame, *, force: bool, now: datetime) -> GateDecision:
+    """Regeneration gate (ADR-0008), shared by both drains: fetch the frame's live
+    analysis + evidence watermark and defer to ``decide_generation``. Fail-open —
+    a lookup error returns generate=True so a transient clear-api blip never
+    silently suppresses a run (clear-api's 24h floor still backstops a redundant
+    write)."""
+    if force:
+        return decide_generation(current=None, latest_evidence_at=None, now=now, force=True)
+    try:
+        current = clear_api.get_analysis(
+            schema_version=ANALYSIS_SCHEMA_VERSION, **frame.upsert_kwargs()
+        )
+        watermark = clear_api.get_frame_evidence_watermark(**frame.upsert_kwargs())
+    except Exception:  # noqa: BLE001 — fail open; clear-api's upsert floor is the backstop
+        context.log.warning(
+            "[analysis_gate] gate lookup failed for %s — proceeding to generate",
+            frame.location_ids, exc_info=True,
+        )
+        return GateDecision(True, "gate-lookup-failed")
+    return decide_generation(
+        current=current,
+        latest_evidence_at=(watermark or {}).get("latestEvidenceAt"),
+        now=now,
+    )
+
+
+def touch_synced(context, frame: Frame) -> None:
+    """Bump the frame's analysis ``lastSyncedAt`` on a gate skip (ADR-0008).
+    Best-effort — a failed touch just means lastSyncedAt lags, not a drain error."""
+    try:
+        clear_api.touch_analysis_synced(**frame.upsert_kwargs())
+    except Exception:  # noqa: BLE001
+        context.log.warning(
+            "[analysis_gate] touch_analysis_synced failed for %s", frame.location_ids, exc_info=True,
+        )
 
 
 def _mark(context, fn, request_id: str, *args) -> bool:
@@ -168,13 +209,27 @@ def _mark(context, fn, request_id: str, *args) -> bool:
 def _process_one_request(context, req: dict) -> str:
     request_id = req["id"]
     frame = _frame_from_request(req)
+    force = bool(req.get("force"))
+    now = datetime.now(timezone.utc)
+
+    # Regeneration gate (ADR-0008): skip when within the 24h floor or no new
+    # evidence (unless forced). The live row is already the answer the requester
+    # polls for, so a skip bumps lastSyncedAt and marks the request GENERATED.
+    decision = evidence_gate(context, frame, force=force, now=now)
+    if not decision.generate:
+        context.log.info(
+            "[drain_analysis] request %s skipped (%s) — bumping lastSyncedAt", request_id, decision.reason,
+        )
+        touch_synced(context, frame)
+        return _GENERATED if _mark(context, clear_api.mark_analysis_request_generated, request_id) else _REQUEUE
+
     # A rolling request (no window_end) generates an automation's frame ahead
     # of its hourly poll: materialise "now" as the end, as the automation drain
     # does, so datapoints aggregate over [window_start, now] instead of being
     # skipped. A fixed window needs no effective_end.
-    effective_end = None if frame.window_end else datetime.now(timezone.utc).isoformat()
+    effective_end = None if frame.window_end else now.isoformat()
     try:
-        result = _run_frame_generation(context, frame, effective_end=effective_end)
+        result = _run_frame_generation(context, frame, effective_end=effective_end, force=force)
     except clear_api.ClearApiError as exc:
         # Non-retryable (bad frame / rejected payload) — fail terminally.
         context.log.error("[drain_analysis] request %s rejected (non-retryable): %s", request_id, exc)

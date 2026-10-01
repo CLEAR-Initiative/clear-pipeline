@@ -247,6 +247,8 @@ mutation UpsertAnalysis($input: UpsertAnalysisInput!) {
   upsertAnalysis(input: $input) {
     analysisId
     supersededPrevious
+    skipped
+    reason
   }
 }
 """
@@ -917,6 +919,7 @@ def upsert_analysis(
     generated_by_model: str,
     generation_cost_usd: float | None,
     schema_version: str,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Insert a unified frame-scoped analysis snapshot and supersede the
     previous "current" row for the same (frame, schema_version) — ADR-0007's
@@ -925,8 +928,11 @@ def upsert_analysis(
 
     The frame is the array columns + window: clear-api canonicalises the arrays
     (sort + de-dupe) the same way `frame.Frame` does, and `window_end=None`
-    addresses the rolling ("to present") row. Returns
-    ``{analysisId, supersededPrevious}``.
+    addresses the rolling ("to present") row.
+
+    ``force`` bypasses clear-api's 24h regeneration floor (ADR-0008). Returns
+    ``{analysisId, supersededPrevious, skipped, reason}`` — ``skipped=True`` when
+    the floor made the write a no-op (only ``lastSyncedAt`` bumped).
     """
     payload = {
         "locationIds": location_ids,
@@ -939,9 +945,71 @@ def upsert_analysis(
         "generatedByModel": generated_by_model,
         "generationCostUsd": generation_cost_usd,
         "schemaVersion": schema_version,
+        "force": force,
     }
     result = _execute(_UPSERT_ANALYSIS, {"input": payload})
     return result["upsertAnalysis"]
+
+
+_FRAME_EVIDENCE_WATERMARK = """
+query FrameEvidenceWatermark($frame: AnalysisFrameInput!) {
+  frameEvidenceWatermark(frame: $frame) {
+    latestEvidenceAt
+    evidenceCount
+  }
+}
+"""
+
+_TOUCH_ANALYSIS_SYNCED = """
+mutation TouchAnalysisSynced($frame: AnalysisFrameInput!) {
+  touchAnalysisSynced(frame: $frame)
+}
+"""
+
+
+def get_frame_evidence_watermark(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+) -> dict[str, Any]:
+    """Latest-evidence watermark for a frame (ADR-0008) — ``latestEvidenceAt``
+    (max knowledgebase ingestion time) + ``evidenceCount``. The drain compares
+    ``latestEvidenceAt`` to the live analysis's ``generatedAt`` to decide whether
+    new evidence warrants a regeneration."""
+    frame = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+    }
+    data = _execute(_FRAME_EVIDENCE_WATERMARK, {"frame": frame})
+    return data["frameEvidenceWatermark"]
+
+
+def touch_analysis_synced(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+) -> bool:
+    """Bump the current analysis row's ``lastSyncedAt`` for a frame WITHOUT
+    regenerating (ADR-0008) — used when the drain's gate decides to skip. Returns
+    False when no current row exists for the frame."""
+    frame = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+    }
+    data = _execute(_TOUCH_ANALYSIS_SYNCED, {"frame": frame})
+    return bool(data.get("touchAnalysisSynced"))
 
 
 def get_analysis(
@@ -978,6 +1046,7 @@ query PendingAnalyses($limit: Int) {
     windowStart
     windowEnd
     teamId
+    force
   }
 }
 """

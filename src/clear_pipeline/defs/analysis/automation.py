@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 import dagster as dg
 
-from clear_pipeline.defs.analysis.stages import _run_frame_generation
+from clear_pipeline.defs.analysis.stages import _run_frame_generation, evidence_gate, touch_synced
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.defs.situation.frame import Frame
 from clear_pipeline.providers import clear_api
@@ -45,10 +45,38 @@ def _frame_from_automation(auto: dict) -> Frame:
     )
 
 
+def _mark_automations_ran(context, frame: Frame, automation_ids: list[str]) -> None:
+    """Advance lastRunAt + nextRunAt for a frame's subscribers so the cadence
+    stays on its fixed slots (ADR-0007 §5). Best-effort — a mark failure just
+    re-runs the frame next tick."""
+    try:
+        clear_api.mark_analysis_automations_ran(automation_ids)
+    except Exception:  # noqa: BLE001
+        context.log.warning(
+            "[drain_automations] could not mark automations ran for frame %s", frame.location_ids, exc_info=True,
+        )
+
+
 def _process_frame(context, frame: Frame, automation_ids: list[str], now_iso: str) -> bool:
     """Regenerate one frame over [window_start, now] and mark its automations
     ran. Returns True on a successful generation. Best-effort — one frame's
-    failure doesn't stop the others."""
+    failure doesn't stop the others.
+
+    Regeneration gate (ADR-0008): when the frame is within the 24h floor or has
+    no new evidence, SKIP the LLM generation — bump lastSyncedAt and still
+    advance the schedule (nextRunAt stays on its cadence slots; the run just
+    no-ops). Automations are never forced."""
+    now = datetime.fromisoformat(now_iso)
+    decision = evidence_gate(context, frame, force=False, now=now)
+    if not decision.generate:
+        context.log.info(
+            "[drain_automations] frame %s skipped (%s) — bumping lastSyncedAt, schedule advances",
+            frame.location_ids, decision.reason,
+        )
+        touch_synced(context, frame)
+        _mark_automations_ran(context, frame, automation_ids)
+        return False
+
     try:
         # Rolling frame: materialise "now" as the window end for retrieval +
         # datapoint aggregation (the frame's stored window_end is None).
@@ -59,12 +87,7 @@ def _process_frame(context, frame: Frame, automation_ids: list[str], now_iso: st
     # Stamp the run on every subscriber of this frame regardless of whether the
     # generation produced content — a None result (all-empty) still means "we
     # tried this tick"; leaving nextRunAt unset would hot-loop the frame.
-    try:
-        clear_api.mark_analysis_automations_ran(automation_ids)
-    except Exception:  # noqa: BLE001 — a mark failure just re-runs the frame next tick
-        context.log.warning(
-            "[drain_automations] could not mark automations ran for frame %s", frame.location_ids, exc_info=True,
-        )
+    _mark_automations_ran(context, frame, automation_ids)
     return result is not None
 
 
