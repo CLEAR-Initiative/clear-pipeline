@@ -397,6 +397,7 @@ def generate_and_upsert_for_frame(
     aggregated: dict[str, Any] | None,
     rag_filters: dict[str, Any] | None,
     log_context=None,
+    force: bool = False,
 ) -> dict | None:
     """Generate + upsert one unified analysis snapshot for a FRAME (ADR-0007) —
     the generalisation of the situation generator. Instead of a (country,
@@ -580,6 +581,7 @@ def generate_and_upsert_for_frame(
             generated_by_model=generated_by_model,
             generation_cost_usd=None,
             schema_version=SCHEMA_VERSION,
+            force=force,
             **frame.upsert_kwargs(),
         )
     except clear_api.ClearApiError as exc:
