@@ -269,3 +269,29 @@ def test_get_ground_message_canonical_projects_text_and_language():
 
     with patch.object(clear_api, "_execute", return_value={"groundMessageForTranslation": None}):
         assert clear_api.get_ground_message_canonical("gone") is None
+
+
+# ── the drain's own trigger ───────────────────────────────────────────────────
+
+def test_translate_has_its_own_running_poll_sensor():
+    # On-demand requests come from a web request, not an upstream
+    # materialisation — the drain must not wait on signal traffic.
+    import dagster as dg
+
+    sensor = stages.translate_drain_sensor
+    assert sensor.job_name == "translate_job"
+    assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
+    # Registered with the code location, and the job runs just the drain.
+    from clear_pipeline.definitions import defs
+
+    loaded = defs()
+    assert loaded.get_sensor_def("translate_drain_sensor").job_name == "translate_job"
+    assert loaded.resolve_job_def("translate_job").asset_layer.executable_asset_keys == {
+        dg.AssetKey("translate")
+    }
+
+
+def test_poll_sensors_still_ship_stopped_by_default():
+    import dagster as dg
+
+    assert stages.signals_drain_sensor.default_status == dg.DefaultSensorStatus.STOPPED
