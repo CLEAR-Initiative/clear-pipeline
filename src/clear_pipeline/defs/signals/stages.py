@@ -43,6 +43,7 @@ from clear_pipeline.providers.clear_api import (
     get_crisis_canonical,
     get_event_canonical,
     get_analysis_canonical,
+    get_ground_message_canonical,
     get_location_canonical,
     get_situation_canonical,
     mark_signals_processed,
@@ -381,6 +382,9 @@ _CANONICAL_FETCH = {
     "location": get_location_canonical,
     "situationAnalysis": get_situation_canonical,
     "analysis": get_analysis_canonical,
+    # On demand: translated only into the locales a reviewer queued (see
+    # translate_and_upsert's requested_locales), from the reporter's language.
+    "groundMessage": get_ground_message_canonical,
 }
 
 
@@ -398,12 +402,24 @@ def translate(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 def _drain_translations(context) -> dg.MaterializeResult:
     translated = cleared = requeued = failed = 0
     seen: set[tuple[str, str]] = set()  # entities attempted this run — never re-invoke
+
+    def next_page() -> list[dict]:
+        # On-demand requests jump the oldest-first queue: a reviewer is polling
+        # the inbox for each one, while bulk rows can back up behind heavy
+        # situation-analysis calls or a stuck head that ends the run early.
+        urgent = [
+            row for row in pending_translations(first=_BATCH_SIZE, entity_type="groundMessage")
+            if (row["entityType"], row["entityId"]) not in seen
+        ]
+        return urgent or pending_translations(first=_BATCH_SIZE)
+
     for _ in range(_MAX_BATCHES):
-        queue = pending_translations(first=_BATCH_SIZE)
+        queue = next_page()
         if not queue:
             break
         # Collapse per-(entity, locale) rows to one translate call per entity —
-        # translate_and_upsert handles every configured locale + clears the rows.
+        # translate_and_upsert handles every configured locale (or, for on-demand
+        # types, exactly the queued ones) + clears the rows.
         entities: dict[tuple[str, str], set[str]] = {}
         for item in queue:
             entities.setdefault((item["entityType"], item["entityId"]), set()).add(item["locale"])
@@ -431,7 +447,9 @@ def _drain_translations(context) -> dg.MaterializeResult:
                     cleared += 1
                     made_progress = True
                     continue
-                outcome = translate_and_upsert(entity_type, entity_id, canonical)
+                outcome = translate_and_upsert(
+                    entity_type, entity_id, canonical, requested_locales=locales,
+                )
             except Exception:  # noqa: BLE001 — isolate one entity's failure
                 context.log.exception("[translate] %s %s failed", entity_type, entity_id)
                 failed += 1

@@ -52,6 +52,10 @@ HASH_FIELDS: dict[str, tuple[str, ...]] = {
         "changes",
         "scenarios",
     ),
+    # Hotline message text, translated on demand. The canonical is the
+    # reporter's original (usually Arabic), not English. Keep aligned with
+    # clear-api's HASH_FIELDS["groundMessage"].
+    "groundMessage": ("text",),
 }
 
 
