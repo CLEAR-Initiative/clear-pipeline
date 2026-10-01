@@ -6,6 +6,7 @@ S3 + fake clear-api calls, one source registered via a throwaway
 guards against) that a pure-function unit test would miss.
 """
 
+import json
 from unittest.mock import patch
 
 import dagster as dg
@@ -19,6 +20,7 @@ from clear_pipeline.defs.gx_pipeline.sources import (
     GXSource,
     IDMCGXSource,
 )
+from clear_pipeline.providers import idmc
 
 
 def test_registered_sources_conform_to_protocol():
@@ -38,23 +40,30 @@ def test_idmc_source_to_silver_input_is_pure_transform():
     mock_build.assert_called_once_with({"idu_id": "1"}, "source-1", promote=False)
 
 
-def test_idmc_source_filter_records_delegates_to_provider():
-    with patch("clear_pipeline.defs.gx_pipeline.sources.idmc.filter_by_role") as mock_filter:
-        mock_filter.return_value = ["kept"]
-        result = IDMCGXSource().filter_records(["r1", "r2"])
-    mock_filter.assert_called_once_with(["r1", "r2"])
-    assert result == ["kept"]
+def test_idmc_source_group_hooks_delegate_to_provider():
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.sources.idmc.group_member") as mock_member,
+        patch("clear_pipeline.defs.gx_pipeline.sources.idmc.resolve_group") as mock_resolve,
+    ):
+        mock_member.return_value = {"externalId": "1"}
+        mock_resolve.return_value = {"1": "keep"}
+        source = IDMCGXSource()
+        assert source.group_member("1", {"event_id": "ev-1"}) == {"externalId": "1"}
+        assert source.resolve_group([{"externalId": "1"}]) == {"1": "keep"}
+    mock_member.assert_called_once_with("1", {"event_id": "ev-1"})
+    mock_resolve.assert_called_once_with([{"externalId": "1"}])
 
 
-def test_only_idmc_source_defines_filter_records():
-    """filter_records is an optional, IDMC-only hook — deliberately not part
-    of the GXSource Protocol (factory.py's _silver probes for it via
-    getattr). Locks in "zero footprint on other sources" as a tested
-    property, not just a design comment."""
-    assert not hasattr(DataminrGXSource(), "filter_records")
-    assert not hasattr(ACLEDGXSource(), "filter_records")
-    assert not hasattr(Darfur24GXSource(), "filter_records")
-    assert hasattr(IDMCGXSource(), "filter_records")
+def test_only_idmc_source_defines_group_hooks():
+    """The group-supersession hooks are optional and IDMC-only —
+    deliberately not part of the GXSource Protocol (factory.py's _reconcile
+    probes for them via getattr). Locks in "zero footprint on other sources"
+    as a tested property, not just a design comment."""
+    for source in (DataminrGXSource(), ACLEDGXSource(), Darfur24GXSource()):
+        assert not hasattr(source, "group_member")
+        assert not hasattr(source, "resolve_group")
+    assert hasattr(IDMCGXSource(), "group_member")
+    assert hasattr(IDMCGXSource(), "resolve_group")
 
 
 class FakeS3:
@@ -214,51 +223,286 @@ def test_gx_pipeline_end_to_end(tmp_path):
     assert len(created_signals) == 2, "second push run must not re-push already-pushed rows"
 
 
-class FilteringFakeSource(FakeSource):
-    """Like FakeSource but drops record "r2" via an optional
-    filter_records — confirms _silver's getattr(source, "filter_records")
-    wiring end to end (not just the pure function an adapter might delegate
-    to)."""
+# ══════════════════════════════════════════════════════════════════════════
+# Supersession groups (`<source>_reconcile`).
+#
+# The bug these guard: the verdict used to be computed over the current
+# BATCH. Two rows competing inside one `event_id` were only ever compared if
+# the same poll happened to deliver both — so a row superseded by a LATER
+# poll stayed live in clear-api forever. The verdict has to be computed over
+# batch ∪ gold, which means it has to survive a round-trip through the gold
+# table, which is what most of these tests actually exercise.
+# ══════════════════════════════════════════════════════════════════════════
 
-    def filter_records(self, records):
-        return [r for r in records if r["id"] != "r2"]
+
+def _group_record(rec_id, event_id, role, created_at):
+    """A record shaped like a parsed IDU row — the fields idmc.group_member
+    reads (`event_id`/`role`/`created_at`) plus what FakeSource needs."""
+    return {
+        "id": rec_id, "ts": created_at, "title": f"Displacement {rec_id}",
+        "lat": 12.0, "lng": 30.0,
+        "event_id": event_id, "role": role, "created_at": created_at,
+    }
 
 
-def test_silver_drops_filtered_records_before_silver_write(tmp_path):
-    fake_s3 = FakeS3()
-    iceberg_warehouse = f"file://{tmp_path / 'warehouse'}"
-    iceberg_catalog_uri = f"sqlite:///{tmp_path / 'catalog.db'}"
-    created_signals = []
+class GroupingFakeSource(FakeSource):
+    """A source whose rows compete inside an `event_id` group, like IDMC.
 
-    def fake_create_signal(input_data):
-        row = {**input_data, "id": f"sig-{len(created_signals)}", "generalLocation": {"id": "loc-1", "level": 2, "ancestorIds": []}}
-        created_signals.append(row)
-        return row
+    Delegates to the REAL providers/idmc.py rules rather than a stub: the
+    bug lives in how the rules, the gold round-trip and the asset wiring
+    combine, not in any one of them, so a stubbed rule would test nothing.
+    Each `poll` returns the next batch, simulating successive polls."""
 
-    defs_list = build_gx_source_assets(FilteringFakeSource())
-    assets = [d for d in defs_list if isinstance(d, dg.AssetsDefinition)]
-    checks = [d for d in defs_list if isinstance(d, dg.AssetChecksDefinition)]
+    def __init__(self, batches):
+        self._batches = list(batches)
+        self._poll_count = 0
+        self._watermark = None
 
+    def poll(self, since):
+        if self._poll_count >= len(self._batches):
+            return []
+        batch = self._batches[self._poll_count]
+        self._poll_count += 1
+        return batch
+
+    def to_silver_input(self, record, source_id):
+        data = super().to_silver_input(record, source_id)
+        # Where build_idmc_signal_input puts the verbatim upstream row — and
+        # therefore where it comes back from when read out of gold.
+        data["rawData"] = record
+        return data
+
+    def group_member(self, external_id, raw_data):
+        return idmc.group_member(external_id, raw_data)
+
+    def resolve_group(self, members):
+        return idmc.resolve_group(members)
+
+
+def _run_gx(assets, checks, fake_s3, warehouse, catalog_uri, create_signal):
     with (
         patch("clear_pipeline.defs.gx_pipeline.factory.lake.s3_client", return_value=fake_s3),
         patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
-        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
-        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
-        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=fake_create_signal),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", warehouse),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", catalog_uri),
+        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=create_signal),
         patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
     ):
         mock_classify.return_value.relevance = 0.9
         mock_classify.return_value.type_level_2 = "conflict"
         mock_classify.return_value.disaster_types = ["cv"]
-
         result = dg.materialize(assets + checks)
-
     assert result.success
-    # "r2" was dropped by filter_records before to_silver_input ever ran for
-    # it — no silver S3 blob written for it at all, not merely excluded from
-    # the final push count.
-    assert not any("r2" in key and "silver" in key for key in fake_s3.objects)
-    assert len(created_signals) == 1  # only "r1" made it all the way to push
+    return result
+
+
+def _gold_rows(warehouse, catalog_uri, source="fakesrc"):
+    """Gold rows by externalId, read straight out of Iceberg.
+
+    NULL in a string column comes back through pandas as float NaN, so
+    normalize it to None exactly as iceberg_signals' own reader does —
+    otherwise an `is None` assertion here would be comparing against NaN and
+    failing on a row that is stored perfectly correctly."""
+    import pandas as pd
+
+    from clear_pipeline.defs.gx_pipeline import iceberg_signals
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", warehouse),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", catalog_uri),
+    ):
+        table = iceberg_signals.get_signals_table(source)
+        return {
+            row["externalId"]: {k: (None if pd.isna(v) else v) for k, v in row.items()}
+            for row in table.scan().to_pandas().to_dict("records")
+        }
+
+
+def _gold_role(gold_row: dict) -> str | None:
+    """The role stored in a gold row's signalInputJson.rawData — what a
+    FUTURE poll's `group_member` fallback would read back for this row if
+    it doesn't reappear in that poll's batch (factory.py's gold-fallback
+    path in `_reconcile`)."""
+    signal_input = json.loads(gold_row["signalInputJson"]) if gold_row.get("signalInputJson") else {}
+    return (signal_input.get("rawData") or {}).get("role")
+
+
+class _GroupHarness:
+    """Builds the assets once and runs successive polls against one shared
+    S3 + Iceberg warehouse, so gold persists between runs the way it does in
+    production. That persistence is the whole subject of these tests."""
+
+    def __init__(self, tmp_path, batches):
+        self.warehouse = f"file://{tmp_path / 'warehouse'}"
+        self.catalog_uri = f"sqlite:///{tmp_path / 'catalog.db'}"
+        self.s3 = FakeS3()
+        self.created = []
+        defs_list = build_gx_source_assets(GroupingFakeSource(batches))
+        self.assets = [d for d in defs_list if isinstance(d, dg.AssetsDefinition)]
+        self.checks = [d for d in defs_list if isinstance(d, dg.AssetChecksDefinition)]
+
+    def _create_signal(self, input_data):
+        row = {**input_data, "id": f"sig-{len(self.created)}",
+               "generalLocation": {"id": "loc-1", "level": 2, "ancestorIds": []}}
+        self.created.append(row)
+        return row
+
+    def poll(self):
+        _run_gx(self.assets, self.checks, self.s3, self.warehouse,
+                self.catalog_uri, self._create_signal)
+
+    @property
+    def gold(self):
+        return _gold_rows(self.warehouse, self.catalog_uri)
+
+    @property
+    def created_ids(self):
+        return [row["externalId"] for row in self.created]
+
+
+def test_reconcile_retracts_a_gold_row_superseded_by_a_later_poll(tmp_path):
+    """THE regression. A Triangulation row arrives alone and is pushed. The
+    Recommended figure that supersedes it arrives on the NEXT poll, in a
+    batch of one — so a batch-scoped rule sees no conflict and leaves the
+    first row live forever. Reconcile has to pull the earlier row back out
+    of gold to see the group at all."""
+    harness = _GroupHarness(tmp_path, batches=[
+        [_group_record("t1", "ev-1", "Triangulation", "2026-09-01T00:00:00Z")],
+        [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
+    ])
+
+    harness.poll()
+    assert harness.created_ids == ["fakesrc:t1"]
+    assert harness.gold["t1"]["retracted"] is False
+    assert harness.gold["t1"]["groupKey"] == "idmc:eventId:ev-1", "gold must record the group to be findable later"
+
+    harness.poll()
+
+    gold = harness.gold
+    assert gold["t1"]["retracted"] is True, "superseded by the Recommended figure from the second poll"
+    assert gold["r1"]["retracted"] is False
+    # The retraction is a gold-state change, not a re-push: t1 keeps the
+    # pushedAt from poll 1 and is never sent to clear-api twice.
+    assert harness.created_ids == ["fakesrc:t1", "fakesrc:r1"]
+
+
+def test_reconcile_never_creates_a_signal_superseded_by_existing_gold(tmp_path):
+    """The reverse arrival order, and the sharper guarantee: a row that is
+    already superseded when it arrives must produce ZERO clear-api calls.
+    Creating it and retracting it afterwards is not equivalent — in between
+    it is a live `status=NEW` row, which is exactly what the drain picks
+    up."""
+    harness = _GroupHarness(tmp_path, batches=[
+        [_group_record("r1", "ev-1", "Recommended figure", "2026-09-01T00:00:00Z")],
+        [_group_record("t1", "ev-1", "Triangulation", "2026-09-02T00:00:00Z")],
+    ])
+
+    harness.poll()
+    harness.poll()
+
+    assert harness.created_ids == ["fakesrc:r1"], "t1 was superseded on arrival — never created"
+    assert "t1" not in harness.gold, "a row that never reached clear-api needs no gold tombstone"
+    assert harness.gold["r1"]["retracted"] is False
+
+
+def test_reconcile_brings_a_retracted_row_back_when_the_verdict_reverses(tmp_path):
+    """Retraction is a verdict about a group, not a tombstone. When the
+    group's composition changes the verdict can flip back, so reconcile must
+    read already-retracted rows (and write both directions). Here the
+    Recommended figure is revised down to Triangulation, which turns the
+    group into an all-Triangulation one — and t1, being the more recent, is
+    the row that survives it."""
+    harness = _GroupHarness(tmp_path, batches=[
+        [_group_record("t1", "ev-1", "Triangulation", "2026-09-05T00:00:00Z")],
+        [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
+        # Same row id as poll 2, revised role — the batch copy must win over
+        # the stale gold copy, or the group is resolved on an outdated role.
+        [_group_record("r1", "ev-1", "Triangulation", "2026-09-02T00:00:00Z")],
+    ])
+
+    harness.poll()
+    harness.poll()
+    assert harness.gold["t1"]["retracted"] is True
+
+    harness.poll()
+
+    gold = harness.gold
+    assert gold["t1"]["retracted"] is False, "verdict reversed — t1 is the most recent Triangulation"
+    assert gold["r1"]["retracted"] is True
+    # The verdict used r1's FRESH role (Triangulation) to decide this — but
+    # r1's verdict is RETRACT, so it's dropped by keep_mask and never
+    # reaches `_match`/`_gold`'s normal full-row overwrite. If gold's
+    # stored content isn't ALSO refreshed here, r1 is written back with
+    # whatever `_gold` wrote on the LAST poll it was kept — poll 2's
+    # "Recommended figure" — even though the verdict that justified this
+    # exact write used "Triangulation". A bare retracted=True flip with a
+    # stale signalInput underneath it is a contradiction sitting in gold.
+    assert _gold_role(gold["r1"]) == "Triangulation", \
+        "gold's stored content must match what resolve_group actually used, not freeze at the last poll r1 was kept"
+    # Neither reversal re-pushes: both rows were already created once.
+    assert harness.created_ids == ["fakesrc:t1", "fakesrc:r1"]
+
+
+def test_reconcile_uses_refreshed_content_on_a_later_poll_that_omits_the_row(tmp_path):
+    """The forward-looking half of the content-staleness guarantee above.
+    r1 is revised to Triangulation in poll 3 (as above) and then NEVER
+    resent — the normal case, since an unchanged row doesn't get re-sent.
+    Poll 4 only revises t1 (forcing reconcile to revisit the group) and
+    must resolve it using r1's REFRESHED stored role, not a phantom
+    "Recommended figure" frozen from poll 2. If gold's content weren't kept
+    fresh, this poll would wrongly retract t1 — the live, correct row —
+    using evidence that stopped being true two polls ago."""
+    harness = _GroupHarness(tmp_path, batches=[
+        [_group_record("t1", "ev-1", "Triangulation", "2026-09-05T00:00:00Z")],
+        [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
+        [_group_record("r1", "ev-1", "Triangulation", "2026-09-02T00:00:00Z")],
+        # Poll 4: only t1 — r1 is not sent at all, the normal case (this
+        # fake harness has no content-hash dedup to route around; real
+        # production's would also simply not resend an unchanged row).
+        [_group_record("t1", "ev-1", "Triangulation", "2026-09-05T00:00:00Z")],
+    ])
+
+    for _ in range(4):
+        harness.poll()
+
+    gold = harness.gold
+    assert gold["t1"]["retracted"] is False, \
+        "t1 is still the more recent of an all-Triangulation group — nothing should have changed"
+    assert gold["r1"]["retracted"] is True
+    assert harness.created_ids == ["fakesrc:t1", "fakesrc:r1"], "no re-push on either poll 3 or poll 4"
+
+
+def test_reconcile_resolves_a_group_delivered_within_one_poll(tmp_path):
+    """The case the old batch filter did handle — still handled, and now
+    the filtering happens AFTER silver rather than before it. Both rows get
+    a silver blob; only the survivor reaches gold and push."""
+    harness = _GroupHarness(tmp_path, batches=[[
+        _group_record("r1", "ev-1", "Recommended figure", "2026-09-01T00:00:00Z"),
+        _group_record("t1", "ev-1", "Triangulation", "2026-09-01T01:00:00Z"),
+    ]])
+
+    harness.poll()
+
+    silver_keys = [k for k in harness.s3.objects if "silver" in k]
+    assert any("r1" in k for k in silver_keys)
+    assert any("t1" in k for k in silver_keys), "silver no longer filters — reconcile does, downstream of it"
+    assert harness.created_ids == ["fakesrc:r1"]
+    assert "t1" not in harness.gold
+
+
+def test_reconcile_leaves_ungrouped_rows_alone(tmp_path):
+    """A row with no `event_id` is a group of one: nothing can supersede it,
+    and it must not be swept up by another group's verdict."""
+    harness = _GroupHarness(tmp_path, batches=[[
+        _group_record("r1", "ev-1", "Recommended figure", "2026-09-01T00:00:00Z"),
+        _group_record("t1", "ev-1", "Triangulation", "2026-09-01T01:00:00Z"),
+        _group_record("solo", None, "Triangulation", "2026-09-01T02:00:00Z"),
+    ]])
+
+    harness.poll()
+
+    assert sorted(harness.created_ids) == ["fakesrc:r1", "fakesrc:solo"]
+    assert harness.gold["solo"]["groupKey"] is None
+    assert harness.gold["solo"]["retracted"] is False
 
 
 class DupSource(FakeSource):
@@ -328,6 +572,66 @@ def test_iceberg_events_stubbed():
     merged = iceberg_events.merge_event(table, event)
     assert merged["version"] == 1 and merged["isCurrent"]
     assert merged["signalIds"] == ["r1"]  # passthrough, not persisted anywhere
+
+
+def test_gold_table_gains_new_columns_on_load(tmp_path):
+    """`_SCHEMA` is only applied at CREATE time, so a gold table created
+    before `groupKey`/`retracted` existed would keep loading with the old
+    schema and break every write. Loading it has to migrate it additively —
+    and a row written before the migration, which reads back `retracted`
+    NULL, must still count as live rather than being stranded unpushable."""
+    import pyarrow as pa
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import DoubleType, LongType, NestedField, StringType
+
+    from clear_pipeline.defs.gx_pipeline import iceberg_catalog, iceberg_signals
+
+    pre_migration_schema = Schema(
+        NestedField(1, "externalId", StringType(), required=True),
+        NestedField(2, "eventId", StringType(), required=False),
+        NestedField(3, "relevanceScore", DoubleType(), required=False),
+        NestedField(4, "eventType", StringType(), required=False),
+        NestedField(5, "districtKey", StringType(), required=False),
+        NestedField(6, "matchOutcome", StringType(), required=False),
+        NestedField(7, "severity", LongType(), required=False),
+        NestedField(8, "populationAffectedContribution", LongType(), required=False),
+        NestedField(9, "casualtiesContribution", LongType(), required=False),
+        NestedField(10, "createdAt", StringType(), required=False),
+        NestedField(11, "pushedAt", StringType(), required=False),
+        NestedField(12, "signalInputJson", StringType(), required=False),
+        identifier_field_ids=[1],
+    )
+
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", f"file://{tmp_path / 'warehouse'}"),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", f"sqlite:///{tmp_path / 'catalog.db'}"),
+    ):
+        cat = iceberg_catalog.catalog()
+        iceberg_catalog.ensure_namespace(cat)
+        old_table = cat.create_table(
+            f"{iceberg_catalog.NAMESPACE}.oldsrc_signals", schema=pre_migration_schema
+        )
+        old_table.append(pa.Table.from_pylist(
+            [{"externalId": "pre-1", "eventId": "e1", "relevanceScore": 0.9,
+              "eventType": "conflict", "districtKey": "North Darfur",
+              "matchOutcome": "new_event", "severity": 3,
+              "populationAffectedContribution": None, "casualtiesContribution": 2,
+              "createdAt": "2026-09-01T00:00:00Z", "pushedAt": None,
+              "signalInputJson": '{"title": "Clash"}'}],
+            schema=pre_migration_schema.as_arrow(),
+        ))
+
+        table = iceberg_signals.get_signals_table("oldsrc")
+        assert "groupKey" in table.schema().column_names
+        assert "retracted" in table.schema().column_names
+
+        unpushed = iceberg_signals.unpushed_signals(table)
+        assert [row["externalId"] for row in unpushed] == ["pre-1"], \
+            "a pre-migration row reads retracted=NULL, which means live, not retracted"
+
+        # The write path works against the migrated schema.
+        iceberg_signals.upsert_signals(table, [{**unpushed[0], "retracted": True}])
+        assert iceberg_signals.unpushed_signals(table) == []
 
 
 def test_iceberg_signals_type1_upsert(tmp_path):

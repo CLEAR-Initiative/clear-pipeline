@@ -21,7 +21,6 @@ Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_last_180_days_r
 
 import hashlib
 import logging
-from collections import defaultdict
 from datetime import UTC, datetime
 
 import httpx
@@ -100,37 +99,97 @@ _ROLE_RECOMMENDED = "Recommended figure"
 _ROLE_TRIANGULATION = "Triangulation"
 
 
-def filter_by_role(records: list[dict]) -> list[dict]:
-    """Group parsed IDU records by `event_id`; within each group, drop
-    Triangulation rows a Recommended figure already supersedes, or collapse
-    an all-Triangulation group down to its single most recent row (by
-    `created_at`). Records with no `event_id`, or a group that's neither
-    case, pass through unchanged.
+# ── Role-based supersession within an IDU `event_id` group ────────────────
+# IDMC-specific: one IDU `event_id` can carry several role-tagged rows
+# (analyst-reviewed "Recommended figure" vs. corroborating "Triangulation")
+# — no other source has this shape. Used only by the gx_pipeline medallion
+# (`IDMCGXSource`'s group hooks -> `<source>_reconcile`), not by
+# production's `fetch_idu_records`/`IDMCConnector`.
+#
+# These are deliberately *group primitives*, not a batch filter. The verdict
+# for a row depends on every other row sharing its `event_id` — including
+# ones ingested by an earlier poll and already sitting in gold. A function
+# that only ever sees the current batch cannot compute it: a Triangulation
+# row polled alone on Monday looks unopposed, and stays live forever once
+# Tuesday's poll delivers the Recommended figure that supersedes it. So the
+# rule is split into "what group is this row in" (`group_key` /
+# `group_member`) and "given the whole group, what survives"
+# (`resolve_group`), and the caller is responsible for assembling the whole
+# group from both sources.
 
-    IDMC-specific: one IDU `event_id` can carry several role-tagged rows
-    (analyst-reviewed "Recommended figure" vs. corroborating
-    "Triangulation") — no other source has this shape. Used only by the
-    gx_pipeline medallion (`IDMCGXSource.filter_records`), not by
-    production's `fetch_idu_records`/`IDMCConnector`.
+KEEP = "keep"
+RETRACT = "retract"
+
+
+def group_key(raw_data: dict | None) -> str | None:
+    """The supersession group a raw IDU row belongs to — its `event_id`,
+    namespaced as `idmc:eventId:<event_id>`. `groupKey` is a single column
+    shared by every source's gold table (`iceberg_signals.py`); the
+    namespace keeps IDMC's numeric `event_id`s from colliding with another
+    source's group key if one is ever added, and makes the column
+    self-describing when read directly out of Iceberg.
+
+    None when the row carries no `event_id`: it's a group of one and no
+    supersession rule can apply to it."""
+    if not raw_data:
+        return None
+    event_id = raw_data.get("event_id")
+    return f"idmc:eventId:{event_id}" if event_id else None
+
+
+def group_member(external_id: str, raw_data: dict | None) -> dict | None:
+    """Normalize a raw IDU row into the shape `resolve_group` reads, or None
+    if it isn't in any group.
+
+    `raw_data` is the verbatim IDU row — `build_idmc_signal_input` stores it
+    on the signal input as `rawData`, so a freshly polled record and a row
+    read back out of gold both reach this through the same field, with
+    `event_id`/`role`/`created_at` under those same names. `externalId` is
+    passed separately because the pipeline's row id is the bare `idu_id`,
+    while the signal input's own `externalId` is the `idmc:`-prefixed form."""
+    key = group_key(raw_data)
+    if key is None or raw_data is None:
+        return None
+    return {
+        "externalId": external_id,
+        "groupKey": key,
+        # Same `or ""` normalization `_parse_event` applies — IDU can send a
+        # null role, and the rules below compare against exact strings.
+        "role": (raw_data.get("role") or ""),
+        "createdAt": raw_data.get("created_at") or "",
+    }
+
+
+def resolve_group(members: list[dict]) -> dict[str, str]:
+    """Given every member of ONE `event_id` group, return each member's
+    verdict: `KEEP` or `RETRACT`.
+
+    Three rules, unchanged from the batch filter this replaces:
+      1. A Recommended figure present -> every Triangulation row is
+         superseded and retracts; everything else keeps.
+      2. An all-Triangulation group -> only the most recent row (by
+         `created_at`) keeps; the rest retract.
+      3. Anything else (no Recommended figure, not all Triangulation) ->
+         everything keeps, rather than guessing at an unknown role mix.
+
+    Total over `members`: every member gets a verdict, so a caller can
+    compare it against what it previously recorded and detect a group whose
+    verdict has *reversed* — a retracted row becoming live again. That
+    reversibility is why the caller must feed in already-retracted rows too.
     """
-    groups: dict[str, list[dict]] = defaultdict(list)
-    kept: list[dict] = []
-    for record in records:
-        event_id = record.get("event_id")
-        if not event_id:
-            kept.append(record)
-        else:
-            groups[event_id].append(record)
-
-    for group in groups.values():
-        roles = [r["role"] for r in group]
-        if _ROLE_RECOMMENDED in roles:
-            kept.extend(r for r, role in zip(group, roles) if role != _ROLE_TRIANGULATION)
-        elif all(role == _ROLE_TRIANGULATION for role in roles):
-            kept.append(max(group, key=lambda r: r.get("created_at") or ""))
-        else:
-            kept.extend(group)
-    return kept
+    roles = [m["role"] for m in members]
+    if _ROLE_RECOMMENDED in roles:
+        return {
+            m["externalId"]: (RETRACT if m["role"] == _ROLE_TRIANGULATION else KEEP)
+            for m in members
+        }
+    if roles and all(role == _ROLE_TRIANGULATION for role in roles):
+        most_recent = max(members, key=lambda m: m["createdAt"])
+        return {
+            m["externalId"]: (KEEP if m["externalId"] == most_recent["externalId"] else RETRACT)
+            for m in members
+        }
+    return {m["externalId"]: KEEP for m in members}
 
 
 # IDMC's backend recomputes this row's centroid independently on every poll,

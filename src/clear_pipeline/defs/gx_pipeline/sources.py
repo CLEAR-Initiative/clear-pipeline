@@ -19,14 +19,16 @@ pure transform, no clear-api write, built on
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-import json
-
 from clear_pipeline.providers import acled, darfur24, dataminr, idmc
-from clear_pipeline.providers.clear_api import get_locations_by_level, get_source_id_by_name
+from clear_pipeline.providers.clear_api import (
+    get_locations_by_level,
+    get_source_id_by_name,
+)
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
 
@@ -279,17 +281,30 @@ class IDMCGXSource:
         # (matching production's IDMCConnector.post_create) is added.
         pass
 
-    def filter_records(self, records: list[Any]) -> list[Any]:
-        """IDMC-specific: one IDU `event_id` can have several role-tagged
-        rows (Recommended figure vs Triangulation) — no other source has
-        this shape, so no other adapter needs this. See
-        providers/idmc.py::filter_by_role for the rule.
+    # ── Optional group-supersession hooks ─────────────────────────────────
+    # IDMC-specific: one IDU `event_id` can have several role-tagged rows
+    # (Recommended figure vs Triangulation) competing to describe the same
+    # displacement, and only some survive — no other source has this shape,
+    # so no other adapter defines these. See providers/idmc.py for the rules.
+    #
+    # Deliberately NOT part of the `GXSource` Protocol — `factory.py`'s
+    # `_reconcile` probes for both via `getattr` and passes the batch
+    # straight through unless both are present, so Dataminr/ACLED/Darfur24
+    # need no change at all to stay unaffected.
 
-        Optional hook, deliberately NOT part of the `GXSource` Protocol —
-        `factory.py`'s `_silver` probes for it via `getattr(source,
-        "filter_records", None)`, so Dataminr/ACLED/Darfur24 need no
-        change at all to stay unaffected."""
-        return idmc.filter_by_role(records)
+    def group_member(self, external_id: str, raw_data: dict | None) -> dict | None:
+        """Place a row in its supersession group, or None if it's in none.
+        `raw_data` is whatever `to_silver_input` stored as `rawData`, so
+        this works identically on a freshly polled row and on one read back
+        out of gold — which is what lets `_reconcile` compare the two."""
+        return idmc.group_member(external_id, raw_data)
+
+    def resolve_group(self, members: list[dict]) -> dict[str, str]:
+        """Verdict per member of ONE group: `"retract"` kills the row,
+        anything else keeps it. Must be total over `members` and must be
+        reversible — a member that retracted on an earlier poll has to be
+        able to come back if the group's composition changes."""
+        return idmc.resolve_group(members)
 
 
 # IDMC is registered for the classify/geo/QA/filtering slice of this

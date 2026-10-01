@@ -1,5 +1,5 @@
 """Generic GX-gated bronze -> silver -> gold asset factory.
-``build_gx_source_assets(source)`` produces one source's full pipeline: 8
+``build_gx_source_assets(source)`` produces one source's full pipeline: 9
 assets + 6 GX checks + 1 job. Nothing writes to clear-api until
 ``<source>_push``. Bronze/silver stay S3 JSON; gold signals are Iceberg,
 Type-1 (`iceberg_signals.py`). Gold events persistence is STUBBED for now
@@ -10,11 +10,11 @@ signals until that lands.
 
 **Add a data source = add a ``GXSource`` to ``sources.py``** — this
 module needs no change, mirroring ``defs/signals/factory.py``'s
-``build_source_assets(connector)``. One exception: ``_silver`` probes for
-an optional ``filter_records`` method via ``getattr`` (not part of the
-``GXSource`` Protocol) — a source with no batch-level filtering need (i.e.
-every source except IDMC today) simply doesn't define it and is
-unaffected; see ``IDMCGXSource.filter_records``.
+``build_source_assets(connector)``. One exception: ``_reconcile`` probes
+for the optional ``group_member``/``resolve_group`` pair via ``getattr``
+(not part of the ``GXSource`` Protocol) — a source whose rows don't
+compete with each other (i.e. every source except IDMC today) simply
+doesn't define them and passes straight through; see ``IDMCGXSource``.
 
 Simplifications, each with an upgrade path (details in the doc §5):
 
@@ -24,7 +24,14 @@ Simplifications, each with an upgrade path (details in the doc §5):
     authoritative admin-2 is resolved in ``<source>_push`` instead.
   - No LLM rewrite of merged event title/description — bootstrap only.
   - Single-writer, no cross-run locking (production uses `redis_lock`
-    here); fine for one Dagster run at a time.
+    here); fine for one Dagster run at a time. ``_reconcile`` makes this
+    assumption load-bearing rather than merely tidy: it is a
+    read-modify-write over a whole supersession group, so two overlapping
+    runs can compute verdicts from the same stale snapshot and silently
+    revert each other's retraction. It does not self-heal, because a group
+    is only ever revisited when one of its rows turns up in a batch. The
+    ``reconcile -> gold -> push`` span wants wrapping in `redis_lock`
+    before this runs concurrently.
 """
 
 import uuid
@@ -46,6 +53,12 @@ from clear_pipeline.signals.config import settings
 
 _BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
 _SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
+
+# The one word `_reconcile` needs from a source's `resolve_group` hook.
+# Anything else a hook returns (conventionally "keep") means the row lives,
+# so a source can't accidentally retract rows by returning an unexpected
+# value. See sources.py's IDMCGXSource for the hook contract.
+_RETRACT = "retract"
 
 
 def _s3():
@@ -95,7 +108,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 lake.write_raw(s3, bucket, key, source.raw_bytes(record))
                 rows.append({"externalId": ext_id, "publishedAt": pub_at, "s3Key": key})
                 written += 1
-            except Exception:  # noqa: BLE001 — one bad record shouldn't drop the batch
+            except Exception:
                 context.log.exception("[%s bronze] failed to write a record", src)
                 failed += 1
 
@@ -132,19 +145,6 @@ def build_gx_source_assets(source: GXSource) -> list:
             raw = s3.get_object(Bucket=bucket, Key=bronze_row["s3Key"])["Body"].read()
             parsed.append((bronze_row, source.parse(raw)))
 
-        # Optional, source-specific batch filter over the parsed records —
-        # e.g. IDMCGXSource groups by event_id to drop redundant
-        # Triangulation rows a Recommended figure already supersedes.
-        # Deliberately NOT part of the GXSource Protocol: probing via
-        # getattr means sources that don't define it (everything but IDMC
-        # today) need zero changes, now or for any future such filter.
-        filter_records = getattr(source, "filter_records", None)
-        if filter_records is not None:
-            records = filter_records([record for _, record in parsed])
-            kept_ids = {source.external_id(record) for record in records}
-            parsed = [(bronze_row, record) for bronze_row, record in parsed
-                      if bronze_row["externalId"] in kept_ids]
-
         rows: list[dict] = []
         for bronze_row, record in parsed:
             signal_input = source.to_silver_input(record, source_id)
@@ -164,8 +164,168 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "signalInput": signal_input,
             })
 
-        context.add_output_metadata({"rows": len(rows), "dropped": len(bronze_df) - len(rows)})
+        context.add_output_metadata({"rows": len(rows)})
         return pd.DataFrame(rows)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Reconcile: decide which rows in each supersession group survive, across
+    # the WHOLE gold table rather than just this batch. Optional per source.
+    # ══════════════════════════════════════════════════════════════════════
+    def _group_hooks():
+        """The optional supersession hooks, or None if the source doesn't do
+        group supersession. All-or-nothing on purpose: one without the other
+        can't produce a verdict, and silently half-running is worse than not
+        running. See IDMCGXSource for the only implementation today."""
+        hooks = tuple(getattr(source, name, None)
+                      for name in ("group_member", "resolve_group"))
+        return hooks if all(hooks) else None
+
+    @dg.asset(
+        name=f"{src}_reconcile",
+        group_name=group,
+        ins={"silver_df": dg.AssetIn(key=f"{src}_silver")},
+        description=(
+            "Resolve supersession groups against the whole gold table (not just this "
+            "batch); drop superseded rows and flag retractions. Pass-through if the "
+            "source defines no group hooks."
+        ),
+    )
+    def _reconcile(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
+        """Sits between `_silver` and `_classify`, and must stay there.
+
+        Not earlier: it reads `signalInput`, which `_silver` builds. Not
+        later: a retracted row must never reach `_match`, whose severity and
+        casualties aggregation would fold a row that's about to be retracted
+        into the event totals.
+
+        The gold table is read with a plain function call rather than a
+        Dagster `AssetIn` on `<source>_gold`. An `AssetIn` would be a cycle
+        — gold already depends on this asset transitively. Same pattern and
+        same reason as `_load_open_gold_event_ids` above.
+        """
+        df = silver_df.copy()
+        hooks = _group_hooks()
+        if df.empty or hooks is None:
+            # No group semantics for this source: every row survives, and
+            # `groupKey` still has to exist as a column so `_match` can read
+            # it off every row uniformly.
+            df["groupKey"] = [None] * len(df)
+            df["retracted"] = [False] * len(df)
+            return df
+        group_member, resolve_group = hooks
+
+        # ── Batch side: one member per silver row that's in a group ───────
+        batch_members: dict[str, dict] = {}
+        # Every batch row's fresh signalInput, keyed by externalId (not just
+        # grouped ones — a RETRACT verdict can apply to any externalId).
+        # Needed below: a row whose verdict is RETRACT never reaches
+        # `_match`/`_gold`'s normal full-row overwrite (keep_mask drops it),
+        # so this is the ONLY place that can keep gold's stored content from
+        # freezing at whatever it was the last time the row WAS kept — see
+        # the gold-side loop below for what breaks if it doesn't.
+        batch_signal_inputs: dict[str, Any] = {row.externalId: row.signalInput for row in df.itertuples()}
+        for row in df.itertuples():
+            member = group_member(row.externalId, (row.signalInput or {}).get("rawData"))
+            if member is not None:
+                batch_members[row.externalId] = member
+
+        if not batch_members:
+            df["groupKey"] = [None] * len(df)
+            df["retracted"] = [False] * len(df)
+            context.add_output_metadata({"rows_in": len(df), "rows_out": len(df), "groups": 0})
+            return df
+
+        # ── Gold side: every row already stored in a group this poll touched.
+        # This is the whole point of the asset — without it the verdict is
+        # computed against the batch alone, and a row superseded by a LATER
+        # poll is never revisited.
+        signals_table = iceberg_signals.get_signals_table(src)
+        touched = sorted({m["groupKey"] for m in batch_members.values()})
+        gold_rows = iceberg_signals.signals_in_groups(signals_table, touched)
+
+        members_by_group: dict[str, list[dict]] = {}
+        for member in batch_members.values():
+            members_by_group.setdefault(member["groupKey"], []).append(member)
+        for gold_row in gold_rows:
+            # A row present in both sides is represented by its batch copy —
+            # same externalId, but the freshly polled version, which may
+            # carry a revised role.
+            if gold_row["externalId"] in batch_members:
+                continue
+            member = group_member(gold_row["externalId"], (gold_row["signalInput"] or {}).get("rawData"))
+            if member is not None:
+                members_by_group.setdefault(member["groupKey"], []).append(member)
+
+        verdicts: dict[str, str] = {}
+        for members in members_by_group.values():
+            verdicts.update(resolve_group(members))
+
+        # ── Apply to gold: flip retracted, and refresh content whenever a
+        # fresh batch copy exists — independent of each other.
+        #
+        # A RETRACT-verdict row never reaches `_match`/`_gold`'s normal
+        # full-row overwrite (keep_mask drops it below), so if this loop
+        # only flipped `retracted`, `signalInput`/`rawData` would freeze at
+        # whatever it was the last time the row WAS kept — even though the
+        # verdict above was computed from its fresh batch role. A LATER poll
+        # that doesn't re-send this row would then read that frozen content
+        # back out of gold (line ~247's fallback) and resolve the group
+        # against a role that no longer exists — a wrong verdict computed
+        # from stale truth, not a decaying display field. Content gets
+        # refreshed whenever the row showed up in this poll's batch at all,
+        # not only when `retracted` happens to flip, because an
+        # already-retracted row can still be revised upstream.
+        changed: list[dict] = []
+        retracted_after_push = 0
+        for gold_row in gold_rows:
+            ext_id = gold_row["externalId"]
+            should_retract = verdicts.get(ext_id) == _RETRACT
+            fresh_signal_input = batch_signal_inputs.get(ext_id)
+            retracted_changed = bool(gold_row.get("retracted")) != should_retract
+            if not retracted_changed and fresh_signal_input is None:
+                continue
+            # upsert_signals replaces the ENTIRE matched row, so this writes
+            # back the full row read from gold with these fields changed —
+            # not a sparse patch, which would blank every other column.
+            if fresh_signal_input is not None:
+                gold_row["signalInput"] = fresh_signal_input
+            gold_row["retracted"] = should_retract
+            changed.append(gold_row)
+            if should_retract and gold_row.get("pushedAt"):
+                retracted_after_push += 1
+        if changed:
+            iceberg_signals.upsert_signals(signals_table, changed)
+        if retracted_after_push:
+            # Known gap until clear-api accepts a retraction (step 4 of the
+            # design): these are correctly marked dead in gold but still
+            # live in Postgres. Logged rather than silently dropped.
+            context.log.warning(
+                "[%s reconcile] %d already-pushed signal(s) retracted in gold — "
+                "clear-api propagation not implemented yet, they remain live downstream",
+                src, retracted_after_push,
+            )
+
+        # ── Apply to the batch: superseded rows leave the pipeline here.
+        # They're dropped rather than written to gold as retracted: a row
+        # that never reached gold has nothing to correct downstream, and
+        # re-dropping it on every poll is idempotent.
+        keep_mask = [verdicts.get(ext_id) != _RETRACT for ext_id in df["externalId"]]
+        df["groupKey"] = [
+            (batch_members[ext_id]["groupKey"] if ext_id in batch_members else None)
+            for ext_id in df["externalId"]
+        ]
+        df["retracted"] = [False] * len(df)
+        kept = df[keep_mask].reset_index(drop=True)
+
+        context.add_output_metadata({
+            "rows_in": len(df),
+            "rows_out": len(kept),
+            "groups": len(members_by_group),
+            "batch_rows_superseded": int(len(df) - len(kept)),
+            "gold_rows_retracted": sum(1 for r in changed if r["retracted"]),
+            "gold_rows_unretracted": sum(1 for r in changed if not r["retracted"]),
+        })
+        return kept
 
     # ══════════════════════════════════════════════════════════════════════
     # Silver -> Gold business logic. Pure transforms, source-agnostic from
@@ -174,8 +334,8 @@ def build_gx_source_assets(source: GXSource) -> list:
     @dg.asset(
         name=f"{src}_classify",
         group_name=group,
-        ins={"silver_df": dg.AssetIn(key=f"{src}_silver")},
-        description="Relevance + event type (classify_locally, unchanged) — pure transform over silver.",
+        ins={"silver_df": dg.AssetIn(key=f"{src}_reconcile")},
+        description="Relevance + event type (classify_locally, unchanged) — pure transform over reconciled silver.",
     )
     def _classify(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
         df = silver_df.copy()
@@ -338,13 +498,18 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "matchOutcome": row.matchOutcome,
                 "createdAt": now_iso,
                 "pushedAt": None,
+                # Carried from `_reconcile` so the row can be found by group
+                # on a LATER poll — without it, gold holds no way to tell
+                # which rows compete with an incoming one.
+                "groupKey": row.groupKey,
+                "retracted": row.retracted,
                 "signalInput": row.signalInput,
             })
             casualties = (row.signalInput or {}).get("casualties")
             if casualties is not None:
                 bundle["casualties"] = (bundle.get("casualties") or 0) + casualties
 
-        context.add_output_metadata({"events": len(bundles), "signals": int(len(df))})
+        context.add_output_metadata({"events": len(bundles), "signals": len(df)})
         return list(bundles.values())
 
     # ══════════════════════════════════════════════════════════════════════
@@ -424,7 +589,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 row["pushedAt"] = now_iso
                 to_upsert.append(row)
                 pushed_signals += 1
-            except Exception:  # noqa: BLE001 — isolate one signal's push failure; it stays unpushed for retry
+            except Exception:
                 context.log.exception("[%s push] signal %s failed — stays unpushed for retry", src, row["externalId"])
                 failed += 1
 
@@ -520,11 +685,11 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     job = dg.define_asset_job(
         name=f"{src}_gx",
-        selection=[_bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push],
+        selection=[_bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push],
     )
 
     return [
-        _bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push,
+        _bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push,
         _bronze_check, _silver_check, _classify_check, _geo_check, _temporal_check, _gold_check,
         job,
     ]

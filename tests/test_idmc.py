@@ -7,12 +7,15 @@ import logging
 from unittest.mock import patch
 
 from clear_pipeline.providers.idmc import (
+    KEEP,
+    RETRACT,
     _content_hash,
     _parse_coordinate,
     _parse_event,
     build_idmc_signal_input,
     build_signal_content_update,
-    filter_by_role,
+    group_member,
+    resolve_group,
 )
 
 
@@ -101,54 +104,85 @@ def test_malformed_latitude_discards_valid_longitude_too():
     assert result["lng"] is None
 
 
-# ── filter_by_role: event_id/role group filtering ──────────────────────────
-# gx_pipeline-only pre-filter (see IDMCGXSource.filter_records) — a
-# Recommended figure supersedes Triangulation rows in the same event_id
-# group; an all-Triangulation group collapses to its most recent row.
+# ── group_member / resolve_group: event_id/role supersession ───────────────
+# gx_pipeline-only (see IDMCGXSource's hooks, consumed by the
+# `<source>_reconcile` asset) — a Recommended figure supersedes
+# Triangulation rows in the same event_id group; an all-Triangulation group
+# collapses to its most recent row.
+#
+# These are group primitives rather than a batch filter on purpose: the
+# caller assembles the group from the current batch AND from gold, so the
+# verdict is the same whether two competing rows arrive in one poll or a
+# week apart. `resolve_group` therefore takes one group's members, not a
+# mixed list, and is total over them so a reversal is detectable.
 
 
-def _record(**overrides) -> dict:
-    result = _parse_event(_raw(**overrides))
-    assert result is not None
-    return result
+def _member(external_id: str, **overrides) -> dict:
+    member = group_member(external_id, _raw(**overrides))
+    assert member is not None
+    return member
 
 
-def test_recommended_figure_drops_triangulation_in_same_group():
-    recommended = _record(id=1, event_id="ev-1", role="Recommended figure")
-    triangulation = _record(id=2, event_id="ev-1", role="Triangulation")
-    other_group = _record(id=3, event_id="ev-2", role="Triangulation")
+def test_recommended_figure_retracts_triangulation_in_same_group():
+    recommended = _member("1", event_id="ev-1", role="Recommended figure")
+    triangulation = _member("2", event_id="ev-1", role="Triangulation")
 
-    result = filter_by_role([recommended, triangulation, other_group])
-
-    assert recommended in result
-    assert triangulation not in result
-    assert other_group in result  # untouched — different event_id, no recommended figure there
+    assert resolve_group([recommended, triangulation]) == {"1": KEEP, "2": RETRACT}
 
 
 def test_all_triangulation_group_keeps_only_most_recent():
-    older = _record(id=1, event_id="ev-1", role="Triangulation", created_at="2026-01-01T00:00:00Z")
-    newer = _record(id=2, event_id="ev-1", role="Triangulation", created_at="2026-01-05T00:00:00Z")
+    older = _member("1", event_id="ev-1", role="Triangulation", created_at="2026-01-01T00:00:00Z")
+    newer = _member("2", event_id="ev-1", role="Triangulation", created_at="2026-01-05T00:00:00Z")
 
-    result = filter_by_role([older, newer])
-
-    assert result == [newer]
+    assert resolve_group([older, newer]) == {"1": RETRACT, "2": KEEP}
 
 
-def test_record_with_no_event_id_passes_through():
-    record = _record(id=1, event_id=None, role="Triangulation")
-    assert filter_by_role([record]) == [record]
-
-
-def test_mixed_roles_with_no_recommended_figure_pass_through_unchanged():
+def test_mixed_roles_with_no_recommended_figure_all_keep():
     """Neither rule applies (no Recommended figure, not ALL Triangulation)
     — the group is left untouched rather than guessed at."""
-    triangulation = _record(id=1, event_id="ev-1", role="Triangulation")
-    other = _record(id=2, event_id="ev-1", role="Some other role")
+    triangulation = _member("1", event_id="ev-1", role="Triangulation")
+    other = _member("2", event_id="ev-1", role="Some other role")
 
-    result = filter_by_role([triangulation, other])
+    assert resolve_group([triangulation, other]) == {"1": KEEP, "2": KEEP}
 
-    assert triangulation in result
-    assert other in result
+
+def test_row_with_no_event_id_is_not_a_group_member():
+    """No event_id means nothing can supersede it — it's a group of one, and
+    `_reconcile` leaves rows with no member strictly alone."""
+    assert group_member("1", _raw(event_id=None)) is None
+    assert group_member("1", None) is None
+
+
+def test_group_member_reads_the_same_fields_from_a_raw_row():
+    """The raw IDU row is what `build_idmc_signal_input` stores as `rawData`
+    — so a freshly polled row and one read back out of gold normalize
+    through this identically. That equivalence is what makes a cross-poll
+    verdict possible at all."""
+    member = group_member("42", _raw(event_id=7, role="Triangulation", created_at="2026-01-06T00:00:00Z"))
+    assert member == {
+        "externalId": "42",
+        "groupKey": "idmc:eventId:7",  # namespaced — see group_key's docstring
+        "role": "Triangulation",
+        "createdAt": "2026-01-06T00:00:00Z",
+    }
+
+
+def test_group_member_normalizes_a_null_role():
+    """IDU can send a null role; the rules compare against exact strings, so
+    it has to land as "" rather than None (same `or ""` _parse_event uses)."""
+    assert _member("1", event_id="ev-1", role=None)["role"] == ""
+
+
+def test_resolve_group_is_total_so_a_reversal_is_detectable():
+    """Every member gets a verdict, including the ones that keep. A caller
+    diffs this against what it stored last time to spot a row coming back to
+    life — a sparse "only the retracted ones" result could not express that."""
+    members = [
+        _member("1", event_id="ev-1", role="Recommended figure"),
+        _member("2", event_id="ev-1", role="Triangulation"),
+        _member("3", event_id="ev-1", role="Some other role"),
+    ]
+    assert set(resolve_group(members)) == {"1", "2", "3"}
 
 
 # ── _content_hash / _round_centroid: coordinate-noise rounding ────────────
