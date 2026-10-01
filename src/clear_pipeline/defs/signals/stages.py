@@ -485,6 +485,25 @@ def _clear_translation_rows(entity_type: str, entity_id: str, locales: set[str])
             pass
 
 
+# ── translate trigger ─────────────────────────────────────────────────────────
+# `translate` is eager on classify_group / alert, so on its own it only runs
+# when signal processing does. A reviewer's on-demand hotline translation
+# (clear-api `requestGroundMessageTranslation`) is queued by a web request, not
+# an upstream materialisation — nothing to be eager on, same reason the ground
+# drains have their own sensors. This sensor drains the queue every interval
+# regardless of signal traffic. Ships RUNNING: the inbox's "Translate" button
+# sits on "queued" until it runs. Concurrent runs (this + the eager trigger)
+# are safe — translate_and_upsert's per-entity Redis lock returns LOCKED and
+# leaves the rows for the next tick.
+translate_job = dg.define_asset_job(name="translate_job", selection=[translate])
+translate_drain_sensor = build_poll_sensor(
+    name="translate_drain_sensor",
+    job=translate_job,
+    default_interval_minutes=settings.manual_poll_interval_minutes,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+
+
 # ── manual-signal trigger ─────────────────────────────────────────────────────
 # Manual signals materialise no ingest asset, so eager automation never fires for
 # them. This sensor ticks classify_group on an interval to drain them (and acts as
