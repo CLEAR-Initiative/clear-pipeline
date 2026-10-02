@@ -69,7 +69,16 @@ def test_projects_only_prose_components():
 
 def test_ai_summary_keeps_text_drops_ids():
     prose = extract_situation_prose(_full_payload())
-    assert prose["ai_summary"] == {"text": "Displacement rose sharply."}
+    assert prose["ai_summary"] == {"text": "Displacement rose sharply.", "key_findings": []}
+
+
+def test_ai_summary_key_findings_reduced_to_descriptions():
+    payload = _full_payload()
+    payload["ai_summary"]["key_findings"] = [
+        {"description": "Drone strikes: markets hit in Darfur.", "source_report_ids": ["r1"]},
+    ]
+    prose = extract_situation_prose(payload)
+    assert prose["ai_summary"]["key_findings"] == [{"description": "Drone strikes: markets hit in Darfur."}]
 
 
 def test_sector_keeps_prose_drops_enums_ids_ratings():
@@ -105,7 +114,7 @@ def test_change_notes_are_prose_values_only():
 def test_empty_payload_yields_stable_empty_shape():
     prose = extract_situation_prose({})
     assert set(prose.keys()) == set(PROSE_COMPONENTS)
-    assert prose["ai_summary"] == {"text": ""}
+    assert prose["ai_summary"] == {"text": "", "key_findings": []}
     assert prose["context_risks"] == {}
     assert prose["sectors"] == {}
     assert prose["changes"] == {"notes": {}}

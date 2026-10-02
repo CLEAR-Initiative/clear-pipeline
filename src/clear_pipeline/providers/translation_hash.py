@@ -38,7 +38,24 @@ HASH_FIELDS: dict[str, tuple[str, ...]] = {
         "displacement",
         "sectors",
         "changes",
+        "scenarios",
     ),
+    # Unified frame-scoped analysis (ADR-0007) — same prose projection as
+    # situationAnalysis (extract_situation_prose). Keep aligned with clear-api's
+    # HASH_FIELDS["analysis"] (includes "scenarios", ADR-0007 §4).
+    "analysis": (
+        "ai_summary",
+        "context_risks",
+        "hazards_and_vulnerabilities",
+        "displacement",
+        "sectors",
+        "changes",
+        "scenarios",
+    ),
+    # Hotline message text, translated on demand. The canonical is the
+    # reporter's original (usually Arabic), not English. Keep aligned with
+    # clear-api's HASH_FIELDS["groundMessage"].
+    "groundMessage": ("text",),
 }
 
 

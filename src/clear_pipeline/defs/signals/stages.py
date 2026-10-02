@@ -42,12 +42,15 @@ from clear_pipeline.providers.clear_api import (
     events_pending_alert,
     get_crisis_canonical,
     get_event_canonical,
+    get_analysis_canonical,
+    get_ground_message_canonical,
     get_location_canonical,
     get_situation_canonical,
     mark_signals_processed,
     mark_translated,
     pending_signals,
     pending_translations,
+    sync_event_cards,
 )
 from clear_pipeline.providers.event import group_signal
 from clear_pipeline.providers.redis_lock import redis_lock
@@ -163,7 +166,7 @@ _DROP_DONE = "drop_done"       # legacy no-blob row (already processed by Celery
 _DROP_FAILED = "drop_failed"   # unknown/undrained source → mark FAILED (anomaly)
 
 
-def _process_one_signal(created: dict) -> str:
+def _process_one_signal(created: dict, touched_events: set[str]) -> str:
     projected = _project(created)
     if isinstance(projected, str):
         # Permanent skip — mark it out of the queue so it can't poison the head.
@@ -176,6 +179,10 @@ def _process_one_signal(created: dict) -> str:
         event = _group(view, created)
         if event:
             _enqueue_translations("event", event["id"])
+            # Record the event as touched so the incident-tier KB card is
+            # refreshed once per changed event at the end of the drain
+            # (ADR-0006), not once per grouped signal.
+            touched_events.add(event["id"])
             loc_id = _event_location_id(created)
             if loc_id:
                 _enqueue_translations("location", loc_id)
@@ -203,8 +210,43 @@ def _drain_signals(context) -> dg.MaterializeResult:
         return _drain_signals_locked(context)
 
 
+# Chunk the sync so a cutover/backfill (touched_events in the hundreds–thousands)
+# doesn't send one giant GraphQL call that blows the 60s _execute timeout and
+# loses EVERY card all-or-nothing (reviewer E5). ~100 events/embeds per call
+# stays well under the timeout and gives partial progress across chunks.
+_SYNC_CHUNK_SIZE = 100
+
+
+def _sync_event_cards(context, touched_events: set[str]) -> None:
+    """Best-effort refresh of the incident-tier KB cards for every event this
+    drain created or revised (ADR-0006). One embed per changed event, chunked so
+    a large backfill makes partial progress. Never fails the drain — grouping
+    already succeeded; a KB-card blip just means the incident tier is briefly
+    stale, corrected on the next touch."""
+    if not touched_events:
+        return
+    ids = list(touched_events)
+    synced = skipped = 0
+    for start in range(0, len(ids), _SYNC_CHUNK_SIZE):
+        chunk = ids[start:start + _SYNC_CHUNK_SIZE]
+        try:
+            result = sync_event_cards(chunk)
+            synced += result.get("synced", 0)
+            skipped += result.get("skipped", 0)
+        except Exception:  # noqa: BLE001 — a chunk failure must not fail the drain or later chunks
+            context.log.exception(
+                "[classify_group] event-card sync failed for a chunk of %d — those cards stale until next touch",
+                len(chunk),
+            )
+    context.log.info(
+        "[classify_group] synced %d event cards (%d skipped) across %d chunk(s)",
+        synced, skipped, (len(ids) + _SYNC_CHUNK_SIZE - 1) // _SYNC_CHUNK_SIZE,
+    )
+
+
 def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = 0
+    touched_events: set[str] = set()
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
         if not batch:
@@ -213,7 +255,7 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         failed_ids: list[str] = []
         for created in batch:
             try:
-                outcome = _process_one_signal(created)
+                outcome = _process_one_signal(created, touched_events)
             except Exception:  # noqa: BLE001 — isolate one signal's failure
                 # Transient (S3/clear-api blip) vs persistent: retry up to
                 # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely
@@ -260,6 +302,10 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         # so a cutover backlog of legacy no-blob rows drains instead of deadlocking.
         if not done_ids and not failed_ids:
             break
+
+    # Refresh the incident-tier KB cards once for every event this drain touched
+    # (ADR-0006) — deduped, so an event that absorbed several signals embeds once.
+    _sync_event_cards(context, touched_events)
 
     context.log.info(
         "[classify_group] processed=%d dropped=%d requeued=%d failed=%d",
@@ -335,6 +381,10 @@ _CANONICAL_FETCH = {
     "crisis": get_crisis_canonical,
     "location": get_location_canonical,
     "situationAnalysis": get_situation_canonical,
+    "analysis": get_analysis_canonical,
+    # On demand: translated only into the locales a reviewer queued (see
+    # translate_and_upsert's requested_locales), from the reporter's language.
+    "groundMessage": get_ground_message_canonical,
 }
 
 
@@ -352,12 +402,24 @@ def translate(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 def _drain_translations(context) -> dg.MaterializeResult:
     translated = cleared = requeued = failed = 0
     seen: set[tuple[str, str]] = set()  # entities attempted this run — never re-invoke
+
+    def next_page() -> list[dict]:
+        # On-demand requests jump the oldest-first queue: a reviewer is polling
+        # the inbox for each one, while bulk rows can back up behind heavy
+        # situation-analysis calls or a stuck head that ends the run early.
+        urgent = [
+            row for row in pending_translations(first=_BATCH_SIZE, entity_type="groundMessage")
+            if (row["entityType"], row["entityId"]) not in seen
+        ]
+        return urgent or pending_translations(first=_BATCH_SIZE)
+
     for _ in range(_MAX_BATCHES):
-        queue = pending_translations(first=_BATCH_SIZE)
+        queue = next_page()
         if not queue:
             break
         # Collapse per-(entity, locale) rows to one translate call per entity —
-        # translate_and_upsert handles every configured locale + clears the rows.
+        # translate_and_upsert handles every configured locale (or, for on-demand
+        # types, exactly the queued ones) + clears the rows.
         entities: dict[tuple[str, str], set[str]] = {}
         for item in queue:
             entities.setdefault((item["entityType"], item["entityId"]), set()).add(item["locale"])
@@ -385,7 +447,9 @@ def _drain_translations(context) -> dg.MaterializeResult:
                     cleared += 1
                     made_progress = True
                     continue
-                outcome = translate_and_upsert(entity_type, entity_id, canonical)
+                outcome = translate_and_upsert(
+                    entity_type, entity_id, canonical, requested_locales=locales,
+                )
             except Exception:  # noqa: BLE001 — isolate one entity's failure
                 context.log.exception("[translate] %s %s failed", entity_type, entity_id)
                 failed += 1
@@ -419,6 +483,25 @@ def _clear_translation_rows(entity_type: str, entity_id: str, locales: set[str])
             mark_translated(entity_type, entity_id, locale)
         except Exception:  # noqa: BLE001 — queue cleanup must not fail the drain
             pass
+
+
+# ── translate trigger ─────────────────────────────────────────────────────────
+# `translate` is eager on classify_group / alert, so on its own it only runs
+# when signal processing does. A reviewer's on-demand hotline translation
+# (clear-api `requestGroundMessageTranslation`) is queued by a web request, not
+# an upstream materialisation — nothing to be eager on, same reason the ground
+# drains have their own sensors. This sensor drains the queue every interval
+# regardless of signal traffic. Ships RUNNING: the inbox's "Translate" button
+# sits on "queued" until it runs. Concurrent runs (this + the eager trigger)
+# are safe — translate_and_upsert's per-entity Redis lock returns LOCKED and
+# leaves the rows for the next tick.
+translate_job = dg.define_asset_job(name="translate_job", selection=[translate])
+translate_drain_sensor = build_poll_sensor(
+    name="translate_drain_sensor",
+    job=translate_job,
+    default_interval_minutes=settings.manual_poll_interval_minutes,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
 
 
 # ── manual-signal trigger ─────────────────────────────────────────────────────

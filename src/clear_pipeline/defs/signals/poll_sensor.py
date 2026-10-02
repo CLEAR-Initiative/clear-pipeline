@@ -27,16 +27,24 @@ import dagster as dg
 _TICK_SECONDS = 30
 
 
-def build_poll_sensor(*, name: str, job, default_interval_minutes: int):
+def build_poll_sensor(
+    *,
+    name: str,
+    job,
+    default_interval_minutes: int,
+    default_status: dg.DefaultSensorStatus = dg.DefaultSensorStatus.STOPPED,
+):
     """A sensor that launches ``job`` every ``interval_minutes`` (default from
-    env, overridable via the sensor cursor in the Dagster UI). Ships STOPPED so
-    the big-bang cutover enables it alongside the eager drain."""
+    env, overridable via the sensor cursor in the Dagster UI). Ships STOPPED by
+    default so the big-bang cutover enables it alongside the eager drain; pass
+    ``default_status=RUNNING`` for a sensor a user-facing feature depends on.
+    The default only applies until someone toggles it in the UI."""
 
     @dg.sensor(
         name=name,
         job=job,
         minimum_interval_seconds=_TICK_SECONDS,
-        default_status=dg.DefaultSensorStatus.STOPPED,
+        default_status=default_status,
     )
     def _poll_sensor(context: dg.SensorEvaluationContext):
         state = json.loads(context.cursor) if context.cursor else {}

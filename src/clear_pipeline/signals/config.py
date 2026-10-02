@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     manual_source_name: str = "manual"
     manual_poll_interval_minutes: int = 1
 
+    # sudan-war-x — X posts pushed by an external poller to clear-api's
+    # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push
+    # feed). Like manual: no poll, no lake blob — the route already writes the
+    # signal row (title/description/url/publishedAt) and the shared drain
+    # sensor picks NEW rows up at `manual_poll_interval_minutes`. Must match
+    # the feed's data_sources row name.
+    sudan_war_x_source_name: str = "sudan-war-x"
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
@@ -103,6 +111,16 @@ class Settings(BaseSettings):
     # overrides + the v1/Claude path were removed in the Dagster port.
     anthropic_api_key: str = ""
 
+    # Speech-to-text (OpenAI Whisper) — hotline voice-note transcription
+    # (defs/ground/transcribe.py). Dedicated provider, not one of the
+    # LLM_<ROLE>_* roles: Whisper's API is audio-in/text-out, not a chat
+    # completion, so providers/llm.py's abstraction doesn't fit.
+    stt_api_key: str = ""
+    stt_model: str = "whisper-1"
+    # Empty uses the OpenAI SDK default (https://api.openai.com/v1). Set to
+    # point at an OpenAI-compatible Whisper endpoint instead.
+    stt_base_url: str = ""
+
     # Translation — comma-separated BCP-47 codes. 'en' is the canonical source and
     # is never a target. Empty string disables translation entirely. Default on.
     target_locales: str = "ar,fr"
@@ -120,6 +138,28 @@ class Settings(BaseSettings):
     s3_region: str = "auto"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""
+
+    # Iceberg (gold events SCD2 table — docs/data-quality-medallion-implementation.md §6).
+    # SQL catalog: no new service, just a metadata pointer store (2 small
+    # tables: iceberg_tables, iceberg_namespace_properties). SQLite by
+    # default — fine for local dev/CI, but a local file doesn't survive
+    # across pods/redeploys, so production MUST set this via env.
+    #
+    # Point it at the SAME Postgres server deploy/dagster.yaml already uses
+    # (DAGSTER_POSTGRES_URL) — but a DIFFERENT DATABASE, not that one. That
+    # file is explicit: "[DAGSTER_POSTGRES_URL] DEDICATED to Dagster (its
+    # own database, NOT clear-api's — Dagster owns and migrates its own
+    # schema)". Reusing it here would put Iceberg's tables inside a database
+    # this repo has deliberately reserved for Dagster's own migrations.
+    # A sibling database on the same server is still "no new infrastructure"
+    # (same Postgres instance, just `CREATE DATABASE iceberg_catalog;`).
+    #
+    # Verified against a real Postgres 16 instance before this was set as
+    # the recommended production value: "postgresql+psycopg2://user:pass@
+    # host:5432/iceberg_catalog" — driver must be `+psycopg2` explicitly
+    # (psycopg2 is already pulled in transitively by dagster-postgres).
+    iceberg_catalog_uri: str = "sqlite:///.dagster_iceberg_catalog.db"
+    iceberg_warehouse: str = ""  # defaults to f"s3://{s3_bucket}/gold-iceberg" when empty
 
     # API server
     api_port: int = 8000
@@ -187,6 +227,19 @@ class Settings(BaseSettings):
     # BA/FM overlap.
     iom_dtm_assessment_type: str = "BA,FM"
 
+    # DTM Flash Alert bulletins (Sudan narrative reports) — a different product
+    # from IOM DTM API (admin-level displacement figures)
+    iom_dtm_flash_alerts_source_name: str = "dtm"
+    # Plain GET on a static JSON export, no Accept header. Returns every
+    # country in one export — no server-side filter/pagination, so
+    # `iom_dtm_flash_alerts_countries` below filters client-side
+    iom_dtm_flash_alerts_export_url: str = "https://dtm.iom.int/flash-reports-export"
+    iom_dtm_flash_alerts_countries: str = "Sudan"
+    # Export updates whenever new bulletins publish — irregular (~monthly for
+    # Sudan, more frequent elsewhere during active crises). IOM recommends
+    # polling once or twice daily to avoid unnecessary server load
+    iom_dtm_flash_alerts_poll_interval_minutes: int = 60 * 24
+
     # ─── Nominatim geocoder (currently LocationIQ as the backend) ────────────
     # The Nominatim-compatible geocoder client uses these. We talk to
     # LocationIQ's free tier (5,000 req/day, 2 req/sec burst), but the code
@@ -201,6 +254,10 @@ class Settings(BaseSettings):
     # cross-country mis-resolution is still caught downstream by clear-api's
     # same-A2 check against the signal's source coordinates.
     geoparser_country_codes: str = "sd,ve,af"
+    # Country scope for geoparsing hotline messages (defs/ground/stages.py).
+    # Hotline messages carry no coordinates, so unlike signals the country
+    # can't be inferred per message. Comma-separated ISO-3166-1 alpha-2.
+    ground_hotline_country_codes: str = "sd"
     # Hybrid geo-resolver: try the offline GeoNames gazetteer in clear-api
     # (`resolveGazetteerLocation`) before LocationIQ. Transliteration-tolerant
     # and quota-free; LocationIQ then only handles the landmarks/POIs the

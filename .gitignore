@@ -159,6 +159,10 @@ storage/
 *.duckdb
 *.duckdb.wal
 
+# Local PyIceberg SQL catalog (iceberg_catalog_uri's dev default) — a real
+# deploy points ICEBERG_CATALOG_URI at Postgres instead.
+.dagster_iceberg_catalog.db
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -230,3 +234,8 @@ evals/reports/
 .DS_Store
 
 data-source-specs
+
+# Slide decks generated alongside design docs — binary, not diffable, kept
+# out of the repo. The design docs themselves (docs/*.md) are the tracked
+# source of truth.
+*.pptx

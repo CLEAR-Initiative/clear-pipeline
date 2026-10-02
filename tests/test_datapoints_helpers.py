@@ -26,7 +26,8 @@ from clear_pipeline.defs.knowledgebase.datapoints_extract import (
 )
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     Casualties,
-    CasualtyDisaggregation,
+    KilledDisaggregation,
+    KilledTotal,
     DocumentCredibility,
     LocationRef,
     NumericField,
@@ -300,9 +301,9 @@ class TestResolveFigureScopes:
     def test_real_schema_shape_round_trips(self):
         # Guards against the collector missing a genuinely-constructed
         # NumericField (not a hand-built dict) after model_dump.
-        cas = Casualties(killed=CasualtyDisaggregation(
-            total=NumericField(value=8, unit="people", confidence="verified",
-                               source_quote="…", scope_location_name="Zalingei"),
+        cas = Casualties(killed=KilledDisaggregation(
+            total=KilledTotal(value=8, unit="people", confidence="verified",
+                              source_quote="…", scope_location_name="Zalingei"),
         )).model_dump(mode="json")
         blob = {"casualties": cas}
         with patch(RESOLVE, return_value="loc-zalingei"):

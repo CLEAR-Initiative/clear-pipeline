@@ -30,7 +30,7 @@ from clear_pipeline.defs.situation.sectors import (
 def _fake_rag_context(*, hits: int, report_ids: list[str] | None = None) -> RAGContext:
     ids = report_ids if report_ids is not None else [f"r-{i}" for i in range(hits)]
     return RAGContext(
-        formatted_for_prompt=f"[R1] chunk\n" * hits,
+        formatted_for_prompt="[R1] chunk\n" * hits,
         contributing_report_ids=ids,
         hit_count=hits,
     )
@@ -214,8 +214,7 @@ class TestGenerateAllSectors:
         # Simulate the health sector failing. The other five should
         # still ship populated. This is the per-sector isolation
         # invariant the doc §5.4 promises for Phase D.
-        def rag_side(**kwargs):
-            filters = kwargs.get("filters") or {}
+        def rag_side(**_kwargs):
             # Health search returns hits (so we exercise the LLM
             # path); other sectors also return hits.
             return _fake_rag_context(hits=2)

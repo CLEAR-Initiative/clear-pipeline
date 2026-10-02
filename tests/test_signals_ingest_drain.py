@@ -21,6 +21,7 @@ from clear_pipeline.defs.signals.connectors import (
     IDMCConnector,
     ManualConnector,
     SignalSource,
+    SudanWarXConnector,
 )
 from clear_pipeline.providers.translation_hash import (
     HASH_FIELDS,
@@ -52,16 +53,24 @@ def _recorder(sink):
 def test_registry_flags_all_drained():
     by_name = {c.source: c for c in CONNECTORS}
     assert all(isinstance(c, SignalSource) for c in CONNECTORS)
-    assert {"dataminr", "acled", "gdacs", "darfur24", "manual"} <= set(by_name)
-    # every source feeds the shared stages EXCEPT idmc — its grouping logic
-    # is different and needs new features that aren't built yet, so its
-    # signals are ingested but not grouped into events for now
-    assert all(c.drained for c in CONNECTORS if c.source != "idmc")
+    assert {"dataminr", "acled", "gdacs", "darfur24", "manual", "sudan-war-x"} <= set(by_name)
+    # every source feeds the shared stages EXCEPT idmc/dtm — idmc's grouping
+    # logic is different and needs new features that aren't built yet; dtm's
+    # district+type grouping doesn't fit a bulletin that can span many
+    # districts. Both are ingested but not grouped into events for now.
+    assert all(c.drained for c in CONNECTORS if c.source not in ("idmc", "dtm"))
     assert not by_name["idmc"].drained
-    assert DRAINED_SOURCES == frozenset({"dataminr", "acled", "gdacs", "darfur24", "manual"})
-    # only manual is non-polled
+    assert not by_name["dtm"].drained
+    assert DRAINED_SOURCES == frozenset(
+        {"dataminr", "acled", "gdacs", "darfur24", "manual", "sudan-war-x"}
+    )
+    # only the push feeds (manual, sudan-war-x) are non-polled
     assert not by_name["manual"].polled
-    assert all(by_name[s].polled for s in ("dataminr", "acled", "gdacs", "darfur24", "idmc"))
+    assert not by_name["sudan-war-x"].polled
+    assert all(
+        by_name[s].polled
+        for s in ("dataminr", "acled", "gdacs", "darfur24", "idmc", "dtm")
+    )
 
 
 def test_connectors_by_source_map():
@@ -70,6 +79,7 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["gdacs"], GDACSConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["darfur24"], Darfur24Connector)
     assert isinstance(CONNECTORS_BY_SOURCE["manual"], ManualConnector)
+    assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
 
 
 # ── to_content_update_input dispatch ──────────────────────────────────────────
@@ -105,8 +115,9 @@ def test_factory_builds_ingest_for_polled_only():
     assert any("dataminr_poll_sensor" in n for n in dm)
     assert not any("signals_processed" in n for n in dm)  # drains are shared stages now
 
-    # manual is not polled → no ingest defs
+    # manual / sudan-war-x are not polled → no ingest defs
     assert factory.build_source_assets(ManualConnector()) == []
+    assert factory.build_source_assets(SudanWarXConnector()) == []
 
 
 def test_raw_key_is_source_date_partitioned_and_slash_safe():
@@ -133,6 +144,34 @@ def test_project_manual_from_signal_row():
     assert view.external_id == "m1"
     assert view.title == "Reported shelling"
     assert view.location_name == "Khartoum"
+
+
+def test_project_sudan_war_x_from_signal_row():
+    # Regression for expo-533: X posts pushed via clear-api's POST /api/x/ingest
+    # land as NEW `sudan-war-x` rows with no rawS3Key. They used to hit the
+    # "unknown_source" branch and be marked FAILED; now they project from the
+    # row exactly like manual signals.
+    created = {
+        "id": "sig-x-1",
+        "externalId": "x:2094734567902953601",
+        "source": {"name": "sudan-war-x"},
+        "title": "RSF shelling reported in Omdurman this morning, several…",
+        "description": "RSF shelling reported in Omdurman this morning, several casualties",
+        "url": "https://x.com/someone/status/2094734567902953601",
+        "publishedAt": "2026-09-02T12:00:00Z",
+        "generalLocation": {"name": "Omdurman"},
+        "rawData": {"author": {"username": "someone"}, "metrics": {"likes": 3}},
+        # no rawS3Key — pushed rows have no lake blob
+    }
+    result = stages._project(created)
+    assert result != "unknown_source"
+    connector, view = result
+    assert isinstance(connector, SudanWarXConnector)
+    assert view.external_id == "sig-x-1"
+    assert view.title.startswith("RSF shelling reported in Omdurman")
+    assert view.description.endswith("several casualties")
+    assert view.timestamp == "2026-09-02T12:00:00Z"
+    assert view.location_name == "Omdurman"
 
 
 def test_project_polled_without_blob_returns_no_blob():
@@ -181,7 +220,7 @@ def test_drain_legacy_no_blob_backlog_does_not_deadlock():
     marked: list[tuple[str, list[str]]] = []
     batches = [[{"id": "legacy1"}, {"id": "legacy2"}], [{"id": "real"}], []]
 
-    def outcome(created):
+    def outcome(created, touched_events):
         return stages._PROCESSED if created["id"] == "real" else stages._DROP_DONE
 
     with (
@@ -216,7 +255,7 @@ def test_drain_transient_failure_requeues_not_failed():
 
 
 def test_drain_marks_failed_after_max_attempts_and_keeps_going():
-    def process(created):
+    def process(created, touched_events):
         if created["id"] == "bad":
             raise RuntimeError("boom")
         return stages._PROCESSED
@@ -238,6 +277,40 @@ def test_drain_marks_failed_after_max_attempts_and_keeps_going():
     assert result.metadata["failed"] == 1
 
 
+def test_drain_syncs_event_cards_for_touched_events_once():
+    # ADR-0006: the drain refreshes the incident-tier KB card once per event it
+    # touched (deduped), via sync_event_cards, after the batch loop.
+    def process(created, touched_events):
+        touched_events.add(f"event-of-{created['id']}")
+        return stages._PROCESSED
+
+    calls: list[list[str]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "s1"}, {"id": "s2"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder([])),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages, "sync_event_cards", side_effect=lambda ids: calls.append(sorted(ids)) or {"synced": len(ids), "skipped": 0}),
+    ):
+        _run()
+
+    assert calls == [["event-of-s1", "event-of-s2"]]  # one call, both touched events
+
+
+def test_drain_event_card_sync_failure_never_fails_the_drain():
+    def process(created, touched_events):
+        touched_events.add("e1")
+        return stages._PROCESSED
+
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "s1"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder([])),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages, "sync_event_cards", side_effect=RuntimeError("clear-api down")),
+    ):
+        result = _run()  # must NOT raise
+    assert result.metadata["processed"] == 1
+
+
 # ── translate drain — no repeated LLM calls on a stuck entity ────────────────
 
 def test_translate_unparseable_entity_invoked_once_per_run():
@@ -245,7 +318,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
 
     calls = {"n": 0}
 
-    def fake_tu(entity_type, entity_id, canonical):
+    def fake_tu(entity_type, entity_id, canonical, requested_locales=None):
         calls["n"] += 1
         return tp.UNPARSEABLE  # rows cleared inside translate_and_upsert
 
@@ -253,7 +326,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
     # guard the loop would re-invoke the model _MAX_BATCHES times.
     row = {"entityType": "event", "entityId": "e1", "locale": "ar"}
     with (
-        patch.object(stages, "pending_translations", side_effect=lambda first: [row]),
+        patch.object(stages, "pending_translations", side_effect=lambda first, entity_type=None: [] if entity_type else [row]),
         patch.dict(stages._CANONICAL_FETCH, {"event": lambda eid: {"title": "t", "description": "d"}}),
         patch.object(stages, "translate_and_upsert", side_effect=fake_tu),
     ):
@@ -266,7 +339,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
 def test_translate_unknown_entity_type_is_dropped():
     with (
         patch.object(stages, "pending_translations",
-                     side_effect=lambda first: [{"entityType": "widget", "entityId": "w1", "locale": "ar"}]),
+                     side_effect=lambda first, entity_type=None: [] if entity_type else [{"entityType": "widget", "entityId": "w1", "locale": "ar"}]),
         patch.object(stages, "mark_translated") as mark,
     ):
         result = stages._drain_translations(MagicMock())
@@ -302,3 +375,43 @@ def test_translation_hash_event_fields_and_staleness():
     assert stale_fields(h2, h1) == ["title"]
     # cold start (no stored hashes) → all fields stale
     assert set(stale_fields(h1, None)) == {"title", "description"}
+
+
+def test_drain_chunks_the_event_card_sync():
+    # E5: a large touched set is chunked so one giant call can't time out and
+    # lose everything; a chunk failure doesn't stop later chunks.
+    def process(created, touched_events):
+        touched_events.add(f"e-{created['id']}")
+        return stages._PROCESSED
+
+    calls: list[list[str]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "1"}, {"id": "2"}, {"id": "3"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder([])),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages, "_SYNC_CHUNK_SIZE", 2),
+        patch.object(stages, "sync_event_cards", side_effect=lambda ids: calls.append(list(ids)) or {"synced": len(ids), "skipped": 0}),
+    ):
+        _run()
+
+    assert len(calls) == 2  # 3 events, chunk size 2 → 2 chunks
+    assert sorted(x for c in calls for x in c) == ["e-1", "e-2", "e-3"]
+
+
+def test_drain_dedups_same_event_across_signals_and_batches():
+    # The dedup rests on the set: two signals in DIFFERENT batches that group into
+    # the SAME event → one card, one id, synced once at drain end.
+    def process(created, touched_events):
+        touched_events.add("e-shared")  # both signals → same event
+        return stages._PROCESSED
+
+    calls: list[list[str]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "s1"}], [{"id": "s2"}], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder([])),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        patch.object(stages, "sync_event_cards", side_effect=lambda ids: calls.append(sorted(ids)) or {"synced": len(ids), "skipped": 0}),
+    ):
+        _run()
+
+    assert calls == [["e-shared"]]  # deduped across both batches → one embed

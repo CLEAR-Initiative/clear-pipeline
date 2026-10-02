@@ -406,6 +406,32 @@ def _to_strict_json_schema(node: Any) -> Any:
     `$defs` (e.g. `LocationRef`) are strict too."""
     if isinstance(node, dict):
         out = {k: _to_strict_json_schema(v) for k, v in node.items()}
+        # Closed-key map — `dict[Literal[...], X]` (the ADR-0009 `by_<axis>`
+        # categorical breakdowns). Pydantic renders it as `additionalProperties:
+        # <value schema>` + `propertyNames.enum` with NO `properties`, which strict
+        # mode rejects (it mandates `additionalProperties: false` and forbids
+        # `propertyNames`). Expand it into explicit `properties` — one per enum
+        # key, each nullable so a cell can be absent while still satisfying
+        # strict's "every property in `required`" rule (reviewer P2). Without this
+        # the v5 backfill 400s on any domain carrying a categorical map.
+        property_names = out.get("propertyNames")
+        enum_keys = (
+            property_names.get("enum")
+            if isinstance(property_names, dict) else None
+        )
+        if (
+            out.get("type") == "object"
+            and isinstance(enum_keys, list)
+            and isinstance(out.get("additionalProperties"), dict)
+        ):
+            value_schema = out["additionalProperties"]
+            out["properties"] = {
+                key: {"anyOf": [value_schema, {"type": "null"}]} for key in enum_keys
+            }
+            out["additionalProperties"] = False
+            out["required"] = list(enum_keys)
+            out.pop("propertyNames", None)
+            return out
         if out.get("type") == "object" and isinstance(out.get("properties"), dict):
             out["additionalProperties"] = False
             out["required"] = list(out["properties"].keys())
