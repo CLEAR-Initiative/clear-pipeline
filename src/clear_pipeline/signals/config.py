@@ -127,7 +127,24 @@ class Settings(BaseSettings):
 
     # Pipeline
     initial_lookback_days: int = 7
-    relevance_threshold: float = 0.5
+    # Disaster-type classifier for the signal/event drain: "jev" (TypeSafe
+    # System One via OpenRouter — the default) or "minilm" (the legacy local
+    # sentence-transformer, now fallback-only; set to force it for rollback).
+    signal_classifier: str = "jev"
+    # Below this the signal is dropped (no event created). With Jev this gates
+    # on the `relevant` Noul probability (is-this-an-incident), not the code
+    # confidence. Calibrated against a live Jev run (scripts/jev_classify_eval.py):
+    # genuine incidents bottomed out around 0.47–0.55 Noul, so the gate is held
+    # low (recall-safe — missing a real disaster costs far more than processing a
+    # borderline non-event). Matches the deployed value. Tighten only once the
+    # gold set has true-noise rows (routine news / forecasts / op-eds) that reveal
+    # a separating threshold — the current incidents-only set can't.
+    relevance_threshold: float = 0.3
+    # When the Jev→MiniLM fallback rate in a single drain crosses this, the drain
+    # logs an error (OpenRouter/Jev likely degraded — classifications are running
+    # on the lower-accuracy local model). Only evaluated when Jev is the selected
+    # classifier and at least one signal was attempted in the run.
+    signal_jev_fallback_alert_rate: float = 0.25
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination

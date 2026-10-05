@@ -36,7 +36,11 @@ from clear_pipeline.defs.signals.connectors import (
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
-from clear_pipeline.providers.classify import classify_locally
+from clear_pipeline.providers.signal_classifier import (
+    classifier_stats_snapshot,
+    classify_signal,
+    reset_classifier_stats,
+)
 from clear_pipeline.providers.clear_api import (
     enqueue_translation,
     events_pending_alert,
@@ -132,10 +136,11 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
 
 def _group(view: SignalView, created: dict) -> dict | None:
     """Classify + group one signal into an event (create or add-to-existing).
-    Returns the event dict, or None when below the relevance threshold."""
-    classification = classify_locally(
-        title=view.title, description=view.description, source_severity=created.get("severity"),
-    )
+    Returns the event dict, or None when below the relevance threshold.
+
+    Classification goes through `classify_signal` (Jev primary, MiniLM fallback);
+    the event reuses this result downstream (see providers/event.py)."""
+    classification = classify_signal(view.title, view.description, created.get("severity"))
     if classification.relevance < settings.relevance_threshold:
         return None
 
@@ -247,6 +252,10 @@ def _sync_event_cards(context, touched_events: set[str]) -> None:
 def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = 0
     touched_events: set[str] = set()
+    # Reset so the emitted fallback rate reflects THIS drain, not the worker's
+    # whole lifetime (a serial drain owns the single-flight lock, so no other
+    # drain is mutating these counters concurrently).
+    reset_classifier_stats()
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
         if not batch:
@@ -311,8 +320,33 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         "[classify_group] processed=%d dropped=%d requeued=%d failed=%d",
         processed, dropped, requeued, failed,
     )
+
+    # Surface how often Jev actually served vs. silently fell back to MiniLM. A
+    # Jev/OpenRouter outage is otherwise invisible — every signal still classifies,
+    # just at MiniLM's lower accuracy — so emit the rate and log an error when it
+    # crosses the alert threshold (makes a sustained outage page-able off logs).
+    stats = classifier_stats_snapshot()
+    jev_ok = stats.get("jev", 0)
+    jev_fallback = stats.get("fallback", 0)
+    jev_total = jev_ok + jev_fallback
+    fallback_rate = (jev_fallback / jev_total) if jev_total else 0.0
+    if jev_total and fallback_rate >= settings.signal_jev_fallback_alert_rate:
+        context.log.error(
+            "[classify_group] Jev fallback rate %.0f%% (%d/%d) ≥ alert threshold %.0f%% — "
+            "OpenRouter/Jev likely degraded; classifications running on MiniLM",
+            fallback_rate * 100, jev_fallback, jev_total,
+            settings.signal_jev_fallback_alert_rate * 100,
+        )
     return dg.MaterializeResult(
-        metadata={"processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed}
+        metadata={
+            "processed": processed,
+            "dropped": dropped,
+            "requeued": requeued,
+            "failed": failed,
+            "jev_classified": jev_ok,
+            "jev_fallback": jev_fallback,
+            "jev_fallback_rate": round(fallback_rate, 4),
+        }
     )
 
 
