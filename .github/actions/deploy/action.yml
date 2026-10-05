@@ -1,0 +1,39 @@
+name: Deploy
+description: Pull the latest clear-pipeline image on the VM and recreate the Dagster services in order
+
+inputs:
+  host:
+    description: VM host
+    required: true
+  ssh-key:
+    description: SSH private key for the VM
+    required: true
+  registry-token:
+    description: Token allowed to pull from the registry
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: SSH and roll the deployment
+      uses: appleboy/ssh-action@v1
+      env:
+        GHCR_TOKEN: ${{ inputs.registry-token }}
+      with:
+        host: ${{ inputs.host }}
+        username: ubuntu
+        key: ${{ inputs.ssh-key }}
+        envs: GHCR_TOKEN
+        script: |
+          set -e
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          cd /srv/app
+          docker compose pull dagster-code dagster-daemon dagster-webserver
+          docker compose rm -f -s dagster-code
+          docker compose up -d --force-recreate dagster-code
+          docker compose rm -f -s dagster-daemon
+          docker compose up -d --force-recreate dagster-daemon
+          docker compose rm -f -s dagster-webserver
+          docker compose up -d --force-recreate dagster-webserver
+          docker image prune -a -f
+          docker compose ps | grep -E 'dagster-'
