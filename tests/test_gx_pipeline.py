@@ -30,9 +30,8 @@ def test_registered_sources_conform_to_protocol():
 
 
 def test_idmc_source_to_silver_input_is_pure_transform():
-    """`to_silver_input` must never promote a geoparser candidate to a real
-    L4 location row (that's a clear-api write, forbidden before `_push`) —
-    same contract ACLEDGXSource already satisfies."""
+    """`to_silver_input` must never promote a geoparser candidate to an L4
+    location (a clear-api write, forbidden before `_push`), like ACLEDGXSource."""
     with patch(
         "clear_pipeline.defs.gx_pipeline.sources.idmc.build_idmc_signal_input"
     ) as mock_build:
@@ -55,10 +54,8 @@ def test_idmc_source_group_hooks_delegate_to_provider():
 
 
 def test_only_idmc_source_defines_group_hooks():
-    """The group-supersession hooks are optional and IDMC-only —
-    deliberately not part of the GXSource Protocol (factory.py's _reconcile
-    probes for them via getattr). Locks in "zero footprint on other sources"
-    as a tested property, not just a design comment."""
+    """Group hooks are optional, IDMC-only and outside the Protocol (`_reconcile`
+    probes via getattr): other sources must not define them."""
     for source in (DataminrGXSource(), ACLEDGXSource(), Darfur24GXSource()):
         assert not hasattr(source, "group_member")
         assert not hasattr(source, "resolve_group")
@@ -224,14 +221,9 @@ def test_gx_pipeline_end_to_end(tmp_path):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Supersession groups (`<source>_reconcile`).
-#
-# The bug these guard: the verdict used to be computed over the current
-# BATCH. Two rows competing inside one `event_id` were only ever compared if
-# the same poll happened to deliver both — so a row superseded by a LATER
-# poll stayed live in clear-api forever. The verdict has to be computed over
-# batch ∪ gold, which means it has to survive a round-trip through the gold
-# table, which is what most of these tests actually exercise.
+# Supersession groups (`<source>_reconcile`). The verdict is computed over
+# batch ∪ gold, so a row superseded by a later poll is still caught; most of
+# these tests exercise that round-trip through the gold table.
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -246,12 +238,9 @@ def _group_record(rec_id, event_id, role, created_at):
 
 
 class GroupingFakeSource(FakeSource):
-    """A source whose rows compete inside an `event_id` group, like IDMC.
-
-    Delegates to the REAL providers/idmc.py rules rather than a stub: the
-    bug lives in how the rules, the gold round-trip and the asset wiring
-    combine, not in any one of them, so a stubbed rule would test nothing.
-    Each `poll` returns the next batch, simulating successive polls."""
+    """A source whose rows compete in an `event_id` group, like IDMC. Uses the
+    real providers/idmc.py rules: failures come from how rules, gold round-trip
+    and wiring combine. Each `poll` returns the next batch."""
 
     def __init__(self, batches):
         self._batches = list(batches)
@@ -267,8 +256,7 @@ class GroupingFakeSource(FakeSource):
 
     def to_silver_input(self, record, source_id):
         data = super().to_silver_input(record, source_id)
-        # Where build_idmc_signal_input puts the verbatim upstream row — and
-        # therefore where it comes back from when read out of gold.
+        # Where build_idmc_signal_input puts the verbatim row; read back from gold.
         data["rawData"] = record
         return data
 
@@ -297,12 +285,8 @@ def _run_gx(assets, checks, fake_s3, warehouse, catalog_uri, create_signal):
 
 
 def _gold_rows(warehouse, catalog_uri, source="fakesrc"):
-    """Gold rows by externalId, read straight out of Iceberg.
-
-    NULL in a string column comes back through pandas as float NaN, so
-    normalize it to None exactly as iceberg_signals' own reader does —
-    otherwise an `is None` assertion here would be comparing against NaN and
-    failing on a row that is stored perfectly correctly."""
+    """Gold rows by externalId, read from Iceberg. pandas NaN is normalized to
+    None, as iceberg_signals' reader does, so `is None` assertions hold."""
     import pandas as pd
 
     from clear_pipeline.defs.gx_pipeline import iceberg_signals
@@ -318,18 +302,15 @@ def _gold_rows(warehouse, catalog_uri, source="fakesrc"):
 
 
 def _gold_role(gold_row: dict) -> str | None:
-    """The role stored in a gold row's signalInputJson.rawData — what a
-    FUTURE poll's `group_member` fallback would read back for this row if
-    it doesn't reappear in that poll's batch (factory.py's gold-fallback
-    path in `_reconcile`)."""
+    """The role in a gold row's stored rawData: what a later poll's
+    `group_member` reads for this row when it is not re-sent."""
     signal_input = json.loads(gold_row["signalInputJson"]) if gold_row.get("signalInputJson") else {}
     return (signal_input.get("rawData") or {}).get("role")
 
 
 class _GroupHarness:
-    """Builds the assets once and runs successive polls against one shared
-    S3 + Iceberg warehouse, so gold persists between runs the way it does in
-    production. That persistence is the whole subject of these tests."""
+    """Builds the assets once; successive polls share one S3 + Iceberg
+    warehouse, so gold persists between runs as in production."""
 
     def __init__(self, tmp_path, batches):
         self.warehouse = f"file://{tmp_path / 'warehouse'}"
@@ -360,11 +341,9 @@ class _GroupHarness:
 
 
 def test_reconcile_retracts_a_gold_row_superseded_by_a_later_poll(tmp_path):
-    """THE regression. A Triangulation row arrives alone and is pushed. The
-    Recommended figure that supersedes it arrives on the NEXT poll, in a
-    batch of one — so a batch-scoped rule sees no conflict and leaves the
-    first row live forever. Reconcile has to pull the earlier row back out
-    of gold to see the group at all."""
+    """A Triangulation row is pushed alone; the Recommended figure superseding
+    it arrives in the next poll's batch of one. Reconcile must read t1 back
+    from gold to see the group at all."""
     harness = _GroupHarness(tmp_path, batches=[
         [_group_record("t1", "ev-1", "Triangulation", "2026-09-01T00:00:00Z")],
         [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
@@ -386,11 +365,8 @@ def test_reconcile_retracts_a_gold_row_superseded_by_a_later_poll(tmp_path):
 
 
 def test_reconcile_never_creates_a_signal_superseded_by_existing_gold(tmp_path):
-    """The reverse arrival order, and the sharper guarantee: a row that is
-    already superseded when it arrives must produce ZERO clear-api calls.
-    Creating it and retracting it afterwards is not equivalent — in between
-    it is a live `status=NEW` row, which is exactly what the drain picks
-    up."""
+    """A row superseded on arrival makes ZERO clear-api calls: create-then-retract
+    would leave a live `status=NEW` row in between, which the drain picks up."""
     harness = _GroupHarness(tmp_path, batches=[
         [_group_record("r1", "ev-1", "Recommended figure", "2026-09-01T00:00:00Z")],
         [_group_record("t1", "ev-1", "Triangulation", "2026-09-02T00:00:00Z")],
@@ -405,12 +381,9 @@ def test_reconcile_never_creates_a_signal_superseded_by_existing_gold(tmp_path):
 
 
 def test_reconcile_brings_a_retracted_row_back_when_the_verdict_reverses(tmp_path):
-    """Retraction is a verdict about a group, not a tombstone. When the
-    group's composition changes the verdict can flip back, so reconcile must
-    read already-retracted rows (and write both directions). Here the
-    Recommended figure is revised down to Triangulation, which turns the
-    group into an all-Triangulation one — and t1, being the more recent, is
-    the row that survives it."""
+    """Retraction is reversible: revising r1 to Triangulation makes the group
+    all-Triangulation, so t1 (more recent) lives again. Reconcile must read
+    already-retracted rows and write both directions."""
     harness = _GroupHarness(tmp_path, batches=[
         [_group_record("t1", "ev-1", "Triangulation", "2026-09-05T00:00:00Z")],
         [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
@@ -428,14 +401,8 @@ def test_reconcile_brings_a_retracted_row_back_when_the_verdict_reverses(tmp_pat
     gold = harness.gold
     assert gold["t1"]["retracted"] is False, "verdict reversed — t1 is the most recent Triangulation"
     assert gold["r1"]["retracted"] is True
-    # The verdict used r1's FRESH role (Triangulation) to decide this — but
-    # r1's verdict is RETRACT, so it's dropped by keep_mask and never
-    # reaches `_match`/`_gold`'s normal full-row overwrite. If gold's
-    # stored content isn't ALSO refreshed here, r1 is written back with
-    # whatever `_gold` wrote on the LAST poll it was kept — poll 2's
-    # "Recommended figure" — even though the verdict that justified this
-    # exact write used "Triangulation". A bare retracted=True flip with a
-    # stale signalInput underneath it is a contradiction sitting in gold.
+    # r1 is RETRACT, so it skips `_gold`'s overwrite: reconcile must refresh its
+    # stored content, or gold keeps poll 2's role under the new verdict.
     assert _gold_role(gold["r1"]) == "Triangulation", \
         "gold's stored content must match what resolve_group actually used, not freeze at the last poll r1 was kept"
     # Neither reversal re-pushes: both rows were already created once.
@@ -443,21 +410,14 @@ def test_reconcile_brings_a_retracted_row_back_when_the_verdict_reverses(tmp_pat
 
 
 def test_reconcile_uses_refreshed_content_on_a_later_poll_that_omits_the_row(tmp_path):
-    """The forward-looking half of the content-staleness guarantee above.
-    r1 is revised to Triangulation in poll 3 (as above) and then NEVER
-    resent — the normal case, since an unchanged row doesn't get re-sent.
-    Poll 4 only revises t1 (forcing reconcile to revisit the group) and
-    must resolve it using r1's REFRESHED stored role, not a phantom
-    "Recommended figure" frozen from poll 2. If gold's content weren't kept
-    fresh, this poll would wrongly retract t1 — the live, correct row —
-    using evidence that stopped being true two polls ago."""
+    """r1 is revised in poll 3 and never resent. Poll 4 revisits the group via
+    t1 and must use r1's refreshed stored role, not poll 2's "Recommended
+    figure", or it would wrongly retract t1."""
     harness = _GroupHarness(tmp_path, batches=[
         [_group_record("t1", "ev-1", "Triangulation", "2026-09-05T00:00:00Z")],
         [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
         [_group_record("r1", "ev-1", "Triangulation", "2026-09-02T00:00:00Z")],
-        # Poll 4: only t1 — r1 is not sent at all, the normal case (this
-        # fake harness has no content-hash dedup to route around; real
-        # production's would also simply not resend an unchanged row).
+        # Poll 4: only t1; an unchanged r1 is not resent.
         [_group_record("t1", "ev-1", "Triangulation", "2026-09-05T00:00:00Z")],
     ])
 
@@ -472,9 +432,8 @@ def test_reconcile_uses_refreshed_content_on_a_later_poll_that_omits_the_row(tmp
 
 
 def test_reconcile_resolves_a_group_delivered_within_one_poll(tmp_path):
-    """The case the old batch filter did handle — still handled, and now
-    the filtering happens AFTER silver rather than before it. Both rows get
-    a silver blob; only the survivor reaches gold and push."""
+    """Both rows in one poll: both get a silver blob (reconcile runs after
+    silver); only the survivor reaches gold and push."""
     harness = _GroupHarness(tmp_path, batches=[[
         _group_record("r1", "ev-1", "Recommended figure", "2026-09-01T00:00:00Z"),
         _group_record("t1", "ev-1", "Triangulation", "2026-09-01T01:00:00Z"),
@@ -484,7 +443,7 @@ def test_reconcile_resolves_a_group_delivered_within_one_poll(tmp_path):
 
     silver_keys = [k for k in harness.s3.objects if "silver" in k]
     assert any("r1" in k for k in silver_keys)
-    assert any("t1" in k for k in silver_keys), "silver no longer filters — reconcile does, downstream of it"
+    assert any("t1" in k for k in silver_keys), "silver keeps every role; reconcile decides supersession"
     assert harness.created_ids == ["fakesrc:r1"]
     assert "t1" not in harness.gold
 
@@ -575,11 +534,8 @@ def test_iceberg_events_stubbed():
 
 
 def test_gold_table_gains_new_columns_on_load(tmp_path):
-    """`_SCHEMA` is only applied at CREATE time, so a gold table created
-    before `groupKey`/`retracted` existed would keep loading with the old
-    schema and break every write. Loading it has to migrate it additively —
-    and a row written before the migration, which reads back `retracted`
-    NULL, must still count as live rather than being stranded unpushable."""
+    """A gold table lacking the new columns is migrated additively on load, and
+    its pre-migration rows (`retracted` NULL) count as live, not stranded."""
     import pyarrow as pa
     from pyiceberg.schema import Schema
     from pyiceberg.types import DoubleType, LongType, NestedField, StringType

@@ -357,10 +357,9 @@ def _member_text(member: dict) -> tuple[str | None, str | None]:
 
 def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dict:
     """Second lane: signals changed after grouping. Each affected event is
-    recomputed once per batch from its live members; a row is marked only when
-    all its events recomputed. Runs after the NEW lane and is bounded on its
-    own, so stuck recomputes never block first grouping. A row is attempted at
-    most once per run."""
+    recomputed once per batch; a row is marked only when all its events succeed,
+    and attempted at most once per run. Runs after, and bounded apart from, the
+    NEW lane so stuck recomputes never block first grouping."""
     counts = {"recompute_rows": 0, "recomputed_events": 0, "recompute_failed": 0,
               "recompute_deferred": 0, "conflicts": 0}
     attempted: set[str] = set()

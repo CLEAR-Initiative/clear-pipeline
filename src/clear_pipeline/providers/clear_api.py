@@ -909,9 +909,8 @@ mutation UpdateSignalContent($input: UpdateSignalContentInput!) {
 }
 """
 
-# gx's create: the shared CREATE_SIGNAL plus the fields gx compares to decide a
-# follow-up update. Separate so production ingest never selects fields an
-# older clear-api lacks.
+# gx's create: CREATE_SIGNAL plus the fields gx compares to decide a follow-up
+# update. Separate so production ingest never selects fields an older clear-api lacks.
 CREATE_SIGNAL_FOR_SYNC = """
 mutation CreateSignalForSync($input: CreateSignalInput!) {
   createSignal(input: $input) {
@@ -1334,9 +1333,8 @@ mutation MarkSignalsProcessed($items: [SignalRevisionInput!]!, $status: SignalSt
 }
 """
 
-# Live (non-retracted) members of an event, newest first: what the rewrite
-# prompt and the recompute read. `rawS3Key` + locations let the drain project
-# each member exactly as first grouping did.
+# Live (non-retracted) members of an event, newest first. `rawS3Key` + locations
+# let the recompute project each member exactly as first grouping did.
 EVENT_MEMBERS = """
 query EventMembers($eventId: String!, $first: Int) {
   eventMembers(eventId: $eventId, first: $first) {

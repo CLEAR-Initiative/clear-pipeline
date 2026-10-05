@@ -486,7 +486,7 @@ def _rewrite_event(
     prompt = build_rewrite_prompt(
         location_name=location_name,
         level_2_type=level_2_type,
-        # The 50 newest, listed oldest first as before.
+        # Newest members, listed oldest first.
         signals=list(reversed(signals)),
     )
 
@@ -855,17 +855,11 @@ def recompute_event(
     event_id: str,
     member_text: Callable[[dict], tuple[str | None, str | None]],
 ) -> bool:
-    """Rebuild an event's aggregates from scratch from its live members.
-    Idempotent and absolute. Returns True when the LLM rewrite ran.
-
-    ``member_text(member)`` gives the (title, description) first grouping saw
-    for that member (its lake blob, or the DB fields as a fallback).
-
-    The rewrite runs only when the live member set changed since the last one
-    (``rewriteMembersHash``), so content revisions cost no LLM call. On an LLM
-    failure the deterministic fields are still written, the text and the hash
-    are left alone, and the error is raised so the caller retries.
-    """
+    """Rebuild an event's aggregates from its live members (idempotent, absolute);
+    ``member_text`` gives each member's (title, description) as grouping saw it.
+    The LLM rewrite runs only when the member set changed (``rewriteMembersHash``).
+    On LLM failure, deterministic fields are still written, text and hash kept,
+    and the error re-raised for retry. Returns True when the rewrite ran."""
     members = graphql.event_members(event_id)
     state = graphql.get_event_recompute_state(event_id) or {}
 

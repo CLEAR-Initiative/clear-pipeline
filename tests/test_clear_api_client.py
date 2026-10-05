@@ -43,7 +43,7 @@ def test_other_graphql_errors_are_still_retried():
 
 
 def test_schema_mismatch_is_a_non_retried_clear_api_error():
-    # gx deployed before clear-api: the sync query selects fields the old API lacks.
+    # gx deployed before clear-api: the sync query selects fields an older API lacks.
     body = {"errors": [{"message": 'Cannot query field "retracted" on type "Signal".'}]}
     with patch.object(clear_api.httpx, "post", return_value=_response(body)) as post, \
          pytest.raises(ClearApiError) as exc:

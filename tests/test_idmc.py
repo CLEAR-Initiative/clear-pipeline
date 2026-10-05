@@ -107,16 +107,9 @@ def test_malformed_latitude_discards_valid_longitude_too():
 
 
 # ── group_member / resolve_group: event_id/role supersession ───────────────
-# gx_pipeline-only (see IDMCGXSource's hooks, consumed by the
-# `<source>_reconcile` asset) — a Recommended figure supersedes
-# Triangulation rows in the same event_id group; an all-Triangulation group
-# collapses to its most recent row.
-#
-# These are group primitives rather than a batch filter on purpose: the
-# caller assembles the group from the current batch AND from gold, so the
-# verdict is the same whether two competing rows arrive in one poll or a
-# week apart. `resolve_group` therefore takes one group's members, not a
-# mixed list, and is total over them so a reversal is detectable.
+# Group primitives for `<source>_reconcile`, which assembles each group from
+# batch and gold, so competing rows get the same verdict in one poll or a week
+# apart. `resolve_group` takes one group and is total, so a reversal is detectable.
 
 
 def _member(external_id: str, **overrides) -> dict:
@@ -149,17 +142,14 @@ def test_mixed_roles_with_no_recommended_figure_all_keep():
 
 
 def test_row_with_no_event_id_is_not_a_group_member():
-    """No event_id means nothing can supersede it — it's a group of one, and
-    `_reconcile` leaves rows with no member strictly alone."""
+    """No event_id: a group of one, which `_reconcile` leaves alone."""
     assert group_member("1", _raw(event_id=None)) is None
     assert group_member("1", None) is None
 
 
 def test_group_member_reads_the_same_fields_from_a_raw_row():
-    """The raw IDU row is what `build_idmc_signal_input` stores as `rawData`
-    — so a freshly polled row and one read back out of gold normalize
-    through this identically. That equivalence is what makes a cross-poll
-    verdict possible at all."""
+    """`rawData` holds the raw IDU row, so polled and gold rows normalize
+    identically: the basis of any cross-poll verdict."""
     member = group_member("42", _raw(event_id=7, role="Triangulation", created_at="2026-01-06T00:00:00Z"))
     assert member == {
         "externalId": "42",
@@ -176,9 +166,8 @@ def test_group_member_normalizes_a_null_role():
 
 
 def test_resolve_group_is_total_so_a_reversal_is_detectable():
-    """Every member gets a verdict, including the ones that keep. A caller
-    diffs this against what it stored last time to spot a row coming back to
-    life — a sparse "only the retracted ones" result could not express that."""
+    """Every member gets a verdict, keepers included, so a caller can spot a
+    retracted row coming back to life."""
     members = [
         _member("1", event_id="ev-1", role="Recommended figure"),
         _member("2", event_id="ev-1", role="Triangulation"),

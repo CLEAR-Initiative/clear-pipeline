@@ -206,7 +206,7 @@ def test_project_manual_and_sudan_war_x_never_touch_s3():
 
 def test_idmc_has_no_ingest_defs():
     assert factory.build_source_assets(IDMCConnector()) == []
-    # the polled sources are unchanged
+    # polled sources still build their ingest asset + sensor
     for c in (DataminrConnector(), ACLEDConnector(), GDACSConnector(), Darfur24Connector()):
         assert len(factory.build_source_assets(c)) == 2
 

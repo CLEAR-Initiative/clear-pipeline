@@ -236,11 +236,9 @@ class Darfur24GXSource:
 
 @dataclass(frozen=True)
 class IDMCGXSource:
-    """Calls `providers/idmc.py` directly — same recipe as `ACLEDGXSource`.
-    IDMC's only ingestion path: production's `raw_idmc` no longer exists.
-    IDU rows revise in place (same `idu_id`, new content): the
-    `content_hash`/`content_update_input` hooks let bronze skip unchanged
-    rows and `_push` send revisions and retractions."""
+    """Calls `providers/idmc.py` directly, like `ACLEDGXSource`; IDMC's only
+    ingestion path. IDU rows revise in place (same `idu_id`), so the sync hooks
+    let bronze skip unchanged rows and `_push` send revisions and retractions."""
 
     @property
     def source(self) -> str:
@@ -288,46 +286,26 @@ class IDMCGXSource:
         return idmc.build_signal_content_update(signal_input, retracted=retracted)
 
     # ── Optional group-supersession hooks ─────────────────────────────────
-    # IDMC-specific: one IDU `event_id` can have several role-tagged rows
-    # (Recommended figure vs Triangulation) competing to describe the same
-    # displacement, and only some survive — no other source has this shape,
-    # so no other adapter defines these. See providers/idmc.py for the rules.
-    #
-    # Deliberately NOT part of the `GXSource` Protocol — `factory.py`'s
-    # `_reconcile` probes for both via `getattr` and passes the batch
-    # straight through unless both are present, so Dataminr/ACLED/Darfur24
-    # need no change at all to stay unaffected.
+    # One IDU `event_id` can have several role-tagged rows (Recommended figure
+    # vs Triangulation) competing for the same displacement; rules in
+    # providers/idmc.py. Outside the Protocol: `_reconcile` probes via `getattr`.
 
     def group_member(self, external_id: str, raw_data: dict | None) -> dict | None:
-        """Place a row in its supersession group, or None if it's in none.
-        `raw_data` is whatever `to_silver_input` stored as `rawData`, so
-        this works identically on a freshly polled row and on one read back
-        out of gold — which is what lets `_reconcile` compare the two."""
+        """Place a row in its group, or None. Reads only stored `rawData`, so a
+        polled row and a gold row compare alike in `_reconcile`."""
         return idmc.group_member(external_id, raw_data)
 
     def resolve_group(self, members: list[dict]) -> dict[str, str]:
-        """Verdict per member of ONE group: `"retract"` kills the row,
-        anything else keeps it. Must be total over `members` and must be
-        reversible — a member that retracted on an earlier poll has to be
-        able to come back if the group's composition changes."""
+        """Verdict per member of ONE group: `"retract"` kills, anything else
+        keeps. Total over `members`, and reversible when the group changes."""
         return idmc.resolve_group(members)
 
 
-# IDMC is registered for the classify/geo/QA/filtering slice of this
-# pipeline: IDU figures flow through classify -> geo -> temporal -> match ->
-# gold -> push, giving QA visibility and letting low-quality/irrelevant
-# signals be filtered before clear-api sees them — same as ACLED/Darfur24.
-# Two things this deliberately does NOT mean:
-#   1. IDMC-native event-grouping is designed. `_temporal`/`_match`'s
-#      district+type heuristic runs for IDMC exactly as it does for every
-#      other source; whether that's semantically right for IDU figures is
-#      still open. The drain groups pushed IDMC rows with the same
-#      district+type heuristic (IDMCConnector, drained=True). This pipeline's
-#      gold *events* table is a QA-only Iceberg sandbox that never writes to
-#      clear-api (only `_push` does, and only Signal rows), so nothing here
-#      creates real clear-api Events either way.
-#   2. That other sources' revisions reach clear-api. Only IDMCGXSource
-#      defines the sync hooks; Dataminr/ACLED/Darfur24 stay create-only.
+# IDMC runs the full chain for QA and pre-push filtering, like ACLED/Darfur24.
+# IDMC-native event grouping is NOT designed: the district+type heuristic runs
+# as-is (as in the drain, IDMCConnector drained=True), and gold events are a
+# QA-only sandbox that never reaches clear-api. Only IDMCGXSource defines the
+# sync hooks; other sources stay create-only.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),

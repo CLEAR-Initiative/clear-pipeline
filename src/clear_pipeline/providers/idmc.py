@@ -100,37 +100,18 @@ _ROLE_TRIANGULATION = "Triangulation"
 
 
 # ── Role-based supersession within an IDU `event_id` group ────────────────
-# IDMC-specific: one IDU `event_id` can carry several role-tagged rows
-# (analyst-reviewed "Recommended figure" vs. corroborating "Triangulation")
-# — no other source has this shape. Used by the gx_pipeline medallion
-# (`IDMCGXSource`'s group hooks -> `<source>_reconcile`), IDMC's only
-# ingestion path.
-#
-# These are deliberately *group primitives*, not a batch filter. The verdict
-# for a row depends on every other row sharing its `event_id` — including
-# ones ingested by an earlier poll and already sitting in gold. A function
-# that only ever sees the current batch cannot compute it: a Triangulation
-# row polled alone on Monday looks unopposed, and stays live forever once
-# Tuesday's poll delivers the Recommended figure that supersedes it. So the
-# rule is split into "what group is this row in" (`group_key` /
-# `group_member`) and "given the whole group, what survives"
-# (`resolve_group`), and the caller is responsible for assembling the whole
-# group from both sources.
+# One `event_id` can carry several role-tagged rows (reviewed "Recommended
+# figure" vs corroborating "Triangulation"). A verdict depends on the whole
+# group, including earlier polls' rows in gold, so these are group primitives,
+# not a batch filter; the caller (`<source>_reconcile`) assembles the group.
 
 KEEP = "keep"
 RETRACT = "retract"
 
 
 def group_key(raw_data: dict | None) -> str | None:
-    """The supersession group a raw IDU row belongs to — its `event_id`,
-    namespaced as `idmc:eventId:<event_id>`. `groupKey` is a single column
-    shared by every source's gold table (`iceberg_signals.py`); the
-    namespace keeps IDMC's numeric `event_id`s from colliding with another
-    source's group key if one is ever added, and makes the column
-    self-describing when read directly out of Iceberg.
-
-    None when the row carries no `event_id`: it's a group of one and no
-    supersession rule can apply to it."""
+    """`idmc:eventId:<event_id>`, or None without an `event_id` (group of one).
+    Namespaced because `groupKey` is one column shared by every source's gold table."""
     if not raw_data:
         return None
     event_id = raw_data.get("event_id")
@@ -138,15 +119,9 @@ def group_key(raw_data: dict | None) -> str | None:
 
 
 def group_member(external_id: str, raw_data: dict | None) -> dict | None:
-    """Normalize a raw IDU row into the shape `resolve_group` reads, or None
-    if it isn't in any group.
-
-    `raw_data` is the verbatim IDU row — `build_idmc_signal_input` stores it
-    on the signal input as `rawData`, so a freshly polled record and a row
-    read back out of gold both reach this through the same field, with
-    `event_id`/`role`/`created_at` under those same names. `externalId` is
-    passed separately because the pipeline's row id is the bare `idu_id`,
-    while the signal input's own `externalId` is the `idmc:`-prefixed form."""
+    """Normalize a raw IDU row for `resolve_group`, or None if ungrouped.
+    `raw_data` is the verbatim row stored as `rawData`, so polled and gold rows
+    read alike. `external_id` is the bare `idu_id`, not the `idmc:`-prefixed one."""
     key = group_key(raw_data)
     if key is None or raw_data is None:
         return None
@@ -161,22 +136,10 @@ def group_member(external_id: str, raw_data: dict | None) -> dict | None:
 
 
 def resolve_group(members: list[dict]) -> dict[str, str]:
-    """Given every member of ONE `event_id` group, return each member's
-    verdict: `KEEP` or `RETRACT`.
-
-    Three rules, unchanged from the batch filter this replaces:
-      1. A Recommended figure present -> every Triangulation row is
-         superseded and retracts; everything else keeps.
-      2. An all-Triangulation group -> only the most recent row (by
-         `created_at`) keeps; the rest retract.
-      3. Anything else (no Recommended figure, not all Triangulation) ->
-         everything keeps, rather than guessing at an unknown role mix.
-
-    Total over `members`: every member gets a verdict, so a caller can
-    compare it against what it previously recorded and detect a group whose
-    verdict has *reversed* — a retracted row becoming live again. That
-    reversibility is why the caller must feed in already-retracted rows too.
-    """
+    """`KEEP`/`RETRACT` for every member of ONE `event_id` group: a Recommended
+    figure retracts all Triangulation rows; an all-Triangulation group keeps only
+    the latest `created_at`; any other mix keeps everything rather than guess.
+    Total, so a reversed verdict is detectable: callers must pass retracted rows too."""
     roles = [m["role"] for m in members]
     if _ROLE_RECOMMENDED in roles:
         return {
@@ -281,13 +244,9 @@ def _parse_coordinate(pair: str) -> tuple[float, float] | None:
 
 def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     """Fetch + filter IDU records for the configured countries and displacement
-    types. `since` is accepted for `PollSource` protocol parity but ignored: the
-    API takes no client-controllable date filter, so every poll re-scans IDMC's
-    whole last-180-days window.
-
-    No cross-poll dedup: the caller (gx) compares each row's `content_hash`
-    against gold. A Redis seen-set here would hide revisions from it.
-    """
+    types. `since` is ignored (`PollSource` parity): the API has no date filter,
+    so every poll re-scans the last 180 days. No cross-poll dedup: gx compares
+    `content_hash` against gold, and a seen-set here would hide revisions."""
     countries = {c.strip().upper() for c in settings.idmc_countries.split(",") if c.strip()}
     allowed_types = {t.strip() for t in settings.idmc_allowed_types.split(",") if t.strip()}
 
@@ -337,11 +296,8 @@ def set_last_synced(ts: datetime) -> None:
 
 
 def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True) -> dict:
-    """Convert a parsed IDU row into a CLEAR CreateSignalInput dict.
-
-    `promote` threads through to `enrich_with_geoparser` (default True,
-    today's behavior). See `acled.py::build_acled_signal_input`'s docstring —
-    same parameter, same reason."""
+    """Convert a parsed IDU row into a CLEAR CreateSignalInput dict. `promote`
+    threads through to `enrich_with_geoparser`, as in `acled.py::build_acled_signal_input`."""
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
 
     input_data: dict = {
@@ -386,18 +342,11 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
 
 
 def build_signal_content_update(input_data: dict, *, retracted: bool | None = None) -> dict:
-    """Adapt a create_signal input dict (already built by
-    build_idmc_signal_input) into an updateSignalContent input dict, keyed by
-    the natural key ``(sourceId, externalId)`` — gold never has the clear-api
-    id. Reuses the same values rather than recomputing them, so a revision's
-    create and update calls always agree.
-
-    lat/lng/geoparsedData/rawS3Key are spread in only when present, never
-    defaulted via `.get()`. An ABSENT key tells clear-api "leave this field
-    alone"; sending an explicit None instead would NULL OUT a previously-
-    resolved value just because this poll's data happened to be missing it
-    transiently. ``retracted=None`` likewise leaves the flag unchanged.
-    """
+    """Adapt a build_idmc_signal_input dict into an updateSignalContent input keyed
+    by ``(sourceId, externalId)`` (gold never has the clear-api id), reusing its
+    values so create and update agree. lat/lng/geoparsedData/rawS3Key are omitted
+    when absent: an absent key leaves the field alone, None would erase a resolved
+    value on a transient gap. ``retracted=None`` leaves the flag unchanged."""
     update = {
         "sourceId": input_data["sourceId"],
         "externalId": input_data["externalId"],

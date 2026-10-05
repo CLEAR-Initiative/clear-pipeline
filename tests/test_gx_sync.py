@@ -1,8 +1,6 @@
-"""gx -> clear-api propagation: bronze skip, rawS3Key, and `_push`'s
-create / update / probe for sources with the sync hooks
-(`content_hash` / `content_update_input`). Runs the real Dagster asset graph
-against a fake S3, a real local Iceberg warehouse and an in-memory
-clear-api (`FakePostgres`) keyed by the natural key, like the real one.
+"""gx -> clear-api propagation: bronze skip, rawS3Key, and `_push`'s create /
+update / probe for sources with sync hooks. Runs the real Dagster graph against
+a fake S3, a local Iceberg warehouse and an in-memory, naturally keyed clear-api.
 """
 
 from unittest.mock import patch
@@ -271,7 +269,7 @@ def test_revision_overwrites_the_blob_at_the_same_key(h):
 
 
 def test_key_moves_when_the_created_at_day_changes(h):
-    # Known issue #19: the blob key follows the created_at day.
+    # Known limitation: the blob key follows the created_at day.
     h.poll([_rec("a", h="h1", created_at="2026-09-01T00:00:00Z")])
     h.poll([_rec("a", h="h2", created_at="2026-09-02T00:00:00Z")])
     assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-02/a.json"
@@ -309,7 +307,7 @@ def test_other_update_error_leaves_the_row_for_retry(h):
 
 
 def test_revert_after_a_failed_push_is_not_skipped_and_ends_quiet(h):
-    # S10: h1 pushed; h2 polled but its update fails; IDMC reverts to h1.
+    # h1 pushed; h2 polled but its update fails; IDMC reverts to h1.
     h.poll([_rec("a", h="h1")])
     h.pg.fail_next["update"] = RuntimeError("clear-api 500")
     h.poll([_rec("a", h="h2")])
@@ -338,7 +336,7 @@ def test_push_metadata_keys(h):
 
 
 def test_legacy_pushed_row_without_state_gets_one_update_with_its_key(h):
-    # S17: a row pushed before this change has pushedState NULL and no rawS3Key.
+    # A legacy pushed row has pushedState NULL and no rawS3Key.
     h.poll([_rec("a", h="h1")])
     w, c = h._iceberg()
     with w, c:

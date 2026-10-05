@@ -22,15 +22,11 @@ capability flags:
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
 
-- **polled** — polled by this pipeline (``defs/signals``). The factory builds an
-  ingest asset + poll sensor: it writes raw blobs to the lake and
-  ``createSignal(status=NEW, rawS3Key=…)``. The shared classify/group stage
-  rehydrates the record from the blob (``parse`` → ``project``). ``False`` = the
-  signal is created in clear-api by something else: analysts (``manual``), an
-  external poller (``sudan-war-x``, via clear-api's ``POST /api/x/ingest``), or
-  the gx pipeline (``idmc``). The drain reads a signal's blob whenever its row
-  has a ``rawS3Key`` (gx writes one for ``idmc``); without one, ``project``
-  reads the signal row itself (``record=None``).
+- **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
+  blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
+  clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
+  ``POST /api/x/ingest``) or gx (``idmc``). The drain projects from the blob
+  (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage.
   ``dtm`` is the exception: a bulletin can span many districts, so its signals
   are ingested but not grouped into events (see ``DRAINED_SOURCES``).
@@ -449,11 +445,9 @@ class Darfur24Connector:
 # IDMC IDU — internal displacement updates (downloaded by gx, drained from S3)
 # ──────────────────────────────────────────────────────────────────────────────
 class IDMCConnector:
-    """IDMC is downloaded only by the gx pipeline (``gx_pipeline``), which
-    writes each record to the lake and creates the signal in clear-api. There
-    is no ingest asset here; the drain reads the S3 file gx wrote (same key and
-    bytes as the former ``raw_idmc`` asset) and projects it like any polled
-    source."""
+    """Downloaded only by ``gx_pipeline``, which writes the lake blob and creates
+    the signal. No ingest asset here: the drain projects the blob gx wrote, so
+    ``parse``/``project`` must match the record format gx writes."""
 
     source = settings.idmc_source_name
     polled = False
