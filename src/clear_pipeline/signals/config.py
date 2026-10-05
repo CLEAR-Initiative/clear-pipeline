@@ -127,6 +127,13 @@ class Settings(BaseSettings):
 
     # Pipeline
     initial_lookback_days: int = 7
+    # Disaster-type classifier for the signal/event drain: "jev" (TypeSafe
+    # System One via OpenRouter — the default) or "minilm" (the legacy local
+    # sentence-transformer, now fallback-only; set to force it for rollback).
+    signal_classifier: str = "jev"
+    # Below this the signal is dropped (no event created). With Jev this gates
+    # on the `relevant` Noul probability (is-this-an-incident), not the code
+    # confidence — revalidate the value against live Jev output.
     relevance_threshold: float = 0.5
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"

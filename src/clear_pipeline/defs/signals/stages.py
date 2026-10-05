@@ -36,7 +36,7 @@ from clear_pipeline.defs.signals.connectors import (
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
-from clear_pipeline.providers.classify import classify_locally
+from clear_pipeline.providers.signal_classifier import classify_signal
 from clear_pipeline.providers.clear_api import (
     enqueue_translation,
     events_pending_alert,
@@ -132,10 +132,11 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
 
 def _group(view: SignalView, created: dict) -> dict | None:
     """Classify + group one signal into an event (create or add-to-existing).
-    Returns the event dict, or None when below the relevance threshold."""
-    classification = classify_locally(
-        title=view.title, description=view.description, source_severity=created.get("severity"),
-    )
+    Returns the event dict, or None when below the relevance threshold.
+
+    Classification goes through `classify_signal` (Jev primary, MiniLM fallback);
+    the event reuses this result downstream (see providers/event.py)."""
+    classification = classify_signal(view.title, view.description, created.get("severity"))
     if classification.relevance < settings.relevance_threshold:
         return None
 
