@@ -75,8 +75,8 @@
   {"text": "Unspecified political violence reported overnight; details unconfirmed", "code": "po", "note": "ambiguous/other"},
   {"text": "An explosion was heard in the city centre; the cause is not yet known", "code": "po", "note": "unknown cause — overconfidence probe"},
 
-  {"text": "The flood warning has been lifted as river levels recede", "code": "fl", "note": "negation/receding — over-react probe"},
-  {"text": "Ceasefire is holding; no clashes have been reported overnight", "code": "pv", "note": "negation — no clashes"},
+  {"text": "The flood warning has been lifted as river levels recede", "code": "fl", "relevant": false, "note": "negation/receding — over-react probe; no current event"},
+  {"text": "Ceasefire is holding; no clashes have been reported overnight", "code": "pv", "relevant": false, "note": "negation — no clashes; no current event"},
 
   {"text": "Un glissement de terrain a enseveli des maisons apres de fortes pluies", "code": "ls", "note": "FR landslide"},
   {"text": "Una turba lincho a un hombre acusado de robo en el mercado", "code": "ri", "note": "ES mob violence"},
