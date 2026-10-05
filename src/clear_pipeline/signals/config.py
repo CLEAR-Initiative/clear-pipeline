@@ -135,6 +135,11 @@ class Settings(BaseSettings):
     # on the `relevant` Noul probability (is-this-an-incident), not the code
     # confidence — revalidate the value against live Jev output.
     relevance_threshold: float = 0.5
+    # When the Jev→MiniLM fallback rate in a single drain crosses this, the drain
+    # logs an error (OpenRouter/Jev likely degraded — classifications are running
+    # on the lower-accuracy local model). Only evaluated when Jev is the selected
+    # classifier and at least one signal was attempted in the run.
+    signal_jev_fallback_alert_rate: float = 0.25
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination

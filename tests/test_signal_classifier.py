@@ -12,6 +12,13 @@ def _clf(code: str) -> SignalClassification:
     return SignalClassification(disaster_types=[code], relevance=0.9, severity=3, summary="s")
 
 
+@pytest.fixture(autouse=True)
+def _reset_stats():
+    sc.reset_classifier_stats()
+    yield
+    sc.reset_classifier_stats()
+
+
 def test_jev_primary_used_when_enabled(monkeypatch):
     monkeypatch.setattr(sc.settings, "signal_classifier", "jev")
     monkeypatch.setattr(sc, "classify_with_jev", lambda **k: _clf("jev"))
@@ -40,3 +47,20 @@ def test_minilm_forced_skips_jev(monkeypatch):
     monkeypatch.setattr(sc, "classify_locally", lambda **k: _clf("minilm"))
     out = sc.classify_signal("flood", None, None)
     assert out.disaster_types == ["minilm"]
+
+
+def test_stats_count_jev_success_and_fallback(monkeypatch):
+    monkeypatch.setattr(sc.settings, "signal_classifier", "jev")
+    monkeypatch.setattr(sc, "classify_locally", lambda **k: _clf("minilm"))
+    calls = {"n": 0}
+
+    def flaky(**k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _clf("jev")
+        raise JevError("down")
+
+    monkeypatch.setattr(sc, "classify_with_jev", flaky)
+    sc.classify_signal("flood", None, 4)   # jev ok
+    sc.classify_signal("quake", None, 4)   # jev fails → fallback
+    assert sc.classifier_stats_snapshot() == {"jev": 1, "fallback": 1}
