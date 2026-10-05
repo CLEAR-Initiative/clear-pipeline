@@ -1,8 +1,6 @@
 """Unit tests for the Jev disaster-type classifier (providers/jev.py). HTTP is
 mocked — no network, no torch (the taxonomy maps are plain JSON reads)."""
 
-import json
-
 import pytest
 
 from clear_pipeline.providers import jev
