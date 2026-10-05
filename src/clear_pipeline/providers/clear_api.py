@@ -38,6 +38,11 @@ class ClearApiError(RuntimeError):
     rather than retrying and amplifying the bad request."""
 
 
+class ClearApiNotFound(ClearApiError):
+    """The target row doesn't exist (GraphQL ``extensions.code ==
+    "NOT_FOUND"``). An answer, not a transient failure, so never retried."""
+
+
 _RESOLVE_LOCATION = """
 query ResolveKnowledgebaseLocation($pcode: String, $name: String, $adminLevel: Int) {
   resolveKnowledgebaseLocation(pcode: $pcode, name: $name, adminLevel: $adminLevel)
@@ -314,6 +319,8 @@ def _execute(
             if "errors" in result:
                 errs = result["errors"]
                 err_text = str(errs)
+                if any((e.get("extensions") or {}).get("code") == "NOT_FOUND" for e in errs):
+                    raise ClearApiNotFound(f"clear-api NOT_FOUND: {err_text[:300]}")
                 # A schema/version mismatch — e.g. the signal-drain endpoints from
                 # clear-api PR #127 not yet deployed — is PERMANENT, not transient.
                 # Raise a clear, non-retryable error instead of retrying every
@@ -894,7 +901,25 @@ mutation UpdateSignalContent($input: UpdateSignalContentInput!) {
   updateSignalContent(input: $input) {
     id
     contentHash
+    retracted
+    revision
+    rawS3Key
     lastRevisedAt
+  }
+}
+"""
+
+# gx's create: the shared CREATE_SIGNAL plus the fields gx compares to decide a
+# follow-up update. Separate so production ingest never selects fields an
+# older clear-api lacks.
+CREATE_SIGNAL_FOR_SYNC = """
+mutation CreateSignalForSync($input: CreateSignalInput!) {
+  createSignal(input: $input) {
+    id
+    externalId
+    contentHash
+    retracted
+    rawS3Key
   }
 }
 """
@@ -1271,9 +1296,7 @@ query DisasterTypes {
 # Signals awaiting downstream processing (status = NEW), oldest-first. The
 # selection mirrors CREATE_SIGNAL so the drain feeds the SAME classify→group→
 # alert code the Celery path uses. Raw payload stays in S3 (rawS3Key).
-PENDING_SIGNALS = """
-query PendingSignals($first: Int, $source: String) {
-  pendingSignals(first: $first, source: $source) {
+_PENDING_SIGNAL_FIELDS = """
     id
     externalId
     title
@@ -1281,20 +1304,80 @@ query PendingSignals($first: Int, $source: String) {
     severity
     casualties
     publishedAt
+    url
     status
+    revision
+    retracted
     rawS3Key
     source { id name }
     originLocation { id name level ancestorIds }
     destinationLocation { id name level ancestorIds }
     generalLocation { id name level ancestorIds }
     events { id title types severity casualties populationAffected }
+"""
+
+PENDING_SIGNALS = f"""
+query PendingSignals($first: Int, $source: String) {{
+  pendingSignals(first: $first, source: $source) {{{_PENDING_SIGNAL_FIELDS}  }}
+}}
+"""
+
+PENDING_RECOMPUTES = f"""
+query PendingRecomputes($first: Int) {{
+  pendingRecomputes(first: $first) {{{_PENDING_SIGNAL_FIELDS}  }}
+}}
+"""
+
+MARK_SIGNALS_PROCESSED = """
+mutation MarkSignalsProcessed($items: [SignalRevisionInput!]!, $status: SignalStatus) {
+  markSignalsProcessed(items: $items, status: $status)
+}
+"""
+
+# Live (non-retracted) members of an event, newest first: what the rewrite
+# prompt and the recompute read. `rawS3Key` + locations let the drain project
+# each member exactly as first grouping did.
+EVENT_MEMBERS = """
+query EventMembers($eventId: String!, $first: Int) {
+  eventMembers(eventId: $eventId, first: $first) {
+    id
+    externalId
+    title
+    description
+    severity
+    casualties
+    publishedAt
+    url
+    rawS3Key
+    source { id name type }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
   }
 }
 """
 
-MARK_SIGNALS_PROCESSED = """
-mutation MarkSignalsProcessed($ids: [String!]!, $status: SignalStatus) {
-  markSignalsProcessed(ids: $ids, status: $status)
+EVENT_RECOMPUTE_STATE = """
+query EventRecomputeState($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    severity
+    types
+    rewriteMembersHash
+    originLocation { name }
+    generalLocation { name }
+    destinationLocation { name }
+  }
+}
+"""
+
+SET_EVENT_AGGREGATES = """
+mutation SetEventAggregates($id: String!, $input: EventAggregatesInput!) {
+  setEventAggregates(id: $id, input: $input) {
+    id
+  }
 }
 """
 
@@ -1307,10 +1390,17 @@ def create_signal(input_data: dict) -> dict:
     return result["createSignal"]
 
 
+def create_signal_for_sync(input_data: dict) -> dict:
+    """gx's get-or-create: also returns ``contentHash``/``retracted`` so the
+    caller can tell an existing, out-of-date row from the one it sent."""
+    result = _execute(CREATE_SIGNAL_FOR_SYNC, {"input": input_data})
+    return result["createSignal"]
+
+
 def update_signal_content(input_data: dict) -> dict:
-    """Apply an in-place content revision to an existing signal (e.g. an IDMC
-    IDU row revised upstream). Hash-gated server-side — a no-op retry with an
-    unchanged contentHash returns the row untouched."""
+    """Apply an in-place revision or retraction to an existing signal, keyed by
+    ``(sourceId, externalId)``. A no-op resend returns the row untouched.
+    Raises ``ClearApiNotFound`` when no such signal exists."""
     result = _execute(UPDATE_SIGNAL_CONTENT, {"input": input_data})
     return result["updateSignalContent"]
 
@@ -1326,13 +1416,45 @@ def pending_signals(first: int = 100, source: str | None = None) -> list[dict]:
     return result["pendingSignals"]
 
 
-def mark_signals_processed(ids: list[str], status: str = "PROCESSED") -> int:
-    """Mark signals done for the drain — PROCESSED (default) or FAILED. Returns
-    the number of rows updated. Idempotent (clear-api #467)."""
-    if not ids:
+def mark_signals_processed(items: list[dict], status: str = "PROCESSED") -> int:
+    """Mark signals done for the drain — PROCESSED (default) or FAILED.
+    ``items`` are ``{"id", "revision"}`` as fetched: a row whose revision moved
+    since (revised or retracted meanwhile) is left for the next run. Returns
+    the number of rows updated."""
+    if not items:
         return 0
-    result = _execute(MARK_SIGNALS_PROCESSED, {"ids": ids, "status": status})
+    result = _execute(MARK_SIGNALS_PROCESSED, {"items": items, "status": status})
     return result["markSignalsProcessed"]
+
+
+def pending_recomputes(first: int = 100) -> list[dict]:
+    """Signals whose events must be recomputed: changed after grouping
+    (NEEDS_RECOMPUTE), or NEW but already linked. Oldest first."""
+    result = _execute(PENDING_RECOMPUTES, {"first": first})
+    return result["pendingRecomputes"]
+
+
+def event_members(event_id: str, first: int | None = None) -> list[dict]:
+    """Live members of an event, newest first; ``first`` bounds the count."""
+    variables: dict = {"eventId": event_id}
+    if first is not None:
+        variables["first"] = first
+    result = _execute(EVENT_MEMBERS, variables)
+    return result["eventMembers"]
+
+
+def get_event_recompute_state(event_id: str) -> dict | None:
+    """The event fields a recompute keeps or compares (text, severity,
+    types, location name, ``rewriteMembersHash``)."""
+    result = _execute(EVENT_RECOMPUTE_STATE, {"id": event_id})
+    return result.get("event")
+
+
+def set_event_aggregates(event_id: str, input_data: dict) -> dict:
+    """Absolute write of an event's aggregates. Absent keys are left unchanged;
+    explicit None clears the field."""
+    result = _execute(SET_EVENT_AGGREGATES, {"id": event_id, "input": input_data})
+    return result["setEventAggregates"]
 
 
 def get_signal(signal_id: str) -> dict | None:

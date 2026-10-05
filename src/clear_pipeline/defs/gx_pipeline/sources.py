@@ -237,9 +237,10 @@ class Darfur24GXSource:
 @dataclass(frozen=True)
 class IDMCGXSource:
     """Calls `providers/idmc.py` directly — same recipe as `ACLEDGXSource`.
-    Treated as immutable for now: IDU rows can revise in place (same
-    `idu_id`, new content), but this adapter doesn't yet detect or push
-    revisions — see GX_SOURCES' comment below and mark_seen's docstring."""
+    IDMC's only ingestion path: production's `raw_idmc` no longer exists.
+    IDU rows revise in place (same `idu_id`, new content): the
+    `content_hash`/`content_update_input` hooks let bronze skip unchanged
+    rows and `_push` send revisions and retractions."""
 
     @property
     def source(self) -> str:
@@ -273,13 +274,18 @@ class IDMCGXSource:
         return idmc.build_idmc_signal_input(record, source_id, promote=False)
 
     def mark_seen(self, external_id: str) -> None:
-        # Deliberately a no-op for now — see class docstring. IDMC is
-        # treated as immutable: a record that comes back on a later poll
-        # is silently re-created (idempotent get-or-create on
-        # (sourceId, externalId) — no duplicate signal, just wasted
-        # re-processing). Revisit once (id, content_hash)-aware dedup
-        # (matching production's IDMCConnector.post_create) is added.
+        # No seen-set: the bronze skip (gold hash + pushedState) dedups.
         pass
+
+    # ── Optional sync hooks ────────────────────────────────────────────────
+    # Only IDMC revises rows in place. Probed via `getattr` in factory.py,
+    # like the group hooks below.
+
+    def content_hash(self, record: Any) -> str:
+        return record["content_hash"]
+
+    def content_update_input(self, signal_input: dict, *, retracted: bool) -> dict:
+        return idmc.build_signal_content_update(signal_input, retracted=retracted)
 
     # ── Optional group-supersession hooks ─────────────────────────────────
     # IDMC-specific: one IDU `event_id` can have several role-tagged rows
@@ -315,19 +321,13 @@ class IDMCGXSource:
 #   1. IDMC-native event-grouping is designed. `_temporal`/`_match`'s
 #      district+type heuristic runs for IDMC exactly as it does for every
 #      other source; whether that's semantically right for IDU figures is
-#      still open — the same question production's own IDMCConnector defers
-#      via `drained=False` (defs/signals/connectors.py). This pipeline's
+#      still open. The drain groups pushed IDMC rows with the same
+#      district+type heuristic (IDMCConnector, drained=True). This pipeline's
 #      gold *events* table is a QA-only Iceberg sandbox that never writes to
 #      clear-api (only `_push` does, and only Signal rows), so nothing here
 #      creates real clear-api Events either way.
-#   2. IDU revisions (same idu_id, new content) are handled. IDMCGXSource
-#      currently treats IDMC signals as immutable — see its mark_seen
-#      docstring. A revision reaching `_push` would silently no-op against
-#      clear-api's idempotent create, and `_gold`'s Type-1 upsert freezes
-#      `pushedAt` once set, so nothing ever re-pushes it. Add
-#      (id, content_hash) dedup (mirroring IDMCConnector.post_create) and an
-#      update path in `_push` before IDMC data is expected to reflect
-#      revisions.
+#   2. That other sources' revisions reach clear-api. Only IDMCGXSource
+#      defines the sync hooks; Dataminr/ACLED/Darfur24 stay create-only.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),

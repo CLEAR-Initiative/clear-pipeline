@@ -177,7 +177,7 @@ def test_gx_pipeline_end_to_end(tmp_path):
         patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
-        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=fake_create_signal),
+        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=fake_create_signal),
         patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
     ):
         mock_classify.return_value.relevance = 0.9
@@ -215,7 +215,7 @@ def test_gx_pipeline_end_to_end(tmp_path):
         patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
-        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=fake_create_signal),
+        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=fake_create_signal),
     ):
         push_asset = next(a for a in assets if "fakesrc_push" in [k.to_user_string() for k in a.keys])
         second_result = dg.materialize([push_asset], selection=[push_asset])
@@ -285,7 +285,7 @@ def _run_gx(assets, checks, fake_s3, warehouse, catalog_uri, create_signal):
         patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", warehouse),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", catalog_uri),
-        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=create_signal),
+        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=create_signal),
         patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
     ):
         mock_classify.return_value.relevance = 0.9
@@ -540,7 +540,7 @@ def test_gx_pipeline_rerun_does_not_repush_already_pushed_signal(tmp_path):
             patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
             patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
             patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
-            patch("clear_pipeline.defs.gx_pipeline.factory.create_signal", side_effect=fake_create_signal),
+            patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=fake_create_signal),
             patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
         ):
             mock_classify.return_value.relevance = 0.9
@@ -624,14 +624,15 @@ def test_gold_table_gains_new_columns_on_load(tmp_path):
         table = iceberg_signals.get_signals_table("oldsrc")
         assert "groupKey" in table.schema().column_names
         assert "retracted" in table.schema().column_names
+        assert "pushedState" in table.schema().column_names
 
-        unpushed = iceberg_signals.unpushed_signals(table)
+        unpushed = iceberg_signals.signals_to_sync(table, can_update=False)["create"]
         assert [row["externalId"] for row in unpushed] == ["pre-1"], \
             "a pre-migration row reads retracted=NULL, which means live, not retracted"
 
         # The write path works against the migrated schema.
         iceberg_signals.upsert_signals(table, [{**unpushed[0], "retracted": True}])
-        assert iceberg_signals.unpushed_signals(table) == []
+        assert iceberg_signals.signals_to_sync(table, can_update=False)["create"] == []
 
 
 def test_iceberg_signals_type1_upsert(tmp_path):
@@ -655,7 +656,7 @@ def test_iceberg_signals_type1_upsert(tmp_path):
         }
 
         iceberg_signals.upsert_signals(table, [row])
-        assert len(iceberg_signals.unpushed_signals(table)) == 1
+        assert len(iceberg_signals.signals_to_sync(table, can_update=False)["create"]) == 1
 
         # Mark pushed — same externalId, updates in place.
         pushed = {**row, "pushedAt": "2026-09-01T01:00:00Z"}
@@ -663,4 +664,4 @@ def test_iceberg_signals_type1_upsert(tmp_path):
 
         all_rows = table.scan().to_pandas()
         assert len(all_rows) == 1, "Type-1: update in place, no history row"
-        assert iceberg_signals.unpushed_signals(table) == []
+        assert iceberg_signals.signals_to_sync(table, can_update=False)["create"] == []

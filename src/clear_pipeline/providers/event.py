@@ -6,8 +6,10 @@ admin_resolver, plus the EventRewrite result model.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict
@@ -18,6 +20,7 @@ from pydantic import BaseModel
 from clear_pipeline.providers import clear_api as graphql
 from clear_pipeline.providers.classify import (
     SignalClassification,
+    classify_locally,
     code_to_level2_map,
     code_to_level3_map,
 )
@@ -36,6 +39,7 @@ from clear_pipeline.providers.signal import (
     earliest_onset_iso,
     extract_casualties_from_text,
     extract_event_start_from_text,
+    extract_population_affected_from_text,
 )
 from clear_pipeline.signals.config import settings
 
@@ -455,30 +459,35 @@ def _most_recent(events: list[dict]) -> dict | None:
     return max(events, key=ts) if events else None
 
 
+# The rewrite prompt (and grouping's severity mean) reads at most this many
+# live members, newest first.
+REWRITE_MEMBERS = 50
+
+
 def _rewrite_event(
     event_id: str,
     location_name: str | None,
     level_2_type: str | None,
+    *,
+    raise_errors: bool = False,
 ) -> tuple[EventRewrite | None, list[dict]]:
-    """Fetch an event's full signal list and ask Claude for a fresh
+    """Fetch an event's newest live members and ask Claude for a fresh
     title/description + severity/displacement fallbacks.
 
     Returns (rewrite, signals) — `signals` is the list we fetched so callers
     can also compute event severity without re-fetching. Either element may
-    be empty/None on failure.
+    be empty/None on failure. ``raise_errors`` re-raises an LLM failure
+    (recompute must retry rather than write a partial rewrite).
     """
-    event = graphql.get_event_with_signals(event_id)
-    if not event:
-        return None, []
-
-    signals = event.get("signals") or []
+    signals = graphql.event_members(event_id, first=REWRITE_MEMBERS)
     if not signals:
         return None, []
 
     prompt = build_rewrite_prompt(
         location_name=location_name,
         level_2_type=level_2_type,
-        signals=signals,
+        # The 50 newest, listed oldest first as before.
+        signals=list(reversed(signals)),
     )
 
     try:
@@ -487,6 +496,8 @@ def _rewrite_event(
         )
         return result, signals
     except Exception as e:
+        if raise_errors:
+            raise
         logger.error(
             "[GROUPING] Rewrite failed for event %s: %s",
             event_id, e, exc_info=True,
@@ -822,3 +833,100 @@ def _match_and_act(
 
     return event
 
+
+
+# ── Recompute (signal revised or retracted after grouping) ──────────────────
+
+
+def members_hash(member_ids: list[str]) -> str:
+    """Order-insensitive fingerprint of an event's live member set."""
+    return hashlib.sha256("\n".join(sorted(member_ids)).encode()).hexdigest()[:16]
+
+
+def _primary_location_name(event: dict) -> str | None:
+    for key in ("originLocation", "generalLocation", "destinationLocation"):
+        loc = event.get(key)
+        if loc and loc.get("name"):
+            return loc["name"]
+    return None
+
+
+def recompute_event(
+    event_id: str,
+    member_text: Callable[[dict], tuple[str | None, str | None]],
+) -> bool:
+    """Rebuild an event's aggregates from scratch from its live members.
+    Idempotent and absolute. Returns True when the LLM rewrite ran.
+
+    ``member_text(member)`` gives the (title, description) first grouping saw
+    for that member (its lake blob, or the DB fields as a fallback).
+
+    The rewrite runs only when the live member set changed since the last one
+    (``rewriteMembersHash``), so content revisions cost no LLM call. On an LLM
+    failure the deterministic fields are still written, the text and the hash
+    are left alone, and the error is raised so the caller retries.
+    """
+    members = graphql.event_members(event_id)
+    state = graphql.get_event_recompute_state(event_id) or {}
+
+    casualties: list[int] = []
+    populations: list[int] = []
+    for member in members:
+        title, description = member_text(member)
+        classification = classify_locally(
+            title=title, description=description, source_severity=member.get("severity"),
+        )
+        glide = classification.disaster_types[0] if classification.disaster_types else None
+        resolved = _resolve_signal_stats(
+            actual_casualties=_resolve_actual_casualties(member, title, description),
+            actual_population=extract_population_affected_from_text(
+                title, description, member.get("description"),
+            ),
+            glide_code=glide,
+        )
+        if resolved["casualties"] is not None:
+            casualties.append(resolved["casualties"])
+        if resolved["population_affected"] is not None:
+            populations.append(resolved["population_affected"])
+
+    live_hash = members_hash([m["id"] for m in members])
+    aggregates: dict = {
+        "casualties": sum(casualties) if casualties else None,
+        "populationAffected": str(max(populations)) if populations else None,
+    }
+
+    rewrite = None
+    rewrite_error: Exception | None = None
+    if members and live_hash != state.get("rewriteMembersHash"):
+        types = state.get("types") or []
+        level_2 = code_to_level2_map().get(types[0]) if types else None
+        try:
+            rewrite, _ = _rewrite_event(
+                event_id, _primary_location_name(state), level_2, raise_errors=True,
+            )
+        except Exception as e:  # noqa: BLE001 — re-raised after the deterministic write
+            rewrite_error = e
+
+    fallback = rewrite.severity if rewrite and rewrite.severity is not None else state.get("severity")
+    severity = _compute_event_severity(members, fallback) if members else None
+    aggregates["severity"] = severity
+    aggregates["rank"] = severity / 5.0 if severity is not None else 0.0
+    if rewrite:
+        aggregates["title"] = rewrite.title
+        aggregates["description"] = rewrite.description
+        aggregates["populationDisplaced"] = str(
+            _resolve_population_displaced(rewrite.population_displaced)
+        )
+    if rewrite or not members:
+        aggregates["rewriteMembersHash"] = live_hash
+
+    try:
+        graphql.set_event_aggregates(event_id, aggregates)
+    finally:
+        # Grouping's _merge_event_stats reads cached totals; a stale entry
+        # would re-add a retracted member's contribution.
+        _invalidate_events_cache()
+
+    if rewrite_error is not None:
+        raise rewrite_error
+    return rewrite is not None

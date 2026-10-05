@@ -102,9 +102,9 @@ _ROLE_TRIANGULATION = "Triangulation"
 # ── Role-based supersession within an IDU `event_id` group ────────────────
 # IDMC-specific: one IDU `event_id` can carry several role-tagged rows
 # (analyst-reviewed "Recommended figure" vs. corroborating "Triangulation")
-# — no other source has this shape. Used only by the gx_pipeline medallion
-# (`IDMCGXSource`'s group hooks -> `<source>_reconcile`), not by
-# production's `fetch_idu_records`/`IDMCConnector`.
+# — no other source has this shape. Used by the gx_pipeline medallion
+# (`IDMCGXSource`'s group hooks -> `<source>_reconcile`), IDMC's only
+# ingestion path.
 #
 # These are deliberately *group primitives*, not a batch filter. The verdict
 # for a row depends on every other row sharing its `event_id` — including
@@ -281,11 +281,12 @@ def _parse_coordinate(pair: str) -> tuple[float, float] | None:
 
 def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     """Fetch + filter IDU records for the configured countries and displacement
-    types, deduplicated against the Redis seen-set (id + content hash — see
-    `_content_hash`). `since` is accepted for `PollSource` protocol parity but
-    ignored: the API takes no client-controllable date filter, so every poll
-    re-scans IDMC's whole last-180-days window and the content-hash dedup does
-    the "what's new/changed" work instead.
+    types. `since` is accepted for `PollSource` protocol parity but ignored: the
+    API takes no client-controllable date filter, so every poll re-scans IDMC's
+    whole last-180-days window.
+
+    No cross-poll dedup: the caller (gx) compares each row's `content_hash`
+    against gold. A Redis seen-set here would hide revisions from it.
     """
     countries = {c.strip().upper() for c in settings.idmc_countries.split(",") if c.strip()}
     allowed_types = {t.strip() for t in settings.idmc_allowed_types.split(",") if t.strip()}
@@ -309,32 +310,19 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
             continue
 
         parsed["content_hash"] = _content_hash(parsed["raw"])
-        seen_key = f"idmc:seen:{parsed['idu_id']}:{parsed['content_hash']}"
-        if seen_key in batch_keys:
+        batch_key = f"{parsed['idu_id']}:{parsed['content_hash']}"
+        if batch_key in batch_keys:
             deduped += 1
             continue
-        # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
-        # idu_id forever, so a fixed TTL would eventually expire on an unchanged
-        # row and misfire it as "new". EXPIRE renews and reports existence in one call
-        if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
-            deduped += 1
-            continue
-        batch_keys.add(seen_key)
+        batch_keys.add(batch_key)
         events.append(parsed)
 
     logger.info(
-        "[IDMC] Result: %d new/changed events (parse_failed=%d, filtered_out=%d, "
-        "already_seen=%d) out of %d raw",
+        "[IDMC] Result: %d events (parse_failed=%d, filtered_out=%d, "
+        "duplicate_in_batch=%d) out of %d raw",
         len(events), parse_failed, filtered_out, deduped, len(raw_rows),
     )
     return events
-
-
-def mark_seen(idu_id: str, content_hash: str) -> None:
-    """Mark a (id, content_hash) revision ingested — called only after
-    createSignal is confirmed, so a failed persistence leaves the row eligible
-    for retry on the next poll."""
-    _redis.setex(f"idmc:seen:{idu_id}:{content_hash}", settings.dedup_ttl_hours * 3600, "1")
 
 
 def get_last_synced() -> datetime | None:
@@ -397,31 +385,36 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
     return input_data
 
 
-def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
+def build_signal_content_update(input_data: dict, *, retracted: bool | None = None) -> dict:
     """Adapt a create_signal input dict (already built by
-    build_idmc_signal_input) into an updateSignalContent input dict targeting
-    an existing signal — reuses the same values rather than recomputing them,
-    so a revision's create and update calls always agree.
+    build_idmc_signal_input) into an updateSignalContent input dict, keyed by
+    the natural key ``(sourceId, externalId)`` — gold never has the clear-api
+    id. Reuses the same values rather than recomputing them, so a revision's
+    create and update calls always agree.
 
-    lat/lng/geoparsedData are spread in only when build_idmc_signal_input
-    actually set them, never defaulted via `.get()`. An ABSENT key tells
-    clear-api's Prisma update "leave this field alone"; sending an explicit
-    None instead would NULL OUT a previously-resolved value just because
-    this poll's data happened to be missing it transiently.
+    lat/lng/geoparsedData/rawS3Key are spread in only when present, never
+    defaulted via `.get()`. An ABSENT key tells clear-api "leave this field
+    alone"; sending an explicit None instead would NULL OUT a previously-
+    resolved value just because this poll's data happened to be missing it
+    transiently. ``retracted=None`` likewise leaves the flag unchanged.
     """
-    return {
-        "id": signal_id,
+    update = {
+        "sourceId": input_data["sourceId"],
+        "externalId": input_data["externalId"],
         "contentHash": input_data["contentHash"],
         "rawData": input_data["rawData"],
         "title": input_data.get("title"),
         "description": input_data.get("description"),
         "severity": input_data.get("severity"),
         "url": input_data.get("url"),
-        # lat/lng/geoparsedData can be transiently missing (bad coordinate
-        # data, or Nominatim being down) — omit, don't null a resolved value.
         **{
             k: input_data[k]
             for k in ("lat", "lng", "geoparsedData")
             if k in input_data
         },
     }
+    if input_data.get("rawS3Key"):
+        update["rawS3Key"] = input_data["rawS3Key"]
+    if retracted is not None:
+        update["retracted"] = retracted
+    return update

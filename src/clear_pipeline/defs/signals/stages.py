@@ -26,6 +26,7 @@ import logging
 
 import dagster as dg
 import redis
+from botocore.exceptions import ClientError
 
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.connectors import (
@@ -46,11 +47,12 @@ from clear_pipeline.providers.clear_api import (
     get_situation_canonical,
     mark_signals_processed,
     mark_translated,
+    pending_recomputes,
     pending_signals,
     pending_translations,
     sync_event_cards,
 )
-from clear_pipeline.providers.event import group_signal
+from clear_pipeline.providers.event import group_signal, recompute_event
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import extract_population_affected_from_text
 from clear_pipeline.providers.translate import (
@@ -83,6 +85,8 @@ _INGEST_DEPS = [f"raw_{c.source}" for c in CONNECTORS if c.polled]
 
 def _project(created: dict):
     """Rehydrate + project a NEW signal via its source connector.
+    Reads the lake blob whenever the row has a ``rawS3Key``; otherwise a
+    non-polled source projects from the row (``record=None``).
     Returns ``(connector, SignalView)`` on success, or a *permanent-skip reason*
     string that the caller marks out of the queue (never leaves it NEW forever):
       - ``"unknown_source"`` — source not in the drained registry
@@ -92,15 +96,15 @@ def _project(created: dict):
     connector = CONNECTORS_BY_SOURCE.get(source_name or "")
     if connector is None or source_name not in DRAINED_SOURCES:
         return "unknown_source"
-    if connector.polled:
-        key = created.get("rawS3Key")
-        if not key:
-            return "no_blob"
+    key = created.get("rawS3Key")
+    if key:
         s3 = lake.s3_client()
         body = s3.get_object(Bucket=settings.s3_bucket, Key=key)["Body"].read()
         record = connector.parse(body)
+    elif connector.polled:
+        return "no_blob"
     else:
-        record = None  # manual — project from the row
+        record = None  # manual / push feed — project from the row
     return connector, connector.project(record, created)
 
 
@@ -242,15 +246,29 @@ def _sync_event_cards(context, touched_events: set[str]) -> None:
     )
 
 
+def _item(created: dict) -> dict:
+    """Compare-and-set mark key: the row is marked only if its revision is still
+    the one fetched (0 for every source that is never revised)."""
+    return {"id": created["id"], "revision": created.get("revision") or 0}
+
+
+def _mark(items: list[dict], status: str) -> int:
+    """Mark rows; returns how many were skipped because they changed meanwhile
+    (picked up by the next run)."""
+    if not items:
+        return 0
+    return len(items) - mark_signals_processed(items, status)
+
+
 def _drain_signals_locked(context) -> dg.MaterializeResult:
-    processed = dropped = requeued = failed = 0
+    processed = dropped = requeued = failed = conflicts = 0
     touched_events: set[str] = set()
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
         if not batch:
             break
-        done_ids: list[str] = []
-        failed_ids: list[str] = []
+        done_ids: list[dict] = []
+        failed_ids: list[dict] = []
         for created in batch:
             try:
                 outcome = _process_one_signal(created, touched_events)
@@ -265,7 +283,7 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
                     context.log.exception(
                         "[classify_group] signal %s failed %d× — marking FAILED", sid, attempts
                     )
-                    failed_ids.append(sid)
+                    failed_ids.append(_item(created))
                     failed += 1
                 else:
                     context.log.warning(
@@ -275,18 +293,18 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
                     requeued += 1
                 continue
             if outcome == _PROCESSED:
-                done_ids.append(created["id"])
+                done_ids.append(_item(created))
                 processed += 1
             elif outcome == _DROP_DONE:
-                done_ids.append(created["id"])  # mark PROCESSED — leaves the queue
+                done_ids.append(_item(created))  # mark PROCESSED — leaves the queue
                 dropped += 1
             elif outcome == _DROP_FAILED:
-                failed_ids.append(created["id"])  # mark FAILED — leaves the queue
+                failed_ids.append(_item(created))  # mark FAILED — leaves the queue
                 failed += 1
             else:  # _REQUEUE — transient, stays NEW for the next run
                 requeued += 1
-        mark_signals_processed(done_ids, "PROCESSED")
-        mark_signals_processed(failed_ids, "FAILED")
+        conflicts += _mark(done_ids, "PROCESSED")
+        conflicts += _mark(failed_ids, "FAILED")
         # Cost guardrail: cap LLM spend per run (each processed signal makes a
         # rewrite call). The remainder stays NEW and drains on the next run.
         if processed >= settings.signal_max_signals_per_run:
@@ -301,17 +319,93 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         if not done_ids and not failed_ids:
             break
 
-    # Refresh the incident-tier KB cards once for every event this drain touched
-    # (ADR-0006) — deduped, so an event that absorbed several signals embeds once.
-    _sync_event_cards(context, touched_events)
+    try:
+        recompute = _drain_recomputes(
+            context, touched_events, llm_budget=settings.signal_max_signals_per_run - processed,
+        )
+    finally:
+        # Refresh the KB cards of every touched event (ADR-0006), even if the recompute
+        # lane failed: the NEW lane's signals are already PROCESSED, so no later run would.
+        _sync_event_cards(context, touched_events)
+    conflicts += recompute.pop("conflicts")
 
-    context.log.info(
-        "[classify_group] processed=%d dropped=%d requeued=%d failed=%d",
-        processed, dropped, requeued, failed,
-    )
-    return dg.MaterializeResult(
-        metadata={"processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed}
-    )
+    metadata = {
+        "processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed,
+        "mark_conflicts": conflicts, **recompute,
+    }
+    context.log.info("[classify_group] %s", " ".join(f"{k}={v}" for k, v in metadata.items()))
+    return dg.MaterializeResult(metadata=metadata)
+
+
+def _member_text(member: dict) -> tuple[str | None, str | None]:
+    """The (title, description) first grouping classified for an event member:
+    its projected lake blob when there is one, else the DB fields."""
+    fallback = (member.get("title"), member.get("description"))
+    if not member.get("rawS3Key"):
+        return fallback
+    try:
+        projected = _project(member)
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return fallback
+        raise
+    if isinstance(projected, str):  # unknown_source / no_blob
+        return fallback
+    _connector, view = projected
+    return view.title, view.description
+
+
+def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dict:
+    """Second lane: signals changed after grouping. Each affected event is
+    recomputed once per batch from its live members; a row is marked only when
+    all its events recomputed. Runs after the NEW lane and is bounded on its
+    own, so stuck recomputes never block first grouping. A row is attempted at
+    most once per run."""
+    counts = {"recompute_rows": 0, "recomputed_events": 0, "recompute_failed": 0,
+              "recompute_deferred": 0, "conflicts": 0}
+    attempted: set[str] = set()
+    for _ in range(_MAX_BATCHES):
+        rows = [r for r in pending_recomputes(first=_BATCH_SIZE) if r["id"] not in attempted]
+        if not rows:
+            break
+        attempted.update(r["id"] for r in rows)
+        counts["recompute_rows"] += len(rows)
+
+        event_ids = list(dict.fromkeys(e["id"] for r in rows for e in r.get("events") or []))
+        ok: set[str] = set()
+        deferred: set[str] = set()
+        for event_id in event_ids:
+            if llm_budget <= 0:
+                deferred.add(event_id)  # may need a rewrite; next run
+                continue
+            try:
+                if recompute_event(event_id, _member_text):
+                    llm_budget -= 1
+                    _enqueue_translations("event", event_id)  # the rewrite changed title/description
+                ok.add(event_id)
+                touched_events.add(event_id)
+                counts["recomputed_events"] += 1
+            except Exception:  # isolate one event's failure
+                context.log.exception("[classify_group] recompute of event %s failed", event_id)
+
+        done: list[dict] = []
+        failed: list[dict] = []
+        for row in rows:
+            row_events = {e["id"] for e in row.get("events") or []}
+            if row_events & deferred:
+                counts["recompute_deferred"] += 1
+            elif row_events <= ok:
+                done.append(_item(row))
+            else:
+                attempts = _redis.incr(f"signal:attempts:{row['id']}")
+                _redis.expire(f"signal:attempts:{row['id']}", 86400)
+                if attempts >= _MAX_SIGNAL_ATTEMPTS:
+                    failed.append(_item(row))
+                    counts["recompute_failed"] += 1
+        counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
+        if deferred:
+            break
+    return counts
 
 
 @dg.asset(

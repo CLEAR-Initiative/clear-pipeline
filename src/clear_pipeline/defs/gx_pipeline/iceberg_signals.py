@@ -15,6 +15,10 @@ the same real-world fact, and which one survives can only be decided against
 the whole group — which spans polls, so it has to be *readable back out of
 gold*, not just held in a batch. `retracted` is the verdict, and it is
 reversible: a later poll can bring a row back to life.
+
+`pushedState` is what Postgres last received for the row, as
+``"<contentHash>|<0/1 retracted>"`` (`sync_state`). A row whose current
+`sync_state` differs from it needs an update; one that matches is in sync.
 """
 
 import json
@@ -35,7 +39,7 @@ _COLUMNS = [
     "externalId", "eventId", "relevanceScore", "eventType", "districtKey",
     "matchOutcome", "severity", "populationAffectedContribution",
     "casualtiesContribution", "createdAt", "pushedAt", "signalInputJson",
-    "groupKey", "retracted",
+    "groupKey", "retracted", "pushedState",
 ]
 
 _SCHEMA = Schema(
@@ -53,6 +57,7 @@ _SCHEMA = Schema(
     NestedField(12, "signalInputJson", StringType(), required=False),
     NestedField(13, "groupKey", StringType(), required=False),
     NestedField(14, "retracted", BooleanType(), required=False),
+    NestedField(15, "pushedState", StringType(), required=False),
     identifier_field_ids=[1],
 )
 
@@ -154,23 +159,59 @@ def upsert_signals(table, rows: list[dict]) -> None:
     table.upsert(arrow_table, join_cols=["externalId"])
 
 
-def unpushed_signals(table) -> list[dict]:
-    """Every signal row still awaiting push: `pushedAt IS NULL` and not
-    retracted.
+def sync_state(row: dict) -> str:
+    """What Postgres should hold for this row: ``"<contentHash>|<0/1>"``.
+    Gold-only bookkeeping, never sent as ``contentHash``."""
+    content_hash = (row.get("signalInput") or {}).get("contentHash")
+    return f"{content_hash}|{int(bool(row.get('retracted')))}"
 
-    The `retracted` half is filtered in pandas rather than in the Iceberg
-    row filter because rows written before that column existed read back
-    NULL, and `retracted = false` would not match them — silently stranding
-    every pre-migration row as unpushable. `None` is falsy, so this treats
-    NULL as live, which is what it meant.
 
-    Excluding retracted rows here is also what keeps a superseded row that
-    was never pushed from being created in clear-api at all. Creating it and
-    retracting it afterwards is NOT equivalent: it would be visible as
-    `status=NEW` in between, which is exactly what the drain selects on."""
-    df = table.scan(row_filter="pushedAt IS NULL").to_pandas()
-    rows = [_from_column_dict(row) for row in df.to_dict("records")]
-    return [row for row in rows if not row.get("retracted")]
+def signals_to_sync(table, can_update: bool) -> dict[str, list[dict]]:
+    """Rows `_push` must send, by action:
+
+      - ``create``: never pushed and live
+      - ``probe``:  never pushed, retracted, never probed — a create may have
+        landed before gold recorded it, so retract just in case
+      - ``update``: pushed, and Postgres holds an older ``sync_state``
+
+    ``probe``/``update`` stay empty without an update hook (create-only source).
+
+    Filtered in pandas, not in the Iceberg row filter: rows written before
+    `retracted` existed read back NULL, and `retracted = false` would not
+    match them — silently stranding every pre-migration row. `None` is falsy,
+    so NULL is treated as live, which is what it meant.
+
+    Never creating a retracted row matters: creating it and retracting it
+    afterwards is NOT equivalent, it would be visible as `status=NEW` in
+    between, which is exactly what the drain selects on."""
+    rows = [_from_column_dict(r) for r in table.scan().to_pandas().to_dict("records")]
+    out: dict[str, list[dict]] = {"create": [], "probe": [], "update": []}
+    for row in rows:
+        if row.get("pushedAt") is None:
+            if not row.get("retracted"):
+                out["create"].append(row)
+            elif can_update and row.get("pushedState") is None:
+                out["probe"].append(row)
+        elif can_update and sync_state(row) != row.get("pushedState"):
+            out["update"].append(row)
+    return out
+
+
+def sync_hashes(table, external_ids: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """``{externalId: (contentHash, pushedState)}`` for these rows — what the
+    bronze skip compares a freshly polled hash against."""
+    if not external_ids:
+        return {}
+    df = table.scan(
+        row_filter=In("externalId", external_ids),
+        selected_fields=("externalId", "signalInputJson", "pushedState"),
+    ).to_pandas()
+    out = {}
+    for row in df.to_dict("records"):
+        signal_input = json.loads(row["signalInputJson"] or "null") or {}
+        pushed_state = None if pd.isna(row["pushedState"]) else row["pushedState"]
+        out[row["externalId"]] = (signal_input.get("contentHash"), pushed_state)
+    return out
 
 
 def signals_in_groups(table, group_keys: list[str]) -> list[dict]:
@@ -188,19 +229,22 @@ def signals_in_groups(table, group_keys: list[str]) -> list[dict]:
     return [_from_column_dict(row) for row in df.to_dict("records")]
 
 
-def existing_pushed_at(table, external_ids: list[str]) -> dict[str, str | None]:
-    """Current `pushedAt` for these `externalId`s. `upsert_signals` is a
-    Type-1 MERGE that overwrites every column — a caller re-upserting a
-    signal that re-enters gold (e.g. merged into another event) must read
-    this first and carry the value forward, or it clobbers an already-
-    pushed row's `pushedAt` back to NULL and the signal gets re-pushed."""
+def existing_push_state(table, external_ids: list[str]) -> dict[str, dict]:
+    """Current ``{pushedAt, pushedState}`` for these `externalId`s.
+    `upsert_signals` is a Type-1 MERGE that overwrites every column — a caller
+    re-upserting a signal that re-enters gold (e.g. merged into another event)
+    must read this first and carry it forward, or it clobbers an already-
+    pushed row back to unpushed and the signal gets re-pushed."""
     if not external_ids:
         return {}
     df = table.scan(
         row_filter=In("externalId", external_ids),
-        selected_fields=("externalId", "pushedAt"),
+        selected_fields=("externalId", "pushedAt", "pushedState"),
     ).to_pandas()
     return {
-        row["externalId"]: (None if pd.isna(row["pushedAt"]) else row["pushedAt"])
+        row["externalId"]: {
+            "pushedAt": None if pd.isna(row["pushedAt"]) else row["pushedAt"],
+            "pushedState": None if pd.isna(row["pushedState"]) else row["pushedState"],
+        }
         for row in df.to_dict("records")
     }
