@@ -48,6 +48,7 @@ from clear_pipeline.providers.clear_api import (
     create_signal_for_sync,
     update_signal_content,
 )
+from clear_pipeline.providers.classify import classify_locally
 from clear_pipeline.providers.signal_classifier import classify_signal
 from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
@@ -320,7 +321,7 @@ def build_gx_source_assets(source: GXSource) -> list:
         name=f"{src}_classify",
         group_name=group,
         ins={"silver_df": dg.AssetIn(key=f"{src}_reconcile")},
-        description="Relevance + event type (classify_signal: Jev primary, MiniLM fallback) — pure transform over reconciled silver.",
+        description="Relevance + event type (classify_signal, or MiniLM for sources the drain classifies) — pure transform over reconciled silver.",
     )
     def _classify(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
         df = silver_df.copy()
@@ -330,9 +331,10 @@ def build_gx_source_assets(source: GXSource) -> list:
             df["glideCode"] = pd.Series(dtype=object)
             return df
 
+        classify = classify_locally if getattr(source, "classify_locally", False) else classify_signal
         relevances, types, glides = [], [], []
         for row in df.itertuples():
-            c = classify_signal(title=row.title, description=row.description, source_severity=row.severity)
+            c = classify(title=row.title, description=row.description, source_severity=row.severity)
             relevances.append(c.relevance)
             types.append(c.type_level_2)
             glides.append(c.disaster_types[0] if c.disaster_types else "ot")

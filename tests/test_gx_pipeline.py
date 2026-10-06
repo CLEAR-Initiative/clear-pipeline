@@ -10,6 +10,7 @@ import json
 from unittest.mock import patch
 
 import dagster as dg
+import pandas as pd
 
 from clear_pipeline.defs.gx_pipeline.factory import build_gx_source_assets
 from clear_pipeline.defs.gx_pipeline.sources import (
@@ -21,6 +22,7 @@ from clear_pipeline.defs.gx_pipeline.sources import (
     IDMCGXSource,
 )
 from clear_pipeline.providers import idmc
+from clear_pipeline.providers.classify import SignalClassification
 
 
 def test_registered_sources_conform_to_protocol():
@@ -51,6 +53,30 @@ def test_idmc_source_group_hooks_delegate_to_provider():
         assert source.resolve_group([{"externalId": "1"}]) == {"1": "keep"}
     mock_member.assert_called_once_with("1", {"event_id": "ev-1"})
     mock_resolve.assert_called_once_with([{"externalId": "1"}])
+
+
+def _run_classify(source):
+    classify = next(a for a in build_gx_source_assets(source)
+                    if isinstance(a, dg.AssetsDefinition) and a.key.path[-1] == f"{source.source}_classify")
+    silver = pd.DataFrame([{"externalId": "x1", "title": "Clashes", "description": "d", "severity": 3}])
+    result = SignalClassification(disaster_types=["cv"], relevance=0.9, severity=3, summary="s")
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal", return_value=result) as jev,
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally", return_value=result) as local,
+    ):
+        classify(context=dg.build_asset_context(), silver_df=silver)
+    return jev, local
+
+
+def test_idmc_gx_classify_never_calls_jev():
+    class LocalSource(FakeSource):
+        classify_locally = True
+
+    assert IDMCGXSource.classify_locally
+    jev, local = _run_classify(LocalSource())
+    assert not jev.called and local.call_count == 1
+    jev, local = _run_classify(FakeSource())  # sources without the flag still use classify_signal
+    assert jev.call_count == 1 and not local.called
 
 
 def test_only_idmc_source_defines_group_hooks():
