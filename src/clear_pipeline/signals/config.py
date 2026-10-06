@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     # match a data_sources row and the `source` clear-api tags on those signals.
     manual_source_name: str = "manual"
     manual_poll_interval_minutes: int = 1
+    # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
+    # works Tasks. Tasks are user-requested and slow to produce; 5 minutes
+    # keeps the Event page's "requested" state short without hammering the queue.
+    task_poll_interval_minutes: int = 5
 
     # sudan-war-x — X posts pushed by an external poller to clear-api's
     # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push
