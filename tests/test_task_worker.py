@@ -95,6 +95,113 @@ EVENT = {"id": "evt-1", "title": "Flood in Testville", "types": ["FL"], "started
          "generalLocation": _loc("district-1", 2, ["state-1", "sdn"], "Testville")}
 
 
+class _FakeLLM:
+    """A provider stub: returns the given selection and reports usage."""
+    model = "claude-sonnet-5-5"
+    provider_name = "fake"
+    role = "narrative"
+
+    def __init__(self, selection):
+        self._selection = selection
+        self.last_usage = None
+        self.calls = []
+
+    def complete_structured(self, **kwargs):
+        self.calls.append(kwargs)
+        self.last_usage = {"input_tokens": 1000, "output_tokens": 200}
+        return self._selection
+
+    def complete_text(self, **kwargs):  # pragma: no cover
+        raise NotImplementedError
+
+
+class TestModelSelection:
+    def test_cost_from_the_price_table_and_none_for_unknown_models(self):
+        assert ip.cost_usd("claude-sonnet-5-5", {"input_tokens": 1_000_000, "output_tokens": 1_000_000}) == 18.0
+        assert ip.cost_usd("claude-haiku-4-5", {"input_tokens": 500_000, "output_tokens": 0}) == 0.5
+        assert ip.cost_usd("llama-whatever", {"input_tokens": 1, "output_tokens": 1}) is None
+        assert ip.cost_usd("claude-sonnet-5-5", None) is None
+
+    def test_select_cases_maps_the_model_choice_back_onto_candidates(self):
+        candidates = [
+            {"tier": "clear", "eventId": "evt-2021", "scope": "district", "quote": "Flood 2021", "occurredAt": "2021-08-10"},
+            {"tier": "clear", "reportId": "rw-1", "sourceUrl": "https://rw/1", "scope": "country", "quote": "In 2019 floods displaced…"},
+            {"tier": "clear", "eventId": "evt-dup", "scope": "country", "quote": "Flood 2021 again"},
+        ]
+        selection = ip.ImpactPriorSelection(
+            cases=[
+                ip.SelectedCase(candidate=1, scope="district", note="peak rainy season"),
+                ip.SelectedCase(candidate=2, scope="country", occurred_at="2019-09-01"),
+                ip.SelectedCase(candidate=2, scope="country"),   # duplicate choice is ignored
+                ip.SelectedCase(candidate=9, scope="country"),   # out of range is ignored
+            ],
+            excluded=[ip.ExcludedCandidate(candidate=3, reason="same occurrence as 1")],
+            reasoning="Two distinct floods.",
+        )
+        llm = _FakeLLM(selection)
+        basis, decision = ip.select_cases(llm, event=EVENT, hazard="FL", country_name="Testland", horizon=10, candidates=candidates)
+        assert [c.get("eventId") or c.get("reportId") for c in basis] == ["evt-2021", "rw-1"]
+        assert basis[0]["note"] == "peak rainy season"
+        assert basis[1]["occurredAt"] == "2019-09-01"
+        assert decision["excluded"] == [{"candidate": 3, "reason": "same occurrence as 1"}]
+        assert "Candidates:" in llm.calls[0]["user"] and "[IN THE INPUT EVENT'S DISTRICT]" in llm.calls[0]["user"]
+        assert ip.usage_for_task(llm) == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.006}
+
+    def test_handler_uses_events_then_kb_then_the_model_and_reports_usage(self):
+        priors = {"items": [
+            {"id": "evt-2021", "title": "Flood 2021", "types": ["FL"], "startedAt": "2021-08-10T00:00:00Z",
+             "generalLocation": _loc("district-1", 2, ["state-1", "sdn"], "Testville")},
+        ], "hasMore": False}
+        hits = [{"reportId": "rw-1", "reportTitle": "Sudan floods 2019", "sourceUrl": "https://rw/1",
+                 "publishedAt": "2019-09-15", "chunkText": "In September 2019 floods displaced 400,000 people."}]
+        selection = ip.ImpactPriorSelection(
+            cases=[ip.SelectedCase(candidate=1, scope="district"), ip.SelectedCase(candidate=2, scope="country")],
+            excluded=[], reasoning="Both are distinct prior floods in Sudan.",
+        )
+        llm = _FakeLLM(selection)
+        with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=EVENT), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level",
+                   return_value=[{"id": "sdn", "name": "Sudan"}]), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page", return_value=priors), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", return_value=hits) as kb, \
+             patch("clear_pipeline.defs.tasks.impact_prior.make_llm_provider", return_value=llm):
+            outcome = ip.handle_impact_prior(_ctx(), TASK)
+        assert kb.call_args.kwargs["filters"]["countryLocationId"] == "sdn"
+        assert kb.call_args.kwargs["filters"]["eventTypes"] == ["FL"]
+        prior = outcome.impact_prior
+        assert prior["numberOfCases"] == 2
+        assert prior["basis"][0]["eventId"] == "evt-2021" and prior["basis"][0]["scope"] == "district"
+        assert prior["basis"][1]["reportId"] == "rw-1" and prior["basis"][1]["sourceUrl"] == "https://rw/1"
+        assert prior["geographicScope"] == "country"
+        assert prior["methodVersion"] == ip.METHOD_VERSION
+        assert outcome.usage == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.006}
+        assert outcome.result["selection"]["reasoning"] == "Both are distinct prior floods in Sudan."
+        assert [s["tool"] for s in outcome.result["searched"]] == ["eventsPage", "searchKnowledgebase"]
+
+    def test_model_can_find_no_case_among_candidates(self):
+        priors = {"items": [{"id": "evt-x", "title": "Earlier phase", "types": ["FL"],
+                             "generalLocation": EVENT["generalLocation"]}], "hasMore": False}
+        llm = _FakeLLM(ip.ImpactPriorSelection(cases=[], excluded=[ip.ExcludedCandidate(candidate=1, reason="earlier phase")],
+                                               reasoning="Nothing distinct."))
+        with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=EVENT), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level", return_value=[{"id": "sdn"}]), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page", return_value=priors), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", return_value=[]), \
+             patch("clear_pipeline.defs.tasks.impact_prior.make_llm_provider", return_value=llm):
+            outcome = ip.handle_impact_prior(_ctx(), TASK)
+        assert outcome.impact_prior is None
+        assert outcome.usage is not None and outcome.result["cases"] == 0
+
+    def test_kb_outage_is_not_the_tasks_failure(self):
+        with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=EVENT), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level", return_value=[{"id": "sdn"}]), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page", return_value={"items": [], "hasMore": False}), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", side_effect=RuntimeError("kb down")), \
+             patch("clear_pipeline.defs.tasks.impact_prior.make_llm_provider", side_effect=RuntimeError("no LLM env")):
+            outcome = ip.handle_impact_prior(_ctx(), TASK)
+        assert outcome.impact_prior is None and outcome.result["cases"] == 0
+
+
 class TestImpactPriorTracer:
     def test_resolves_country_and_district(self):
         assert ip.resolve_country_id(EVENT, {"sdn", "eth"}) == "sdn"
@@ -103,6 +210,7 @@ class TestImpactPriorTracer:
         assert ip.resolve_country_id({"originLocation": _loc("x", 3, ["nope"])}, {"sdn"}) is None
 
     def test_cases_from_clear_events_labelled_by_scope_excluding_the_input(self):
+        # Rule-based selection: no model configured, no knowledge-base hits.
         priors = {
             "items": [
                 {"id": "evt-1", "title": "self", "types": ["FL"], "generalLocation": EVENT["generalLocation"]},
@@ -116,7 +224,9 @@ class TestImpactPriorTracer:
         with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=EVENT), \
              patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level",
                    return_value=[{"id": "sdn"}, {"id": "eth"}]), \
-             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page", return_value=priors) as page:
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page", return_value=priors) as page, \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", return_value=[]), \
+             patch("clear_pipeline.defs.tasks.impact_prior.make_llm_provider", side_effect=RuntimeError("no LLM env")):
             outcome = ip.handle_impact_prior(_ctx(), TASK)
         sent = page.call_args.args[0]
         assert sent["eventTypes"] == ["FL"] and sent["locationId"] == "sdn" and sent["to"] == EVENT["startedAt"]
@@ -126,13 +236,14 @@ class TestImpactPriorTracer:
         assert [c["scope"] for c in prior["basis"]] == ["district", "country"]
         assert all(c["tier"] == "clear" for c in prior["basis"])
         assert prior["geographicScope"] == "country"
-        assert outcome.result["excluded"] == [{"id": "evt-1", "reason": "the input Event"}]
+        assert outcome.usage is None
 
     def test_no_prior_event_means_no_proposal(self):
         with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=EVENT), \
              patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level", return_value=[{"id": "sdn"}]), \
              patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page",
-                   return_value={"items": [], "hasMore": False}):
+                   return_value={"items": [], "hasMore": False}), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", return_value=[]):
             outcome = ip.handle_impact_prior(_ctx(), TASK)
         assert outcome.impact_prior is None
         assert outcome.result["cases"] == 0
