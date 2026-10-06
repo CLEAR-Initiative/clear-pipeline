@@ -18,7 +18,8 @@ from clear_pipeline.defs.tasks.worker import (
     process_one_task,
     register_handler,
 )
-from clear_pipeline.providers.clear_api import ClearApiError, TaskLeaseError
+from clear_pipeline.providers import clear_api
+from clear_pipeline.providers.clear_api import ClearApiError, GraphQLErrors, TaskLeaseError
 
 TASK = {"id": "task-1", "kind": "event.impact_prior", "subjectType": "event", "subjectId": "evt-1",
         "leaseToken": "tok-1", "payload": {"horizonYears": 10}, "status": "LEASED"}
@@ -65,11 +66,40 @@ class TestProcessOneTask:
         complete.assert_not_called()
 
     def test_rejected_proposal_fails_the_task_with_the_reason(self):
-        with patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task",
-                   side_effect=ClearApiError("clear-api 400: hazardType EQ is not one of the Event's types")), \
+        # The real shape: HTTP 200 with a GraphQL error carrying code BAD_USER_INPUT,
+        # which _task_write turns into a ClearApiError.
+        rejected = GraphQLErrors([{"message": "impactPrior.hazardType \"EQ\" is not one of the Event's types (FL)",
+                                   "extensions": {"code": "BAD_USER_INPUT"}}])
+        with patch("clear_pipeline.providers.clear_api._execute", side_effect=rejected), \
+             patch("clear_pipeline.providers.clear_api._worker_key", return_value="sk_live_w"), \
              patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task") as fail:
             assert process_one_task(_ctx(), TASK, lambda c, t: TaskOutcome(impact_prior={"hazardType": "EQ"}), heartbeat_seconds=60) == FAILED
         assert "completion rejected" in fail.call_args.args[2]
+        assert "not one of the Event's types" in fail.call_args.args[2]
+
+    def test_task_write_maps_graphql_errors_by_extensions(self):
+        with patch("clear_pipeline.providers.clear_api._worker_key", return_value="sk_live_w"):
+            with patch("clear_pipeline.providers.clear_api._execute",
+                       side_effect=GraphQLErrors([{"message": "stale", "extensions": {"code": "FORBIDDEN", "subCode": "NOT_LEASE_OWNER"}}])):
+                with pytest.raises(TaskLeaseError):
+                    clear_api.heartbeat_task("task-1", "tok")
+            with patch("clear_pipeline.providers.clear_api._execute",
+                       side_effect=GraphQLErrors([{"message": "done", "extensions": {"code": "CONFLICT", "subCode": "NOT_LEASED"}}])):
+                with pytest.raises(TaskLeaseError):
+                    clear_api.fail_task("task-1", "tok", "x")
+            with patch("clear_pipeline.providers.clear_api._execute",
+                       side_effect=GraphQLErrors([{"message": "lock", "extensions": {"code": "INTERNAL_SERVER_ERROR"}}])):
+                with pytest.raises(GraphQLErrors):
+                    clear_api.complete_task("task-1", "tok", result={})
+
+    def test_a_transport_failure_on_the_terminal_write_leaves_the_task_to_lapse(self):
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task", side_effect=OSError("connection reset")):
+            assert process_one_task(_ctx(), TASK, lambda c, t: TaskOutcome(), heartbeat_seconds=60) == LOST
+
+        def boom(context, task):  # noqa: ARG001
+            raise ValueError("x")
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task", side_effect=ClearApiError("401")):
+            assert process_one_task(_ctx(), TASK, boom, heartbeat_seconds=60) == LOST
 
     @pytest.mark.parametrize("where", ["handler", "complete", "fail"])
     def test_a_lost_lease_is_never_retried(self, where):
@@ -178,7 +208,12 @@ class _FakeLLM:
 
 class TestModelSelection:
     def test_cost_from_the_price_table_and_none_for_unknown_models(self):
-        assert ip.cost_usd("claude-sonnet-5-5", {"input_tokens": 1_000_000, "output_tokens": 1_000_000}) == 18.0
+        one_each = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+        assert ip.cost_usd("claude-sonnet-5-5", one_each) == 12.0
+        assert ip.cost_usd("claude-sonnet-5", one_each) == 12.0
+        assert ip.cost_usd("claude-opus-5-5", one_each) == 24.0
+        assert ip.cost_usd("claude-opus-5", one_each) == 30.0
+        assert ip.cost_usd("claude-opus-5-5-20260401", one_each) == 24.0   # dated id → exact prefix, not opus-5
         assert ip.cost_usd("claude-haiku-4-5", {"input_tokens": 500_000, "output_tokens": 0}) == 0.5
         assert ip.cost_usd("llama-whatever", {"input_tokens": 1, "output_tokens": 1}) is None
         assert ip.cost_usd("claude-sonnet-5-5", None) is None
@@ -206,7 +241,7 @@ class TestModelSelection:
         assert basis[1]["occurredAt"] == "2019-09-01"
         assert decision["excluded"] == [{"candidate": 3, "reason": "same occurrence as 1"}]
         assert "Candidates:" in llm.calls[0]["user"] and "[IN THE INPUT EVENT'S DISTRICT]" in llm.calls[0]["user"]
-        assert ip.usage_for_task(llm) == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.006}
+        assert ip.usage_for_task(llm) == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.004}
 
     def test_handler_uses_events_then_kb_then_the_model_and_reports_usage(self):
         priors = {"items": [
@@ -214,7 +249,8 @@ class TestModelSelection:
              "generalLocation": _loc("district-1", 2, ["state-1", "sdn"], "Testville")},
         ], "hasMore": False}
         hits = [{"reportId": "rw-1", "reportTitle": "Sudan floods 2019", "sourceUrl": "https://rw/1",
-                 "publishedAt": "2019-09-15", "chunkText": "In September 2019 floods displaced 400,000 people."}]
+                 "publishedAt": "2019-09-15", "chunkText": "In September 2019 floods displaced 400,000 people."},
+                {"reportId": "rw-nourl", "reportTitle": "No link", "sourceUrl": None, "chunkText": "uncitable"}]
         selection = ip.ImpactPriorSelection(
             cases=[ip.SelectedCase(candidate=1, scope="district"), ip.SelectedCase(candidate=2, scope="country")],
             excluded=[], reasoning="Both are distinct prior floods in Sudan.",
@@ -231,11 +267,12 @@ class TestModelSelection:
         assert kb.call_args.kwargs["filters"]["eventTypes"] == ["FL"]
         prior = outcome.impact_prior
         assert prior["numberOfCases"] == 2
+        assert outcome.result["candidates"] == 2  # the passage without a URL was never a candidate
         assert prior["basis"][0]["eventId"] == "evt-2021" and prior["basis"][0]["scope"] == "district"
         assert prior["basis"][1]["reportId"] == "rw-1" and prior["basis"][1]["sourceUrl"] == "https://rw/1"
         assert prior["geographicScope"] == "country"
         assert prior["methodVersion"] == ip.METHOD_VERSION
-        assert outcome.usage == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.006}
+        assert outcome.usage == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.004}
         assert outcome.result["selection"]["reasoning"] == "Both are distinct prior floods in Sudan."
         assert [s["tool"] for s in outcome.result["searched"]] == ["eventsPage", "searchKnowledgebase"]
 

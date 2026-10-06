@@ -32,6 +32,27 @@ from clear_pipeline.providers.situation_prose import extract_situation_prose
 logger = logging.getLogger(__name__)
 
 
+class GraphQLErrors(RuntimeError):
+    """clear-api answered 200 with an ``errors`` array. ``errors`` keeps the
+    parsed list so a caller can branch on ``extensions.code`` / ``subCode``
+    instead of the stringified message. Retryable by ``_execute`` like any
+    RuntimeError (a transient server-side state can look like this too)."""
+
+    def __init__(self, errors: list[dict[str, Any]]) -> None:
+        super().__init__(f"clear-api GraphQL errors: {errors}")
+        self.errors = errors
+
+    def codes(self) -> set[str]:
+        return {str((e.get("extensions") or {}).get("code") or "") for e in self.errors}
+
+    def sub_codes(self) -> set[str]:
+        return {str((e.get("extensions") or {}).get("subCode") or "") for e in self.errors}
+
+    def messages(self) -> str:
+        """clear-api's own messages, joined — what a person should read."""
+        return "; ".join(str(e.get("message") or "") for e in self.errors if e.get("message"))
+
+
 class ClearApiError(RuntimeError):
     """Non-retryable clear-api failure - schema mismatch, auth error,
     validation reject, etc. Callers should surface + skip the batch
@@ -377,7 +398,7 @@ def _execute(
                         f"translation drain + eventsPendingAlert) deployed? {err_text[:300]}"
                     )
                 logger.error("clear-api GraphQL errors: %s", errs)
-                raise RuntimeError(f"clear-api GraphQL errors: {errs}")
+                raise GraphQLErrors(errs if isinstance(errs, list) else [errs])
 
             return result["data"]
 
@@ -2677,14 +2698,17 @@ def _worker_key() -> str:
 
 def _task_write(query: str, variables: dict[str, Any], field: str) -> dict[str, Any]:
     """A Worker write: one attempt (a lease write is not idempotent across a
-    reclaim), with the lease errors surfaced as TaskLeaseError."""
+    reclaim). clear-api's answer is read from the error's ``extensions``: a
+    lease subCode is a TaskLeaseError (the Task is no longer ours), a
+    BAD_USER_INPUT is a ClearApiError (the write itself is wrong — e.g. a
+    proposal that does not fit the Event — and must not be retried)."""
     try:
         data = _execute(query, variables, retries=1, api_key=_worker_key())
-    except RuntimeError as exc:
-        if isinstance(exc, ClearApiError):
-            raise
-        if any(code in str(exc) for code in _LEASE_SUB_CODES):
+    except GraphQLErrors as exc:
+        if exc.sub_codes() & set(_LEASE_SUB_CODES):
             raise TaskLeaseError(str(exc)) from exc
+        if "BAD_USER_INPUT" in exc.codes():
+            raise ClearApiError(exc.messages() or str(exc)) from exc
         raise
     return data[field]
 

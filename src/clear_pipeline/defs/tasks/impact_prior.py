@@ -35,16 +35,33 @@ _KB_LIMIT = 15
 _MAX_CANDIDATES = 40
 _LLM_ROLE = "narrative"
 
-# USD per million tokens (input, output), by model-id prefix. The Worker
+# USD per million tokens (input, output), Anthropic first-party API rates
+# (claude-api reference, cached 2026-09-25). Matched by exact model id first,
+# then by the longest matching prefix (for dated or suffixed ids). The Worker
 # computes cost from its own table, as clear-api expects; an unknown model
 # reports 0 with a note in the result rather than a guess.
-_PRICE_PER_MTOK: list[tuple[str, float, float]] = [
-    ("claude-opus-5", 15.0, 75.0),
-    ("claude-sonnet-5", 3.0, 15.0),
-    ("claude-sonnet-4", 3.0, 15.0),
-    ("claude-haiku-4", 1.0, 5.0),
-    ("claude-3-5-haiku", 0.8, 4.0),
-]
+_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-5-5": (2.0, 10.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+
+def _price_for(model: str) -> tuple[float, float] | None:
+    if model in _PRICE_PER_MTOK:
+        return _PRICE_PER_MTOK[model]
+    for prefix in sorted(_PRICE_PER_MTOK, key=len, reverse=True):
+        if model.startswith(prefix + "-") or model.startswith(prefix + "@"):
+            return _PRICE_PER_MTOK[prefix]
+    return None
 
 
 def primary_location(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -194,10 +211,11 @@ def cost_usd(model: str, usage: dict[str, int] | None) -> float | None:
     """From the Worker's own price table; None when the model is unknown."""
     if not usage:
         return None
-    for prefix, in_price, out_price in _PRICE_PER_MTOK:
-        if model.startswith(prefix):
-            return round((usage.get("input_tokens", 0) * in_price + usage.get("output_tokens", 0) * out_price) / 1_000_000, 6)
-    return None
+    price = _price_for(model)
+    if price is None:
+        return None
+    in_price, out_price = price
+    return round((usage.get("input_tokens", 0) * in_price + usage.get("output_tokens", 0) * out_price) / 1_000_000, 6)
 
 
 def usage_for_task(llm: LLMProvider) -> dict[str, Any] | None:
@@ -282,7 +300,9 @@ def handle_impact_prior(context, task: dict[str, Any]) -> TaskOutcome:
     except Exception:  # noqa: BLE001 — the KB is the second source; its outage is not the Task's failure
         context.log.warning("[impact_prior] knowledge-base search failed for %s — Events only", event_id, exc_info=True)
         passages = []
-    passage_cases = [case_from_passage(h) for h in passages if h.get("sourceUrl") or h.get("reportId")]
+    # A passage is citable only with a URL: the basis vocabulary the decider
+    # UI renders is {tier, eventId?, sourceUrl?, quote?, occurredAt?, locationLabel?, scope}.
+    passage_cases = [case_from_passage(h) for h in passages if h.get("sourceUrl")]
     candidates = (event_cases + passage_cases)[:_MAX_CANDIDATES]
 
     searched = [

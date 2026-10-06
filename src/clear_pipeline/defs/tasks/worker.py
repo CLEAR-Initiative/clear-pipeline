@@ -20,8 +20,11 @@ from clear_pipeline.signals.config import settings
 logger = logging.getLogger(__name__)
 
 _DRAIN_LOCK_TTL_SECONDS = 3600
-_BATCH_SIZE = 5
-_MAX_BATCHES = 10
+# One Task per claim: a lease starts at claim time, and only the Task being
+# worked is heartbeated, so a batch would let later Tasks lapse while earlier
+# ones run. The claim is a cheap SKIP LOCKED statement; loop instead.
+_BATCH_SIZE = 1
+_MAX_BATCHES = 50
 
 # Per-Task outcomes, for the run's metadata.
 COMPLETED = "completed"
@@ -68,7 +71,9 @@ class Lease:
 
     def __exit__(self, *exc) -> None:
         self._halt.set()
-        self._thread.join(timeout=5)
+        # Wait for an in-flight heartbeat (bounded by the HTTP timeout) so
+        # `stopped` is final before the caller writes the result.
+        self._thread.join()
 
     def _run(self) -> None:
         while not self._halt.wait(self.interval):
@@ -100,6 +105,20 @@ def register_handler(kind: str):
     return _decorate
 
 
+def _fail(context, task_id: str, token: str, error: str) -> str:
+    """Fail the Task with ``error``; if even that write is refused or fails,
+    leave the lease to lapse (clear-api retries) rather than crash the run."""
+    try:
+        clear_api.fail_task(task_id, token, error)
+    except clear_api.TaskLeaseError as exc:
+        context.log.warning("[drain_tasks] task %s lost before it could be failed: %s", task_id, exc)
+        return LOST
+    except Exception:  # noqa: BLE001
+        context.log.warning("[drain_tasks] task %s: could not fail — leaving it to lapse", task_id, exc_info=True)
+        return LOST
+    return FAILED
+
+
 def process_one_task(
     context, task: dict[str, Any], handler: TaskHandler, *, heartbeat_seconds: float | None = None,
 ) -> str:
@@ -121,12 +140,7 @@ def process_one_task(
         return LOST
     except Exception as exc:  # noqa: BLE001 — the handler's failure is the Task's failure
         context.log.warning("[drain_tasks] task %s failed: %s", task_id, exc, exc_info=True)
-        try:
-            clear_api.fail_task(task_id, token, f"{type(exc).__name__}: {exc}")
-        except clear_api.TaskLeaseError as lease_exc:
-            context.log.warning("[drain_tasks] task %s lost before it could be failed: %s", task_id, lease_exc)
-            return LOST
-        return FAILED
+        return _fail(context, task_id, token, f"{type(exc).__name__}: {exc}")
 
     try:
         done = clear_api.complete_task(
@@ -136,14 +150,14 @@ def process_one_task(
         context.log.warning("[drain_tasks] task %s lost before completion: %s", task_id, exc)
         return LOST
     except clear_api.ClearApiError as exc:
-        # clear-api refused the proposal (BAD_USER_INPUT): the work is wrong,
-        # not the queue. Fail with the reason so the requester sees it.
+        # clear-api refused the write (BAD_USER_INPUT, e.g. a proposal that
+        # does not fit the Event): the work is wrong, not the queue. Fail
+        # with the reason so the requester sees it.
         context.log.error("[drain_tasks] task %s: completion rejected: %s", task_id, exc)
-        try:
-            clear_api.fail_task(task_id, token, f"completion rejected: {exc}")
-        except clear_api.TaskLeaseError:
-            return LOST
-        return FAILED
+        return _fail(context, task_id, token, f"completion rejected: {exc}")
+    except Exception:  # noqa: BLE001 — transport blip on the terminal write: the lease lapses and clear-api retries
+        context.log.warning("[drain_tasks] task %s: could not complete — leaving it to lapse", task_id, exc_info=True)
+        return LOST
     context.log.info("[drain_tasks] task %s %s (outcome=%s)", task_id, done.get("status"), done.get("outcome"))
     if done.get("status") == "COMPLETED":
         return COMPLETED
