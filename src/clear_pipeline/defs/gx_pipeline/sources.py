@@ -240,9 +240,6 @@ class IDMCGXSource:
     ingestion path. IDU rows revise in place (same `idu_id`), so the sync hooks
     let bronze skip unchanged rows and `_push` send revisions and retractions."""
 
-    #: The drain classifies IDMC with Jev; gx's copy is QA-only, so it stays local (MiniLM).
-    classify_locally = True
-
     @property
     def source(self) -> str:
         return settings.idmc_source_name

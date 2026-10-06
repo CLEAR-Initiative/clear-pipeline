@@ -60,23 +60,16 @@ def _run_classify(source):
                     if isinstance(a, dg.AssetsDefinition) and a.key.path[-1] == f"{source.source}_classify")
     silver = pd.DataFrame([{"externalId": "x1", "title": "Clashes", "description": "d", "severity": 3}])
     result = SignalClassification(disaster_types=["cv"], relevance=0.9, severity=3, summary="s")
-    with (
-        patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal", return_value=result) as jev,
-        patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally", return_value=result) as local,
-    ):
-        classify(context=dg.build_asset_context(), silver_df=silver)
-    return jev, local
+    with patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal", return_value=result) as jev:
+        out = classify(context=dg.build_asset_context(), silver_df=silver)
+    return jev, out
 
 
-def test_idmc_gx_classify_never_calls_jev():
-    class LocalSource(FakeSource):
-        classify_locally = True
-
-    assert IDMCGXSource.classify_locally
-    jev, local = _run_classify(LocalSource())
-    assert not jev.called and local.call_count == 1
-    jev, local = _run_classify(FakeSource())  # sources without the flag still use classify_signal
-    assert jev.call_count == 1 and not local.called
+def test_gx_classify_uses_classify_signal_for_every_source():
+    for source in (IDMCGXSource(), FakeSource()):
+        jev, out = _run_classify(source)
+        assert jev.call_count == 1
+        assert out["glideCode"].tolist() == ["cv"]
 
 
 def test_only_idmc_source_defines_group_hooks():
