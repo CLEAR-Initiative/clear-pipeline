@@ -33,12 +33,12 @@ schedule_storage:
 
 # Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
 # forks each run's step workers as subprocesses). The daemon dequeues up to
-# max_concurrent_runs at a time.
+# max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
   config:
-    max_concurrent_runs: 2
+    max_concurrent_runs: 4
 
 # DefaultRunLauncher forks each run as a subprocess of the process that
 # launches it (the daemon, here). Simplest launcher; fine for a single-node

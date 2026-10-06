@@ -1,12 +1,11 @@
 """`providers/event.recompute_event`: an event's aggregates rebuilt from its
-live members. clear-api, the LLM, the classifier and Redis are faked."""
+live members. clear-api, the LLM and Redis are faked."""
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from clear_pipeline.providers import event as ev
-from clear_pipeline.providers.classify import SignalClassification
 
 
 class FakeApi:
@@ -45,11 +44,6 @@ class FakeLLM:
         return schema(title="New title", description="New desc", severity=4, population_displaced=1200)
 
 
-def _classify(title, description, source_severity=None):
-    glide = "fl" if "flood" in (title or "").lower() else "rc"
-    return SignalClassification(disaster_types=[glide], relevance=0.9, severity=3, summary="s")
-
-
 def m(mid, *, day=1, severity=3, casualties=None, title="Clash", description="details"):
     return {"id": mid, "title": title, "description": description, "severity": severity,
             "casualties": casualties, "publishedAt": f"2026-09-{day:02d}T00:00:00Z",
@@ -70,7 +64,6 @@ def run():
             patch.object(ev.graphql, "get_event_recompute_state", side_effect=api.get_event_recompute_state),
             patch.object(ev.graphql, "set_event_aggregates", side_effect=api.set_event_aggregates),
             patch.object(ev, "make_llm_provider", return_value=llm),
-            patch.object(ev, "classify_locally", side_effect=_classify),
             patch.object(ev, "_redis", redis),
         ):
             called = ev.recompute_event("e1", text)
@@ -90,10 +83,20 @@ def test_sum_max_mean_rank(run):
 
 def test_casualties_null_when_nothing_resolves(run):
     # flood glide has no historical fatality stats, and no member reports any
-    api = FakeApi([m("a", title="Flood in Nyala", description="rising water")])
+    api = FakeApi([m("a", title="Flood in Nyala", description="rising water")], {"types": ["fl"]})
     run(api)
     assert "casualties" in api.writes[-1]
     assert api.writes[-1]["casualties"] is None
+
+
+def test_defaults_use_the_event_type_and_never_classify(run):
+    api = FakeApi([m("a"), m("b", day=2)], {"types": ["fl"]})  # no figures in the text
+    with (
+        patch("clear_pipeline.providers.classify.classify_locally", side_effect=AssertionError),
+        patch("clear_pipeline.providers.signal_classifier.classify_signal", side_effect=AssertionError),
+    ):
+        run(api)
+    assert api.writes[-1]["populationAffected"] == "33000"  # flood default, despite "Clash" titles
 
 
 def test_retracted_member_is_not_counted(run):

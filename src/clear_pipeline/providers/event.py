@@ -20,7 +20,6 @@ from pydantic import BaseModel
 from clear_pipeline.providers import clear_api as graphql
 from clear_pipeline.providers.classify import (
     SignalClassification,
-    classify_locally,
     code_to_level2_map,
     code_to_level3_map,
 )
@@ -863,14 +862,13 @@ def recompute_event(
     members = graphql.event_members(event_id)
     state = graphql.get_event_recompute_state(event_id) or {}
 
+    # Defaults use the event's stored type, not a re-classification: grouping's
+    # classifier (Jev) is an LLM, so re-running it would cost calls and could disagree.
+    glide = (state.get("types") or [None])[0]
     casualties: list[int] = []
     populations: list[int] = []
     for member in members:
         title, description = member_text(member)
-        classification = classify_locally(
-            title=title, description=description, source_severity=member.get("severity"),
-        )
-        glide = classification.disaster_types[0] if classification.disaster_types else None
         resolved = _resolve_signal_stats(
             actual_casualties=_resolve_actual_casualties(member, title, description),
             actual_population=extract_population_affected_from_text(

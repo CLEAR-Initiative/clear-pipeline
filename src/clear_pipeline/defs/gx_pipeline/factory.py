@@ -43,12 +43,12 @@ from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
 from clear_pipeline.defs.gx_pipeline.sources import GXSource
 from clear_pipeline.defs.signals import lake
-from clear_pipeline.providers.classify import classify_locally
 from clear_pipeline.providers.clear_api import (
     ClearApiNotFound,
     create_signal_for_sync,
     update_signal_content,
 )
+from clear_pipeline.providers.signal_classifier import classify_signal
 from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
 
@@ -320,7 +320,7 @@ def build_gx_source_assets(source: GXSource) -> list:
         name=f"{src}_classify",
         group_name=group,
         ins={"silver_df": dg.AssetIn(key=f"{src}_reconcile")},
-        description="Relevance + event type (classify_locally, unchanged) — pure transform over reconciled silver.",
+        description="Relevance + event type (classify_signal: Jev primary, MiniLM fallback) — pure transform over reconciled silver.",
     )
     def _classify(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
         df = silver_df.copy()
@@ -332,7 +332,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
         relevances, types, glides = [], [], []
         for row in df.itertuples():
-            c = classify_locally(title=row.title, description=row.description, source_severity=row.severity)
+            c = classify_signal(title=row.title, description=row.description, source_severity=row.severity)
             relevances.append(c.relevance)
             types.append(c.type_level_2)
             glides.append(c.disaster_types[0] if c.disaster_types else "ot")

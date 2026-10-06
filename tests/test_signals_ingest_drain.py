@@ -452,7 +452,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
 
     calls = {"n": 0}
 
-    def fake_tu(entity_type, entity_id, canonical):
+    def fake_tu(entity_type, entity_id, canonical, requested_locales=None):
         calls["n"] += 1
         return tp.UNPARSEABLE  # rows cleared inside translate_and_upsert
 
@@ -460,7 +460,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
     # guard the loop would re-invoke the model _MAX_BATCHES times.
     row = {"entityType": "event", "entityId": "e1", "locale": "ar"}
     with (
-        patch.object(stages, "pending_translations", side_effect=lambda first: [row]),
+        patch.object(stages, "pending_translations", side_effect=lambda first, entity_type=None: [] if entity_type else [row]),
         patch.dict(stages._CANONICAL_FETCH, {"event": lambda eid: {"title": "t", "description": "d"}}),
         patch.object(stages, "translate_and_upsert", side_effect=fake_tu),
     ):
@@ -473,7 +473,7 @@ def test_translate_unparseable_entity_invoked_once_per_run():
 def test_translate_unknown_entity_type_is_dropped():
     with (
         patch.object(stages, "pending_translations",
-                     side_effect=lambda first: [{"entityType": "widget", "entityId": "w1", "locale": "ar"}]),
+                     side_effect=lambda first, entity_type=None: [] if entity_type else [{"entityType": "widget", "entityId": "w1", "locale": "ar"}]),
         patch.object(stages, "mark_translated") as mark,
     ):
         result = stages._drain_translations(MagicMock())
@@ -697,6 +697,7 @@ def test_drain_metadata_keys():
     assert set(result.metadata) == {
         "processed", "dropped", "requeued", "failed", "mark_conflicts",
         "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred",
+        "jev_classified", "jev_fallback", "jev_fallback_rate",
     }
 
 

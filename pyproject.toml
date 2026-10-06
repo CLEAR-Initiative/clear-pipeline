@@ -60,6 +60,13 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+# Ruff runs in CI (.github/workflows/ci.yml) at a pinned version. The rule set
+# is deliberately small — syntax errors + pyflakes (undefined names, unused
+# imports/variables) — so the check is green today. Widen it in its own PR,
+# alongside the autofixes it needs.
+[tool.ruff.lint]
+select = ["E9", "F"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

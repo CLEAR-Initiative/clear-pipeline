@@ -37,12 +37,18 @@ from clear_pipeline.defs.signals.connectors import (
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
-from clear_pipeline.providers.classify import classify_locally
+from clear_pipeline.providers.signal_classifier import (
+    classifier_stats_snapshot,
+    classify_signal,
+    reset_classifier_stats,
+)
 from clear_pipeline.providers.clear_api import (
     enqueue_translation,
     events_pending_alert,
     get_crisis_canonical,
     get_event_canonical,
+    get_analysis_canonical,
+    get_ground_message_canonical,
     get_location_canonical,
     get_situation_canonical,
     mark_signals_processed,
@@ -134,10 +140,11 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
 
 def _group(view: SignalView, created: dict) -> dict | None:
     """Classify + group one signal into an event (create or add-to-existing).
-    Returns the event dict, or None when below the relevance threshold."""
-    classification = classify_locally(
-        title=view.title, description=view.description, source_severity=created.get("severity"),
-    )
+    Returns the event dict, or None when below the relevance threshold.
+
+    Classification goes through `classify_signal` (Jev primary, MiniLM fallback);
+    the event reuses this result downstream (see providers/event.py)."""
+    classification = classify_signal(view.title, view.description, created.get("severity"))
     if classification.relevance < settings.relevance_threshold:
         return None
 
@@ -263,6 +270,10 @@ def _mark(items: list[dict], status: str) -> int:
 def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = conflicts = 0
     touched_events: set[str] = set()
+    # Reset so the emitted fallback rate reflects THIS drain, not the worker's
+    # whole lifetime (a serial drain owns the single-flight lock, so no other
+    # drain is mutating these counters concurrently).
+    reset_classifier_stats()
     for _ in range(_MAX_BATCHES):
         batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
         if not batch:
@@ -329,9 +340,28 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         _sync_event_cards(context, touched_events)
     conflicts += recompute.pop("conflicts")
 
+    # Surface how often Jev actually served vs. silently fell back to MiniLM. A
+    # Jev/OpenRouter outage is otherwise invisible — every signal still classifies,
+    # just at MiniLM's lower accuracy — so emit the rate and log an error when it
+    # crosses the alert threshold (makes a sustained outage page-able off logs).
+    stats = classifier_stats_snapshot()
+    jev_ok = stats.get("jev", 0)
+    jev_fallback = stats.get("fallback", 0)
+    jev_total = jev_ok + jev_fallback
+    fallback_rate = (jev_fallback / jev_total) if jev_total else 0.0
+    if jev_total and fallback_rate >= settings.signal_jev_fallback_alert_rate:
+        context.log.error(
+            "[classify_group] Jev fallback rate %.0f%% (%d/%d) ≥ alert threshold %.0f%% — "
+            "OpenRouter/Jev likely degraded; classifications running on MiniLM",
+            fallback_rate * 100, jev_fallback, jev_total,
+            settings.signal_jev_fallback_alert_rate * 100,
+        )
+
     metadata = {
         "processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed,
         "mark_conflicts": conflicts, **recompute,
+        "jev_classified": jev_ok, "jev_fallback": jev_fallback,
+        "jev_fallback_rate": round(fallback_rate, 4),
     }
     context.log.info("[classify_group] %s", " ".join(f"{k}={v}" for k, v in metadata.items()))
     return dg.MaterializeResult(metadata=metadata)
@@ -472,6 +502,10 @@ _CANONICAL_FETCH = {
     "crisis": get_crisis_canonical,
     "location": get_location_canonical,
     "situationAnalysis": get_situation_canonical,
+    "analysis": get_analysis_canonical,
+    # On demand: translated only into the locales a reviewer queued (see
+    # translate_and_upsert's requested_locales), from the reporter's language.
+    "groundMessage": get_ground_message_canonical,
 }
 
 
@@ -489,12 +523,24 @@ def translate(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 def _drain_translations(context) -> dg.MaterializeResult:
     translated = cleared = requeued = failed = 0
     seen: set[tuple[str, str]] = set()  # entities attempted this run — never re-invoke
+
+    def next_page() -> list[dict]:
+        # On-demand requests jump the oldest-first queue: a reviewer is polling
+        # the inbox for each one, while bulk rows can back up behind heavy
+        # situation-analysis calls or a stuck head that ends the run early.
+        urgent = [
+            row for row in pending_translations(first=_BATCH_SIZE, entity_type="groundMessage")
+            if (row["entityType"], row["entityId"]) not in seen
+        ]
+        return urgent or pending_translations(first=_BATCH_SIZE)
+
     for _ in range(_MAX_BATCHES):
-        queue = pending_translations(first=_BATCH_SIZE)
+        queue = next_page()
         if not queue:
             break
         # Collapse per-(entity, locale) rows to one translate call per entity —
-        # translate_and_upsert handles every configured locale + clears the rows.
+        # translate_and_upsert handles every configured locale (or, for on-demand
+        # types, exactly the queued ones) + clears the rows.
         entities: dict[tuple[str, str], set[str]] = {}
         for item in queue:
             entities.setdefault((item["entityType"], item["entityId"]), set()).add(item["locale"])
@@ -522,7 +568,9 @@ def _drain_translations(context) -> dg.MaterializeResult:
                     cleared += 1
                     made_progress = True
                     continue
-                outcome = translate_and_upsert(entity_type, entity_id, canonical)
+                outcome = translate_and_upsert(
+                    entity_type, entity_id, canonical, requested_locales=locales,
+                )
             except Exception:  # noqa: BLE001 — isolate one entity's failure
                 context.log.exception("[translate] %s %s failed", entity_type, entity_id)
                 failed += 1
@@ -556,6 +604,25 @@ def _clear_translation_rows(entity_type: str, entity_id: str, locales: set[str])
             mark_translated(entity_type, entity_id, locale)
         except Exception:  # noqa: BLE001 — queue cleanup must not fail the drain
             pass
+
+
+# ── translate trigger ─────────────────────────────────────────────────────────
+# `translate` is eager on classify_group / alert, so on its own it only runs
+# when signal processing does. A reviewer's on-demand hotline translation
+# (clear-api `requestGroundMessageTranslation`) is queued by a web request, not
+# an upstream materialisation — nothing to be eager on, same reason the ground
+# drains have their own sensors. This sensor drains the queue every interval
+# regardless of signal traffic. Ships RUNNING: the inbox's "Translate" button
+# sits on "queued" until it runs. Concurrent runs (this + the eager trigger)
+# are safe — translate_and_upsert's per-entity Redis lock returns LOCKED and
+# leaves the rows for the next tick.
+translate_job = dg.define_asset_job(name="translate_job", selection=[translate])
+translate_drain_sensor = build_poll_sensor(
+    name="translate_drain_sensor",
+    job=translate_job,
+    default_interval_minutes=settings.manual_poll_interval_minutes,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
 
 
 # ── manual-signal trigger ─────────────────────────────────────────────────────

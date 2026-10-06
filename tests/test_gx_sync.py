@@ -133,7 +133,7 @@ class Harness:
             patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
             patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=self.pg.create),
             patch("clear_pipeline.defs.gx_pipeline.factory.update_signal_content", side_effect=self.pg.update),
-            patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as classify,
+            patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal") as classify,
         ):
             classify.return_value.relevance = 0.9
             classify.return_value.type_level_2 = "conflict"

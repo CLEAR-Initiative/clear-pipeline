@@ -46,6 +46,8 @@ class RAGContext:
     contributing_report_ids: list[str] = field(default_factory=list)
     hit_report_ids: list[str] = field(default_factory=list)
     hit_count: int = 0
+    # The raw hits, so several searches can be merged into one numbered list.
+    hits: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -57,16 +59,15 @@ def fetch_rag_context(
     query: str,
     limit: int = 10,
     filters: dict[str, Any] | None = None,
-    country_id: str | None = None,
+    mode: str | None = None,
 ) -> RAGContext:
     """Run one hybrid dense+BM25 search and package the hits.
 
-    ``country_id`` scopes the search to one country's subtree via clear-api's
-    ``countryLocationId`` filter — so a country's situation analysis only cites
-    knowledge-base chunks from reports about THAT country, not any other country
-    in the shared KB. Merged into ``filters`` here so callers just pass their
-    country id through; None leaves the search unscoped (used off the situation
-    path).
+    ``filters`` is a ``KnowledgebaseFilters`` dict built by
+    ``situation/frame.build_rag_filters`` — it already carries the frame's scope,
+    including the ``countryLocationId`` subtree filter that keeps a country's
+    analysis citing only reports about THAT country (not other countries in the
+    shared KB). This helper forwards ``filters`` verbatim to the search.
 
     On network / server error we return an empty RAGContext instead
     of raising — the caller degrades gracefully to "no evidence
@@ -79,11 +80,12 @@ def fetch_rag_context(
     missing, making every ``searchKnowledgebase`` throw — is now diagnosable from
     the pipeline logs instead of only surfacing as unexplained null fields.
     """
-    if country_id:
-        filters = {**(filters or {}), "countryLocationId": country_id}
     logger.debug("[situation:rag] searching knowledgebase: query=%r limit=%d filters=%s", query, limit, filters)
     try:
-        hits = clear_api.search_knowledgebase(query=query, filters=filters, limit=limit)
+        kwargs: dict[str, Any] = {"query": query, "filters": filters, "limit": limit}
+        if mode:
+            kwargs["mode"] = mode
+        hits = clear_api.search_knowledgebase(**kwargs)
     except Exception:  # noqa: BLE001 — degrade to empty on any search failure, but LOG it
         logger.exception(
             "[situation:rag] searchKnowledgebase FAILED for query=%r — returning empty context "
@@ -103,6 +105,10 @@ def fetch_rag_context(
         return RAGContext(formatted_for_prompt="", contributing_report_ids=[], hit_count=0)
 
     logger.debug("[situation:rag] query=%r → %d hits", query, len(hits))
+    return _context_from_hits(hits)
+
+
+def _context_from_hits(hits: list[dict[str, Any]]) -> RAGContext:
 
     # De-dupe report ids preserving first-seen order (which mirrors
     # the RRF-fused ranking — most relevant reports first).
@@ -123,7 +129,35 @@ def fetch_rag_context(
         contributing_report_ids=ordered_report_ids,
         hit_report_ids=hit_report_ids,
         hit_count=len(hits),
+        hits=list(hits),
     )
+
+
+def merge_rag_contexts(*contexts: RAGContext, max_per_report: int | None = None) -> RAGContext:
+    """Merge several searches into one evidence list, in the order given, with
+    duplicate hits dropped and `[Rn]` renumbered across the whole list.
+    ``max_per_report`` caps how many chunks one report may contribute, so a
+    long report can't crowd out other sources.
+
+    Contexts built without raw hits (e.g. test doubles) can't be renumbered;
+    the first non-empty one is returned unchanged."""
+    if not any(c.hits for c in contexts):
+        return next((c for c in contexts if not c.is_empty), contexts[0] if contexts else RAGContext(""))
+    seen: set[str] = set()
+    per_report: dict[str, int] = {}
+    merged: list[dict[str, Any]] = []
+    for ctx in contexts:
+        for hit in ctx.hits:
+            key = str(hit.get("id") or f"{hit.get('reportId')}|{hit.get('chunkText')}")
+            if key in seen:
+                continue
+            rid = str(hit.get("reportId") or key)
+            if max_per_report is not None and per_report.get(rid, 0) >= max_per_report:
+                continue
+            seen.add(key)
+            per_report[rid] = per_report.get(rid, 0) + 1
+            merged.append(hit)
+    return _context_from_hits(merged)
 
 
 def _format_hits_for_prompt(hits: list[dict[str, Any]]) -> str:

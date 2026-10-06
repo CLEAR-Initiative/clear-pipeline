@@ -247,6 +247,32 @@ mutation UpsertSituationAnalysis($input: UpsertSituationAnalysisInput!) {
 }
 """
 
+_UPSERT_ANALYSIS = """
+mutation UpsertAnalysis($input: UpsertAnalysisInput!) {
+  upsertAnalysis(input: $input) {
+    analysisId
+    supersededPrevious
+    skipped
+    reason
+  }
+}
+"""
+
+_GET_ANALYSIS = """
+query GetAnalysis($frame: AnalysisFrameInput!, $schemaVersion: String) {
+  analysis(frame: $frame, schemaVersion: $schemaVersion) {
+    id
+    data
+    generatedAt
+    windowStart
+    windowEnd
+    schemaVersion
+  }
+}
+"""
+
+# Without `$mode`: works against a clear-api that predates the
+# KnowledgebaseSearchMode enum (ADR-0006). Only searches that set a mode need it.
 _SEARCH_KNOWLEDGEBASE = """
 query SearchKnowledgebaseForSituation(
   $query: String!,
@@ -254,6 +280,30 @@ query SearchKnowledgebaseForSituation(
   $limit: Int,
 ) {
   searchKnowledgebase(query: $query, filters: $filters, limit: $limit) {
+    id
+    reportId
+    reportTitle
+    sourceUrl
+    publishedAt
+    pageStart
+    pageEnd
+    chunkText
+    score
+    locationIds
+    eventTypes
+    needSectors
+  }
+}
+"""
+
+_SEARCH_KNOWLEDGEBASE_WITH_MODE = """
+query SearchKnowledgebaseForSituation(
+  $query: String!,
+  $filters: KnowledgebaseFilters,
+  $limit: Int,
+  $mode: KnowledgebaseSearchMode,
+) {
+  searchKnowledgebase(query: $query, filters: $filters, limit: $limit, mode: $mode) {
     id
     reportId
     reportTitle
@@ -799,8 +849,13 @@ def search_knowledgebase(
     query: str,
     filters: dict[str, Any] | None = None,
     limit: int = 10,
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid dense + BM25 retrieval over the knowledgebase.
+
+    ``mode`` selects clear-api's report/incident merge (ADR-0006): None lets
+    the API decide (AUTO), ``"FRAME"`` returns a recency-ordered report band
+    plus a guaranteed incident band for a location/time frame.
 
     Returns a list of hits ordered by RRF score, each carrying its
     source report metadata + page range so the narrative generator
@@ -812,10 +867,10 @@ def search_knowledgebase(
     knowledgebase rows are tagged at admin-2 level but our scope is
     the country (A0); semantic relevance handles the geo scoping.
     """
-    data = _execute(
-        _SEARCH_KNOWLEDGEBASE,
-        {"query": query, "filters": filters, "limit": limit},
-    )
+    variables: dict[str, Any] = {"query": query, "filters": filters, "limit": limit}
+    if mode:
+        variables["mode"] = mode
+    data = _execute(_SEARCH_KNOWLEDGEBASE_WITH_MODE if mode else _SEARCH_KNOWLEDGEBASE, variables)
     return data.get("searchKnowledgebase") or []
 
 
@@ -857,6 +912,220 @@ def upsert_situation_analysis(
     }
     result = _execute(_UPSERT_SITUATION_ANALYSIS, {"input": payload})
     return result["upsertSituationAnalysis"]
+
+
+def upsert_analysis(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+    data: dict[str, Any],
+    source_report_ids: list[str],
+    generated_by_model: str,
+    generation_cost_usd: float | None,
+    schema_version: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Insert a unified frame-scoped analysis snapshot and supersede the
+    previous "current" row for the same (frame, schema_version) — ADR-0007's
+    generalisation of `upsert_situation_analysis`. One transaction on the
+    clear-api side.
+
+    The frame is the array columns + window: clear-api canonicalises the arrays
+    (sort + de-dupe) the same way `frame.Frame` does, and `window_end=None`
+    addresses the rolling ("to present") row.
+
+    ``force`` bypasses clear-api's 24h regeneration floor (ADR-0008). Returns
+    ``{analysisId, supersededPrevious, skipped, reason}`` — ``skipped=True`` when
+    the floor made the write a no-op (only ``lastSyncedAt`` bumped).
+    """
+    payload = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+        "data": data,
+        "sourceReportIds": source_report_ids,
+        "generatedByModel": generated_by_model,
+        "generationCostUsd": generation_cost_usd,
+        "schemaVersion": schema_version,
+        "force": force,
+    }
+    result = _execute(_UPSERT_ANALYSIS, {"input": payload})
+    return result["upsertAnalysis"]
+
+
+_FRAME_EVIDENCE_WATERMARK = """
+query FrameEvidenceWatermark($frame: AnalysisFrameInput!) {
+  frameEvidenceWatermark(frame: $frame) {
+    latestEvidenceAt
+    evidenceCount
+  }
+}
+"""
+
+_TOUCH_ANALYSIS_SYNCED = """
+mutation TouchAnalysisSynced($frame: AnalysisFrameInput!) {
+  touchAnalysisSynced(frame: $frame)
+}
+"""
+
+
+def get_frame_evidence_watermark(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+) -> dict[str, Any]:
+    """Latest-evidence watermark for a frame (ADR-0008) — ``latestEvidenceAt``
+    (max knowledgebase ingestion time) + ``evidenceCount``. The drain compares
+    ``latestEvidenceAt`` to the live analysis's ``generatedAt`` to decide whether
+    new evidence warrants a regeneration."""
+    frame = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+    }
+    data = _execute(_FRAME_EVIDENCE_WATERMARK, {"frame": frame})
+    return data["frameEvidenceWatermark"]
+
+
+def touch_analysis_synced(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+) -> bool:
+    """Bump the current analysis row's ``lastSyncedAt`` for a frame WITHOUT
+    regenerating (ADR-0008) — used when the drain's gate decides to skip. Returns
+    False when no current row exists for the frame."""
+    frame = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+    }
+    data = _execute(_TOUCH_ANALYSIS_SYNCED, {"frame": frame})
+    return bool(data.get("touchAnalysisSynced"))
+
+
+def get_analysis(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+    schema_version: str,
+) -> dict[str, Any] | None:
+    """Read the current unified analysis for a frame (ADR-0007). Used to fetch
+    the prior generation to diff "what changed" against — called BEFORE
+    ``upsert_analysis`` supersedes it. Returns the row (incl. ``data`` +
+    ``generatedAt``) or None when no analysis exists for the frame yet."""
+    frame = {
+        "locationIds": location_ids,
+        "eventTypes": event_types,
+        "needSectors": need_sectors,
+        "windowStart": window_start,
+        "windowEnd": window_end,
+    }
+    data = _execute(_GET_ANALYSIS, {"frame": frame, "schemaVersion": schema_version})
+    return data.get("analysis")
+
+
+_PENDING_ANALYSES = """
+query PendingAnalyses($limit: Int) {
+  pendingAnalyses(limit: $limit) {
+    id
+    locationIds
+    eventTypes
+    needSectors
+    windowStart
+    windowEnd
+    teamId
+    force
+  }
+}
+"""
+
+_MARK_ANALYSIS_REQUEST_GENERATED = """
+mutation MarkAnalysisRequestGenerated($id: String!) {
+  markAnalysisRequestGenerated(id: $id) { id status }
+}
+"""
+
+_MARK_ANALYSIS_REQUEST_FAILED = """
+mutation MarkAnalysisRequestFailed($id: String!, $error: String) {
+  markAnalysisRequestFailed(id: $id, error: $error) { id status attempts }
+}
+"""
+
+
+def get_pending_analyses(*, limit: int = 20) -> list[dict[str, Any]]:
+    """Drain the on-demand analysis request queue (ADR-0007 §4). Returns the
+    oldest PENDING requests (each a frame) for the generation sensor to process."""
+    data = _execute(_PENDING_ANALYSES, {"limit": limit})
+    return data.get("pendingAnalyses") or []
+
+
+def mark_analysis_request_generated(request_id: str) -> dict[str, Any]:
+    """Mark a drained request GENERATED after its analysis was upserted."""
+    result = _execute(_MARK_ANALYSIS_REQUEST_GENERATED, {"id": request_id})
+    return result["markAnalysisRequestGenerated"]
+
+
+def mark_analysis_request_failed(request_id: str, error: str | None = None) -> dict[str, Any]:
+    """Record a generation failure on a request (bumps its attempt counter)."""
+    result = _execute(
+        _MARK_ANALYSIS_REQUEST_FAILED, {"id": request_id, "error": error}
+    )
+    return result["markAnalysisRequestFailed"]
+
+
+_DUE_ANALYSIS_AUTOMATIONS = """
+query DueAnalysisAutomations($limit: Int) {
+  dueAnalysisAutomations(limit: $limit) {
+    id
+    locationIds
+    eventTypes
+    needSectors
+    windowStart
+    cadence
+    teamId
+  }
+}
+"""
+
+_MARK_ANALYSIS_AUTOMATIONS_RAN = """
+mutation MarkAnalysisAutomationsRan($ids: [String!]!) {
+  markAnalysisAutomationsRan(ids: $ids)
+}
+"""
+
+
+def get_due_analysis_automations(*, limit: int = 100) -> list[dict[str, Any]]:
+    """Drain the scheduler queue (ADR-0007 §5): enabled automations that are DUE
+    (never run, or nextRunAt passed). Each is a rolling frame; the drain groups
+    them by frame and regenerates each at the minimum cadence."""
+    data = _execute(_DUE_ANALYSIS_AUTOMATIONS, {"limit": limit})
+    return data.get("dueAnalysisAutomations") or []
+
+
+def mark_analysis_automations_ran(ids: list[str]) -> int:
+    """Stamp lastRunAt + nextRunAt (per each row's cadence) on the automations
+    whose frame was just regenerated. Returns the count updated."""
+    result = _execute(_MARK_ANALYSIS_AUTOMATIONS_RAN, {"ids": ids})
+    return result.get("markAnalysisAutomationsRan") or 0
 
 
 def _require_env(name: str) -> str:
@@ -1559,6 +1828,18 @@ def get_locations() -> list[dict]:
     return result.get("locations", [])
 
 
+def get_location_parents() -> dict[str, str | None]:
+    """Map every ``locations.id`` to its immediate parent id (``None`` at the
+    root). Used to de-nest a multi-location analysis frame — dropping a location
+    that is a descendant of another location the frame also lists — so summing
+    per-location aggregated buckets doesn't double-count a subtree (ADR-0007)."""
+    return {
+        loc["id"]: (loc.get("parent") or {}).get("id")
+        for loc in get_locations()
+        if loc.get("id")
+    }
+
+
 def get_data_sources() -> list[dict]:
     result = _execute(GET_DATA_SOURCES)
     return result.get("dataSources", [])
@@ -1940,6 +2221,25 @@ query SituationAnalysisById($id: String!) {
 }
 """
 
+GET_ANALYSIS_CANONICAL = """
+query AnalysisById($id: String!) {
+  analysisById(id: $id) {
+    id
+    data
+  }
+}
+"""
+
+GET_GROUND_MESSAGE_CANONICAL = """
+query GroundMessageForTranslation($id: String!) {
+  groundMessageForTranslation(id: $id) {
+    id
+    text
+    language
+  }
+}
+"""
+
 
 def get_crisis_canonical(crisis_id: str) -> dict | None:
     """Fetch only the four translatable fields of a crisis. Used by the
@@ -1985,6 +2285,31 @@ def get_situation_canonical(situation_analysis_id: str) -> dict | None:
     if not row:
         return None
     return extract_situation_prose(row.get("data") or {})
+
+
+def get_analysis_canonical(analysis_id: str) -> dict | None:
+    """Fetch a unified analysis (ADR-0007) by id and project it to its
+    translatable prose. The payload shares the situation-analysis taxonomy, so
+    the same prose extractor applies (including the scenarios prose). Same
+    pipeline-language ('en') invariant as get_situation_canonical."""
+    result = _execute(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
+    row = result.get("analysisById")
+    if not row:
+        return None
+    return extract_situation_prose(row.get("data") or {})
+
+
+def get_ground_message_canonical(message_id: str) -> dict | None:
+    """Fetch a hotline message for on-demand translation: ``{text,
+    language}``. ``text`` is the reporter's original words (already
+    phone-redacted at ingest) — NOT English — and ``language`` is clear-api's
+    intake detection (``"ar"``, ``"en"``, …), None when unknown. No sender
+    identity is exposed. None when the message no longer exists."""
+    result = _execute(GET_GROUND_MESSAGE_CANONICAL, {"id": message_id})
+    row = result.get("groundMessageForTranslation")
+    if not row:
+        return None
+    return {"text": row.get("text") or "", "language": row.get("language")}
 
 
 # ─── Translations ─────────────────────────────────────────────────────────────
@@ -2052,13 +2377,26 @@ def get_entities_missing_translation(
 # stripped at persistence); senderRef is pseudonymous.
 
 GROUND_MESSAGES_FOR_CLASSIFICATION = """
-query GroundMessagesForClassification($groundSourceId: String!, $limit: Int) {
-  groundMessagesForClassification(groundSourceId: $groundSourceId, limit: $limit) {
+query GroundMessagesForClassification(
+  $groundSourceId: String!
+  $limit: Int
+  $unclassifiedOnly: Boolean
+  $awaitingTranscript: Boolean
+) {
+  groundMessagesForClassification(
+    groundSourceId: $groundSourceId
+    limit: $limit
+    unclassifiedOnly: $unclassifiedOnly
+    awaitingTranscript: $awaitingTranscript
+  ) {
     id
     text
     sentAt
     senderRef
     hasMedia
+    voiceMediaKeys
+    hasVoice
+    transcript
     classification
     threadId
   }
@@ -2077,16 +2415,25 @@ mutation UpsertGroundMessageClassifications(
 def ground_messages_for_classification(
     ground_source_id: str,
     limit: int | None = None,
+    *,
+    unclassified_only: bool = False,
+    awaiting_transcript: bool = False,
 ) -> list[dict]:
-    """Fetch a ground source's messages awaiting classification/threading.
+    """Fetch a ground source's messages, oldest first, up to `limit`.
 
-    The server scopes the result to the source and orders by sentAt; rows
-    carry `classification` / `threadId` as null until this pipeline fills
-    them in.
+    With no filter this is ALL of the source's messages (classified or
+    not), so the window is the oldest `limit` rows and stops moving once
+    those are done. Drains must pass the filter for their own queue:
+    `unclassified_only` (classification null) or `awaiting_transcript`
+    (hotline voice note with no transcript). Filtering happens server-side.
     """
     variables: dict = {"groundSourceId": ground_source_id}
     if limit is not None:
         variables["limit"] = limit
+    if unclassified_only:
+        variables["unclassifiedOnly"] = True
+    if awaiting_transcript:
+        variables["awaitingTranscript"] = True
     result = _execute(GROUND_MESSAGES_FOR_CLASSIFICATION, variables)
     return result.get("groundMessagesForClassification") or []
 
@@ -2133,6 +2480,25 @@ def ground_threads_for_source(
     return result.get("groundThreadsForSource") or []
 
 
+GROUND_THREAD_DRAFTS_FOR_SOURCE = """
+query GroundThreadDraftsForSource($groundSourceId: String!) {
+  groundThreadsForSource(groundSourceId: $groundSourceId) {
+    id
+    reviewState
+    draftTitle
+  }
+}
+"""
+
+
+def ground_thread_drafts_for_source(ground_source_id: str) -> list[dict]:
+    """A source's threads with just enough to tell whether each has an
+    enrichment draft yet (`draftTitle` null = none). Used by the one-off
+    draft backfill (defs/ground/backfill.py)."""
+    result = _execute(GROUND_THREAD_DRAFTS_FOR_SOURCE, {"groundSourceId": ground_source_id})
+    return result.get("groundThreadsForSource") or []
+
+
 UPSERT_GROUND_THREADS = """
 mutation UpsertGroundThreads($inputs: [GroundThreadUpsertInput!]!) {
   upsertGroundThreads(inputs: $inputs)
@@ -2152,6 +2518,85 @@ def upsert_ground_threads(inputs: list[dict]) -> list[str | None]:
         return []
     result = _execute(UPSERT_GROUND_THREADS, {"inputs": inputs})
     return result.get("upsertGroundThreads") or []
+
+
+PIPELINE_GROUND_SOURCE_IDS = """
+query PipelineGroundSourceIds($kind: String, $isActive: Boolean) {
+  pipelineGroundSourceIds(kind: $kind, isActive: $isActive)
+}
+"""
+
+
+def pipeline_ground_source_ids(
+    kind: str | None = None,
+    is_active: bool | None = True,
+) -> list[str]:
+    """Enumerate ground source ids for the hotline enrichment drain to
+    poll — a minimal projection (ids only, no consent/policy fields) next
+    to the admin/analyst-facing `groundSources` query."""
+    variables: dict = {}
+    if kind is not None:
+        variables["kind"] = kind
+    if is_active is not None:
+        variables["isActive"] = is_active
+    result = _execute(PIPELINE_GROUND_SOURCE_IDS, variables)
+    return result.get("pipelineGroundSourceIds") or []
+
+
+UPSERT_GROUND_THREAD_DRAFTS = """
+mutation UpsertGroundThreadDrafts($inputs: [GroundThreadDraftInput!]!) {
+  upsertGroundThreadDrafts(inputs: $inputs)
+}
+"""
+
+
+def upsert_ground_thread_drafts(inputs: list[dict]) -> int:
+    """Write enrichment drafts back to clear-api. Each input row shapes as
+    {threadId, draftTitle, draftSeverity, draftLocationId,
+    draftDisasterType} — omit/None fields leave the existing draft value
+    unchanged. Returns the number of threads updated."""
+    if not inputs:
+        return 0
+    result = _execute(UPSERT_GROUND_THREAD_DRAFTS, {"inputs": inputs})
+    return result.get("upsertGroundThreadDrafts") or 0
+
+
+UPSERT_GROUND_MESSAGE_TRANSCRIPTS = """
+mutation UpsertGroundMessageTranscripts($inputs: [GroundMessageTranscriptInput!]!) {
+  upsertGroundMessageTranscripts(inputs: $inputs)
+}
+"""
+
+
+def upsert_ground_message_transcripts(inputs: list[dict]) -> int:
+    """Write voice-note transcriptions back to clear-api. Each input row
+    shapes as {messageId, transcript}. Returns the number of messages
+    updated."""
+    if not inputs:
+        return 0
+    result = _execute(UPSERT_GROUND_MESSAGE_TRANSCRIPTS, {"inputs": inputs})
+    return result.get("upsertGroundMessageTranscripts") or 0
+
+
+MARK_GROUND_MESSAGES_FAILED = """
+mutation MarkGroundMessagesFailed($inputs: [GroundMessageFailureInput!]!) {
+  markGroundMessagesFailed(inputs: $inputs)
+}
+"""
+
+
+def mark_ground_messages_failed(inputs: list[dict]) -> int:
+    """Durably mark messages a ground drain has given up on. Each input row
+    shapes as {messageId, stage, error} — stage is "ENRICH" or
+    "TRANSCRIBE". A marked message drops out of that stage's queue in
+    `ground_messages_for_classification` until a reviewer retries it; the
+    server stores `error` truncated and phone-redacted, and leaves a
+    message whose stage already succeeded unmarked. Returns the number of
+    messages marked."""
+    if not inputs:
+        return 0
+    result = _execute(MARK_GROUND_MESSAGES_FAILED, {"inputs": inputs})
+    return result.get("markGroundMessagesFailed") or 0
 
 
 def upsert_translations(

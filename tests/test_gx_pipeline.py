@@ -175,7 +175,7 @@ def test_gx_pipeline_end_to_end(tmp_path):
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
         patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=fake_create_signal),
-        patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal") as mock_classify,
     ):
         mock_classify.return_value.relevance = 0.9
         mock_classify.return_value.type_level_2 = "conflict"
@@ -274,7 +274,7 @@ def _run_gx(assets, checks, fake_s3, warehouse, catalog_uri, create_signal):
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", warehouse),
         patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", catalog_uri),
         patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=create_signal),
-        patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal") as mock_classify,
     ):
         mock_classify.return_value.relevance = 0.9
         mock_classify.return_value.type_level_2 = "conflict"
@@ -500,7 +500,7 @@ def test_gx_pipeline_rerun_does_not_repush_already_pushed_signal(tmp_path):
             patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", iceberg_warehouse),
             patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", iceberg_catalog_uri),
             patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=fake_create_signal),
-            patch("clear_pipeline.defs.gx_pipeline.factory.classify_locally") as mock_classify,
+            patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal") as mock_classify,
         ):
             mock_classify.return_value.relevance = 0.9
             mock_classify.return_value.type_level_2 = "conflict"
