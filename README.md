@@ -82,6 +82,11 @@ The sensor ships STOPPED, like the other drains. The model for the ImpactPrior h
 `narrative` role (`LLM_NARRATIVE_*`); without one it falls back to a rule-based selection over
 CLEAR's own Events and reports no usage.
 
+Retry is clear-api's: a failed Task returns to PENDING while attempts remain (`TASK_MAX_ATTEMPTS`
+there, default 3) and is FAILED after. clear-api adds no delay between attempts, so a drain run
+stops claiming a kind as soon as one of its Tasks fails or is lost — the next sensor tick is the
+backoff. Otherwise the same Task would be re-claimed at once and lose every attempt in seconds.
+
 ## Learn more
 
 To learn more about this template and Dagster in general:

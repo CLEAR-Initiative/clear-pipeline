@@ -129,18 +129,24 @@ def process_one_task(
     Task is no longer ours."""
     task_id, token = task["id"], task["leaseToken"]
     interval = heartbeat_seconds if heartbeat_seconds is not None else settings.task_heartbeat_minutes * 60
+    lease = Lease(task, interval_seconds=interval, log=context.log)
     try:
-        with Lease(task, interval_seconds=interval, log=context.log) as lease:
+        with lease:
             outcome = handler(context, task)
-        if lease.stopped:
-            context.log.info("[drain_tasks] task %s: result discarded (%s)", task_id, lease.stopped)
-            return lease.stopped
     except clear_api.TaskLeaseError as exc:
         context.log.warning("[drain_tasks] task %s lost mid-work: %s", task_id, exc)
         return LOST
     except Exception as exc:  # noqa: BLE001 — the handler's failure is the Task's failure
+        if lease.stopped:
+            # The heartbeat already learnt the Task is no longer ours (cancelled
+            # or reclaimed): clear-api would refuse the write, so don't make it.
+            context.log.info("[drain_tasks] task %s: handler failed after %s — nothing to write", task_id, lease.stopped)
+            return lease.stopped
         context.log.warning("[drain_tasks] task %s failed: %s", task_id, exc, exc_info=True)
         return _fail(context, task_id, token, f"{type(exc).__name__}: {exc}")
+    if lease.stopped:
+        context.log.info("[drain_tasks] task %s: result discarded (%s)", task_id, lease.stopped)
+        return lease.stopped
 
     try:
         done = clear_api.complete_task(
@@ -166,13 +172,32 @@ def process_one_task(
 
 
 def _drain_kind(context, kind: str, handler: TaskHandler) -> dict[str, int]:
+    """Claim and work Tasks of ``kind`` until the queue is empty or a Task
+    fails. A failed Task goes straight back to PENDING at the head of the
+    queue (clear-api retries with no delay of its own), so claiming again in
+    the same run would re-lease it at once and burn its remaining attempts
+    in seconds on what is usually a transient fault (the model or clear-api
+    briefly down). Stopping leaves the retry to the next sensor tick, which
+    is the backoff — the same rule as the analysis drain's no-progress stop.
+    A LOST outcome stops too: it means clear-api is unhealthy or someone
+    else holds our leases, and neither improves by claiming more."""
     counts = {COMPLETED: 0, FAILED: 0, LOST: 0, CANCELLED: 0}
     for _ in range(_MAX_BATCHES):
         batch = clear_api.claim_tasks(kind, limit=_BATCH_SIZE)
         if not batch:
             break
+        stop = False
         for task in batch:
-            counts[process_one_task(context, task, handler)] += 1
+            outcome = process_one_task(context, task, handler)
+            counts[outcome] += 1
+            if outcome in (FAILED, LOST):
+                context.log.info(
+                    "[drain_tasks] %s: task %s %s — leaving the rest of the queue to the next run",
+                    kind, task["id"], outcome,
+                )
+                stop = True
+        if stop:
+            break
     return counts
 
 

@@ -15,6 +15,7 @@ from clear_pipeline.defs.tasks.worker import (
     LOST,
     Lease,
     TaskOutcome,
+    _drain_kind,
     process_one_task,
     register_handler,
 )
@@ -176,6 +177,55 @@ class TestHeartbeatAndCancel:
         with lease:
             assert lease._thread.is_alive()
         assert not lease._thread.is_alive()
+
+    def test_a_handler_failure_after_a_cancel_writes_nothing(self):
+        # The heartbeat saw CANCELLED, then the handler raised: clear-api has
+        # already closed the Task, so neither fail nor complete is attempted
+        # and the outcome is the cancel, not a misreported loss.
+        import time
+
+        def slow_then_boom(context, task):  # noqa: ARG001
+            time.sleep(0.3)
+            raise ValueError("late failure")
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.heartbeat_task",
+                   return_value={"status": "CANCELLED"}), \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task") as complete, \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task") as fail:
+            assert process_one_task(_ctx(), TASK, slow_then_boom, heartbeat_seconds=0.05) == CANCELLED
+        complete.assert_not_called()
+        fail.assert_not_called()
+
+
+class TestDrainKind:
+    """The claim loop. clear-api retries a failed Task with no delay of its
+    own, so the loop must not re-claim it in the same run."""
+
+    def test_drains_until_the_queue_is_empty(self):
+        tasks = [dict(TASK, id="t1"), dict(TASK, id="t2")]
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.claim_tasks",
+                   side_effect=[[tasks[0]], [tasks[1]], []]) as claim, \
+             patch("clear_pipeline.defs.tasks.worker.process_one_task", return_value=COMPLETED):
+            counts = _drain_kind(_ctx(), "event.impact_prior", lambda c, t: TaskOutcome())
+        assert claim.call_count == 3
+        assert counts[COMPLETED] == 2
+
+    @pytest.mark.parametrize("outcome", [FAILED, LOST])
+    def test_stops_claiming_after_a_failed_or_lost_task(self, outcome):
+        # Without the stop, the just-failed Task (PENDING again, oldest) would
+        # be the very next claim and lose all its attempts within seconds.
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.claim_tasks", return_value=[TASK]) as claim, \
+             patch("clear_pipeline.defs.tasks.worker.process_one_task", return_value=outcome):
+            counts = _drain_kind(_ctx(), "event.impact_prior", lambda c, t: TaskOutcome())
+        assert claim.call_count == 1
+        assert counts[outcome] == 1
+
+    def test_a_cancelled_task_does_not_stop_the_drain(self):
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.claim_tasks",
+                   side_effect=[[TASK], [dict(TASK, id="t2")], []]) as claim, \
+             patch("clear_pipeline.defs.tasks.worker.process_one_task", side_effect=[CANCELLED, COMPLETED]):
+            counts = _drain_kind(_ctx(), "event.impact_prior", lambda c, t: TaskOutcome())
+        assert claim.call_count == 3
+        assert counts == {COMPLETED: 1, FAILED: 0, LOST: 0, CANCELLED: 1}
 
 
 def _loc(id_, level, ancestors=(), name=None):
