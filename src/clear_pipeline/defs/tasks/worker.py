@@ -5,6 +5,7 @@ annotation on the asset.
 """
 
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,6 +27,7 @@ _MAX_BATCHES = 10
 COMPLETED = "completed"
 FAILED = "failed"
 LOST = "lost"  # the lease was reclaimed or the Task ended elsewhere: nothing to write
+CANCELLED = "cancelled"  # the requester withdrew it while we worked: result discarded
 
 
 @dataclass
@@ -41,6 +43,49 @@ class TaskOutcome:
 
 TaskHandler = Callable[[Any, dict[str, Any]], TaskOutcome]
 
+
+class Lease:
+    """A claimed Task's lease, kept alive by a background heartbeat while the
+    handler runs. The heartbeat is also how the Worker learns it should stop:
+    clear-api answers CANCELLED when the requester withdrew the Task, and
+    NOT_LEASE_OWNER / NOT_LEASED when the lease lapsed and was reclaimed or
+    the Task ended elsewhere. Either way `stopped` is set with the reason,
+    and whatever the handler produces afterwards is discarded.
+    """
+
+    def __init__(self, task: dict[str, Any], *, interval_seconds: float, log) -> None:
+        self.task_id = task["id"]
+        self.token = task["leaseToken"]
+        self.interval = interval_seconds
+        self.log = log
+        self.stopped: str | None = None  # CANCELLED | LOST
+        self._halt = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"lease-{self.task_id}", daemon=True)
+
+    def __enter__(self) -> "Lease":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._halt.set()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._halt.wait(self.interval):
+            try:
+                beat = clear_api.heartbeat_task(self.task_id, self.token)
+            except clear_api.TaskLeaseError as exc:
+                self.log.warning("[drain_tasks] task %s: lease lost at heartbeat: %s", self.task_id, exc)
+                self.stopped = LOST
+                return
+            except Exception:  # noqa: BLE001 — a transient blip; the lease still has time
+                self.log.warning("[drain_tasks] task %s: heartbeat failed, will retry", self.task_id, exc_info=True)
+                continue
+            if beat.get("status") == "CANCELLED":
+                self.log.info("[drain_tasks] task %s cancelled by its requester — stopping", self.task_id)
+                self.stopped = CANCELLED
+                return
+
 # kind → handler. Registering a kind is all it takes to drain it.
 HANDLERS: dict[str, TaskHandler] = {}
 
@@ -55,13 +100,22 @@ def register_handler(kind: str):
     return _decorate
 
 
-def process_one_task(context, task: dict[str, Any], handler: TaskHandler) -> str:
-    """Run one claimed Task through its handler and report back to clear-api.
-    A handler exception fails the Task with its message (clear-api retries
-    while attempts remain); a lease error means the Task is no longer ours."""
+def process_one_task(
+    context, task: dict[str, Any], handler: TaskHandler, *, heartbeat_seconds: float | None = None,
+) -> str:
+    """Run one claimed Task through its handler, under a heartbeat, and report
+    back to clear-api. A handler exception fails the Task with its message
+    (clear-api retries while attempts remain, FAILED after maxAttempts); a
+    cancel seen at a heartbeat discards the result; a lease error means the
+    Task is no longer ours."""
     task_id, token = task["id"], task["leaseToken"]
+    interval = heartbeat_seconds if heartbeat_seconds is not None else settings.task_heartbeat_minutes * 60
     try:
-        outcome = handler(context, task)
+        with Lease(task, interval_seconds=interval, log=context.log) as lease:
+            outcome = handler(context, task)
+        if lease.stopped:
+            context.log.info("[drain_tasks] task %s: result discarded (%s)", task_id, lease.stopped)
+            return lease.stopped
     except clear_api.TaskLeaseError as exc:
         context.log.warning("[drain_tasks] task %s lost mid-work: %s", task_id, exc)
         return LOST
@@ -91,11 +145,14 @@ def process_one_task(context, task: dict[str, Any], handler: TaskHandler) -> str
             return LOST
         return FAILED
     context.log.info("[drain_tasks] task %s %s (outcome=%s)", task_id, done.get("status"), done.get("outcome"))
-    return COMPLETED if done.get("status") == "COMPLETED" else LOST
+    if done.get("status") == "COMPLETED":
+        return COMPLETED
+    # clear-api finished a cancellation requested while we worked: the result was discarded.
+    return CANCELLED if done.get("status") == "CANCELLED" else LOST
 
 
 def _drain_kind(context, kind: str, handler: TaskHandler) -> dict[str, int]:
-    counts = {COMPLETED: 0, FAILED: 0, LOST: 0}
+    counts = {COMPLETED: 0, FAILED: 0, LOST: 0, CANCELLED: 0}
     for _ in range(_MAX_BATCHES):
         batch = clear_api.claim_tasks(kind, limit=_BATCH_SIZE)
         if not batch:

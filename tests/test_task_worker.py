@@ -8,10 +8,12 @@ import pytest
 
 from clear_pipeline.defs.tasks import impact_prior as ip
 from clear_pipeline.defs.tasks.worker import (
+    CANCELLED,
     COMPLETED,
     FAILED,
     HANDLERS,
     LOST,
+    Lease,
     TaskOutcome,
     process_one_task,
     register_handler,
@@ -48,20 +50,17 @@ class TestProcessOneTask:
                               impact_prior={"hazardType": "FL"})
         with patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task",
                    return_value={"status": "COMPLETED", "outcome": "produced"}) as complete:
-            assert process_one_task(_ctx(), TASK, lambda c, t: outcome) == COMPLETED
+            assert process_one_task(_ctx(), TASK, lambda c, t: outcome, heartbeat_seconds=60) == COMPLETED
         complete.assert_called_once_with("task-1", "tok-1", result={"cases": 1}, usage=outcome.usage,
                                          impact_prior={"hazardType": "FL"})
 
-    def test_a_cancelled_completion_counts_as_lost(self):
-        with patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task", return_value={"status": "CANCELLED"}):
-            assert process_one_task(_ctx(), TASK, lambda c, t: TaskOutcome()) == LOST
 
     def test_handler_exception_fails_the_task_with_its_message(self):
         def boom(context, task):  # noqa: ARG001
             raise ValueError("model exploded")
         with patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task") as fail, \
              patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task") as complete:
-            assert process_one_task(_ctx(), TASK, boom) == FAILED
+            assert process_one_task(_ctx(), TASK, boom, heartbeat_seconds=60) == FAILED
         fail.assert_called_once_with("task-1", "tok-1", "ValueError: model exploded")
         complete.assert_not_called()
 
@@ -69,7 +68,7 @@ class TestProcessOneTask:
         with patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task",
                    side_effect=ClearApiError("clear-api 400: hazardType EQ is not one of the Event's types")), \
              patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task") as fail:
-            assert process_one_task(_ctx(), TASK, lambda c, t: TaskOutcome(impact_prior={"hazardType": "EQ"})) == FAILED
+            assert process_one_task(_ctx(), TASK, lambda c, t: TaskOutcome(impact_prior={"hazardType": "EQ"}), heartbeat_seconds=60) == FAILED
         assert "completion rejected" in fail.call_args.args[2]
 
     @pytest.mark.parametrize("where", ["handler", "complete", "fail"])
@@ -84,7 +83,69 @@ class TestProcessOneTask:
                    side_effect=TaskLeaseError("NOT_LEASED") if where == "complete" else None), \
              patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task",
                    side_effect=TaskLeaseError("NOT_LEASE_OWNER") if where == "fail" else None):
-            assert process_one_task(_ctx(), TASK, handler) == LOST
+            assert process_one_task(_ctx(), TASK, handler, heartbeat_seconds=60) == LOST
+
+
+class TestHeartbeatAndCancel:
+    def test_heartbeats_while_the_handler_runs(self):
+        import time
+
+        def slow(context, task):  # noqa: ARG001
+            time.sleep(0.35)
+            return TaskOutcome(result={"ok": True})
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.heartbeat_task",
+                   return_value={"status": "LEASED"}) as beat, \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task", return_value={"status": "COMPLETED"}):
+            assert process_one_task(_ctx(), TASK, slow, heartbeat_seconds=0.1) == COMPLETED
+        assert beat.call_count >= 2
+        assert beat.call_args.args == ("task-1", "tok-1")
+
+    def test_a_cancel_seen_at_a_heartbeat_discards_the_result(self):
+        import time
+
+        def slow(context, task):  # noqa: ARG001
+            time.sleep(0.3)
+            return TaskOutcome(result={"late": True})
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.heartbeat_task",
+                   return_value={"status": "CANCELLED"}), \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task") as complete, \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.fail_task") as fail:
+            assert process_one_task(_ctx(), TASK, slow, heartbeat_seconds=0.05) == CANCELLED
+        complete.assert_not_called()
+        fail.assert_not_called()
+
+    def test_a_lease_lost_at_a_heartbeat_discards_the_result(self):
+        import time
+
+        def slow(context, task):  # noqa: ARG001
+            time.sleep(0.3)
+            return TaskOutcome()
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.heartbeat_task",
+                   side_effect=TaskLeaseError("NOT_LEASE_OWNER")), \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task") as complete:
+            assert process_one_task(_ctx(), TASK, slow, heartbeat_seconds=0.05) == LOST
+        complete.assert_not_called()
+
+    def test_a_transient_heartbeat_failure_keeps_going(self):
+        import time
+
+        def slow(context, task):  # noqa: ARG001
+            time.sleep(0.3)
+            return TaskOutcome()
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.heartbeat_task",
+                   side_effect=[RuntimeError("blip"), {"status": "LEASED"}, {"status": "LEASED"}, {"status": "LEASED"}]), \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task", return_value={"status": "COMPLETED"}):
+            assert process_one_task(_ctx(), TASK, slow, heartbeat_seconds=0.05) == COMPLETED
+
+    def test_a_cancel_that_clear_api_finishes_at_completion_counts_as_cancelled(self):
+        with patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task", return_value={"status": "CANCELLED"}):
+            assert process_one_task(_ctx(), TASK, lambda c, t: TaskOutcome(), heartbeat_seconds=60) == CANCELLED
+
+    def test_lease_stops_its_thread_on_exit(self):
+        lease = Lease(TASK, interval_seconds=60, log=MagicMock())
+        with lease:
+            assert lease._thread.is_alive()
+        assert not lease._thread.is_alive()
 
 
 def _loc(id_, level, ancestors=(), name=None):

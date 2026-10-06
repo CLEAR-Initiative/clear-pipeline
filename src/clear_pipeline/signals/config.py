@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     # works Tasks. Tasks are user-requested and slow to produce; 5 minutes
     # keeps the Event page's "requested" state short without hammering the queue.
     task_poll_interval_minutes: int = 5
+    # How often a Worker extends its lease while a handler runs (clear-api's
+    # lease is 15 minutes by default; three heartbeats fit comfortably).
+    task_heartbeat_minutes: int = 5
 
     # sudan-war-x — X posts pushed by an external poller to clear-api's
     # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push
