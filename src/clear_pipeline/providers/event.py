@@ -504,6 +504,28 @@ def _rewrite_event(
         return None, signals
 
 
+def _rewrite_fields(
+    members: list[dict],
+    rewrite: EventRewrite | None,
+    fallback_severity: int | None,
+) -> dict:
+    """Event fields derived from ``members`` and an optional rewrite, shared by
+    grouping and recompute. Severity/rank only when a severity resolves (the
+    rewrite's, else ``fallback_severity``, unless every member has one); text
+    and displacement only from a successful rewrite. Never returns nulls."""
+    claude = rewrite.severity if rewrite and rewrite.severity is not None else fallback_severity
+    severity = _compute_event_severity(members, claude) if members else None
+    out: dict = {}
+    if severity is not None:
+        out["severity"] = severity
+        out["rank"] = severity / 5.0
+    if rewrite:
+        out["title"] = rewrite.title
+        out["description"] = rewrite.description
+        out["populationDisplaced"] = str(_resolve_population_displaced(rewrite.population_displaced))
+    return out
+
+
 def group_signal(
     signal_id: str,
     signal_title: str | None,
@@ -691,32 +713,17 @@ def _match_and_act(
             "lastSignalCreatedAt": ts,
         })
 
-        # Now rewrite + derive severity + displacement across the full set
+        # Now rewrite + derive severity + displacement across the full set.
+        # No severity fallback: an absent key keeps the stored value (the
+        # cached `target` may be stale); a failed rewrite keeps stored text.
         rewrite, signals = _rewrite_event(target_id, location_name, level_2)
-        event_severity = _compute_event_severity(
-            signals,
-            rewrite.severity if rewrite else None,
-        )
-        pop_displaced = _resolve_population_displaced(
-            claude_value=rewrite.population_displaced if rewrite else None,
-        )
+        final_update = _rewrite_fields(signals, rewrite, fallback_severity=None)
         # Subsequent-signal stats: add casualties to the running total, take
         # max() for populationAffected. Per-signal values prefer raw-extracted
         # actuals (ACLED fatalities, GDACS population, Dataminr regex) and
         # fall back to the per-event-type stats lookup keyed off the signal's
         # glide. Skipped entirely when neither source produced a value.
-        merged_stats = _merge_event_stats(target, resolved_stats)
-
-        final_update: dict = {}
-        if rewrite:
-            final_update["title"] = rewrite.title
-            final_update["description"] = rewrite.description
-        if event_severity is not None:
-            final_update["severity"] = event_severity
-            final_update["rank"] = event_severity / 5.0
-        if pop_displaced is not None:
-            final_update["populationDisplaced"] = str(pop_displaced)
-        final_update.update(merged_stats)
+        final_update.update(_merge_event_stats(target, resolved_stats))
         # Onset: keep the EARLIEST across the event's signals — the new signal's
         # parsed onset, the LLM's (it saw the full set), and the event's current
         # startedAt. Only write when it moves the value earlier.
@@ -796,26 +803,13 @@ def _match_and_act(
     # Polish title/description + derive severity + displacement across the
     # event's full signal set (here, just the one we linked).
     rewrite, signals = _rewrite_event(event["id"], location_name, level_2)
-    event_severity = _compute_event_severity(
-        signals,
-        rewrite.severity if rewrite else None,
-    )
-    pop_displaced = _resolve_population_displaced(
-        claude_value=rewrite.population_displaced if rewrite else None,
-    )
+    final_update = _rewrite_fields(signals, rewrite, fallback_severity=None)
+    # A new event always carries a displacement estimate, even without a rewrite.
+    final_update.setdefault("populationDisplaced", str(_resolve_population_displaced(None)))
 
     # casualties + populationAffected were already set at create_event() time
     # from this first signal's glide-derived stats. They're maintained via
     # _merge_event_stats() in the update branch as more signals attach.
-    final_update: dict = {}
-    if rewrite:
-        final_update["title"] = rewrite.title
-        final_update["description"] = rewrite.description
-    if event_severity is not None:
-        final_update["severity"] = event_severity
-        final_update["rank"] = event_severity / 5.0
-    if pop_displaced is not None:
-        final_update["populationDisplaced"] = str(pop_displaced)
     # Onset fallback: if the regex couldn't parse a start date, take the LLM's
     # (it saw the full signal text). Keep the earliest of the two either way.
     onset = earliest_onset_iso(started_at, rewrite.start_date if rewrite else None)
@@ -882,10 +876,6 @@ def recompute_event(
             populations.append(resolved["population_affected"])
 
     live_hash = members_hash([m["id"] for m in members])
-    aggregates: dict = {
-        "casualties": sum(casualties) if casualties else None,
-        "populationAffected": str(max(populations)) if populations else None,
-    }
 
     rewrite = None
     rewrite_error: Exception | None = None
@@ -899,16 +889,15 @@ def recompute_event(
         except Exception as e:  # noqa: BLE001 — re-raised after the deterministic write
             rewrite_error = e
 
-    fallback = rewrite.severity if rewrite and rewrite.severity is not None else state.get("severity")
-    severity = _compute_event_severity(members, fallback) if members else None
-    aggregates["severity"] = severity
-    aggregates["rank"] = severity / 5.0 if severity is not None else 0.0
-    if rewrite:
-        aggregates["title"] = rewrite.title
-        aggregates["description"] = rewrite.description
-        aggregates["populationDisplaced"] = str(
-            _resolve_population_displaced(rewrite.population_displaced)
-        )
+    # Absolute write: severity/rank are cleared explicitly when none resolves
+    # (rank is required by setEventAggregates).
+    aggregates: dict = {
+        "casualties": sum(casualties) if casualties else None,
+        "populationAffected": str(max(populations)) if populations else None,
+        "severity": None,
+        "rank": 0.0,
+        **_rewrite_fields(members, rewrite, state.get("severity")),
+    }
     if rewrite or not members:
         aggregates["rewriteMembersHash"] = live_hash
 
