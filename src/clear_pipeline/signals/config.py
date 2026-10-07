@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     # an analyst's signal is classified/grouped promptly). MANUAL_SOURCE_NAME must
     # match a data_sources row and the `source` clear-api tags on those signals.
     manual_source_name: str = "manual"
+    # The data_sources rows clear-api's createManualSignal accepts — a mirror of
+    # its TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts). Drained exactly
+    # like MANUAL_SOURCE_NAME; a name missing here is marked FAILED as an unknown
+    # source instead of being grouped. Comma-separated.
+    manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
     # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
     # works Tasks. Tasks are user-requested and slow to produce; 5 minutes

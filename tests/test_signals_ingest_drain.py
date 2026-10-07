@@ -7,9 +7,12 @@ flags, the ingest factory shape, per-source projection dispatch, the
 classify_group drain-loop control flow, and the translation-hash helper.
 """
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-from clear_pipeline.defs.signals import factory, lake, stages
+import pytest
+
+from clear_pipeline.defs.signals import connectors, factory, lake, stages
 from clear_pipeline.defs.signals.connectors import (
     CONNECTORS,
     CONNECTORS_BY_SOURCE,
@@ -28,6 +31,33 @@ from clear_pipeline.providers.translation_hash import (
     compute_source_hashes,
     stale_fields,
 )
+
+
+# Analyst-created sources: `manual`, plus the DataSource names clear-api's
+# createManualSignal accepts (its TRUSTED_SOURCE_NAMES). Spelled out rather than
+# read from settings so the test pins the contract with clear-api.
+MANUAL_SOURCES = ("manual", "field_officer", "partner", "government")
+TRUSTED_SOURCES = ("field_officer", "partner", "government")
+
+
+def _manual_signal_row(source_name: str) -> dict:
+    """A NEW signal as createManualSignal writes it and pendingSignals returns it."""
+    return {
+        "id": f"sig-{source_name}",
+        "externalId": None,
+        "source": {"id": f"ds-{source_name}", "name": source_name},
+        "title": "Flooding in Kassala",
+        "description": "River burst its banks overnight, 2,000 people displaced",
+        "severity": 4,
+        "casualties": None,
+        "publishedAt": "2026-09-17T06:22:32.953Z",
+        "status": "NEW",
+        "rawS3Key": None,  # no lake blob — created directly in clear-api
+        "originLocation": None,
+        "destinationLocation": None,
+        "generalLocation": {"id": "loc-kassala", "name": "Kassala", "level": 1, "ancestorIds": []},
+        "events": [],
+    }
 
 
 def _run():
@@ -62,10 +92,10 @@ def test_registry_flags_all_drained():
     assert not by_name["idmc"].drained
     assert not by_name["dtm"].drained
     assert DRAINED_SOURCES == frozenset(
-        {"dataminr", "acled", "gdacs", "darfur24", "manual", "sudan-war-x"}
+        {"dataminr", "acled", "gdacs", "darfur24", "sudan-war-x", *MANUAL_SOURCES}
     )
     # only the push feeds (manual, sudan-war-x) are non-polled
-    assert not by_name["manual"].polled
+    assert all(not by_name[s].polled for s in MANUAL_SOURCES)
     assert not by_name["sudan-war-x"].polled
     assert all(
         by_name[s].polled
@@ -78,8 +108,29 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["acled"], ACLEDConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["gdacs"], GDACSConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["darfur24"], Darfur24Connector)
-    assert isinstance(CONNECTORS_BY_SOURCE["manual"], ManualConnector)
+    for name in MANUAL_SOURCES:
+        assert isinstance(CONNECTORS_BY_SOURCE[name], ManualConnector)
+        assert CONNECTORS_BY_SOURCE[name].source == name
     assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
+
+
+def test_manual_source_names_keep_legacy_setting_and_dedupe():
+    # A deployment that overrides MANUAL_SOURCE_NAME keeps draining that source;
+    # the trusted names are added alongside it, never instead of it.
+    with (
+        patch.object(connectors.settings, "manual_source_name", "analyst"),
+        patch.object(
+            connectors.settings, "manual_trusted_source_names", " field_officer,partner,,analyst ,government"
+        ),
+    ):
+        assert connectors._manual_source_names() == ["analyst", "field_officer", "partner", "government"]
+
+
+def test_index_by_source_rejects_a_name_two_connectors_claim():
+    # A manual name that collides with a polled source must fail loudly at load,
+    # not silently replace the polled connector in CONNECTORS_BY_SOURCE.
+    with pytest.raises(ValueError, match="'dataminr'"):
+        connectors._index_by_source([DataminrConnector(), ManualConnector("dataminr")])
 
 
 # ── to_content_update_input dispatch ──────────────────────────────────────────
@@ -116,7 +167,7 @@ def test_factory_builds_ingest_for_polled_only():
     assert not any("signals_processed" in n for n in dm)  # drains are shared stages now
 
     # manual / sudan-war-x are not polled → no ingest defs
-    assert factory.build_source_assets(ManualConnector()) == []
+    assert factory.build_source_assets(ManualConnector("manual")) == []
     assert factory.build_source_assets(SudanWarXConnector()) == []
 
 
@@ -144,6 +195,22 @@ def test_project_manual_from_signal_row():
     assert view.external_id == "m1"
     assert view.title == "Reported shelling"
     assert view.location_name == "Khartoum"
+
+
+@pytest.mark.parametrize("source_name", TRUSTED_SOURCES)
+def test_project_trusted_manual_source_from_signal_row(source_name):
+    # Regression for expo-740: createManualSignal only accepts these DataSource
+    # names, and they used to hit "unknown_source" and be marked FAILED.
+    result = stages._project(_manual_signal_row(source_name))
+    assert result != "unknown_source"
+    connector, view = result
+    assert isinstance(connector, ManualConnector)
+    assert connector.source == source_name
+    assert view.external_id == f"sig-{source_name}"
+    assert view.title == "Flooding in Kassala"
+    assert view.description.startswith("River burst its banks")
+    assert view.timestamp == "2026-09-17T06:22:32.953Z"
+    assert view.location_name == "Kassala"
 
 
 def test_project_sudan_war_x_from_signal_row():
@@ -181,6 +248,41 @@ def test_project_polled_without_blob_returns_no_blob():
 
 def test_project_unknown_source_returns_reason():
     assert stages._project({"id": "x", "source": {"name": "mystery"}}) == "unknown_source"
+
+
+@pytest.mark.parametrize("source_name", MANUAL_SOURCES)
+def test_drain_classifies_and_groups_manual_signal(source_name):
+    # End to end through the drain, mocking only the clear-api / Redis / model
+    # boundaries: a signal from any analyst-created source is classified,
+    # grouped into an event, and marked PROCESSED — not FAILED (expo-740).
+    row = _manual_signal_row(source_name)
+    marked: list[tuple[str, list[str]]] = []
+    lock_keys: list[str] = []
+
+    @contextmanager
+    def fake_lock(key, **_kwargs):
+        lock_keys.append(key)
+        yield True
+
+    classification = MagicMock(relevance=0.9)
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[row], []])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
+        patch.object(stages, "redis_lock", side_effect=fake_lock),
+        patch.object(stages, "classify_signal", return_value=classification) as classify,
+        patch.object(stages, "group_signal", return_value={"id": "evt-1"}) as group,
+        patch.object(stages, "enqueue_translation"),
+        patch.object(stages, "sync_event_cards", return_value={"synced": 1, "skipped": 0}),
+    ):
+        result = _run()
+
+    classify.assert_called_once_with(row["title"], row["description"], 4)
+    assert group.call_args.kwargs["signal_id"] == row["id"]
+    assert group.call_args.kwargs["classification"] is classification
+    assert f"signal:{source_name}:{row['id']}" in lock_keys
+    assert ("PROCESSED", [row["id"]]) in marked
+    assert all(status != "FAILED" or not ids for status, ids in marked)
+    assert result.metadata["processed"] == 1
 
 
 # ── classify_group drain-loop control flow ───────────────────────────────────
