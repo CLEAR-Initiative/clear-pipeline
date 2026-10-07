@@ -1,5 +1,16 @@
 """The Worker loop over clear-api's Task contract (ADR-0010).
 
+Run-queue placement: ``drain_tasks_job`` carries ``dagster/priority`` (see
+``_RUN_PRIORITY``). The instance's QueuedRunCoordinator dequeues up to its
+``max_concurrent_runs`` at a time (the instance's dagster.yaml decides: the
+dev VM mounts its own) and, among the queued, the highest priority first
+(default 0). The 1-minute hotline and translate sensors keep that queue busy,
+and a Task is a person waiting on an Event page, so this job jumps the queue
+rather than taking its turn behind an hour of ingest runs. Priority only
+reorders the queue; it cannot free a slot two long runs already hold. A
+priority tag needs no instance config, unlike a tag concurrency limit, which
+would also only cap, not favour, the drain.
+
 No ``from __future__ import annotations`` — Dagster inspects the ``context``
 annotation on the asset.
 """
@@ -25,6 +36,9 @@ _DRAIN_LOCK_TTL_SECONDS = 3600
 # ones run. The claim is a cheap SKIP LOCKED statement; loop instead.
 _BATCH_SIZE = 1
 _MAX_BATCHES = 50
+# QueuedRunCoordinator dequeues higher `dagster/priority` first; 0 is every
+# other run here. 10 leaves room for something more urgent later.
+_RUN_PRIORITY = 10
 
 # Per-Task outcomes, for the run's metadata.
 COMPLETED = "completed"
@@ -36,7 +50,7 @@ CANCELLED = "cancelled"  # the requester withdrew it while we worked: result dis
 @dataclass
 class TaskOutcome:
     """What a handler hands back: the raw output for audit, usage if it ran a
-    model, and for ``event.impact_prior`` the proposal (``None`` = no prior
+    model, and for ``event.impact_prior.*`` the proposal (``None`` = no prior
     found, which clear-api records as such and writes no row)."""
 
     result: dict[str, Any] = field(default_factory=dict)
@@ -128,6 +142,7 @@ def process_one_task(
     cancel seen at a heartbeat discards the result; a lease error means the
     Task is no longer ours."""
     task_id, token = task["id"], task["leaseToken"]
+    context.log.info("[drain_tasks] task %s (%s) claimed", task_id, task.get("kind"))
     interval = heartbeat_seconds if heartbeat_seconds is not None else settings.task_heartbeat_minutes * 60
     lease = Lease(task, interval_seconds=interval, log=context.log)
     try:
@@ -211,11 +226,18 @@ def _drain(context) -> dg.MaterializeResult:
             return dg.MaterializeResult(metadata={"skipped_concurrent": True})
 
         metadata: dict[str, Any] = {}
+        if not HANDLERS:
+            context.log.warning("[drain_tasks] no Task kind is registered — nothing to claim")
         for kind, handler in HANDLERS.items():
             counts = _drain_kind(context, kind, handler)
             context.log.info("[drain_tasks] %s: %s", kind, counts)
             for outcome, n in counts.items():
                 metadata[f"{kind}.{outcome}"] = n
+            # A lost lease means clear-api is unhealthy or someone else holds
+            # our Tasks; claiming the next kind straight away would not help.
+            if counts[LOST]:
+                context.log.info("[drain_tasks] %s lost a lease — leaving the other kinds to the next run", kind)
+                break
         return dg.MaterializeResult(metadata=metadata)
 
 
@@ -228,7 +250,11 @@ def drain_tasks(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     return _drain(context)
 
 
-drain_tasks_job = dg.define_asset_job(name="drain_tasks_job", selection=[drain_tasks])
+drain_tasks_job = dg.define_asset_job(
+    name="drain_tasks_job",
+    selection=[drain_tasks],
+    tags={"dagster/priority": str(_RUN_PRIORITY)},
+)
 task_worker_sensor = build_poll_sensor(
     name="task_worker_sensor",
     job=drain_tasks_job,
