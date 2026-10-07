@@ -77,14 +77,16 @@ class Settings(BaseSettings):
     idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
-    # NEW signals with any of these source names straight from clear-api. No
-    # ingest asset; a drain sensor checks for pending manual signals every N
-    # minutes (low so an analyst's signal is classified/grouped promptly).
-    # Comma-separated data_sources row names. Must include every name in
-    # clear-api's TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts) — the
-    # only sources createManualSignal accepts — or those signals are marked
-    # FAILED as an unknown source instead of being grouped.
-    manual_source_names: str = "manual,field_officer,partner,government"
+    # NEW signals with this source name straight from clear-api. No ingest asset;
+    # a drain sensor checks for pending manual signals every N minutes (low so
+    # an analyst's signal is classified/grouped promptly). MANUAL_SOURCE_NAME must
+    # match a data_sources row and the `source` clear-api tags on those signals.
+    manual_source_name: str = "manual"
+    # The data_sources rows clear-api's createManualSignal accepts — a mirror of
+    # its TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts). Drained exactly
+    # like MANUAL_SOURCE_NAME; a name missing here is marked FAILED as an unknown
+    # source instead of being grouped. Comma-separated.
+    manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
     # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
     # works Tasks. Tasks are user-requested and slow to produce; 5 minutes

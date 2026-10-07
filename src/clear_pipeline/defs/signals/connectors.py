@@ -21,9 +21,10 @@ capability flags:
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
-  * one ``ManualConnector`` per name in ``settings.manual_source_names``:
-    ``manual`` plus ``field_officer`` / ``partner`` / ``government``, the
-    sources clear-api's ``createManualSignal`` accepts.
+  * one ``ManualConnector`` per analyst-created source: ``manual``
+    (``MANUAL_SOURCE_NAME``) plus ``field_officer`` / ``partner`` / ``government``
+    (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
+    ``createManualSignal`` accepts.
 
 - **polled** — has an external API to poll. The factory builds an ingest asset +
   poll sensor: it writes raw blobs to the lake and ``createSignal(status=NEW,
@@ -614,7 +615,7 @@ class ManualConnector:
     drain reads NEW manual signals and ``project`` builds the view from the
     signal row itself.
 
-    One instance per analyst-created source name (``settings.manual_source_names``):
+    One instance per analyst-created source name (see ``_manual_source_names``):
     clear-api files them under ``field_officer`` / ``partner`` / ``government``,
     and each needs its own registry entry so the drain dispatches it here."""
 
@@ -668,6 +669,13 @@ class SudanWarXConnector:
         )
 
 
+def _manual_source_names() -> list[str]:
+    """``MANUAL_SOURCE_NAME`` plus clear-api's trusted sources
+    (``MANUAL_TRUSTED_SOURCE_NAMES``), in order, without duplicates."""
+    names = [settings.manual_source_name, *settings.manual_trusted_source_names.split(",")]
+    return list(dict.fromkeys(n.strip() for n in names if n.strip()))
+
+
 #: The connector registry — the factory builds every source's ingest defs from
 #: this, and the shared drain stages dispatch per-signal projection through
 #: CONNECTORS_BY_SOURCE.
@@ -678,11 +686,7 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     DTMFlashAlertConnector(),
-    *(
-        ManualConnector(name.strip())
-        for name in settings.manual_source_names.split(",")
-        if name.strip()
-    ),
+    *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]
 

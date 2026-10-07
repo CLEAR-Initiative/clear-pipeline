@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from clear_pipeline.defs.signals import factory, lake, stages
+from clear_pipeline.defs.signals import connectors, factory, lake, stages
 from clear_pipeline.defs.signals.connectors import (
     CONNECTORS,
     CONNECTORS_BY_SOURCE,
@@ -112,6 +112,18 @@ def test_connectors_by_source_map():
         assert isinstance(CONNECTORS_BY_SOURCE[name], ManualConnector)
         assert CONNECTORS_BY_SOURCE[name].source == name
     assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
+
+
+def test_manual_source_names_keep_legacy_setting_and_dedupe():
+    # A deployment that overrides MANUAL_SOURCE_NAME keeps draining that source;
+    # the trusted names are added alongside it, never instead of it.
+    with (
+        patch.object(connectors.settings, "manual_source_name", "analyst"),
+        patch.object(
+            connectors.settings, "manual_trusted_source_names", " field_officer,partner,,analyst ,government"
+        ),
+    ):
+        assert connectors._manual_source_names() == ["analyst", "field_officer", "partner", "government"]
 
 
 # ── to_content_update_input dispatch ──────────────────────────────────────────
