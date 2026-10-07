@@ -37,14 +37,23 @@ def _ctx():
 
 
 class TestRegistry:
-    def test_impact_prior_handler_claims_clear_first_then_the_bare_kind(self):
-        # Both kinds dispatch to the same handler; the drain works HANDLERS in
-        # insertion order, so `.clear` is claimed before any leftover bare Task.
+    def test_impact_prior_handler_is_registered_under_every_configured_kind_in_order(self):
+        # Every configured kind dispatches to the same handler, registered in
+        # claim order: the drain works HANDLERS in insertion order. Asserted
+        # against the configured kinds, not a literal, so an environment that
+        # has already dropped the legacy kind still passes.
         assert ip.KIND == "event.impact_prior.clear"
         assert ip.LEGACY_KIND == "event.impact_prior"
-        assert HANDLERS["event.impact_prior.clear"] is ip.handle_impact_prior
-        assert HANDLERS["event.impact_prior"] is ip.handle_impact_prior
-        assert list(HANDLERS) == ["event.impact_prior.clear", "event.impact_prior"]
+        configured = ip.claim_kinds()
+        assert configured and configured[0] == ip.KIND
+        assert all(HANDLERS[kind] is ip.handle_impact_prior for kind in configured)
+        assert [kind for kind in HANDLERS if kind in configured] == configured
+
+    def test_default_claims_clear_first_then_the_bare_kind_for_one_release(self):
+        # The shipped default (the field, not the env-driven instance).
+        default = type(ip.settings).model_fields["task_impact_prior_kinds"].default
+        with patch.object(ip.settings, "task_impact_prior_kinds", default):
+            assert ip.claim_kinds() == [ip.KIND, ip.LEGACY_KIND]
 
     def test_claim_kinds_come_from_settings_in_order(self):
         with patch.object(ip.settings, "task_impact_prior_kinds", "event.impact_prior.clear,event.impact_prior"):
