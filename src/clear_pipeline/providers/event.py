@@ -303,16 +303,15 @@ def _resolve_signal_stats(
     actual_population: int | None,
     glide_code: str | None,
 ) -> dict:
-    """Per-signal stats with a 3-tier fallback chain:
+    """Per-signal stats with a 2-tier chain (no invented constant):
       1. Raw-extracted actual from the source (ACLED fatalities, GDACS
          population_affected, Dataminr/manual regex).
       2. Per-event-type historical lookup via the signal's level_3 sub-type
          (q75 fatalities / median pop_1km).
-      3. For populationAffected only: settings.default_population_affected
-         as a last-resort constant so events always carry some estimate.
 
-    Casualties stays None when both (1) and (2) produce nothing — there's
-    no sensible global default for fatalities.
+    Both casualties and populationAffected stay None when neither tier yields
+    a number — we no longer fabricate a last-resort population constant; the
+    field is left null so "unknown" is honestly null, not an invented estimate.
     """
     fallback = _stats_for_glide(glide_code)
 
@@ -324,13 +323,13 @@ def _resolve_signal_stats(
     else:
         casualties = None
 
-    population: int
+    population: int | None
     if actual_population is not None:
         population = actual_population
     elif fallback["population_affected"] is not None:
         population = fallback["population_affected"]
     else:
-        population = settings.default_population_affected
+        population = None
 
     return {"casualties": casualties, "population_affected": population}
 
@@ -373,24 +372,20 @@ def _merge_event_stats(target: dict, resolved: dict) -> dict:
     return out
 
 
-def _resolve_population_displaced(claude_value: int | None) -> int:
-    """Two-tier fallback:
-      1. `claude_value` (regex-style extraction across the signal text done
-         by the rewrite pass).
-      2. `settings.default_population_displaced` (1670 by default).
+def _resolve_population_displaced(claude_value: int | None) -> int | None:
+    """Displacement count from the rewrite pass's text extraction, or None.
 
-    The DTM-from-location-metadata tier was previously between these two,
-    but DTM data is district-wide and event-agnostic — we'd attribute a
-    whole-district displacement total to a single event, inflating the
-    estimate. Better to fall straight through to the bounded default when
-    the text doesn't tell us a number.
+    We no longer fall back to an invented constant (the old 1670 default):
+    when the signal text gives no positive figure, displacement is genuinely
+    unknown and is left null rather than fabricated. (The DTM-from-location-
+    metadata tier was already removed — district-wide totals over-attribute to
+    a single event.)
     """
     if claude_value is not None and claude_value > 0:
         return int(claude_value)
 
-    default = settings.default_population_displaced
-    logger.info("[GROUPING] populationDisplaced falling back to default: %s", default)
-    return default
+    logger.info("[GROUPING] populationDisplaced unknown — leaving null (not invented)")
+    return None
 
 
 def _get_active_events() -> list[dict]:
@@ -729,13 +724,11 @@ def _match_and_act(
         signal_id, admin2_id, level_2,
     )
 
-    try:
-        valid_to = (
-            datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
-        ).isoformat()
-    except (ValueError, AttributeError):
-        valid_to = (datetime.now(UTC) + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)).isoformat()
+    # Event end (validTo): left null — we don't invent an end date. A new event
+    # has no known end, so validTo stays None ("ongoing / no known end") rather
+    # than a fabricated start + ACTIVE_EVENTS_WINDOW_DAYS. (That window constant
+    # is still used for active-event clustering below, not as an event end.)
+    valid_to = None
 
     # Event-level location: the admin-2 district we clustered on IS the
     # event's location. Stored in `locationId` (generalLocation) — the

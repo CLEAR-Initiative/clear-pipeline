@@ -250,11 +250,11 @@ def build_darfur24_signal_input(article: dict, source_id: str, location_id: str 
         "url": article["url"],
         "title": article["title"],
         "description": article.get("description"),
-        # Documented informational default for news-source signals: 1 is the
-        # scale floor ("informational"), not an estimated threat level. A
-        # null severity makes the signal vanish from any severity-filtered
-        # view (the API's gte/lte range filter drops null rows) — expo-385.
-        "severity": 1,
+        # News-source signals carry no assessable severity, so leave it null
+        # rather than invent a floor. (This used to be hardcoded to 1 because a
+        # null severity dropped the signal from the API's gte/lte severity filter
+        # — expo-385 — but that filter now keeps null rows, so null is honest and safe.)
+        "severity": None,
     }
     if location_id is not None:
         input_data["locationId"] = location_id
