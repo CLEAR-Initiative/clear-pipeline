@@ -89,7 +89,7 @@ _Avoid_: agent, bot, enricher
 
 **Handler**:
 The function that turns one claimed Task into a `TaskOutcome` (raw result, usage, and for
-`event.impact_prior` the ImpactPrior proposal or none). Handlers never write to clear-api
+`event.impact_prior.clear` the ImpactPrior proposal or none). Handlers never write to clear-api
 themselves; the Worker loop does.
 _Avoid_: processor, job runner
 

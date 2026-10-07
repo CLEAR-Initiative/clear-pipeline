@@ -2733,7 +2733,7 @@ def complete_task(
     usage: dict[str, Any] | None = None,
     impact_prior: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Report the Task done. For an ``event.impact_prior`` Task, ``impact_prior``
+    """Report the Task done. For an ``event.impact_prior.*`` Task, ``impact_prior``
     proposes an ImpactPrior (stored ``proposed``); omitting it records
     ``no_prior_found``. clear-api validates the proposal against the Event and
     answers BAD_USER_INPUT (a ClearApiError here) if it does not fit."""

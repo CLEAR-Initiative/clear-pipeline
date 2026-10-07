@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # How often a Worker extends its lease while a handler runs (clear-api's
     # lease is 15 minutes by default; three heartbeats fit comfortably).
     task_heartbeat_minutes: int = 5
+    # Which Task kinds the ImpactPrior handler claims, comma-separated, in
+    # claim order. clear-api fans one request out into one Task per Worker
+    # kind (`event.impact_prior.clear` is ours: CLEAR Events + knowledge base,
+    # never the web). The bare `event.impact_prior` stays here for one
+    # release so a Task opened before the rename is still drained; drop it
+    # from the env (or from this default) once no bare Task can be left.
+    task_impact_prior_kinds: str = "event.impact_prior.clear,event.impact_prior"
 
     # sudan-war-x — X posts pushed by an external poller to clear-api's
     # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push

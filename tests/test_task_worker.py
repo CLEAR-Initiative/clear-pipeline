@@ -15,6 +15,7 @@ from clear_pipeline.defs.tasks.worker import (
     LOST,
     Lease,
     TaskOutcome,
+    _drain,
     _drain_kind,
     process_one_task,
     register_handler,
@@ -22,8 +23,10 @@ from clear_pipeline.defs.tasks.worker import (
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.clear_api import ClearApiError, GraphQLErrors, TaskLeaseError
 
-TASK = {"id": "task-1", "kind": "event.impact_prior", "subjectType": "event", "subjectId": "evt-1",
+TASK = {"id": "task-1", "kind": "event.impact_prior.clear", "subjectType": "event", "subjectId": "evt-1",
         "leaseToken": "tok-1", "payload": {"horizonYears": 10}, "status": "LEASED"}
+# A Task opened before the fan-out rename (clear-api #727): still drained for one release.
+LEGACY_TASK = dict(TASK, id="task-legacy", kind="event.impact_prior", leaseToken="tok-legacy")
 
 
 def _ctx():
@@ -33,8 +36,23 @@ def _ctx():
 
 
 class TestRegistry:
-    def test_impact_prior_handler_is_registered(self):
+    def test_impact_prior_handler_claims_clear_first_then_the_bare_kind(self):
+        # Both kinds dispatch to the same handler; the drain works HANDLERS in
+        # insertion order, so `.clear` is claimed before any leftover bare Task.
+        assert ip.KIND == "event.impact_prior.clear"
+        assert ip.LEGACY_KIND == "event.impact_prior"
+        assert HANDLERS["event.impact_prior.clear"] is ip.handle_impact_prior
         assert HANDLERS["event.impact_prior"] is ip.handle_impact_prior
+        assert list(HANDLERS) == ["event.impact_prior.clear", "event.impact_prior"]
+
+    def test_claim_kinds_come_from_settings_in_order(self):
+        with patch.object(ip.settings, "task_impact_prior_kinds", "event.impact_prior.clear,event.impact_prior"):
+            assert ip.claim_kinds() == ["event.impact_prior.clear", "event.impact_prior"]
+        # Dropping the bare kind once the release has shipped is an env change, not a code change.
+        with patch.object(ip.settings, "task_impact_prior_kinds", "event.impact_prior.clear"):
+            assert ip.claim_kinds() == ["event.impact_prior.clear"]
+        with patch.object(ip.settings, "task_impact_prior_kinds", " event.impact_prior.clear , ,event.impact_prior.clear,"):
+            assert ip.claim_kinds() == ["event.impact_prior.clear"]
 
     def test_register_handler_adds_a_kind(self):
         @register_handler("event.other")
@@ -194,6 +212,34 @@ class TestHeartbeatAndCancel:
             assert process_one_task(_ctx(), TASK, slow_then_boom, heartbeat_seconds=0.05) == CANCELLED
         complete.assert_not_called()
         fail.assert_not_called()
+
+
+class TestDrain:
+    def test_claims_every_registered_kind_in_order_and_passes_the_kind_unchanged(self):
+        # One `.clear` Task and one legacy bare Task: the `.clear` queue is
+        # drained first; each Task is completed by id and lease token, so the
+        # kind reaches clear-api exactly as claimed (sourceKind is stamped there).
+        queues = {"event.impact_prior.clear": [[TASK], []], "event.impact_prior": [[LEGACY_TASK], []]}
+
+        def claim(kind, *, limit):  # noqa: ARG001
+            return queues[kind].pop(0)
+        with patch("clear_pipeline.defs.tasks.worker.redis_lock") as lock, \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.claim_tasks", side_effect=claim) as claimed, \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.complete_task",
+                   return_value={"status": "COMPLETED", "outcome": "produced"}) as complete, \
+             patch.dict(HANDLERS, {"event.impact_prior.clear": lambda c, t: TaskOutcome(result={"kind": t["kind"]}),
+                                   "event.impact_prior": lambda c, t: TaskOutcome(result={"kind": t["kind"]})}, clear=True):
+            lock.return_value.__enter__.return_value = True
+            result = _drain(_ctx())
+        assert [c.args[0] for c in claimed.call_args_list] == [
+            "event.impact_prior.clear", "event.impact_prior.clear", "event.impact_prior", "event.impact_prior",
+        ]
+        assert [(c.args[0], c.args[1], c.kwargs["result"]["kind"]) for c in complete.call_args_list] == [
+            ("task-1", "tok-1", "event.impact_prior.clear"),
+            ("task-legacy", "tok-legacy", "event.impact_prior"),
+        ]
+        assert result.metadata["event.impact_prior.clear.completed"] == 1
+        assert result.metadata["event.impact_prior.completed"] == 1
 
 
 class TestDrainKind:
@@ -430,13 +476,15 @@ class TestImpactPriorTracer:
         assert prior["geographicScope"] == "country"
         assert outcome.usage is None
 
-    def test_no_prior_event_means_no_proposal(self):
+    @pytest.mark.parametrize("task", [TASK, LEGACY_TASK])
+    def test_no_prior_event_means_no_proposal(self, task):
+        # The handler does the same work whichever of its two kinds the Task carries.
         with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=EVENT), \
              patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level", return_value=[{"id": "sdn"}]), \
              patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page",
                    return_value={"items": [], "hasMore": False}), \
              patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", return_value=[]):
-            outcome = ip.handle_impact_prior(_ctx(), TASK)
+            outcome = ip.handle_impact_prior(_ctx(), task)
         assert outcome.impact_prior is None
         assert outcome.result["cases"] == 0
 

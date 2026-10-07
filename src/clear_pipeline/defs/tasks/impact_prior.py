@@ -1,5 +1,13 @@
-"""The ``event.impact_prior`` handler (clear-api ADR-0010): what has typically
-happened before for this Event's hazard type in this country.
+"""The ``event.impact_prior.clear`` handler (clear-api ADR-0010): what has
+typically happened before for this Event's hazard type in this country, from
+CLEAR's own data.
+
+clear-api fans one ImpactPrior request out into one Task per Worker kind
+(``TASK_IMPACT_PRIOR_KINDS`` there); ``.clear`` is this Worker's. The bare
+``event.impact_prior`` was the kind before the fan-out and is still claimed
+for one release, after ``.clear``, so a Task opened before the rename is
+drained too (``settings.task_impact_prior_kinds``). The proposal's
+``sourceKind`` is stamped server-side from the Task's kind — nothing to send.
 
 Cases come from CLEAR first — its own Events of the same GLIDE type under the
 Event's country, then knowledge-base passages — and a model decides which
@@ -23,10 +31,12 @@ from pydantic import BaseModel, Field
 from clear_pipeline.defs.tasks.worker import TaskOutcome, register_handler
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.llm import LLMProvider, make_llm_provider
+from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
-KIND = "event.impact_prior"
+KIND = "event.impact_prior.clear"
+LEGACY_KIND = "event.impact_prior"  # pre-fan-out kind; claimed for one release, then remove
 METHOD_VERSION = "clear-pipeline-impact-prior@0.2.0"
 DEFAULT_HORIZON_YEARS = 10
 _PAGE = 25
@@ -283,7 +293,17 @@ def select_cases(
 # ── the handler ────────────────────────────────────────────────────────────
 
 
-@register_handler(KIND)
+def claim_kinds() -> list[str]:
+    """The kinds this handler claims, in claim order, from
+    ``TASK_IMPACT_PRIOR_KINDS`` (comma-separated; blanks and repeats dropped)."""
+    kinds: list[str] = []
+    for raw in settings.task_impact_prior_kinds.split(","):
+        kind = raw.strip()
+        if kind and kind not in kinds:
+            kinds.append(kind)
+    return kinds
+
+
 def handle_impact_prior(context, task: dict[str, Any]) -> TaskOutcome:
     event_id = task["subjectId"]
     horizon = int((task.get("payload") or {}).get("horizonYears") or DEFAULT_HORIZON_YEARS)
@@ -367,3 +387,9 @@ def handle_impact_prior(context, task: dict[str, Any]) -> TaskOutcome:
             "methodVersion": METHOD_VERSION,
         },
     )
+
+
+# Registered in claim order: the drain works HANDLERS in insertion order, so
+# `.clear` Tasks are claimed before any leftover bare-kind Task.
+for _kind in claim_kinds():
+    register_handler(_kind)(handle_impact_prior)

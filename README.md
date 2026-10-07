@@ -67,7 +67,9 @@ Open http://localhost:3000 in your browser to see the project.
 `drain_tasks` (group `tasks`) is the production Worker on clear-api's generic Task queue
 (clear-api ADR-0010): it claims Tasks of every kind registered in
 `clear_pipeline.defs.tasks.worker.HANDLERS`, runs each handler under a heartbeat, and
-completes or fails it. The first handler is `event.impact_prior`. Adding a kind of work is a
+completes or fails it. The first handler is `event.impact_prior.clear` (CLEAR Events + knowledge
+base, never the web); it also claims the bare `event.impact_prior` for one release, after
+`.clear` — `TASK_IMPACT_PRIOR_KINDS` lists the kinds in claim order. Adding a kind of work is a
 handler (`@register_handler("<kind>")` returning a `TaskOutcome`), not a module and not a queue.
 
 It needs one extra variable, because the pipeline user may not claim Tasks:

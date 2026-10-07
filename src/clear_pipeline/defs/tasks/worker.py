@@ -36,7 +36,7 @@ CANCELLED = "cancelled"  # the requester withdrew it while we worked: result dis
 @dataclass
 class TaskOutcome:
     """What a handler hands back: the raw output for audit, usage if it ran a
-    model, and for ``event.impact_prior`` the proposal (``None`` = no prior
+    model, and for ``event.impact_prior.*`` the proposal (``None`` = no prior
     found, which clear-api records as such and writes no row)."""
 
     result: dict[str, Any] = field(default_factory=dict)
@@ -128,6 +128,7 @@ def process_one_task(
     cancel seen at a heartbeat discards the result; a lease error means the
     Task is no longer ours."""
     task_id, token = task["id"], task["leaseToken"]
+    context.log.info("[drain_tasks] task %s (%s) claimed", task_id, task.get("kind"))
     interval = heartbeat_seconds if heartbeat_seconds is not None else settings.task_heartbeat_minutes * 60
     lease = Lease(task, interval_seconds=interval, log=context.log)
     try:
