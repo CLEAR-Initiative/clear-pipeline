@@ -92,6 +92,18 @@ def event_date(event: dict[str, Any]) -> str | None:
     return event.get("startedAt") or event.get("firstSignalCreatedAt")
 
 
+def parse_iso(value: str | None) -> datetime | None:
+    """An ISO-8601 instant or date, or None. Accepts a trailing ``Z``; a
+    date-only value is midnight UTC."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 # ── candidates ─────────────────────────────────────────────────────────────
 
 
@@ -249,9 +261,14 @@ def select_cases(
             continue
         seen.add(idx)
         case = dict(candidates[idx])
-        case["scope"] = chosen.scope
-        if chosen.occurred_at:
-            case["occurredAt"] = chosen.occurred_at
+        # The candidate's own scope is the ground truth (it was matched
+        # against the input Event's district); the model may only narrow a
+        # district case to country, never promote one.
+        case["scope"] = "district" if chosen.scope == "district" and case["scope"] == "district" else "country"
+        # A model-supplied date replaces the candidate's only when it is a
+        # real ISO-8601 value: the basis is rendered as evidence, not prose.
+        if chosen.occurred_at and parse_iso(chosen.occurred_at) is not None:
+            case["occurredAt"] = chosen.occurred_at.strip()
         if chosen.note:
             case["note"] = chosen.note
         basis.append(case)
@@ -285,9 +302,13 @@ def handle_impact_prior(context, task: dict[str, Any]) -> TaskOutcome:
         return TaskOutcome(result={"searched": [], "candidates": 0, "reason": "event has no resolvable country"})
     country_name = countries[country_id].get("name") or country_id
 
+    # The horizon is "N years before this Event": anchor it on the Event's
+    # date (now, for an Event without one), so an old Event is not searched
+    # over an empty or inverted window.
     now = datetime.now(timezone.utc)
-    since = (now - timedelta(days=365 * horizon)).isoformat()
+    until_dt = parse_iso(event_date(event)) or now
     until = event_date(event) or now.isoformat()
+    since = (until_dt - timedelta(days=365 * horizon)).isoformat()
     input_district = district_id(event)
 
     # 1. CLEAR Events, then 2. knowledge-base passages. Never the web here.

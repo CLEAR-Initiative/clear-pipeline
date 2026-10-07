@@ -293,6 +293,50 @@ class TestModelSelection:
         assert "Candidates:" in llm.calls[0]["user"] and "[IN THE INPUT EVENT'S DISTRICT]" in llm.calls[0]["user"]
         assert ip.usage_for_task(llm) == {"model": "claude-sonnet-5-5", "inputTokens": 1000, "outputTokens": 200, "costUsd": 0.004}
 
+    def test_model_may_narrow_a_scope_but_never_promote_one(self):
+        candidates = [
+            {"tier": "clear", "eventId": "evt-country", "scope": "country", "quote": "Elsewhere in the country"},
+            {"tier": "clear", "eventId": "evt-district", "scope": "district", "quote": "Same district"},
+        ]
+        selection = ip.ImpactPriorSelection(
+            cases=[ip.SelectedCase(candidate=1, scope="district"),   # mislabelled: candidate is country-scope
+                   ip.SelectedCase(candidate=2, scope="country")],   # narrowing a district case is allowed
+            reasoning="x",
+        )
+        basis, _ = ip.select_cases(_FakeLLM(selection), event=EVENT, hazard="FL", country_name="T", horizon=10, candidates=candidates)
+        assert [c["scope"] for c in basis] == ["country", "country"]
+
+    def test_a_model_date_replaces_the_candidates_only_when_it_is_iso_8601(self):
+        candidates = [
+            {"tier": "clear", "eventId": "a", "scope": "country", "occurredAt": "2019-09-01", "quote": "a"},
+            {"tier": "clear", "eventId": "b", "scope": "country", "occurredAt": "2021-08-10T00:00:00Z", "quote": "b"},
+            {"tier": "clear", "eventId": "c", "scope": "country", "occurredAt": None, "quote": "c"},
+        ]
+        selection = ip.ImpactPriorSelection(
+            cases=[ip.SelectedCase(candidate=1, scope="country", occurred_at="spring 2019"),
+                   ip.SelectedCase(candidate=2, scope="country", occurred_at="2021-08-12T06:00:00Z"),
+                   ip.SelectedCase(candidate=3, scope="country", occurred_at="2015-07-01")],
+            reasoning="x",
+        )
+        basis, _ = ip.select_cases(_FakeLLM(selection), event=EVENT, hazard="FL", country_name="T", horizon=10, candidates=candidates)
+        assert [c["occurredAt"] for c in basis] == ["2019-09-01", "2021-08-12T06:00:00Z", "2015-07-01"]
+
+    def test_the_horizon_is_anchored_on_the_events_date_not_now(self):
+        from datetime import datetime, timezone
+
+        old_event = dict(EVENT, startedAt="2014-06-01T00:00:00.000Z")
+        with patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_get_event", return_value=old_event), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_locations_by_level", return_value=[{"id": "sdn"}]), \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_events_page",
+                   return_value={"items": [], "hasMore": False}) as page, \
+             patch("clear_pipeline.defs.tasks.impact_prior.clear_api.worker_search_knowledgebase", return_value=[]):
+            ip.handle_impact_prior(_ctx(), TASK)
+        sent = page.call_args.args[0]
+        since, until = ip.parse_iso(sent["from"]), ip.parse_iso(sent["to"])
+        assert until == datetime(2014, 6, 1, tzinfo=timezone.utc)
+        assert since < until
+        assert since.year == 2004
+
     def test_handler_uses_events_then_kb_then_the_model_and_reports_usage(self):
         priors = {"items": [
             {"id": "evt-2021", "title": "Flood 2021", "types": ["FL"], "startedAt": "2021-08-10T00:00:00Z",
