@@ -126,6 +126,13 @@ def test_manual_source_names_keep_legacy_setting_and_dedupe():
         assert connectors._manual_source_names() == ["analyst", "field_officer", "partner", "government"]
 
 
+def test_index_by_source_rejects_a_name_two_connectors_claim():
+    # A manual name that collides with a polled source must fail loudly at load,
+    # not silently replace the polled connector in CONNECTORS_BY_SOURCE.
+    with pytest.raises(ValueError, match="'dataminr'"):
+        connectors._index_by_source([DataminrConnector(), ManualConnector("dataminr")])
+
+
 # ── to_content_update_input dispatch ──────────────────────────────────────────
 
 def test_non_revising_connectors_return_none_for_content_update():

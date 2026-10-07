@@ -690,9 +690,26 @@ CONNECTORS: list[SignalSource] = [
     SudanWarXConnector(),
 ]
 
+
+def _index_by_source(connectors: list[SignalSource]) -> dict[str, SignalSource]:
+    """Map source name → connector, refusing a name two connectors claim. A
+    manual name configured to match a polled source (e.g. ``dataminr``) would
+    otherwise silently replace that source's connector and skip its blob
+    projection."""
+    by_source: dict[str, SignalSource] = {}
+    for c in connectors:
+        if c.source in by_source:
+            raise ValueError(
+                f"Two connectors claim source {c.source!r} — check "
+                "MANUAL_SOURCE_NAME / MANUAL_TRUSTED_SOURCE_NAMES"
+            )
+        by_source[c.source] = c
+    return by_source
+
+
 #: source name → connector, so the shared classify/group stage can rehydrate +
 #: project a signal from ANY source (dispatch on ``created["source"]["name"]``).
-CONNECTORS_BY_SOURCE: dict[str, SignalSource] = {c.source: c for c in CONNECTORS}
+CONNECTORS_BY_SOURCE: dict[str, SignalSource] = _index_by_source(CONNECTORS)
 
 #: Sources whose NEW signals the classify/group stage should process. All current
 #: sources are drained; an ingest-only source (drained=False) would be excluded.
