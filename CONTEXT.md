@@ -73,3 +73,29 @@ _Avoid_: Report, summary, briefing
 **SAF Sector**:
 One of the six NRC Sector Analysis Framework sectors: education, food security, health, shelter, WASH, protection. A fixed taxonomy — not an open list.
 _Avoid_: Cluster (the OCHA coordination concept, which is a different taxonomy)
+
+### Tasks and Workers
+
+**Task**:
+One unit of work of a named kind about one subject, kept by clear-api in its generic Task
+queue (clear-api ADR-0010; vocabulary owned by clear-api's CONTEXT.md). This pipeline is a
+**Task Worker** on that queue, not its owner.
+_Avoid_: job, request, drain item
+
+**Task Worker**:
+The `drain_tasks` asset acting on clear-api's Worker protocol — claim, heartbeat, complete,
+fail — as the `worker` service user. A new kind of work is a **handler** registered by kind.
+_Avoid_: agent, bot, enricher
+
+**Handler**:
+The function that turns one claimed Task into a `TaskOutcome` (raw result, usage, and for
+`event.impact_prior` the ImpactPrior proposal or none). Handlers never write to clear-api
+themselves; the Worker loop does.
+_Avoid_: processor, job runner
+
+**ImpactPrior**:
+The first kind of **Event enrichment**: what has typically happened before given a hazard
+type and a country, with its evidence basis (one case per distinct prior occurrence, from
+CLEAR's Events and knowledge base here — never the web from this Worker). A Worker proposes;
+a named analyst accepts or rejects in clear-api.
+_Avoid_: precedent, history, prior events

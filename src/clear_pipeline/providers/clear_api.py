@@ -32,6 +32,27 @@ from clear_pipeline.providers.situation_prose import extract_situation_prose
 logger = logging.getLogger(__name__)
 
 
+class GraphQLErrors(RuntimeError):
+    """clear-api answered 200 with an ``errors`` array. ``errors`` keeps the
+    parsed list so a caller can branch on ``extensions.code`` / ``subCode``
+    instead of the stringified message. Retryable by ``_execute`` like any
+    RuntimeError (a transient server-side state can look like this too)."""
+
+    def __init__(self, errors: list[dict[str, Any]]) -> None:
+        super().__init__(f"clear-api GraphQL errors: {errors}")
+        self.errors = errors
+
+    def codes(self) -> set[str]:
+        return {str((e.get("extensions") or {}).get("code") or "") for e in self.errors}
+
+    def sub_codes(self) -> set[str]:
+        return {str((e.get("extensions") or {}).get("subCode") or "") for e in self.errors}
+
+    def messages(self) -> str:
+        """clear-api's own messages, joined — what a person should read."""
+        return "; ".join(str(e.get("message") or "") for e in self.errors if e.get("message"))
+
+
 class ClearApiError(RuntimeError):
     """Non-retryable clear-api failure - schema mismatch, auth error,
     validation reject, etc. Callers should surface + skip the batch
@@ -321,6 +342,7 @@ def _execute(
     variables: dict[str, Any] | None = None,
     *,
     retries: int = 3,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """POST a GraphQL operation with the same retry semantics
     clear-pipeline uses.
@@ -335,7 +357,9 @@ def _execute(
       server-side state like a lock conflict).
     """
     url = _require_env("CLEAR_API_URL")
-    api_key = _require_env("CLEAR_API_KEY")
+    # The pipeline's own key by default; a Task Worker call passes the
+    # `worker`-role key instead (see the Tasks section at the end).
+    api_key = api_key or _require_env("CLEAR_API_KEY")
 
     headers = {
         "Content-Type": "application/json",
@@ -374,7 +398,7 @@ def _execute(
                         f"translation drain + eventsPendingAlert) deployed? {err_text[:300]}"
                     )
                 logger.error("clear-api GraphQL errors: %s", errs)
-                raise RuntimeError(f"clear-api GraphQL errors: {errs}")
+                raise GraphQLErrors(errs if isinstance(errs, list) else [errs])
 
             return result["data"]
 
@@ -2599,3 +2623,198 @@ def events_pending_alert(
         {"first": first, "minSeverity": min_severity, "maxAgeHours": max_age_hours},
     )
     return result.get("eventsPendingAlert") or []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tasks and Workers (clear-api ADR-0010)
+#
+# The generic Task queue: a Worker claims Tasks of a kind under a lease,
+# heartbeats, and completes or fails them. Every call here authenticates as
+# the `worker` service user (CLEAR_WORKER_API_KEY), never the pipeline user:
+# `worker` is the only role allowed to claim, and it can write nothing but
+# Tasks it holds and `proposed` ImpactPriors. The per-claim `leaseToken` the
+# claim returns must accompany every later write.
+# ═══════════════════════════════════════════════════════════════════════════
+
+TASK_FIELDS = """
+    id
+    kind
+    subjectType
+    subjectId
+    payload
+    status
+    leaseToken
+    leaseExpiresAt
+    attempts
+    maxAttempts
+    cancelRequestedAt
+    outcome
+    lastError
+    completedAt
+"""
+
+CLAIM_TASKS = f"""
+mutation ClearPipelineClaimTasks($kind: String!, $limit: Int) {{
+  claimTasks(kind: $kind, limit: $limit) {{ {TASK_FIELDS} }}
+}}
+"""
+
+HEARTBEAT_TASK = f"""
+mutation ClearPipelineHeartbeatTask($id: String!, $leaseToken: String!) {{
+  heartbeatTask(id: $id, leaseToken: $leaseToken) {{ {TASK_FIELDS} }}
+}}
+"""
+
+COMPLETE_TASK = f"""
+mutation ClearPipelineCompleteTask(
+  $id: String!, $leaseToken: String!, $result: JSON!, $usage: TaskUsageInput, $impactPrior: ImpactPriorInput
+) {{
+  completeTask(id: $id, leaseToken: $leaseToken, result: $result, usage: $usage, impactPrior: $impactPrior) {{
+    {TASK_FIELDS}
+  }}
+}}
+"""
+
+FAIL_TASK = f"""
+mutation ClearPipelineFailTask($id: String!, $leaseToken: String!, $error: String!) {{
+  failTask(id: $id, leaseToken: $leaseToken, error: $error) {{ {TASK_FIELDS} }}
+}}
+"""
+
+# The lease outcomes a Worker branches on (clear-api `extensions.subCode`).
+_LEASE_SUB_CODES = ("NOT_LEASE_OWNER", "NOT_LEASED")
+
+
+class TaskLeaseError(RuntimeError):
+    """The Task is no longer this Worker's to write: the lease lapsed and was
+    reclaimed (NOT_LEASE_OWNER) or the Task is no longer LEASED at all
+    (NOT_LEASED — completed, failed or cancelled elsewhere). Stop working on
+    it; never retry the write."""
+
+
+def _worker_key() -> str:
+    return _require_env("CLEAR_WORKER_API_KEY")
+
+
+def _task_write(query: str, variables: dict[str, Any], field: str) -> dict[str, Any]:
+    """A Worker write: one attempt (a lease write is not idempotent across a
+    reclaim). clear-api's answer is read from the error's ``extensions``: a
+    lease subCode is a TaskLeaseError (the Task is no longer ours), a
+    BAD_USER_INPUT is a ClearApiError (the write itself is wrong — e.g. a
+    proposal that does not fit the Event — and must not be retried)."""
+    try:
+        data = _execute(query, variables, retries=1, api_key=_worker_key())
+    except GraphQLErrors as exc:
+        if exc.sub_codes() & set(_LEASE_SUB_CODES):
+            raise TaskLeaseError(str(exc)) from exc
+        if "BAD_USER_INPUT" in exc.codes():
+            raise ClearApiError(exc.messages() or str(exc)) from exc
+        raise
+    return data[field]
+
+
+def claim_tasks(kind: str, *, limit: int = 1) -> list[dict[str, Any]]:
+    """Lease up to ``limit`` of the oldest claimable Tasks of ``kind``. Each
+    returned Task carries the ``leaseToken`` every later write needs."""
+    data = _execute(CLAIM_TASKS, {"kind": kind, "limit": limit}, api_key=_worker_key())
+    return data.get("claimTasks") or []
+
+
+def heartbeat_task(task_id: str, lease_token: str) -> dict[str, Any]:
+    """Extend the lease. Read ``status`` on the result: CANCELLED means stop."""
+    return _task_write(HEARTBEAT_TASK, {"id": task_id, "leaseToken": lease_token}, "heartbeatTask")
+
+
+def complete_task(
+    task_id: str,
+    lease_token: str,
+    *,
+    result: dict[str, Any],
+    usage: dict[str, Any] | None = None,
+    impact_prior: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Report the Task done. For an ``event.impact_prior`` Task, ``impact_prior``
+    proposes an ImpactPrior (stored ``proposed``); omitting it records
+    ``no_prior_found``. clear-api validates the proposal against the Event and
+    answers BAD_USER_INPUT (a ClearApiError here) if it does not fit."""
+    variables: dict[str, Any] = {"id": task_id, "leaseToken": lease_token, "result": result}
+    if usage is not None:
+        variables["usage"] = usage
+    if impact_prior is not None:
+        variables["impactPrior"] = impact_prior
+    return _task_write(COMPLETE_TASK, variables, "completeTask")
+
+
+def fail_task(task_id: str, lease_token: str, error: str) -> dict[str, Any]:
+    """Give the Task up with an error: PENDING again while attempts remain,
+    FAILED with this error once they are used up."""
+    return _task_write(FAIL_TASK, {"id": task_id, "leaseToken": lease_token, "error": error[:2000]}, "failTask")
+
+
+# ── Reads the ImpactPrior handler needs, as the worker user ─────────────────
+
+GET_EVENT_FOR_TASK = """
+query EventForTask($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    types
+    startedAt
+    firstSignalCreatedAt
+    generalLocation { id name level ancestorIds }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+  }
+}
+"""
+
+EVENTS_PAGE_FOR_TASK = """
+query EventsPageForTask($input: EventsPageInput) {
+  eventsPage(input: $input) {
+    items {
+      id
+      title
+      description
+      types
+      startedAt
+      firstSignalCreatedAt
+      severity
+      generalLocation { id name level ancestorIds }
+      originLocation { id name level ancestorIds }
+      destinationLocation { id name level ancestorIds }
+    }
+    totalCount
+    hasMore
+  }
+}
+"""
+
+LOCATIONS_LEVEL_FOR_TASK = """
+query LocationsLevelForTask($level: Int!) {
+  locations(level: $level) { id name level }
+}
+"""
+
+
+def worker_get_event(event_id: str) -> dict[str, Any] | None:
+    """The Event a Task is about, with its locations' ancestors, as the worker user."""
+    data = _execute(GET_EVENT_FOR_TASK, {"id": event_id}, api_key=_worker_key())
+    return data.get("event")
+
+
+def worker_events_page(input_data: dict[str, Any]) -> dict[str, Any]:
+    """A page of Events (EventsPageInput: eventTypes, locationId, from, to, limit, offset…)."""
+    data = _execute(EVENTS_PAGE_FOR_TASK, {"input": input_data}, api_key=_worker_key())
+    return data.get("eventsPage") or {"items": [], "totalCount": 0, "hasMore": False}
+
+
+def worker_locations_by_level(level: int) -> list[dict[str, Any]]:
+    data = _execute(LOCATIONS_LEVEL_FOR_TASK, {"level": level}, api_key=_worker_key())
+    return data.get("locations") or []
+
+
+def worker_search_knowledgebase(*, query: str, filters: dict[str, Any] | None, limit: int = 10) -> list[dict[str, Any]]:
+    """Knowledge-base search as the worker user (same document as search_knowledgebase)."""
+    data = _execute(_SEARCH_KNOWLEDGEBASE, {"query": query, "filters": filters, "limit": limit}, api_key=_worker_key())
+    return data.get("searchKnowledgebase") or []
