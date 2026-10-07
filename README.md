@@ -69,7 +69,9 @@ Open http://localhost:3000 in your browser to see the project.
 `clear_pipeline.defs.tasks.worker.HANDLERS`, runs each handler under a heartbeat, and
 completes or fails it. The first handler is `event.impact_prior.clear` (CLEAR Events + knowledge
 base, never the web); it also claims the bare `event.impact_prior` for one release, after
-`.clear` — `TASK_IMPACT_PRIOR_KINDS` lists the kinds in claim order. Adding a kind of work is a
+`.clear` — `TASK_DRAIN_IMPACT_PRIOR_KINDS` lists the kinds in claim order and accepts only those two
+(not to be confused with clear-api's `TASK_IMPACT_PRIOR_KINDS`, which lists the kinds a request fans out
+into, `.web` included). Adding a kind of work is a
 handler (`@register_handler("<kind>")` returning a `TaskOutcome`), not a module and not a queue.
 
 It needs one extra variable, because the pipeline user may not claim Tasks:

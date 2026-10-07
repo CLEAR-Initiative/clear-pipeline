@@ -1,13 +1,15 @@
 """The Worker loop over clear-api's Task contract (ADR-0010).
 
 Run-queue placement: ``drain_tasks_job`` carries ``dagster/priority`` (see
-``_RUN_PRIORITY``). The instance's QueuedRunCoordinator dequeues at most four
-runs at a time and, among the queued, the highest priority first (default 0).
-The 1-minute hotline and translate sensors keep that queue busy, and a Task
-is a person waiting on an Event page, so this job jumps that queue rather
-than taking its turn behind an hour of ingest runs. A priority tag needs no
-instance config, unlike a concurrency key (``tag_concurrency_limits`` in
-``deploy/dagster.yaml``), which would also only cap, not favour, the drain.
+``_RUN_PRIORITY``). The instance's QueuedRunCoordinator dequeues up to its
+``max_concurrent_runs`` at a time (the instance's dagster.yaml decides: the
+dev VM mounts its own) and, among the queued, the highest priority first
+(default 0). The 1-minute hotline and translate sensors keep that queue busy,
+and a Task is a person waiting on an Event page, so this job jumps the queue
+rather than taking its turn behind an hour of ingest runs. Priority only
+reorders the queue; it cannot free a slot two long runs already hold. A
+priority tag needs no instance config, unlike a tag concurrency limit, which
+would also only cap, not favour, the drain.
 
 No ``from __future__ import annotations`` — Dagster inspects the ``context``
 annotation on the asset.
@@ -224,11 +226,18 @@ def _drain(context) -> dg.MaterializeResult:
             return dg.MaterializeResult(metadata={"skipped_concurrent": True})
 
         metadata: dict[str, Any] = {}
+        if not HANDLERS:
+            context.log.warning("[drain_tasks] no Task kind is registered — nothing to claim")
         for kind, handler in HANDLERS.items():
             counts = _drain_kind(context, kind, handler)
             context.log.info("[drain_tasks] %s: %s", kind, counts)
             for outcome, n in counts.items():
                 metadata[f"{kind}.{outcome}"] = n
+            # A lost lease means clear-api is unhealthy or someone else holds
+            # our Tasks; claiming the next kind straight away would not help.
+            if counts[LOST]:
+                context.log.info("[drain_tasks] %s lost a lease — leaving the other kinds to the next run", kind)
+                break
         return dg.MaterializeResult(metadata=metadata)
 
 

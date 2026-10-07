@@ -6,8 +6,9 @@ clear-api fans one ImpactPrior request out into one Task per Worker kind
 (``TASK_IMPACT_PRIOR_KINDS`` there); ``.clear`` is this Worker's. The bare
 ``event.impact_prior`` was the kind before the fan-out and is still claimed
 for one release, after ``.clear``, so a Task opened before the rename is
-drained too (``settings.task_impact_prior_kinds``). The proposal's
-``sourceKind`` is stamped server-side from the Task's kind — nothing to send.
+drained too (``settings.task_drain_impact_prior_kinds``, allow-listed to
+these two by ``claim_kinds``). The proposal's ``sourceKind`` is stamped
+server-side from the Task's kind — nothing to send.
 
 Cases come from CLEAR first — its own Events of the same GLIDE type under the
 Event's country, then knowledge-base passages — and a model decides which
@@ -293,14 +294,35 @@ def select_cases(
 # ── the handler ────────────────────────────────────────────────────────────
 
 
+#: The only kinds this handler may claim: its own, and the pre-fan-out bare
+#: kind for one release. Claiming `.web` would complete web Tasks with CLEAR
+#: evidence (clear-api labels a proposal by the Task's kind) and starve the
+#: web Worker, so a misconfigured value must never widen this.
+CLAIMABLE_KINDS = (KIND, LEGACY_KIND)
+
+
 def claim_kinds() -> list[str]:
     """The kinds this handler claims, in claim order, from
-    ``TASK_IMPACT_PRIOR_KINDS`` (comma-separated; blanks and repeats dropped)."""
+    ``TASK_DRAIN_IMPACT_PRIOR_KINDS`` (comma-separated; blanks and repeats
+    dropped). Anything outside ``CLAIMABLE_KINDS`` is dropped with an error
+    log; an empty result falls back to ``[KIND]`` so the drain never silently
+    claims nothing."""
     kinds: list[str] = []
-    for raw in settings.task_impact_prior_kinds.split(","):
+    for raw in settings.task_drain_impact_prior_kinds.split(","):
         kind = raw.strip()
-        if kind and kind not in kinds:
-            kinds.append(kind)
+        if not kind or kind in kinds:
+            continue
+        if kind not in CLAIMABLE_KINDS:
+            logger.error(
+                "[impact_prior] TASK_DRAIN_IMPACT_PRIOR_KINDS lists %r, which this Worker may not claim "
+                "(allowed: %s) — ignored",
+                kind, ", ".join(CLAIMABLE_KINDS),
+            )
+            continue
+        kinds.append(kind)
+    if not kinds:
+        logger.warning("[impact_prior] TASK_DRAIN_IMPACT_PRIOR_KINDS names no claimable kind — claiming %s", KIND)
+        kinds = [KIND]
     return kinds
 
 

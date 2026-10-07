@@ -51,18 +51,33 @@ class TestRegistry:
 
     def test_default_claims_clear_first_then_the_bare_kind_for_one_release(self):
         # The shipped default (the field, not the env-driven instance).
-        default = type(ip.settings).model_fields["task_impact_prior_kinds"].default
-        with patch.object(ip.settings, "task_impact_prior_kinds", default):
+        default = type(ip.settings).model_fields["task_drain_impact_prior_kinds"].default
+        with patch.object(ip.settings, "task_drain_impact_prior_kinds", default):
             assert ip.claim_kinds() == [ip.KIND, ip.LEGACY_KIND]
 
     def test_claim_kinds_come_from_settings_in_order(self):
-        with patch.object(ip.settings, "task_impact_prior_kinds", "event.impact_prior.clear,event.impact_prior"):
+        with patch.object(ip.settings, "task_drain_impact_prior_kinds", "event.impact_prior.clear,event.impact_prior"):
             assert ip.claim_kinds() == ["event.impact_prior.clear", "event.impact_prior"]
         # Dropping the bare kind once the release has shipped is an env change, not a code change.
-        with patch.object(ip.settings, "task_impact_prior_kinds", "event.impact_prior.clear"):
+        with patch.object(ip.settings, "task_drain_impact_prior_kinds", "event.impact_prior.clear"):
             assert ip.claim_kinds() == ["event.impact_prior.clear"]
-        with patch.object(ip.settings, "task_impact_prior_kinds", " event.impact_prior.clear , ,event.impact_prior.clear,"):
+        with patch.object(ip.settings, "task_drain_impact_prior_kinds", " event.impact_prior.clear , ,event.impact_prior.clear,"):
             assert ip.claim_kinds() == ["event.impact_prior.clear"]
+
+    def test_never_claims_a_kind_outside_its_own(self, caplog):
+        # clear-api's fan-out default pasted here must not make this CLEAR-only
+        # Worker claim (and mislabel) web Tasks; a typo must not be a silent no-op.
+        with patch.object(ip.settings, "task_drain_impact_prior_kinds", "event.impact_prior.clear,event.impact_prior.web"):
+            assert ip.claim_kinds() == ["event.impact_prior.clear"]
+        assert "event.impact_prior.web" in caplog.text
+        with patch.object(ip.settings, "task_drain_impact_prior_kinds", "event.impact_prior_clear"):
+            assert ip.claim_kinds() == ["event.impact_prior.clear"]
+
+    def test_an_empty_setting_claims_clear_rather_than_nothing(self, caplog):
+        for value in ("", " , ,"):
+            with patch.object(ip.settings, "task_drain_impact_prior_kinds", value):
+                assert ip.claim_kinds() == ["event.impact_prior.clear"]
+        assert "claiming event.impact_prior.clear" in caplog.text
 
     def test_drain_tasks_job_jumps_the_run_queue(self):
         # QueuedRunCoordinator dequeues the highest `dagster/priority` first;
@@ -255,6 +270,24 @@ class TestDrain:
         ]
         assert result.metadata["event.impact_prior.clear.completed"] == 1
         assert result.metadata["event.impact_prior.completed"] == 1
+
+
+    def test_a_lost_lease_stops_the_whole_drain_not_just_its_kind(self):
+        claimed_kinds = []
+
+        def claim(kind, *, limit):  # noqa: ARG001
+            claimed_kinds.append(kind)
+            return [TASK] if kind == "event.impact_prior.clear" else [LEGACY_TASK]
+        with patch("clear_pipeline.defs.tasks.worker.redis_lock") as lock, \
+             patch("clear_pipeline.defs.tasks.worker.clear_api.claim_tasks", side_effect=claim), \
+             patch("clear_pipeline.defs.tasks.worker.process_one_task", return_value=LOST), \
+             patch.dict(HANDLERS, {"event.impact_prior.clear": lambda c, t: None,
+                                   "event.impact_prior": lambda c, t: None}, clear=True):
+            lock.return_value.__enter__.return_value = True
+            result = _drain(_ctx())
+        assert claimed_kinds == ["event.impact_prior.clear"]
+        assert result.metadata["event.impact_prior.clear.lost"] == 1
+        assert "event.impact_prior.lost" not in result.metadata
 
 
 class TestDrainKind:
