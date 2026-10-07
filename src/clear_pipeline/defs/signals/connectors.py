@@ -18,9 +18,12 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
-  │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
+  │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
+  * one ``ManualConnector`` per name in ``settings.manual_source_names``:
+    ``manual`` plus ``field_officer`` / ``partner`` / ``government``, the
+    sources clear-api's ``createManualSignal`` accepts.
 
 - **polled** — has an external API to poll. The factory builds an ingest asset +
   poll sensor: it writes raw blobs to the lake and ``createSignal(status=NEW,
@@ -606,14 +609,21 @@ class DTMFlashAlertConnector:
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
-    """No external API: analysts create ``source=manual`` signals directly in
-    clear-api. There is no ingest asset and no lake blob — the drain reads NEW
-    manual signals and ``project`` builds the view from the signal row itself."""
+    """No external API: analysts create signals directly in clear-api
+    (``createManualSignal``). There is no ingest asset and no lake blob — the
+    drain reads NEW manual signals and ``project`` builds the view from the
+    signal row itself.
 
-    source = settings.manual_source_name
+    One instance per analyst-created source name (``settings.manual_source_names``):
+    clear-api files them under ``field_officer`` / ``partner`` / ``government``,
+    and each needs its own registry entry so the drain dispatches it here."""
+
     polled = False
     drained = True
     poll_interval_minutes = settings.manual_poll_interval_minutes
+
+    def __init__(self, source: str) -> None:
+        self.source = source
 
     def project(self, record: Any, created: dict) -> SignalView:
         # record is None — everything comes from the clear-api signal row.
@@ -668,7 +678,11 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     DTMFlashAlertConnector(),
-    ManualConnector(),
+    *(
+        ManualConnector(name.strip())
+        for name in settings.manual_source_names.split(",")
+        if name.strip()
+    ),
     SudanWarXConnector(),
 ]
 
