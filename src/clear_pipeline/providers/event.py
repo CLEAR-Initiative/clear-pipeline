@@ -394,8 +394,9 @@ def _resolve_population_displaced(claude_value: int | None) -> int:
 
 
 def _get_active_events() -> list[dict]:
-    """Events touched in the last 14 days (matches the archival cutoff so we
-    don't cluster into an event that the nightly job is about to archive)."""
+    """Events whose newest Signal is within the last ACTIVE_EVENTS_WINDOW_DAYS
+    (7 days) — inside the 14-day stale-alert archival cutoff, so we don't
+    cluster into an event whose alert the nightly job is about to archive."""
     cached = _redis.get(ACTIVE_EVENTS_CACHE_KEY)
     if cached:
         return json.loads(cached)
@@ -446,6 +447,25 @@ def _event_matches(event: dict, target_admin2: str, target_level2: str) -> bool:
         if admin2 == target_admin2:
             return True
     return False
+
+
+def _later_iso(current: str | None, candidate: str) -> str:
+    """The later of two ISO-8601 timestamps, returned as given. Parsed rather
+    than compared as strings: clear-api returns `...000Z` while signals carry
+    `+00:00` or no offset (read as UTC). Falls back to `candidate` when
+    `current` is missing and to whichever side parses when the other doesn't.
+    """
+    def parse(v: str) -> datetime | None:
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+    if not current or (cur := parse(current)) is None:
+        return candidate
+    cand = parse(candidate)
+    return candidate if cand is not None and cand > cur else current
 
 
 def _most_recent(events: list[dict]) -> dict | None:
@@ -675,10 +695,14 @@ def _match_and_act(
             len(matches), signal_id, target_id,
         )
 
-        # First attach the signal so the rewrite sees the full set
+        # First attach the signal so the rewrite sees the full set. Signals
+        # arrive out of order (a backdated ACLED/IDMC record, a delayed
+        # Dataminr item), so never move lastSignalCreatedAt back: it decides
+        # whether the event stays in the active window and the alert window.
+        # clear-api's updateEvent enforces this too.
         update_event(target_id, {
             "signalIds": [signal_id],
-            "lastSignalCreatedAt": ts,
+            "lastSignalCreatedAt": _later_iso(target.get("lastSignalCreatedAt"), ts),
         })
 
         # Now rewrite + derive severity + displacement across the full set
