@@ -17,6 +17,7 @@ from clear_pipeline.defs.tasks.worker import (
     TaskOutcome,
     _drain,
     _drain_kind,
+    drain_tasks_job,
     process_one_task,
     register_handler,
 )
@@ -53,6 +54,11 @@ class TestRegistry:
             assert ip.claim_kinds() == ["event.impact_prior.clear"]
         with patch.object(ip.settings, "task_impact_prior_kinds", " event.impact_prior.clear , ,event.impact_prior.clear,"):
             assert ip.claim_kinds() == ["event.impact_prior.clear"]
+
+    def test_drain_tasks_job_jumps_the_run_queue(self):
+        # QueuedRunCoordinator dequeues the highest `dagster/priority` first;
+        # every other job here is 0, so a Task never waits behind the ingest sensors.
+        assert int(drain_tasks_job.tags["dagster/priority"]) > 0
 
     def test_register_handler_adds_a_kind(self):
         @register_handler("event.other")

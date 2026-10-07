@@ -1,5 +1,14 @@
 """The Worker loop over clear-api's Task contract (ADR-0010).
 
+Run-queue placement: ``drain_tasks_job`` carries ``dagster/priority`` (see
+``_RUN_PRIORITY``). The instance's QueuedRunCoordinator dequeues at most four
+runs at a time and, among the queued, the highest priority first (default 0).
+The 1-minute hotline and translate sensors keep that queue busy, and a Task
+is a person waiting on an Event page, so this job jumps that queue rather
+than taking its turn behind an hour of ingest runs. A priority tag needs no
+instance config, unlike a concurrency key (``tag_concurrency_limits`` in
+``deploy/dagster.yaml``), which would also only cap, not favour, the drain.
+
 No ``from __future__ import annotations`` — Dagster inspects the ``context``
 annotation on the asset.
 """
@@ -25,6 +34,9 @@ _DRAIN_LOCK_TTL_SECONDS = 3600
 # ones run. The claim is a cheap SKIP LOCKED statement; loop instead.
 _BATCH_SIZE = 1
 _MAX_BATCHES = 50
+# QueuedRunCoordinator dequeues higher `dagster/priority` first; 0 is every
+# other run here. 10 leaves room for something more urgent later.
+_RUN_PRIORITY = 10
 
 # Per-Task outcomes, for the run's metadata.
 COMPLETED = "completed"
@@ -229,7 +241,11 @@ def drain_tasks(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     return _drain(context)
 
 
-drain_tasks_job = dg.define_asset_job(name="drain_tasks_job", selection=[drain_tasks])
+drain_tasks_job = dg.define_asset_job(
+    name="drain_tasks_job",
+    selection=[drain_tasks],
+    tags={"dagster/priority": str(_RUN_PRIORITY)},
+)
 task_worker_sensor = build_poll_sensor(
     name="task_worker_sensor",
     job=drain_tasks_job,
