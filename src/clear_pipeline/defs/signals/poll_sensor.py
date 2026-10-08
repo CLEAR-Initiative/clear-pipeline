@@ -19,6 +19,7 @@ asset modules omit it).
 
 import json
 import time
+from collections.abc import Callable
 
 import dagster as dg
 
@@ -33,12 +34,18 @@ def build_poll_sensor(
     job,
     default_interval_minutes: int,
     default_status: dg.DefaultSensorStatus = dg.DefaultSensorStatus.STOPPED,
+    skip_when: Callable[[], str | None] | None = None,
 ):
     """A sensor that launches ``job`` every ``interval_minutes`` (default from
     env, overridable via the sensor cursor in the Dagster UI). Ships STOPPED by
     default so the big-bang cutover enables it alongside the eager drain; pass
     ``default_status=RUNNING`` for a sensor a user-facing feature depends on.
-    The default only applies until someone toggles it in the UI."""
+    The default only applies until someone toggles it in the UI.
+
+    ``skip_when``, checked every tick, returns a reason to launch nothing (the
+    job would have no work at all) or ``None`` to poll as usual. A skipped
+    tick leaves the cursor alone, so polling resumes on the next tick after
+    the reason clears."""
 
     @dg.sensor(
         name=name,
@@ -47,6 +54,11 @@ def build_poll_sensor(
         default_status=default_status,
     )
     def _poll_sensor(context: dg.SensorEvaluationContext):
+        reason = skip_when() if skip_when is not None else None
+        if reason:
+            yield dg.SkipReason(reason)
+            return
+
         state = json.loads(context.cursor) if context.cursor else {}
         interval_minutes = int(state.get("interval_minutes", default_interval_minutes))
         last_run = float(state.get("last_run", 0.0))
