@@ -44,7 +44,6 @@ from functools import lru_cache
 import httpx
 
 from clear_pipeline.providers.classify import (
-    DEFAULT_FALLBACK_SEVERITY,
     SignalClassification,
     _load_taxonomy,
     code_to_level1_map,
@@ -176,7 +175,6 @@ def classify_with_jev(
     title: str | None,
     description: str | None,
     source_severity: int | None = None,
-    default_severity: int = DEFAULT_FALLBACK_SEVERITY,
 ) -> SignalClassification:
     """Classify one signal with Jev. Same contract as ``classify_locally``.
     Raises ``JevError`` on any failure (incl. a malformed answer or an open
@@ -224,14 +222,14 @@ def classify_with_jev(
     classification = SignalClassification(
         disaster_types=[code],
         relevance=relevance,
-        severity=source_severity if source_severity is not None else default_severity,
+        severity=source_severity,  # None when the source gave none — not invented
         summary=summary,
         type_level_1=code_to_level1_map().get(code),
         type_level_2=code_to_level2_map().get(code),
         type_level_3=code_to_level3_map().get(code),
     )
     logger.info(
-        "[JEV CLASSIFY] code=%s code_conf=%.2f relevance=%.2f severity=%d (source=%s)",
+        "[JEV CLASSIFY] code=%s code_conf=%.2f relevance=%.2f severity=%s (source=%s)",
         code, code_confidence, relevance, classification.severity, source_severity,
     )
     return classification

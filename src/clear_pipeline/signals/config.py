@@ -82,7 +82,19 @@ class Settings(BaseSettings):
     # an analyst's signal is classified/grouped promptly). MANUAL_SOURCE_NAME must
     # match a data_sources row and the `source` clear-api tags on those signals.
     manual_source_name: str = "manual"
+    # The data_sources rows clear-api's createManualSignal accepts — a mirror of
+    # its TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts). Drained exactly
+    # like MANUAL_SOURCE_NAME; a name missing here is marked FAILED as an unknown
+    # source instead of being grouped. Comma-separated.
+    manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
+    # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
+    # works Tasks. Tasks are user-requested and slow to produce; 5 minutes
+    # keeps the Event page's "requested" state short without hammering the queue.
+    task_poll_interval_minutes: int = 5
+    # How often a Worker extends its lease while a handler runs (clear-api's
+    # lease is 15 minutes by default; three heartbeats fit comfortably).
+    task_heartbeat_minutes: int = 5
 
     # sudan-war-x — X posts pushed by an external poller to clear-api's
     # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push
@@ -211,15 +223,9 @@ class Settings(BaseSettings):
     # email is technically correct but stale. Set to 0 to disable the gate.
     alert_max_signal_age_hours: int = 48
 
-    # Last-resort default for `events.population_displaced` when neither
-    # the signal text nor the admin-2 DTM row provides a value.
-    default_population_displaced: int = 1670
-
-    # Last-resort default for `events.population_affected` when neither the
-    # raw signal extraction (ACLED has none, GDACS exposure data,
-    # Dataminr/manual regex) nor the per-event-type lookup (median pop_1km
-    # via acled_event_type_stats.json) produces a value.
-    default_population_affected: int = 33_000
+    # (Removed: default_population_displaced / default_population_affected — the
+    # pipeline no longer invents a last-resort population constant; an unknown
+    # population is left null rather than fabricated.)
 
     # IOM DTM API — displaced-person data per admin level
     iom_dtm_base_url: str = "https://dtmapi.iom.int/v3"

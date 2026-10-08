@@ -59,9 +59,10 @@ def test_without_a_rewrite_no_text_or_displacement_and_no_nulls():
     assert out == {}
 
 
-def test_rewrite_without_displacement_falls_back_to_the_default():
+def test_rewrite_without_displacement_leaves_it_out():
+    # ADR-0010: unknown stays null; no invented default.
     out = ev._rewrite_fields([m("a")], rewrite(population_displaced=None), None)
-    assert out["populationDisplaced"] == str(ev.settings.default_population_displaced)
+    assert "populationDisplaced" not in out
 
 
 # ── _match_and_act (characterization) ───────────────────────────────────────
@@ -126,10 +127,10 @@ def test_create_branch_with_rewrite(group):
     assert (final["title"], final["severity"], final["populationDisplaced"]) == ("New title", 4, "1200")
 
 
-def test_create_branch_failed_rewrite_still_writes_the_default_displacement(group):
+def test_create_branch_failed_rewrite_writes_no_displacement(group):
+    # ADR-0010: no rewrite figure, no invented default.
     update_event, _ = group(members=[m("s-new", severity=None)], llm=FakeLLM(fail=True))
-    final = update_event.call_args.args[1]
-    assert final == {"populationDisplaced": str(ev.settings.default_population_displaced)}
+    assert all("populationDisplaced" not in c.args[1] for c in update_event.call_args_list)
 
 
 # ── group_signal records the glide (signals.glideCode) ──────────────────────

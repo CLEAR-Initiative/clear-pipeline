@@ -18,9 +18,13 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
-  │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
+  │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
+  * one ``ManualConnector`` per analyst-created source: ``manual``
+    (``MANUAL_SOURCE_NAME``) plus ``field_officer`` / ``partner`` / ``government``
+    (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
+    ``createManualSignal`` accepts.
 
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
@@ -568,14 +572,21 @@ class DTMFlashAlertConnector:
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
-    """No external API: analysts create ``source=manual`` signals directly in
-    clear-api. There is no ingest asset and no lake blob — the drain reads NEW
-    manual signals and ``project`` builds the view from the signal row itself."""
+    """No external API: analysts create signals directly in clear-api
+    (``createManualSignal``). There is no ingest asset and no lake blob — the
+    drain reads NEW manual signals and ``project`` builds the view from the
+    signal row itself.
 
-    source = settings.manual_source_name
+    One instance per analyst-created source name (see ``_manual_source_names``):
+    clear-api files them under ``field_officer`` / ``partner`` / ``government``,
+    and each needs its own registry entry so the drain dispatches it here."""
+
     polled = False
     drained = True
     poll_interval_minutes = settings.manual_poll_interval_minutes
+
+    def __init__(self, source: str) -> None:
+        self.source = source
 
     def project(self, record: Any, created: dict) -> SignalView:
         # record is None — everything comes from the clear-api signal row.
@@ -620,6 +631,13 @@ class SudanWarXConnector:
         )
 
 
+def _manual_source_names() -> list[str]:
+    """``MANUAL_SOURCE_NAME`` plus clear-api's trusted sources
+    (``MANUAL_TRUSTED_SOURCE_NAMES``), in order, without duplicates."""
+    names = [settings.manual_source_name, *settings.manual_trusted_source_names.split(",")]
+    return list(dict.fromkeys(n.strip() for n in names if n.strip()))
+
+
 #: The connector registry — the factory builds every source's ingest defs from
 #: this, and the shared drain stages dispatch per-signal projection through
 #: CONNECTORS_BY_SOURCE.
@@ -630,13 +648,30 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     DTMFlashAlertConnector(),
-    ManualConnector(),
+    *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]
 
+
+def _index_by_source(connectors: list[SignalSource]) -> dict[str, SignalSource]:
+    """Map source name → connector, refusing a name two connectors claim. A
+    manual name configured to match a polled source (e.g. ``dataminr``) would
+    otherwise silently replace that source's connector and skip its blob
+    projection."""
+    by_source: dict[str, SignalSource] = {}
+    for c in connectors:
+        if c.source in by_source:
+            raise ValueError(
+                f"Two connectors claim source {c.source!r} — check "
+                "MANUAL_SOURCE_NAME / MANUAL_TRUSTED_SOURCE_NAMES"
+            )
+        by_source[c.source] = c
+    return by_source
+
+
 #: source name → connector, so the shared classify/group stage can rehydrate +
 #: project a signal from ANY source (dispatch on ``created["source"]["name"]``).
-CONNECTORS_BY_SOURCE: dict[str, SignalSource] = {c.source: c for c in CONNECTORS}
+CONNECTORS_BY_SOURCE: dict[str, SignalSource] = _index_by_source(CONNECTORS)
 
 #: Sources whose NEW signals the classify/group stage should process. All current
 #: sources are drained; an ingest-only source (drained=False) would be excluded.

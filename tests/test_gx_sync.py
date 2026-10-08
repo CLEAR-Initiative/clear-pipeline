@@ -64,7 +64,7 @@ class FakePostgres:
         self._maybe_fail("update")
         key = (data["sourceId"], data["externalId"])
         if key not in self.rows:
-            raise ClearApiNotFound("Signal not found")
+            raise ClearApiNotFound([{"message": "Signal not found", "extensions": {"code": "NOT_FOUND"}}])
         row = self.rows[key]
         row["contentHash"] = data["contentHash"]
         row["title"] = data.get("title")

@@ -252,15 +252,20 @@ def _compute_event_severity(
     claude_fallback: int | None,
 ) -> int | None:
     """Event-level severity rule:
-    - If EVERY signal has a non-null source severity → return round(mean).
-    - Otherwise → return the Claude-estimated fallback (may itself be None).
+    - Average ONLY the signals that have a source severity (null = unknown, not
+      low — an unknown-severity signal still belongs to the event, it just isn't
+      counted in the mean). Clamp to 1-5.
+    - Fall back to the Claude estimate ONLY when NO signal has a severity (it may
+      itself be None → event severity stays null).
+
+    Averaging only known values matters after #95, where null severity is common
+    (Darfur24 news, ACLED with no fatalities, unmapped GDACS): discarding every
+    known severity the moment one null signal joins would, e.g., throw away a
+    GDACS red alert's 5 as soon as a Darfur24 article attaches to the same event.
     """
-    if not signals:
-        return claude_fallback
-    severities = [s.get("severity") for s in signals]
-    if all(s is not None for s in severities):
-        mean = sum(severities) / len(severities)
-        return max(1, min(5, round(mean)))
+    known = [s["severity"] for s in signals if s.get("severity") is not None]
+    if known:
+        return max(1, min(5, round(sum(known) / len(known))))
     return claude_fallback
 
 
@@ -306,16 +311,15 @@ def _resolve_signal_stats(
     actual_population: int | None,
     glide_code: str | None,
 ) -> dict:
-    """Per-signal stats with a 3-tier fallback chain:
+    """Per-signal stats with a 2-tier chain (no invented constant):
       1. Raw-extracted actual from the source (ACLED fatalities, GDACS
          population_affected, Dataminr/manual regex).
       2. Per-event-type historical lookup via the signal's level_3 sub-type
          (q75 fatalities / median pop_1km).
-      3. For populationAffected only: settings.default_population_affected
-         as a last-resort constant so events always carry some estimate.
 
-    Casualties stays None when both (1) and (2) produce nothing — there's
-    no sensible global default for fatalities.
+    Both casualties and populationAffected stay None when neither tier yields
+    a number — we no longer fabricate a last-resort population constant; the
+    field is left null so "unknown" is honestly null, not an invented estimate.
     """
     fallback = _stats_for_glide(glide_code)
 
@@ -327,13 +331,13 @@ def _resolve_signal_stats(
     else:
         casualties = None
 
-    population: int
+    population: int | None
     if actual_population is not None:
         population = actual_population
     elif fallback["population_affected"] is not None:
         population = fallback["population_affected"]
     else:
-        population = settings.default_population_affected
+        population = None
 
     return {"casualties": casualties, "population_affected": population}
 
@@ -376,29 +380,26 @@ def _merge_event_stats(target: dict, resolved: dict) -> dict:
     return out
 
 
-def _resolve_population_displaced(claude_value: int | None) -> int:
-    """Two-tier fallback:
-      1. `claude_value` (regex-style extraction across the signal text done
-         by the rewrite pass).
-      2. `settings.default_population_displaced` (1670 by default).
+def _resolve_population_displaced(claude_value: int | None) -> int | None:
+    """Displacement count from the rewrite pass's text extraction, or None.
 
-    The DTM-from-location-metadata tier was previously between these two,
-    but DTM data is district-wide and event-agnostic — we'd attribute a
-    whole-district displacement total to a single event, inflating the
-    estimate. Better to fall straight through to the bounded default when
-    the text doesn't tell us a number.
+    We no longer fall back to an invented constant (the old 1670 default):
+    when the signal text gives no positive figure, displacement is genuinely
+    unknown and is left null rather than fabricated. (The DTM-from-location-
+    metadata tier was already removed — district-wide totals over-attribute to
+    a single event.)
     """
     if claude_value is not None and claude_value > 0:
         return int(claude_value)
 
-    default = settings.default_population_displaced
-    logger.info("[GROUPING] populationDisplaced falling back to default: %s", default)
-    return default
+    logger.info("[GROUPING] populationDisplaced unknown — leaving null (not invented)")
+    return None
 
 
 def _get_active_events() -> list[dict]:
-    """Events touched in the last 14 days (matches the archival cutoff so we
-    don't cluster into an event that the nightly job is about to archive)."""
+    """Events whose newest Signal is within the last ACTIVE_EVENTS_WINDOW_DAYS
+    (7 days) — inside the 14-day stale-alert archival cutoff, so we don't
+    cluster into an event whose alert the nightly job is about to archive."""
     cached = _redis.get(ACTIVE_EVENTS_CACHE_KEY)
     if cached:
         return json.loads(cached)
@@ -449,6 +450,25 @@ def _event_matches(event: dict, target_admin2: str, target_level2: str) -> bool:
         if admin2 == target_admin2:
             return True
     return False
+
+
+def _later_iso(current: str | None, candidate: str) -> str:
+    """The later of two ISO-8601 timestamps, returned as given. Parsed rather
+    than compared as strings: clear-api returns `...000Z` while signals carry
+    `+00:00` or no offset (read as UTC). Falls back to `candidate` when
+    `current` is missing and to whichever side parses when the other doesn't.
+    """
+    def parse(v: str) -> datetime | None:
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+    if not current or (cur := parse(current)) is None:
+        return candidate
+    cand = parse(candidate)
+    return candidate if cand is not None and cand > cur else current
 
 
 def _most_recent(events: list[dict]) -> dict | None:
@@ -511,8 +531,9 @@ def _rewrite_fields(
 ) -> dict:
     """Event fields derived from ``members`` and an optional rewrite, shared by
     grouping and recompute. Severity/rank only when a severity resolves (the
-    rewrite's, else ``fallback_severity``, unless every member has one); text
-    and displacement only from a successful rewrite. Never returns nulls."""
+    members' known severities, else the rewrite's, else ``fallback_severity``);
+    text and displacement only from a successful rewrite, displacement only when
+    it gives a figure (ADR-0010: unknown stays null). Never returns nulls."""
     claude = rewrite.severity if rewrite and rewrite.severity is not None else fallback_severity
     severity = _compute_event_severity(members, claude) if members else None
     out: dict = {}
@@ -522,7 +543,9 @@ def _rewrite_fields(
     if rewrite:
         out["title"] = rewrite.title
         out["description"] = rewrite.description
-        out["populationDisplaced"] = str(_resolve_population_displaced(rewrite.population_displaced))
+        displaced = _resolve_population_displaced(rewrite.population_displaced)
+        if displaced is not None:
+            out["populationDisplaced"] = str(displaced)
     return out
 
 
@@ -712,10 +735,14 @@ def _match_and_act(
             len(matches), signal_id, target_id,
         )
 
-        # First attach the signal so the rewrite sees the full set
+        # First attach the signal so the rewrite sees the full set. Signals
+        # arrive out of order (a backdated ACLED/IDMC record, a delayed
+        # Dataminr item), so never move lastSignalCreatedAt back: it decides
+        # whether the event stays in the active window and the alert window.
+        # clear-api's updateEvent enforces this too.
         update_event(target_id, {
             "signalIds": [signal_id],
-            "lastSignalCreatedAt": ts,
+            "lastSignalCreatedAt": _later_iso(target.get("lastSignalCreatedAt"), ts),
         })
 
         # Now rewrite + derive severity + displacement across the full set.
@@ -751,13 +778,11 @@ def _match_and_act(
         signal_id, admin2_id, level_2,
     )
 
-    try:
-        valid_to = (
-            datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
-        ).isoformat()
-    except (ValueError, AttributeError):
-        valid_to = (datetime.now(UTC) + timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)).isoformat()
+    # Event end (validTo): left null — we don't invent an end date. A new event
+    # has no known end, so validTo stays None ("ongoing / no known end") rather
+    # than a fabricated start + ACTIVE_EVENTS_WINDOW_DAYS. (That window constant
+    # is still used for active-event clustering below, not as an event end.)
+    valid_to = None
 
     # Event-level location: the admin-2 district we clustered on IS the
     # event's location. Stored in `locationId` (generalLocation) — the
@@ -809,8 +834,6 @@ def _match_and_act(
     # event's full signal set (here, just the one we linked).
     rewrite, signals = _rewrite_event(event["id"], location_name, level_2)
     final_update = _rewrite_fields(signals, rewrite, fallback_severity=None)
-    # A new event always carries a displacement estimate, even without a rewrite.
-    final_update.setdefault("populationDisplaced", str(_resolve_population_displaced(None)))
 
     # casualties + populationAffected were already set at create_event() time
     # from this first signal's glide-derived stats. They're maintained via
@@ -913,8 +936,9 @@ def recompute_event(
     }
     if rewrite or not members:
         aggregates["rewriteMembersHash"] = live_hash
-    if not members:
-        # Only a rewrite sets it, and none can run without members.
+    if (rewrite or not members) and "populationDisplaced" not in aggregates:
+        # Absolute write: the live members give no figure, so it is unknown (ADR-0010),
+        # not the figure a retracted member may have supplied.
         aggregates["populationDisplaced"] = None
 
     try:

@@ -4,6 +4,11 @@ status: accepted
 
 # Population Affected is extracted from reports, not sourced from `events`
 
+> **Update (2026-10-08):** the tier-3 invented defaults described below (33,000
+> affected / 1,670 displaced) were removed in #95 — unknown is now stored as null,
+> not a fabricated constant (see ADR-0010). The rest of this ADR's reasoning and
+> conclusion still hold.
+
 The situation dashboard needs Population Affected — the widest circle of crisis impact (see `CONTEXT.md`). Two places in the system could supply it:
 
 1. **`events.populationAffected`** in clear-api — already exists, already populated.

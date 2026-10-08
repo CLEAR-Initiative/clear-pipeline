@@ -101,7 +101,8 @@ def test_defaults_use_the_event_type_and_never_classify(run):
         patch("clear_pipeline.providers.signal_classifier.classify_signal", side_effect=AssertionError),
     ):
         run(api)
-    assert api.writes[-1]["populationAffected"] == "33000"  # flood default, despite "Clash" titles
+    # ADR-0010: no figure and no flood stat -> null, not an invented default.
+    assert api.writes[-1]["populationAffected"] is None
 
 
 def test_retracted_member_is_not_counted(run):
@@ -132,6 +133,19 @@ def test_membership_change_runs_one_rewrite_and_stores_the_hash(run):
     assert w["rewriteMembersHash"] == ev.members_hash(api.event_members("e1"))
 
 
+def test_rewrite_without_a_displacement_figure_clears_it(run):
+    # Absolute write: the stored figure may have come from a now-retracted member.
+    class NoFigureLLM(FakeLLM):
+        def complete_structured(self, *, system, user, schema):
+            self.calls.append(user)
+            return schema(title="New title", description="New desc", severity=4, population_displaced=None)
+
+    api = FakeApi([m("a")])
+    run(api, NoFigureLLM())
+    w = api.writes[-1]
+    assert "populationDisplaced" in w and w["populationDisplaced"] is None
+
+
 def test_unchanged_membership_makes_no_llm_call_and_keeps_text(run):
     members = [m("a", severity=None), m("b", day=2)]
     api = FakeApi(members, {"severity": 2})
@@ -141,7 +155,15 @@ def test_unchanged_membership_makes_no_llm_call_and_keeps_text(run):
     assert called is False and llm.calls == []
     for key in ("title", "description", "rewriteMembersHash", "populationDisplaced"):
         assert key not in w
-    assert w["severity"] == 2  # a member lacks severity -> current event severity is the fallback
+    assert w["severity"] == 3  # ADR-0010: the known severities are averaged; the null one is skipped
+
+
+def test_unchanged_membership_falls_back_to_event_severity_when_no_member_has_one(run):
+    members = [m("a", severity=None), m("b", day=2, severity=None)]
+    api = FakeApi(members, {"severity": 2})
+    api.state["rewriteMembersHash"] = ev.members_hash(api.event_members("e1"))
+    run(api)
+    assert api.writes[-1]["severity"] == 2
 
 
 def test_idempotent(run):
@@ -232,7 +254,7 @@ def test_write_carries_the_member_snapshot_the_totals_came_from(run):
 
 def test_stale_members_propagates_over_an_llm_failure_and_invalidates_the_cache(run):
     api = FakeApi([m("a")])
-    api.set_event_aggregates = MagicMock(side_effect=ev.graphql.ClearApiStaleMembers("stale"))
+    api.set_event_aggregates = MagicMock(side_effect=ev.graphql.ClearApiStaleMembers([{"message": "stale", "extensions": {"code": "STALE_EVENT_MEMBERS"}}]))
     with pytest.raises(ev.graphql.ClearApiStaleMembers):
         run(api, FakeLLM(fail=True))
     api.redis.delete.assert_called_with(ev.ACTIVE_EVENTS_CACHE_KEY)
