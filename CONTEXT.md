@@ -24,6 +24,10 @@ _Avoid_: Affected, beneficiaries, caseload
 People forced from their homes. Cuts across the other three rather than nesting cleanly inside them.
 _Avoid_: Refugees (a specific legal status — a displaced person who crossed an international border), IDPs (a displaced person who did not)
 
+### Severity
+
+A 1-5 signal/event magnitude. It is **nullable**: `null` means *unknown* (the source gave none), which is NOT the scale floor. Unknown values stay null — we never invent a default (no `?? 1`, `?? 3`, or per-source floor). Event severity averages only the signals that have one; null-severity signals still belong to the event but aren't counted. See [ADR-0010](docs/adr/0010-unknown-values-stay-null.md) for how null severity is treated in the event mean, range filters, alert matching, and sorting.
+
 ### Reports and incidents
 
 **Report**:

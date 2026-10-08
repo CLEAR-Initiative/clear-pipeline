@@ -249,15 +249,20 @@ def _compute_event_severity(
     claude_fallback: int | None,
 ) -> int | None:
     """Event-level severity rule:
-    - If EVERY signal has a non-null source severity → return round(mean).
-    - Otherwise → return the Claude-estimated fallback (may itself be None).
+    - Average ONLY the signals that have a source severity (null = unknown, not
+      low — an unknown-severity signal still belongs to the event, it just isn't
+      counted in the mean). Clamp to 1-5.
+    - Fall back to the Claude estimate ONLY when NO signal has a severity (it may
+      itself be None → event severity stays null).
+
+    Averaging only known values matters after #95, where null severity is common
+    (Darfur24 news, ACLED with no fatalities, unmapped GDACS): discarding every
+    known severity the moment one null signal joins would, e.g., throw away a
+    GDACS red alert's 5 as soon as a Darfur24 article attaches to the same event.
     """
-    if not signals:
-        return claude_fallback
-    severities = [s.get("severity") for s in signals]
-    if all(s is not None for s in severities):
-        mean = sum(severities) / len(severities)
-        return max(1, min(5, round(mean)))
+    known = [s["severity"] for s in signals if s.get("severity") is not None]
+    if known:
+        return max(1, min(5, round(sum(known) / len(known))))
     return claude_fallback
 
 
