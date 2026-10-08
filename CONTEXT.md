@@ -92,14 +92,16 @@ fail — as the `worker` service user. A new kind of work is a **handler** regis
 _Avoid_: agent, bot, enricher
 
 **Handler**:
-The function that turns one claimed Task into a `TaskOutcome` (raw result, usage, and for
-`event.impact_prior.clear` the ImpactPrior proposal or none). Handlers never write to clear-api
-themselves; the Worker loop does.
+The function that turns one claimed Task into a `TaskOutcome` (raw result, and usage if it
+ran a model). Handlers never write to clear-api themselves; the Worker loop does. None is
+registered today (see **ImpactPrior**).
 _Avoid_: processor, job runner
 
 **ImpactPrior**:
-The first kind of **Event enrichment**: what has typically happened before given a hazard
-type and a country, with its evidence basis (one case per distinct prior occurrence, from
-CLEAR's Events and knowledge base here — never the web from this Worker). A Worker proposes;
-a named analyst accepts or rejects in clear-api.
+What has typically happened before given a hazard type and a country, with its evidence
+basis (vocabulary owned by clear-api's CONTEXT.md). No longer this pipeline's concern: its
+`event.impact_prior.clear` handler — the first **Handler** — was retired on 2026-10-08,
+because clear-api now computes the ImpactPrior from accepted history and the web Worker (a
+Claude routine) proposes individual cases for analysts to accept. The generic **Task
+Worker** stays for future kinds.
 _Avoid_: precedent, history, prior events

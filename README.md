@@ -67,24 +67,25 @@ Open http://localhost:3000 in your browser to see the project.
 `drain_tasks` (group `tasks`) is the production Worker on clear-api's generic Task queue
 (clear-api ADR-0010): it claims Tasks of every kind registered in
 `clear_pipeline.defs.tasks.worker.HANDLERS`, runs each handler under a heartbeat, and
-completes or fails it. The first handler is `event.impact_prior.clear` (CLEAR Events + knowledge
-base, never the web); it also claims the bare `event.impact_prior` for one release, after
-`.clear` — `TASK_DRAIN_IMPACT_PRIOR_KINDS` lists the kinds in claim order and accepts only those two
-(not to be confused with clear-api's `TASK_IMPACT_PRIOR_KINDS`, which lists the kinds a request fans out
-into, `.web` included). Adding a kind of work is a
-handler (`@register_handler("<kind>")` returning a `TaskOutcome`), not a module and not a queue.
+completes or fails it. Adding a kind of work is a handler (`@register_handler("<kind>")`
+returning a `TaskOutcome`), not a module and not a queue.
+
+**No kind is registered today.** The first handler, `event.impact_prior.clear` (and the bare
+pre-fan-out `event.impact_prior`), was retired on 2026-10-08: clear-api now computes the
+ImpactPrior from accepted history itself, and the web Worker (a Claude routine, kind
+`event.impact_prior.web`) proposes individual cases instead, so clear-api no longer requests
+`.clear` Tasks. The generic drain stays for future kinds; with an empty registry the sensor
+skips its ticks and a manual run claims nothing.
 
 It needs one extra variable, because the pipeline user may not claim Tasks:
 
 | Variable | Meaning |
 |---|---|
-| `CLEAR_WORKER_API_KEY` | An `sk_live_…` key of clear-api's `worker` service user (`scripts/create-worker-user.ts` there). Every Task call — claim, heartbeat, complete, fail and the handler's reads — uses it. |
+| `CLEAR_WORKER_API_KEY` | An `sk_live_…` key of clear-api's `worker` service user (`scripts/create-worker-user.ts` there). Every Task call — claim, heartbeat, complete, fail — uses it, as should a handler's own reads. |
 | `TASK_POLL_INTERVAL_MINUTES` | How often `task_worker_sensor` drains (default 5). |
 | `TASK_HEARTBEAT_MINUTES` | How often a running handler extends its lease (default 5; clear-api's lease is 15 minutes). |
 
-The sensor ships STOPPED, like the other drains. The model for the ImpactPrior handler is the
-`narrative` role (`LLM_NARRATIVE_*`); without one it falls back to a rule-based selection over
-CLEAR's own Events and reports no usage.
+The sensor ships STOPPED, like the other drains.
 
 Retry is clear-api's: a failed Task returns to PENDING while attempts remain (`TASK_MAX_ATTEMPTS`
 there, default 3) and is FAILED after. clear-api adds no delay between attempts, so a drain run

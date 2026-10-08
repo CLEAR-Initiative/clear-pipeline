@@ -49,13 +49,11 @@ CANCELLED = "cancelled"  # the requester withdrew it while we worked: result dis
 
 @dataclass
 class TaskOutcome:
-    """What a handler hands back: the raw output for audit, usage if it ran a
-    model, and for ``event.impact_prior.*`` the proposal (``None`` = no prior
-    found, which clear-api records as such and writes no row)."""
+    """What a handler hands back: the raw output for audit, and usage if it
+    ran a model."""
 
     result: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] | None = None
-    impact_prior: dict[str, Any] | None = None
 
 
 TaskHandler = Callable[[Any, dict[str, Any]], TaskOutcome]
@@ -164,16 +162,14 @@ def process_one_task(
         return lease.stopped
 
     try:
-        done = clear_api.complete_task(
-            task_id, token, result=outcome.result, usage=outcome.usage, impact_prior=outcome.impact_prior,
-        )
+        done = clear_api.complete_task(task_id, token, result=outcome.result, usage=outcome.usage)
     except clear_api.TaskLeaseError as exc:
         context.log.warning("[drain_tasks] task %s lost before completion: %s", task_id, exc)
         return LOST
     except clear_api.ClearApiError as exc:
-        # clear-api refused the write (BAD_USER_INPUT, e.g. a proposal that
-        # does not fit the Event): the work is wrong, not the queue. Fail
-        # with the reason so the requester sees it.
+        # clear-api refused the write (BAD_USER_INPUT, e.g. a result that
+        # does not fit the Task's subject): the work is wrong, not the queue.
+        # Fail with the reason so the requester sees it.
         context.log.error("[drain_tasks] task %s: completion rejected: %s", task_id, exc)
         return _fail(context, task_id, token, f"completion rejected: {exc}")
     except Exception:  # noqa: BLE001 — transport blip on the terminal write: the lease lapses and clear-api retries
@@ -227,7 +223,10 @@ def _drain(context) -> dg.MaterializeResult:
 
         metadata: dict[str, Any] = {}
         if not HANDLERS:
-            context.log.warning("[drain_tasks] no Task kind is registered — nothing to claim")
+            # The normal state between handlers (the `.clear` ImpactPrior
+            # handler was retired 2026-10-08): claim nothing, write nothing.
+            context.log.info("[drain_tasks] no Task kind is registered — nothing to claim")
+            return dg.MaterializeResult(metadata={"registered_kinds": 0})
         for kind, handler in HANDLERS.items():
             counts = _drain_kind(context, kind, handler)
             context.log.info("[drain_tasks] %s: %s", kind, counts)
@@ -255,8 +254,17 @@ drain_tasks_job = dg.define_asset_job(
     selection=[drain_tasks],
     tags={"dagster/priority": str(_RUN_PRIORITY)},
 )
+
+
+def _no_registered_kind() -> str | None:
+    """With no handler registered a run would claim nothing: don't launch one
+    (it would also jump the run queue on ``dagster/priority`` for nothing)."""
+    return None if HANDLERS else "no Task kind is registered — nothing to drain"
+
+
 task_worker_sensor = build_poll_sensor(
     name="task_worker_sensor",
     job=drain_tasks_job,
     default_interval_minutes=settings.task_poll_interval_minutes,
+    skip_when=_no_registered_kind,
 )
