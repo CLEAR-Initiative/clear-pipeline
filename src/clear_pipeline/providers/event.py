@@ -831,9 +831,12 @@ def _match_and_act(
 # ── Recompute (signal revised or retracted after grouping) ──────────────────
 
 
-def members_hash(member_ids: list[str]) -> str:
-    """Order-insensitive fingerprint of an event's live member set."""
-    return hashlib.sha256("\n".join(sorted(member_ids)).encode()).hexdigest()[:16]
+def members_hash(members: list[dict]) -> str:
+    """Fingerprint of what the rewrite prompt sees: the newest
+    ``REWRITE_MEMBERS`` live members (newest first, as clear-api returns them)
+    with their revisions, since a revision keeps the signal id."""
+    keys = sorted(f"{m['id']}:{m.get('revision', 0)}" for m in members[:REWRITE_MEMBERS])
+    return hashlib.sha256("\n".join(keys).encode()).hexdigest()[:16]
 
 
 def _primary_location_name(event: dict) -> str | None:
@@ -850,7 +853,7 @@ def recompute_event(
 ) -> bool:
     """Rebuild an event's aggregates from its live members (idempotent, absolute);
     ``member_text`` gives each member's (title, description) as grouping saw it.
-    The LLM rewrite runs only when the member set changed (``rewriteMembersHash``).
+    The LLM rewrite runs only when its newest members changed (``rewriteMembersHash``).
     On LLM failure, deterministic fields are still written, text and hash kept,
     and the error re-raised for retry. Returns True when the rewrite ran."""
     members = graphql.event_members(event_id)
@@ -875,7 +878,7 @@ def recompute_event(
         if resolved["population_affected"] is not None:
             populations.append(resolved["population_affected"])
 
-    live_hash = members_hash([m["id"] for m in members])
+    live_hash = members_hash(members)
 
     rewrite = None
     rewrite_error: Exception | None = None

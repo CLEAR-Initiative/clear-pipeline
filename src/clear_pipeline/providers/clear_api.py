@@ -1608,6 +1608,7 @@ EVENT_MEMBERS = """
 query EventMembers($eventId: String!, $first: Int) {
   eventMembers(eventId: $eventId, first: $first) {
     id
+    revision
     externalId
     title
     description

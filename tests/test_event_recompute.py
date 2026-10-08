@@ -44,10 +44,10 @@ class FakeLLM:
         return schema(title="New title", description="New desc", severity=4, population_displaced=1200)
 
 
-def m(mid, *, day=1, severity=3, casualties=None, title="Clash", description="details"):
+def m(mid, *, day=1, severity=3, casualties=None, title="Clash", description="details", revision=0):
     return {"id": mid, "title": title, "description": description, "severity": severity,
             "casualties": casualties, "publishedAt": f"2026-09-{day:02d}T00:00:00Z",
-            "source": {"name": "acled"}}
+            "source": {"name": "acled"}, "revision": revision}
 
 
 def text(member):
@@ -123,12 +123,13 @@ def test_membership_change_runs_one_rewrite_and_stores_the_hash(run):
     assert called is True and len(llm.calls) == 1
     assert (w["title"], w["description"]) == ("New title", "New desc")
     assert w["populationDisplaced"] == "1200"
-    assert w["rewriteMembersHash"] == ev.members_hash(["a", "b"])
+    assert w["rewriteMembersHash"] == ev.members_hash(api.event_members("e1"))
 
 
 def test_unchanged_membership_makes_no_llm_call_and_keeps_text(run):
     members = [m("a", severity=None), m("b", day=2)]
-    api = FakeApi(members, {"rewriteMembersHash": ev.members_hash(["a", "b"]), "severity": 2})
+    api = FakeApi(members, {"severity": 2})
+    api.state["rewriteMembersHash"] = ev.members_hash(api.event_members("e1"))
     called, llm, _ = run(api)
     w = api.writes[-1]
     assert called is False and llm.calls == []
@@ -147,9 +148,40 @@ def test_idempotent(run):
         assert api.writes[-1][key] == first[key]
 
 
-def test_members_hash_is_order_insensitive():
-    assert ev.members_hash(["a", "b", "c"]) == ev.members_hash(["c", "a", "b"])
-    assert ev.members_hash(["a"]) != ev.members_hash(["a", "b"])
+def test_members_hash_changes_with_membership_and_revision():
+    base = ev.members_hash([m("a"), m("b")])
+    assert ev.members_hash([m("b"), m("a")]) == base
+    assert ev.members_hash([m("a")]) != base
+    assert ev.members_hash([m("a"), m("b", revision=1)]) != base
+
+
+def test_revised_member_reruns_the_rewrite(run):
+    api = FakeApi([m("a"), m("b", day=2)])
+    api.state["rewriteMembersHash"] = ev.members_hash(api.event_members("e1"))
+    api.members[1] = m("b", day=2, description="4,000 displaced", revision=1)  # same id, in place
+    called, llm, _ = run(api)
+    assert called is True and "4,000 displaced" in llm.calls[0]
+    assert api.writes[-1]["rewriteMembersHash"] == ev.members_hash(api.event_members("e1"))
+
+
+def test_retracted_member_in_the_newest_50_reruns_the_rewrite(run):
+    api = FakeApi([m("a"), m("b", day=2)])
+    api.state["rewriteMembersHash"] = ev.members_hash(api.event_members("e1"))
+    api.members.pop()  # eventMembers drops retracted signals
+    called, _, _ = run(api)
+    assert called is True
+
+
+def test_change_outside_the_newest_50_makes_no_llm_call(run):
+    members = [m(f"s{i:02d}", casualties=1) for i in range(51)]
+    for i, member in enumerate(members):
+        member["publishedAt"] = f"2026-09-01T00:{i:02d}:00Z"
+    api = FakeApi(members)
+    api.state["rewriteMembersHash"] = ev.members_hash(api.event_members("e1"))
+    api.members[0] = {**members[0], "casualties": 9, "revision": 1}  # the oldest: not in the prompt
+    called, llm, _ = run(api)
+    assert called is False and llm.calls == []
+    assert api.writes[-1]["casualties"] == 59  # aggregates still cover every member
 
 
 def test_rewrite_prompt_takes_the_50_newest_but_aggregates_cover_all(run):
