@@ -47,3 +47,18 @@ class TestEventSeverity:
 
     def test_mean_when_all_signals_have_severity(self):
         assert event._compute_event_severity([{"severity": 4}, {"severity": 2}], None) == 3
+
+    def test_averages_only_known_severities_ignoring_nulls(self):
+        # Mixed: some signals have a severity, some are null. Null signals belong
+        # to the event but are NOT counted in the mean (null = unknown, not low);
+        # the Claude fallback is ignored because a known severity exists.
+        assert event._compute_event_severity(
+            [{"severity": 4}, {"severity": 2}, {"severity": None}], claude_fallback=1
+        ) == 3
+
+    def test_gdacs_red_survives_darfur24_null(self):
+        # The #95 regression this fixes: a GDACS red alert (5) must not be thrown
+        # away when a Darfur24 news signal (null severity) joins the same event.
+        assert event._compute_event_severity(
+            [{"severity": 5}, {"severity": None}], claude_fallback=2
+        ) == 5
