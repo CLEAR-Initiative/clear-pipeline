@@ -44,7 +44,7 @@ class Store:
     def recompute_state(self, eid):
         return {**self.events[eid], "rewriteMembersHash": None}
 
-    def set_event_aggregates(self, eid, data):
+    def set_event_aggregates(self, eid, data, members):
         self.aggregates = data
         return {"id": eid}
 

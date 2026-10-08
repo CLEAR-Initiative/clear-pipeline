@@ -43,6 +43,12 @@ class ClearApiNotFound(ClearApiError):
     "NOT_FOUND"``). An answer, not a transient failure, so never retried."""
 
 
+class ClearApiStaleMembers(ClearApiError):
+    """setEventAggregates refused a write computed from members that changed
+    since they were read (``extensions.code == "STALE_EVENT_MEMBERS"``). A newer
+    recompute supersedes it, so never retried."""
+
+
 _RESOLVE_LOCATION = """
 query ResolveKnowledgebaseLocation($pcode: String, $name: String, $adminLevel: Int) {
   resolveKnowledgebaseLocation(pcode: $pcode, name: $name, adminLevel: $adminLevel)
@@ -371,6 +377,8 @@ def _execute(
                 err_text = str(errs)
                 if any((e.get("extensions") or {}).get("code") == "NOT_FOUND" for e in errs):
                     raise ClearApiNotFound(f"clear-api NOT_FOUND: {err_text[:300]}")
+                if any((e.get("extensions") or {}).get("code") == "STALE_EVENT_MEMBERS" for e in errs):
+                    raise ClearApiStaleMembers(f"clear-api STALE_EVENT_MEMBERS: {err_text[:300]}")
                 # A schema/version mismatch — e.g. the signal-drain endpoints from
                 # clear-api PR #127 not yet deployed — is PERMANENT, not transient.
                 # Raise a clear, non-retryable error instead of retrying every
@@ -1653,8 +1661,10 @@ query EventRecomputeState($id: String!) {
 """
 
 SET_EVENT_AGGREGATES = """
-mutation SetEventAggregates($id: String!, $input: EventAggregatesInput!) {
-  setEventAggregates(id: $id, input: $input) {
+mutation SetEventAggregates(
+  $id: String!, $input: EventAggregatesInput!, $members: [SignalRevisionInput!]!
+) {
+  setEventAggregates(id: $id, input: $input, members: $members) {
     id
   }
 }
@@ -1733,10 +1743,15 @@ def get_event_recompute_state(event_id: str) -> dict | None:
     return result.get("event")
 
 
-def set_event_aggregates(event_id: str, input_data: dict) -> dict:
+def set_event_aggregates(event_id: str, input_data: dict, members: list[dict]) -> dict:
     """Absolute write of an event's aggregates. Absent keys are left unchanged;
-    explicit None clears the field."""
-    result = _execute(SET_EVENT_AGGREGATES, {"id": event_id, "input": input_data})
+    explicit None clears the field. ``members`` are the live members the values
+    were computed from: if they changed since, nothing is written and
+    ``ClearApiStaleMembers`` is raised (a newer recompute supersedes this one)."""
+    snapshot = [{"id": m["id"], "revision": m["revision"]} for m in members]
+    result = _execute(
+        SET_EVENT_AGGREGATES, {"id": event_id, "input": input_data, "members": snapshot},
+    )
     return result["setEventAggregates"]
 
 

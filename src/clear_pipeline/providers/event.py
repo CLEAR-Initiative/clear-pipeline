@@ -860,7 +860,9 @@ def recompute_event(
     ``member_text`` gives each member's (title, description) as grouping saw it.
     The LLM rewrite runs only when its newest members changed (``rewriteMembersHash``).
     On LLM failure, deterministic fields are still written, text and hash kept,
-    and the error re-raised for retry. Returns True when the rewrite ran."""
+    and the error re-raised for retry. Raises ``ClearApiStaleMembers``, writing
+    nothing, when the members changed after they were read. Returns True when
+    the rewrite ran."""
     members = graphql.event_members(event_id, with_glide=True)
     state = graphql.get_event_recompute_state(event_id) or {}
 
@@ -916,7 +918,7 @@ def recompute_event(
         aggregates["populationDisplaced"] = None
 
     try:
-        graphql.set_event_aggregates(event_id, aggregates)
+        graphql.set_event_aggregates(event_id, aggregates, members)
     finally:
         # Grouping's _merge_event_stats reads cached totals; a stale entry
         # would re-add a retracted member's contribution.

@@ -653,6 +653,49 @@ def test_partial_failure_marks_only_fully_recomputed_rows_and_counts_one_attempt
     assert result.metadata["recompute_failed"] == 0
 
 
+def test_stale_write_is_recomputed_from_a_fresh_read_then_marked():
+    # Members moved mid-recompute: a re-read converges; the row is not left to
+    # a recompute some other change may never queue.
+    tries = []
+
+    def recompute(event_id):
+        tries.append(event_id)
+        if len(tries) == 1:
+            raise stages.ClearApiStaleMembers("stale")
+        return False
+
+    result, _, marked, _, incr = _run_lanes([], [[_rc("s1", ["e1"], revision=2)], []], recompute=recompute)
+    assert tries == ["e1", "e1"]
+    assert marked == [("PROCESSED", [("s1", 2)])]
+    incr.assert_not_called()
+    assert result.metadata["recomputed_events"] == 1
+
+
+def test_still_stale_after_retries_stays_pending_without_spending_an_attempt():
+    tries = []
+
+    def recompute(event_id):
+        tries.append(event_id)
+        raise stages.ClearApiStaleMembers("stale")
+
+    result, _, marked, sync, incr = _run_lanes([], [[_rc("s1", ["e1"], revision=2)], []], recompute=recompute,
+                                               incr=stages._MAX_SIGNAL_ATTEMPTS)
+    assert len(tries) == stages._STALE_RETRIES + 1
+    assert marked == []
+    incr.assert_not_called()
+    assert result.metadata["recompute_stale"] == 1
+    assert "e1" not in sync.call_args.args[1]
+
+
+def test_a_real_failure_on_another_event_still_spends_an_attempt():
+    def recompute(event_id):
+        raise (stages.ClearApiStaleMembers("stale") if event_id == "e1" else RuntimeError("boom"))
+
+    _, _, marked, _, incr = _run_lanes([], [[_rc("s1", ["e1", "e2"], revision=2)], []], recompute=recompute)
+    assert marked == []
+    incr.assert_called_once_with("signal:recompute_attempts:s1:2")
+
+
 def test_failing_row_goes_failed_after_max_attempts_through_items():
     def recompute(event_id):
         raise RuntimeError("boom")
@@ -749,7 +792,7 @@ def test_drain_metadata_keys():
     result, *_ = _run_lanes([], [])
     assert set(result.metadata) == {
         "processed", "dropped", "requeued", "failed", "mark_conflicts",
-        "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred",
+        "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred", "recompute_stale",
         "jev_classified", "jev_fallback", "jev_fallback_rate",
     }
 

@@ -15,6 +15,7 @@ class FakeApi:
                       "types": ["rc"], "rewriteMembersHash": None,
                       "generalLocation": {"name": "El Fasher"}, **(state or {})}
         self.writes: list[dict] = []
+        self.snapshots: list[list[dict]] = []
         self.member_calls: list[int | None] = []
         self.glide_calls: list[bool] = []
 
@@ -27,7 +28,8 @@ class FakeApi:
     def get_event_recompute_state(self, event_id):
         return self.state
 
-    def set_event_aggregates(self, event_id, data):
+    def set_event_aggregates(self, event_id, data, members):
+        self.snapshots.append(members)
         self.writes.append(data)
         # Persist the hash/text like clear-api would, for idempotency checks.
         self.state.update({k: v for k, v in data.items() if k in ("rewriteMembersHash", "title", "description", "severity")})
@@ -218,6 +220,21 @@ def test_cache_invalidated_even_when_the_write_fails(run):
     api.set_event_aggregates = MagicMock(side_effect=RuntimeError("clear-api 500"))
     with pytest.raises(RuntimeError, match="500"):
         run(api)
+    api.redis.delete.assert_called_with(ev.ACTIVE_EVENTS_CACHE_KEY)
+
+
+def test_write_carries_the_member_snapshot_the_totals_came_from(run):
+    api = FakeApi([m("a", revision=2, casualties=1), m("b", day=2, revision=5, casualties=2)])
+    run(api)
+    assert [(s["id"], s["revision"]) for s in api.snapshots[-1]] == [("b", 5), ("a", 2)]
+    assert api.writes[-1]["casualties"] == 3
+
+
+def test_stale_members_propagates_over_an_llm_failure_and_invalidates_the_cache(run):
+    api = FakeApi([m("a")])
+    api.set_event_aggregates = MagicMock(side_effect=ev.graphql.ClearApiStaleMembers("stale"))
+    with pytest.raises(ev.graphql.ClearApiStaleMembers):
+        run(api, FakeLLM(fail=True))
     api.redis.delete.assert_called_with(ev.ACTIVE_EVENTS_CACHE_KEY)
 
 

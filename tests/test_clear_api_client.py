@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clear_pipeline.providers import clear_api
-from clear_pipeline.providers.clear_api import ClearApiError, ClearApiNotFound
+from clear_pipeline.providers.clear_api import ClearApiError, ClearApiNotFound, ClearApiStaleMembers
 
 
 def _response(body: dict, status: int = 200):
@@ -30,6 +30,18 @@ def test_not_found_is_raised_once_without_retry_or_sleep():
         clear_api.update_signal_content({"sourceId": "s", "externalId": "idmc:1", "contentHash": "h", "rawData": {}})
     assert post.call_count == 1
     sleep.assert_not_called()
+
+
+def test_stale_event_members_is_raised_once_without_retry():
+    body = {"errors": [{"message": "stale", "extensions": {"code": "STALE_EVENT_MEMBERS"}}]}
+    with patch.object(clear_api.httpx, "post", return_value=_response(body)) as post, \
+         patch.object(clear_api.time, "sleep") as sleep, \
+         pytest.raises(ClearApiStaleMembers):
+        clear_api.set_event_aggregates("e1", {"rank": 0.0}, [{"id": "s1", "revision": 2, "title": "x"}])
+    assert post.call_count == 1
+    sleep.assert_not_called()
+    sent = post.call_args.kwargs["json"]["variables"]
+    assert sent["members"] == [{"id": "s1", "revision": 2}]  # only the CAS fields
 
 
 def test_other_graphql_errors_are_still_retried():

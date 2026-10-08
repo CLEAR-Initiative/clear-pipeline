@@ -43,6 +43,7 @@ from clear_pipeline.providers.signal_classifier import (
     reset_classifier_stats,
 )
 from clear_pipeline.providers.clear_api import (
+    ClearApiStaleMembers,
     enqueue_translation,
     events_pending_alert,
     get_crisis_canonical,
@@ -78,6 +79,8 @@ _BATCH_SIZE = 200
 # Bound per-signal retries so a transient failure (S3 blip, clear-api 5xx) is
 # retried instead of dropped, but a persistently-bad signal still leaves the queue.
 _MAX_SIGNAL_ATTEMPTS = 5
+# Fresh re-reads of an event whose members moved during its recompute.
+_STALE_RETRIES = 2
 _ALERT_MIN_SEVERITY = 4  # events at/above this with no alert surface in eventsPendingAlert
 
 _EAGER = dg.AutomationCondition.eager()
@@ -391,7 +394,7 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
     and attempted at most once per run. Runs after, and bounded apart from, the
     NEW lane so stuck recomputes never block first grouping."""
     counts = {"recompute_rows": 0, "recomputed_events": 0, "recompute_failed": 0,
-              "recompute_deferred": 0, "conflicts": 0}
+              "recompute_deferred": 0, "recompute_stale": 0, "conflicts": 0}
     attempted: set[str] = set()
     for _ in range(_MAX_BATCHES):
         rows = [r for r in pending_recomputes(first=_BATCH_SIZE) if r["id"] not in attempted]
@@ -403,17 +406,30 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
         event_ids = list(dict.fromkeys(e["id"] for r in rows for e in r.get("events") or []))
         ok: set[str] = set()
         deferred: set[str] = set()
+        stale: set[str] = set()
         for event_id in event_ids:
             if llm_budget <= 0:
                 deferred.add(event_id)  # may need a rewrite; next run
                 continue
             try:
-                if recompute_event(event_id, _member_text):
+                # A refused write means the members moved after the read; not every
+                # such change queues its own recompute, so re-read rather than skip.
+                for attempt in range(_STALE_RETRIES + 1):
+                    try:
+                        rewrote = recompute_event(event_id, _member_text)
+                        break
+                    except ClearApiStaleMembers:
+                        if attempt == _STALE_RETRIES:
+                            raise
+                if rewrote:
                     llm_budget -= 1
                     _enqueue_translations("event", event_id)  # the rewrite changed title/description
                 ok.add(event_id)
                 touched_events.add(event_id)
                 counts["recomputed_events"] += 1
+            except ClearApiStaleMembers:
+                stale.add(event_id)  # still moving; next run, without spending an attempt
+                counts["recompute_stale"] += 1
             except Exception:  # isolate one event's failure
                 context.log.exception("[classify_group] recompute of event %s failed", event_id)
 
@@ -425,6 +441,8 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
                 counts["recompute_deferred"] += 1
             elif row_events <= ok:
                 done.append(_item(row))
+            elif row_events <= ok | stale:
+                pass  # left pending, no attempt spent
             else:
                 # Own key per revision: NEW-lane failures and earlier revisions'
                 # failures must not spend this correction's retry budget.
