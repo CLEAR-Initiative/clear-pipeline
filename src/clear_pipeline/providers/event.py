@@ -903,6 +903,9 @@ def recompute_event(
     }
     if rewrite or not members:
         aggregates["rewriteMembersHash"] = live_hash
+    if not members:
+        # Only a rewrite sets it, and none can run without members.
+        aggregates["populationDisplaced"] = None
 
     try:
         graphql.set_event_aggregates(event_id, aggregates)

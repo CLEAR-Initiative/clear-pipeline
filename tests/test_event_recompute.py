@@ -112,6 +112,7 @@ def test_zero_live_members_clears_aggregates_without_llm(run):
     w = api.writes[-1]
     assert called is False and llm.calls == []
     assert (w["casualties"], w["populationAffected"], w["severity"], w["rank"]) == (None, None, None, 0.0)
+    assert w["populationDisplaced"] is None  # no live member backs the figure
     assert "title" not in w and "description" not in w
 
 
