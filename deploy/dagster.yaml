@@ -34,11 +34,39 @@ schedule_storage:
 # Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
 # forks each run's step workers as subprocesses). The daemon dequeues up to
 # max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
+#
+# tag_concurrency_limits caps HEAVY runs independently of the global 4. On
+# Railway the code location is loaded in-process (workspace.yaml `python_module`)
+# and the daemon supervises that code server by heartbeat while ALSO forking
+# every run under it (DefaultRunLauncher). When the weekly reliefweb job fans
+# out one heavy run per country (PDF text + LLM enrichment + embeddings) they
+# used to land 3-at-once, starving the daemon's heartbeat → the code server
+# shut down → in-flight runs died with DagsterExecutionInterruptedError. Capping
+# `clear/weight: heavy` to 1 serialises those heavy runs while leaving the other
+# 3 slots free for the many 1-minute sensor jobs, so throughput is unchanged.
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
   config:
     max_concurrent_runs: 4
+    tag_concurrency_limits:
+      - key: "clear/weight"
+        value: "heavy"
+        limit: 1
+
+# Run monitoring keeps the queue healthy: the daemon fails runs whose process
+# died without reporting back (e.g. a code-server heartbeat shutdown killing the
+# runs it forked) and runs that can't start within start_timeout. Without it a
+# killed run stays STARTED, holds one of the max_concurrent_runs slots forever,
+# and once enough accumulate the queue pins at 4/4 and ticks stall ("unhealthy
+# queue"). max_runtime caps a genuinely stuck run; raise it (or set the
+# `dagster/max_runtime` tag on a job) if a legitimate run ever needs longer.
+run_monitoring:
+  enabled: true
+  start_timeout_seconds: 300
+  cancel_timeout_seconds: 180
+  max_runtime_seconds: 21600
+  poll_interval_seconds: 120
 
 # DefaultRunLauncher forks each run as a subprocess of the process that
 # launches it (the daemon, here). Simplest launcher; fine for a single-node
