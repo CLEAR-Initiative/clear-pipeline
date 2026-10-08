@@ -16,8 +16,10 @@ class FakeApi:
                       "generalLocation": {"name": "El Fasher"}, **(state or {})}
         self.writes: list[dict] = []
         self.member_calls: list[int | None] = []
+        self.glide_calls: list[bool] = []
 
-    def event_members(self, event_id, first=None):
+    def event_members(self, event_id, first=None, *, with_glide=False):
+        self.glide_calls.append(with_glide)
         self.member_calls.append(first)
         newest_first = sorted(self.members, key=lambda m: m["publishedAt"], reverse=True)
         return newest_first[:first] if first else newest_first
@@ -44,10 +46,11 @@ class FakeLLM:
         return schema(title="New title", description="New desc", severity=4, population_displaced=1200)
 
 
-def m(mid, *, day=1, severity=3, casualties=None, title="Clash", description="details", revision=0):
+def m(mid, *, day=1, severity=3, casualties=None, title="Clash", description="details", revision=0,
+      glide=None):
     return {"id": mid, "title": title, "description": description, "severity": severity,
             "casualties": casualties, "publishedAt": f"2026-09-{day:02d}T00:00:00Z",
-            "source": {"name": "acled"}, "revision": revision}
+            "source": {"name": "acled"}, "revision": revision, "glideCode": glide}
 
 
 def text(member):
@@ -247,3 +250,29 @@ def test_grouping_rewrite_uses_the_50_newest_live_members_oldest_first():
     assert calls == [50]
     prompt = llm.calls[0]
     assert prompt.index("2026-09-01") < prompt.index("2026-09-02") < prompt.index("2026-09-03")
+
+
+# ── Per-member glide (signals.glideCode) ────────────────────────────────────
+
+
+def test_member_glide_resolves_its_own_fallback(run):
+    # Battles: `ba` armed clash (q75 4 / pop 23 532) vs the event's `bo`
+    # non-state actor overtakes territory (q75 10 / pop 10 602).
+    api = FakeApi([m("a", glide="ba"), m("b", day=2, glide="bo")], {"types": ["bo"]})
+    run(api)
+    w = api.writes[-1]
+    assert w["casualties"] == 4 + 10
+    assert w["populationAffected"] == "23532"
+
+
+def test_member_without_glide_falls_back_to_the_event_type(run):
+    api = FakeApi([m("a", glide=None), m("b", day=2, glide="bo")], {"types": ["bo"]})
+    run(api)
+    assert api.writes[-1]["casualties"] == 10 + 10
+
+
+def test_only_the_aggregate_read_requests_glides(run):
+    api = FakeApi([m("a")])
+    run(api)
+    # The rewrite's prompt read never needs them.
+    assert api.glide_calls == [True, False]

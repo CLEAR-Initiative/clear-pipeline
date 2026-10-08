@@ -1201,6 +1201,15 @@ mutation UpdateSignalSeverity($id: String!, $severity: Int!) {
 }
 """
 
+SET_SIGNAL_GLIDE_CODE = """
+mutation SetSignalGlideCode($id: String!, $glideCode: String!) {
+  setSignalGlideCode(id: $id, glideCode: $glideCode) {
+    id
+    glideCode
+  }
+}
+"""
+
 UPDATE_SIGNAL_GEOPARSED_DATA = """
 mutation UpdateSignalGeoparsedData($id: String!, $geoparsedData: JSON!) {
   updateSignalGeoparsedData(id: $id, geoparsedData: $geoparsedData) {
@@ -1625,6 +1634,8 @@ query EventMembers($eventId: String!, $first: Int) {
 }
 """
 
+EVENT_MEMBERS_WITH_GLIDE = EVENT_MEMBERS.replace("    casualties\n", "    casualties\n    glideCode\n")
+
 EVENT_RECOMPUTE_STATE = """
 query EventRecomputeState($id: String!) {
   event(id: $id) {
@@ -1702,12 +1713,16 @@ def pending_recomputes(first: int = 100) -> list[dict]:
     return result["pendingRecomputes"]
 
 
-def event_members(event_id: str, first: int | None = None) -> list[dict]:
-    """Live members of an event, newest first; ``first`` bounds the count."""
+def event_members(
+    event_id: str, first: int | None = None, *, with_glide: bool = False,
+) -> list[dict]:
+    """Live members of an event, newest first; ``first`` bounds the count.
+    ``with_glide`` also selects each member's ``glideCode`` (needs a clear-api
+    that has the field)."""
     variables: dict = {"eventId": event_id}
     if first is not None:
         variables["first"] = first
-    result = _execute(EVENT_MEMBERS, variables)
+    result = _execute(EVENT_MEMBERS_WITH_GLIDE if with_glide else EVENT_MEMBERS, variables)
     return result["eventMembers"]
 
 
@@ -1739,6 +1754,12 @@ def update_signal_severity(signal_id: str, severity: int) -> dict:
     """Update a signal's severity score (1-5)."""
     result = _execute(UPDATE_SIGNAL_SEVERITY, {"id": signal_id, "severity": severity})
     return result["updateSignalSeverity"]
+
+
+def set_signal_glide_code(signal_id: str, glide_code: str) -> dict:
+    """Record the glide code grouping used for a signal (overwrites)."""
+    result = _execute(SET_SIGNAL_GLIDE_CODE, {"id": signal_id, "glideCode": glide_code})
+    return result["setSignalGlideCode"]
 
 
 def update_signal_geoparsed_data(signal_id: str, geoparsed_data: dict) -> dict:

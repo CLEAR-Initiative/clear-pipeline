@@ -130,3 +130,34 @@ def test_create_branch_failed_rewrite_still_writes_the_default_displacement(grou
     update_event, _ = group(members=[m("s-new", severity=None)], llm=FakeLLM(fail=True))
     final = update_event.call_args.args[1]
     assert final == {"populationDisplaced": str(ev.settings.default_population_displaced)}
+
+
+# ── group_signal records the glide (signals.glideCode) ──────────────────────
+
+
+def test_group_signal_records_its_glide_before_attaching():
+    calls: list[str] = []
+    set_glide = MagicMock(side_effect=lambda sid, glide: calls.append(f"glide:{sid}:{glide}"))
+    act = MagicMock(side_effect=lambda **kw: calls.append("attach") or {"id": "e1"})
+    classification = MagicMock(disaster_types=["ba"], type_level_1="conflict", type_level_2="battles",
+                               relevance=0.9, summary="s")
+    with (
+        patch.object(ev.graphql, "set_signal_glide_code", set_glide),
+        patch.object(ev, "resolve_signal_admin2", return_value=None),
+        patch.object(ev, "_match_and_act", act),
+    ):
+        ev.group_signal("s1", "Clash", "details", None, classification, {"casualties": 3})
+    assert calls == ["glide:s1:ba", "attach"]
+
+
+def test_group_signal_glide_write_failure_fails_grouping():
+    classification = MagicMock(disaster_types=["ba"], type_level_1="conflict", type_level_2="battles",
+                               relevance=0.9, summary="s")
+    act = MagicMock()
+    with (
+        patch.object(ev.graphql, "set_signal_glide_code", side_effect=RuntimeError("api down")),
+        patch.object(ev, "_match_and_act", act),
+        pytest.raises(RuntimeError),
+    ):
+        ev.group_signal("s1", "Clash", "details", None, classification, {"casualties": 3})
+    act.assert_not_called()

@@ -582,6 +582,11 @@ def group_signal(
         level_2 = level_2 or "other"
         glide_code = glide_code or "ot"
 
+    # Recorded before the signal is attached, so a failure here fails grouping
+    # (the drain retries) rather than leaving a member whose glide recompute
+    # can't recover. Recompute reads it to resolve this signal's stats fallback.
+    graphql.set_signal_glide_code(signal_id, glide_code)
+
     # ── 2. Resolve admin-2 district ────────────────────────────────────
     admin2_id = resolve_signal_admin2(created_signal)
     if not admin2_id:
@@ -856,12 +861,15 @@ def recompute_event(
     The LLM rewrite runs only when its newest members changed (``rewriteMembersHash``).
     On LLM failure, deterministic fields are still written, text and hash kept,
     and the error re-raised for retry. Returns True when the rewrite ran."""
-    members = graphql.event_members(event_id)
+    members = graphql.event_members(event_id, with_glide=True)
     state = graphql.get_event_recompute_state(event_id) or {}
 
-    # Defaults use the event's stored type, not a re-classification: grouping's
-    # classifier (Jev) is an LLM, so re-running it would cost calls and could disagree.
-    glide = (state.get("types") or [None])[0]
+    # Each member's stats fallback uses the glide grouping recorded for it, so
+    # unchanged members resolve exactly as grouping did. Members without one
+    # (grouped before it was recorded, or linked by hand) fall back to the
+    # event's stored type. Never re-classify: grouping's classifier (Jev) is an
+    # LLM, so re-running it would cost calls and could disagree.
+    event_glide = (state.get("types") or [None])[0]
     casualties: list[int] = []
     populations: list[int] = []
     for member in members:
@@ -871,7 +879,7 @@ def recompute_event(
             actual_population=extract_population_affected_from_text(
                 title, description, member.get("description"),
             ),
-            glide_code=glide,
+            glide_code=member.get("glideCode") or event_glide,
         )
         if resolved["casualties"] is not None:
             casualties.append(resolved["casualties"])
