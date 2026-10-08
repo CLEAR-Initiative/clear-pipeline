@@ -405,6 +405,12 @@ def _execute(
         except ClearApiError:
             raise
         except (httpx.HTTPError, RuntimeError) as exc:
+            # A NOT_FOUND GraphQL error is permanent — the entity is gone, so
+            # retrying never helps (and the translation drain relies on seeing it
+            # promptly to drop the stale queue row). Other GraphQL errors can
+            # reflect transient server state, so they still retry.
+            if isinstance(exc, GraphQLErrors) and "NOT_FOUND" in exc.codes():
+                raise
             if attempt < retries:
                 wait = 2 ** attempt
                 logger.warning(
@@ -2145,6 +2151,25 @@ query GroundMessageForTranslation($id: String!) {
 """
 
 
+def _execute_allow_missing(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    """``_execute`` for canonical fetches: a NOT_FOUND GraphQL error — the entity
+    was deleted/superseded after it was enqueued — returns ``{}`` instead of
+    raising, so the caller's ``result.get(key)`` yields ``None`` and the
+    translation drain drops the stale queue rows (rather than re-failing the same
+    poison entry every tick). Any other error still propagates.
+
+    Needed because clear-api's `crisis` resolver *throws* NOT_FOUND where the
+    `event`/`location`/… resolvers return null; this normalises both to None.
+    """
+    try:
+        return _execute(query, variables)
+    except GraphQLErrors as exc:
+        if "NOT_FOUND" in exc.codes():
+            logger.info("clear-api NOT_FOUND for %s — entity gone, treating as missing", variables)
+            return {}
+        raise
+
+
 def get_crisis_canonical(crisis_id: str) -> dict | None:
     """Fetch only the four translatable fields of a crisis. Used by the
     translation step in tasks/crisis.py to feed Claude the current
@@ -2155,7 +2180,7 @@ def get_crisis_canonical(crisis_id: str) -> dict | None:
     changes, swap to an explicit `Accept-Language: en` header in
     `_execute`.
     """
-    result = _execute(GET_CRISIS_CANONICAL, {"id": crisis_id})
+    result = _execute_allow_missing(GET_CRISIS_CANONICAL, {"id": crisis_id})
     return result.get("crisis")
 
 
@@ -2163,14 +2188,14 @@ def get_event_canonical(event_id: str) -> dict | None:
     """Fetch the two translatable fields of an event (title,
     description). Same pipeline-language invariant as
     get_crisis_canonical above."""
-    result = _execute(GET_EVENT_CANONICAL, {"id": event_id})
+    result = _execute_allow_missing(GET_EVENT_CANONICAL, {"id": event_id})
     return result.get("event")
 
 
 def get_location_canonical(location_id: str) -> dict | None:
     """Fetch the one translatable field of a location (name). Same
     pipeline-language invariant as get_crisis_canonical above."""
-    result = _execute(GET_LOCATION_CANONICAL, {"id": location_id})
+    result = _execute_allow_missing(GET_LOCATION_CANONICAL, {"id": location_id})
     return result.get("location")
 
 
@@ -2184,7 +2209,7 @@ def get_situation_canonical(situation_analysis_id: str) -> dict | None:
     `data` field is overlaid per-locale by the resolver, so this returns
     canonical English only while the pipeline user's language is 'en'.
     """
-    result = _execute(GET_SITUATION_CANONICAL, {"id": situation_analysis_id})
+    result = _execute_allow_missing(GET_SITUATION_CANONICAL, {"id": situation_analysis_id})
     row = result.get("situationAnalysisById")
     if not row:
         return None
@@ -2196,7 +2221,7 @@ def get_analysis_canonical(analysis_id: str) -> dict | None:
     translatable prose. The payload shares the situation-analysis taxonomy, so
     the same prose extractor applies (including the scenarios prose). Same
     pipeline-language ('en') invariant as get_situation_canonical."""
-    result = _execute(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
+    result = _execute_allow_missing(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
     row = result.get("analysisById")
     if not row:
         return None
@@ -2209,7 +2234,7 @@ def get_ground_message_canonical(message_id: str) -> dict | None:
     phone-redacted at ingest) — NOT English — and ``language`` is clear-api's
     intake detection (``"ar"``, ``"en"``, …), None when unknown. No sender
     identity is exposed. None when the message no longer exists."""
-    result = _execute(GET_GROUND_MESSAGE_CANONICAL, {"id": message_id})
+    result = _execute_allow_missing(GET_GROUND_MESSAGE_CANONICAL, {"id": message_id})
     row = result.get("groundMessageForTranslation")
     if not row:
         return None
