@@ -23,12 +23,17 @@ Simplifications, each with an upgrade path (details in the doc §5):
     clear-api-resolved location, which only exists post-push). The
     authoritative admin-2 is resolved in ``<source>_push`` instead.
   - No LLM rewrite of merged event title/description — bootstrap only.
-  - Single-writer, no cross-run locking (production uses `redis_lock`
-    here); fine for one Dagster run at a time. Load-bearing for
-    ``_reconcile``: it read-modify-writes a whole group, so overlapping runs
-    can revert each other's retraction, and nothing revisits the group until
-    one of its rows reappears. Wrap ``reconcile -> gold -> push`` in
-    `redis_lock` before running concurrently.
+  - Single-flight per source: ``_reconcile``, ``_gold`` and ``_push`` share
+    the ``gx_<source>_gold`` pool, and ``deploy/dagster.yaml`` runs pools at
+    run granularity with a limit of 1, so a run containing any of them queues
+    while another holds the slot. Pools sit on the assets, not the job, so an
+    ad-hoc UI materialization of a subset is queued too (a job run tag would
+    miss it). Load-bearing because ``_reconcile`` read-modify-writes whole
+    groups: Iceberg rejects the stale writer's commit (it validates against
+    the snapshot its table handle read), so an overlap fails a run rather than
+    corrupting gold — but only while the read and the write share one handle,
+    and ``_push`` calls clear-api before its own commit. In-process execution
+    (``dg launch``) skips the run queue and is not guarded.
 """
 
 import uuid
@@ -54,6 +59,12 @@ from clear_pipeline.signals.config import settings
 
 _BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
 _SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
+
+# Concurrency pool shared by every asset that writes a source's gold table
+# (see the module docstring and deploy/dagster.yaml's `concurrency.pools`).
+# https://dagster.io/docs/guides/operate/managing-concurrency/concurrency-pools
+def gold_pool(source: str) -> str:
+    return f"gx_{source}_gold"
 
 # The only `resolve_group` verdict that retracts. Any other value keeps the
 # row, so an unexpected value can never retract (contract: IDMCGXSource).
@@ -208,6 +219,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset(
         name=f"{src}_reconcile",
+        pool=gold_pool(src),
         group_name=group,
         ins={"silver_df": dg.AssetIn(key=f"{src}_silver")},
         description=(
@@ -500,6 +512,7 @@ def build_gx_source_assets(source: GXSource) -> list:
     # ══════════════════════════════════════════════════════════════════════
     @dg.asset(
         name=f"{src}_gold",
+        pool=gold_pool(src),
         group_name=group,
         ins={"bundles": dg.AssetIn(key=f"{src}_match")},
         description="Upsert signal rows (Type-1) into Iceberg (§6). Event persistence is stubbed (iceberg_events.py).",
@@ -556,6 +569,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset(
         name=f"{src}_push",
+        pool=gold_pool(src),
         group_name=group,
         deps=[f"{src}_gold"],
         description=(

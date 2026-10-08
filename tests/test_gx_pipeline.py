@@ -7,12 +7,14 @@ guards against) that a pure-function unit test would miss.
 """
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import dagster as dg
 import pandas as pd
+import yaml
 
-from clear_pipeline.defs.gx_pipeline.factory import build_gx_source_assets
+from clear_pipeline.defs.gx_pipeline.factory import build_gx_source_assets, gold_pool
 from clear_pipeline.defs.gx_pipeline.sources import (
     GX_SOURCES,
     ACLEDGXSource,
@@ -171,6 +173,22 @@ class FakeSource:
             # (both should land in the SAME gold event, not two isolated ones).
             "geoparsedData": {"display_name": "Testville, Test State, Testland"},
         }
+
+
+def test_gold_writers_share_a_single_flight_pool():
+    """`_reconcile`'s whole-group read-modify-write needs one in-flight run per
+    source. The pool sits on the assets (not the job) so ad-hoc subset runs
+    queue too, and must be run-granular with a limit in the deployed config:
+    `op` granularity would let two runs' reconcile/push steps interleave, and
+    an unlimited pool is not enforced at all."""
+    pools = {key.to_user_string(): d.op.pool for d in build_gx_source_assets(FakeSource())
+             if isinstance(d, dg.AssetsDefinition) for key in d.keys}
+    writers = {f"fakesrc_{n}" for n in ("reconcile", "gold", "push")}
+    assert {k: v for k, v in pools.items() if k in writers} == dict.fromkeys(writers, gold_pool("fakesrc"))
+
+    config = yaml.safe_load((Path(__file__).parents[1] / "deploy" / "dagster.yaml").read_text())
+    assert config["concurrency"]["pools"] == {"granularity": "run", "default_limit": 1}
+    assert config["run_monitoring"]["free_slots_after_run_end_seconds"] > 0, "a crashed run would hold the slot forever"
 
 
 def test_gx_pipeline_end_to_end(tmp_path):
@@ -481,6 +499,48 @@ def test_reconcile_leaves_ungrouped_rows_alone(tmp_path):
     assert sorted(harness.created_ids) == ["fakesrc:r1", "fakesrc:solo"]
     assert harness.gold["solo"]["groupKey"] is None
     assert harness.gold["solo"]["retracted"] is False
+
+
+def test_reconcile_fails_rather_than_overwrite_a_concurrent_gold_write(tmp_path):
+    """Second line of defence behind the pool: if another run commits to the
+    group between `_reconcile`'s read and its write, Iceberg rejects the stale
+    commit (validated against the snapshot the read used) instead of silently
+    reverting the other run. Holds only while the read and the write share one
+    table handle; reloading the table before `upsert_signals` breaks this."""
+    from clear_pipeline.defs.gx_pipeline import iceberg_signals
+
+    harness = _GroupHarness(tmp_path, batches=[
+        [_group_record("t1", "ev-1", "Triangulation", "2026-09-01T00:00:00Z")],
+        [_group_record("r1", "ev-1", "Recommended figure", "2026-09-02T00:00:00Z")],
+    ])
+    harness.poll()
+
+    real_read = iceberg_signals.signals_in_groups
+
+    def read_then_concurrent_write(table, group_keys):
+        rows = real_read(table, group_keys)
+        other_run = iceberg_signals.get_signals_table("fakesrc")
+        concurrent = {**next(r for r in rows if r["externalId"] == "t1"), "eventId": "ev-concurrent"}
+        iceberg_signals.upsert_signals(other_run, [concurrent])
+        return rows
+
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.factory.lake.s3_client", return_value=harness.s3),
+        patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", harness.warehouse),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", harness.catalog_uri),
+        patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=harness._create_signal),
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal"),
+        patch.object(iceberg_signals, "signals_in_groups", side_effect=read_then_concurrent_write),
+    ):
+        result = dg.materialize(harness.assets + harness.checks, raise_on_error=False)
+
+    failures = {e.step_key: e.event_specific_data.error.cause.cls_name
+                for e in result.all_events if e.is_step_failure}
+    assert failures == {"fakesrc_reconcile": "ValidationException"}, "the stale reconcile commit must be rejected"
+    gold = harness.gold
+    assert gold["t1"]["eventId"] == "ev-concurrent", "the concurrent write survives"
+    assert gold["t1"]["retracted"] is False, "the stale run's retraction never landed"
 
 
 class DupSource(FakeSource):
