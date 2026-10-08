@@ -649,7 +649,7 @@ def test_partial_failure_marks_only_fully_recomputed_rows_and_counts_one_attempt
     rows = [_rc("ok", ["good"]), _rc("mixed", ["good", "bad"])]
     result, _, marked, _, incr = _run_lanes([], [rows, rows, []], recompute=recompute)
     assert marked == [("PROCESSED", [("ok", 1)])]
-    incr.assert_called_once_with("signal:attempts:mixed")  # once per run, even if refetched
+    incr.assert_called_once_with("signal:recompute_attempts:mixed:1")  # once per run, even if refetched
     assert result.metadata["recompute_failed"] == 0
 
 
@@ -660,6 +660,59 @@ def test_failing_row_goes_failed_after_max_attempts_through_items():
     _, _, marked, _, _ = _run_lanes([], [[_rc("s1", ["e1"], revision=2)], []], recompute=recompute,
                                     incr=stages._MAX_SIGNAL_ATTEMPTS)
     assert marked == [("FAILED", [("s1", 2)])]
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.counters: dict[str, int] = {}
+
+    def incr(self, key):
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    def expire(self, key, ttl):
+        pass
+
+
+def _drain_once(redis, *, new=(), recompute=()):
+    """One full drain run in which every NEW signal and every recompute fails."""
+    marked: list = []
+
+    def boom(*_):
+        raise RuntimeError("boom")
+
+    with (
+        patch.object(stages, "_redis", redis),
+        patch.object(stages, "pending_signals", side_effect=[list(new), []]),
+        patch.object(stages, "pending_recomputes", side_effect=[list(recompute), []]),
+        patch.object(stages, "_process_one_signal", side_effect=boom),
+        patch.object(stages, "recompute_event", side_effect=boom),
+        patch.object(stages, "mark_signals_processed", side_effect=_items_recorder(marked)),
+        patch.object(stages, "_sync_event_cards"),
+    ):
+        _run()
+    return marked
+
+
+def test_new_lane_failures_do_not_spend_the_recompute_retry_budget():
+    redis = _FakeRedis()
+    for _ in range(stages._MAX_SIGNAL_ATTEMPTS - 1):
+        assert _drain_once(redis, new=[{"id": "s1", "revision": 0}]) == []
+
+    marked = _drain_once(redis, recompute=[_rc("s1", ["e1"], revision=1)])
+
+    assert marked == []  # first recompute failure → retried next run, not FAILED
+
+
+def test_a_new_revision_gets_a_fresh_recompute_retry_budget():
+    redis = _FakeRedis()
+    for _ in range(stages._MAX_SIGNAL_ATTEMPTS - 1):
+        assert _drain_once(redis, recompute=[_rc("s1", ["e1"], revision=2)]) == []
+    assert _drain_once(redis, recompute=[_rc("s1", ["e1"], revision=2)]) == [("FAILED", [("s1", 2)])]
+
+    marked = _drain_once(redis, recompute=[_rc("s1", ["e1"], revision=3)])
+
+    assert marked == []  # rev 3's first failure → retried next run, not FAILED
 
 
 def test_failing_recomputes_do_not_block_first_grouping():

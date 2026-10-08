@@ -426,8 +426,11 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
             elif row_events <= ok:
                 done.append(_item(row))
             else:
-                attempts = _redis.incr(f"signal:attempts:{row['id']}")
-                _redis.expire(f"signal:attempts:{row['id']}", 86400)
+                # Own key per revision: NEW-lane failures and earlier revisions'
+                # failures must not spend this correction's retry budget.
+                key = f"signal:recompute_attempts:{row['id']}:{_item(row)['revision']}"
+                attempts = _redis.incr(key)
+                _redis.expire(key, 86400)
                 if attempts >= _MAX_SIGNAL_ATTEMPTS:
                     failed.append(_item(row))
                     counts["recompute_failed"] += 1
