@@ -67,8 +67,10 @@ def _parse_event(raw: dict) -> dict | None:
 
     name = props.get("name") or props.get("eventname", "")
     description = props.get("description") or props.get("htmldescription", "")
-    alert_level = props.get("alertlevel", "Green")
-    severity = GDACS_SEVERITY_MAP.get(alert_level, 2)
+    alert_level = props.get("alertlevel", "Green")  # display only (title below)
+    # Severity comes only from a real, mapped alert level — null (not an invented
+    # floor) when GDACS gives no alertlevel or an unmapped one.
+    severity = GDACS_SEVERITY_MAP.get(props.get("alertlevel"))
     from_date = props.get("fromdate") or props.get("datestart")
     to_date = props.get("todate") or props.get("dateend")
     country = props.get("country", "")

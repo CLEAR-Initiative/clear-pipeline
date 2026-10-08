@@ -233,15 +233,9 @@ class Settings(BaseSettings):
     # email is technically correct but stale. Set to 0 to disable the gate.
     alert_max_signal_age_hours: int = 48
 
-    # Last-resort default for `events.population_displaced` when neither
-    # the signal text nor the admin-2 DTM row provides a value.
-    default_population_displaced: int = 1670
-
-    # Last-resort default for `events.population_affected` when neither the
-    # raw signal extraction (ACLED has none, GDACS exposure data,
-    # Dataminr/manual regex) nor the per-event-type lookup (median pop_1km
-    # via acled_event_type_stats.json) produces a value.
-    default_population_affected: int = 33_000
+    # (Removed: default_population_displaced / default_population_affected — the
+    # pipeline no longer invents a last-resort population constant; an unknown
+    # population is left null rather than fabricated.)
 
     # IOM DTM API — displaced-person data per admin level
     iom_dtm_base_url: str = "https://dtmapi.iom.int/v3"

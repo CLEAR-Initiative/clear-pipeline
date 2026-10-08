@@ -5,7 +5,6 @@ import httpx
 import pytest
 
 from clear_pipeline.providers import jev
-from clear_pipeline.providers.classify import DEFAULT_FALLBACK_SEVERITY
 
 
 class _FakeResp:
@@ -73,10 +72,11 @@ def test_maps_choice_to_code_and_levels(monkeypatch):
     assert c.severity == 4  # source severity passes through
 
 
-def test_default_severity_when_source_missing(monkeypatch):
+def test_severity_is_null_when_source_missing(monkeypatch):
+    # No source severity → severity is None (not an invented default).
     _patch_post(monkeypatch, _FakeResp(_answers()))
     c = jev.classify_with_jev(title="x", description=None, source_severity=None)
-    assert c.severity == DEFAULT_FALLBACK_SEVERITY
+    assert c.severity is None
 
 
 def test_missing_choice_raises_jeverror(monkeypatch):

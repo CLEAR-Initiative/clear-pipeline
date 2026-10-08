@@ -25,7 +25,7 @@ class SignalClassification(BaseModel):
 
     disaster_types: list[str]  # glide numbers e.g. ["fl", "ff"]
     relevance: float  # 0.0-1.0 (== the classifier's confidence)
-    severity: int  # 1-5
+    severity: int | None  # 1-5, or None when the source supplied no severity
     summary: str
     # Full taxonomy prediction from the local classifier, carried so the grouping
     # stage can reuse it instead of running a second inference on the same text.
@@ -433,24 +433,19 @@ def coerce_event_types(values: object) -> object:
 
 # ── classify_locally (v2 entry point) ────────────────────────────────────────
 
-DEFAULT_FALLBACK_SEVERITY = 3  # used when source didn't supply one
-
-
-
 def classify_locally(
     title: str | None,
     description: str | None,
     source_severity: int | None = None,
-    default_severity: int = DEFAULT_FALLBACK_SEVERITY,
 ) -> SignalClassification:
     """Build a `SignalClassification` from the local EventClassifier. No
     network calls.
 
     `source_severity` — the 1-5 severity already attached to the signal by
     its source (Dataminr alertType mapping, GDACS alert level, ACLED
-    fatalities). Pass through if present; otherwise fall back to
-    `default_severity` so downstream gates (e.g. severity >= 4 alert check)
-    still have something to look at.
+    fatalities). Passed through as-is; `None` when the source supplied no
+    severity (we never invent one — the event-severity rule and the alert
+    gate both handle null).
     """
     classifier = get_classifier()
     text = " ".join(filter(None, [title, description])) or "unknown event"
@@ -470,7 +465,7 @@ def classify_locally(
     classification = SignalClassification(
         disaster_types=[glide_code] if glide_code else ["ot"],
         relevance=confidence,
-        severity=source_severity if source_severity is not None else default_severity,
+        severity=source_severity,  # None when the source gave none — not invented
         summary=summary,
         type_level_1=level_1,
         type_level_2=level_2,

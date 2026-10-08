@@ -289,7 +289,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                     "glideCode": row.glideCode,
                     "title": row.title,
                     "description": row.description,
-                    "severity": row.severity or 1,
+                    "severity": row.severity,  # null when unknown — not an invented floor
                     "casualties": None,
                     "signalIds": [],
                     "startedAt": row.publishedAt,
@@ -303,7 +303,10 @@ def build_gx_source_assets(source: GXSource) -> list:
                 bundle["description"] = row.description or bundle["description"]
 
             bundle["signalIds"] = list({*bundle["signalIds"], row.externalId})
-            bundle["severity"] = max(bundle["severity"] or 1, row.severity or 1)
+            # Highest known severity across the bundle's signals; stays null while
+            # every contributing signal's severity is unknown (no invented floor).
+            _sevs = [s for s in (bundle["severity"], row.severity) if s is not None]
+            bundle["severity"] = max(_sevs) if _sevs else None
             bundle["lastSignalCreatedAt"] = row.publishedAt
             bundle.setdefault("newSignalRows", []).append({
                 "externalId": row.externalId,
