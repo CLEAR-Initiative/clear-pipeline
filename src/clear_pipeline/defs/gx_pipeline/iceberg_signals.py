@@ -163,6 +163,21 @@ def signals_in_groups(table, group_keys: list[str]) -> list[dict]:
     return [_from_column_dict(row) for row in df.to_dict("records")]
 
 
+def grouping_keys(table, external_ids: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Stored ``{externalId: (districtKey, eventType)}``: the grouping key a
+    revised row was last classified under, for `_gold`'s drift check."""
+    if not external_ids:
+        return {}
+    df = table.scan(
+        row_filter=In("externalId", external_ids),
+        selected_fields=("externalId", "districtKey", "eventType"),
+    ).to_pandas()
+    return {
+        row["externalId"]: (_na_to_none(row["districtKey"]), _na_to_none(row["eventType"]))
+        for row in df.to_dict("records")
+    }
+
+
 def existing_push_state(table, external_ids: list[str]) -> dict[str, dict]:
     """Current ``{pushedAt, pushedState}`` per `externalId`. `upsert_signals`
     overwrites every column, so a signal re-entering gold must carry these

@@ -121,7 +121,8 @@ class Harness:
             patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", self.catalog_uri),
         )
 
-    def poll(self, batch):
+    def poll(self, batch, *, event_type="conflict", district="d1"):
+        """`event_type`/`district`: what classify/geo assign every row this poll."""
         self.source._batches = [batch]
         self.source._poll_count = 0
         self.pg.calls.clear()
@@ -134,9 +135,10 @@ class Harness:
             patch("clear_pipeline.defs.gx_pipeline.factory.create_signal_for_sync", side_effect=self.pg.create),
             patch("clear_pipeline.defs.gx_pipeline.factory.update_signal_content", side_effect=self.pg.update),
             patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal") as classify,
+            patch("clear_pipeline.defs.gx_pipeline.factory._district_key", return_value=district),
         ):
             classify.return_value.relevance = 0.9
-            classify.return_value.type_level_2 = "conflict"
+            classify.return_value.type_level_2 = event_type
             classify.return_value.disaster_types = ["cv"]
             result = dg.materialize(self.assets + self.checks)
         assert result.success
@@ -399,6 +401,55 @@ def test_one_revised_sibling_among_unchanged_ones(h):
     result = h.poll([_rec("r", h="h2", event_id="e1", role=R), _rec("x", event_id="e2", role=R)])
     assert h.metadata(result, "bronze")["skipped_unchanged"] == 1
     assert [d["externalId"] for _, d in h.pg.calls] == ["fakesrc:r"]
+
+
+# ── grouping key drift (ADR-0011) ────────────────────────────────────────────
+
+
+def _drift_check(result):
+    (evaluation,) = [e for e in result.get_asset_check_evaluations() if e.check_name == "grouping_key_drift"]
+    return evaluation
+
+
+def test_revision_that_reclassifies_is_flagged_not_blocked(h):
+    h.poll([_rec("a", h="h1")])
+
+    result = h.poll([_rec("a", h="h2")], event_type="flood", district="d2")
+
+    assert h.pg.ops() == ["update"], "detection only: the revision still lands"
+    meta = h.metadata(result, "gold")
+    assert (meta["signals_revised"], meta["district_drift"], meta["type_drift"]) == (1, 1, 1)
+    check = _drift_check(result)
+    assert not check.passed
+    assert check.severity == dg.AssetCheckSeverity.WARN
+    assert check.metadata["rows"].value == {
+        "a": {"districtKey": ["d1", "d2"], "eventType": ["conflict", "flood"]},
+    }
+    # Gold now holds the new key: the next identical revision is no drift.
+    assert _drift_check(h.poll([_rec("a", h="h3")], event_type="flood", district="d2")).passed
+
+
+def test_revision_under_the_same_key_passes(h):
+    h.poll([_rec("a", h="h1")])
+    result = h.poll([_rec("a", h="h2", role=T)])
+    assert _drift_check(result).passed
+    assert h.metadata(result, "gold")["signals_revised"] == 1
+
+
+def test_new_row_and_unresolved_side_are_not_drift(h):
+    assert _drift_check(h.poll([_rec("a", h="h1")], district=None)).passed
+
+    result = h.poll([_rec("a", h="h2")], district="d2")
+
+    assert _drift_check(result).passed
+    assert h.metadata(result, "gold")["drift_unresolved"] == 1
+
+
+def test_hookless_source_has_no_drift_check(tmp_path):
+    hk = Harness(tmp_path, GroupingFakeSource([]))
+    result = hk.poll([_rec("a")])
+    assert not [e for e in result.get_asset_check_evaluations() if e.check_name == "grouping_key_drift"]
+    assert "type_drift" not in hk.metadata(result, "gold")
 
 
 # ── probe ────────────────────────────────────────────────────────────────────

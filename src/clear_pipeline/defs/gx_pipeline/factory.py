@@ -102,6 +102,8 @@ def build_gx_source_assets(source: GXSource) -> list:
     # ══════════════════════════════════════════════════════════════════════
     # Bronze: raw records, untouched. GX-gated on shape before anything reads it.
     # ══════════════════════════════════════════════════════════════════════
+    content_hash = getattr(source, "content_hash", None)
+
     @dg.asset(
         name=f"{src}_bronze",
         group_name=group,
@@ -142,7 +144,6 @@ def build_gx_source_assets(source: GXSource) -> list:
         # Skip rows Postgres already holds unchanged. The blob is still written
         # above, so it always carries the latest polled payload.
         skipped = 0
-        content_hash = getattr(source, "content_hash", None)
         if content_hash is not None and rows:
             polled_hash = {source.external_id(r): content_hash(r) for r in records}
             stored = iceberg_signals.sync_hashes(
@@ -513,16 +514,43 @@ def build_gx_source_assets(source: GXSource) -> list:
     # ══════════════════════════════════════════════════════════════════════
     # Gold: finished signal + event rows, GX-gated before they're eligible to push.
     # ══════════════════════════════════════════════════════════════════════
+    def _key_drift(signals_table, signal_rows: list[dict]) -> tuple[dict, int]:
+        """Revised rows whose `(districtKey, eventType)` differs from gold's
+        stored copy, as ``{externalId: {field: [stored, new]}}``, plus how many
+        revised rows could not be compared (a side unresolved). Detection only:
+        clear-api links are sticky, so such a row stays in its old event
+        (ADR-0011). An `eventType` change may be classifier noise, not a revision."""
+        stored = iceberg_signals.grouping_keys(signals_table, [r["externalId"] for r in signal_rows])
+        drift: dict[str, dict] = {}
+        unresolved = 0
+        for row in signal_rows:
+            if row["externalId"] not in stored:
+                continue  # new row: nothing to drift from
+            old = dict(zip(("districtKey", "eventType"), stored[row["externalId"]], strict=True))
+            if None in old.values() or row["districtKey"] is None or row["eventType"] is None:
+                unresolved += 1
+                continue
+            changed = {f: [old[f], row[f]] for f in old if old[f] != row[f]}
+            if changed:
+                drift[row["externalId"]] = changed
+        return drift, unresolved
+
     @dg.asset(
         name=f"{src}_gold",
         pool=gold_pool(src),
         group_name=group,
         ins={"bundles": dg.AssetIn(key=f"{src}_match")},
         description="Upsert signal rows (Type-1) into Iceberg (§6). Event persistence is stubbed (iceberg_events.py).",
+        # Only sources that revise rows in place re-classify a stored row with
+        # new content; elsewhere a re-processed row's drift is classifier noise.
+        check_specs=[dg.AssetCheckSpec("grouping_key_drift", asset=f"{src}_gold")] if content_hash else [],
     )
-    def _gold(context: dg.AssetExecutionContext, bundles: list[dict]) -> pd.DataFrame:
+    def _gold(context: dg.AssetExecutionContext, bundles: list[dict]):
         if not bundles:
-            return pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"])
+            yield dg.Output(pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"]))
+            if content_hash:
+                yield dg.AssetCheckResult(check_name="grouping_key_drift", passed=True, metadata={"drifted": 0})
+            return
 
         events_table = iceberg_events.get_events_table(src)
         signals_table = iceberg_signals.get_signals_table(src)
@@ -552,13 +580,32 @@ def build_gx_source_assets(source: GXSource) -> list:
             if existing is not None:
                 sig_row["pushedAt"] = existing["pushedAt"]
                 sig_row["pushedState"] = existing["pushedState"]
+        # Read before the upsert overwrites the stored key.
+        drift, unresolved = _key_drift(signals_table, signal_rows) if content_hash else ({}, 0)
+        for ext_id, changed in drift.items():
+            context.log.warning("[%s gold] %s grouping key drifted %s — link kept", src, ext_id, changed)
         iceberg_signals.upsert_signals(signals_table, signal_rows)
 
-        context.add_output_metadata({
+        metadata = {
             "events_written": len(bundles), "signals_written": len(signal_rows),
             "event_versions_new": new_versions, "event_versions_unchanged": no_op_versions,
-        })
-        return pd.DataFrame(signal_rows)
+        }
+        if content_hash:
+            metadata.update({
+                "signals_revised": len(push_state),
+                "district_drift": sum("districtKey" in c for c in drift.values()),
+                "type_drift": sum("eventType" in c for c in drift.values()),
+                "drift_unresolved": unresolved,
+            })
+        yield dg.Output(pd.DataFrame(signal_rows), metadata=metadata)
+        if content_hash:
+            yield dg.AssetCheckResult(
+                check_name="grouping_key_drift",
+                passed=not drift,
+                # Detection only: nothing is blocked, and type drift may be noise.
+                severity=dg.AssetCheckSeverity.WARN,
+                metadata={"drifted": len(drift), "rows": dict(list(drift.items())[:50])},
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     # Push: the ONLY stage that writes to clear-api. Incremental — only rows
