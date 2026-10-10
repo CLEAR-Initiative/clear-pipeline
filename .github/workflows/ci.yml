@@ -40,5 +40,7 @@ jobs:
       - name: Lint (ruff, pinned)
         run: uvx ruff@0.16.9 check src tests
 
+      # -n auto: pytest-xdist across the runner's cores. The suite uses in-memory
+      # fakes (tests/conftest.py) and no shared DB, so files are independent.
       - name: Test
-        run: uv run --frozen pytest -q
+        run: uv run --frozen pytest -q -n auto

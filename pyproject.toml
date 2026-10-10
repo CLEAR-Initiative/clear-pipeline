@@ -53,6 +53,7 @@ dependencies = [
 dev = [
     "dagster-dg-cli",
     "pytest>=8.0",
+    "pytest-xdist",
     "ty>=0.0.79",
 ]
 
