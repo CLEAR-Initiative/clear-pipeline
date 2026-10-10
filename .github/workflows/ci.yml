@@ -13,9 +13,12 @@ on:
 
 # Cancel a superseded run only for pull_request events. Push-to-dev runs are
 # the only verdict a merged commit ever gets (the deploy is not gated on CI),
-# so two merges landing within a minute must not cancel each other.
+# so merges landing back to back must not cancel each other. PR runs share a
+# group per PR; push runs get a group per SHA, because GitHub also cancels a
+# *pending* run in a group when a third run arrives, regardless of
+# cancel-in-progress.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
