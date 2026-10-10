@@ -15,19 +15,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir uv
 
-# Copy the metadata + source layout hatchling needs BEFORE `uv pip install`
-# runs. The build backend has `packages = ["src/clear_pipeline"]`
-# in pyproject.toml, so `src/` must exist on disk when the wheel is built
-# — otherwise hatchling silently produces a wheel containing pyproject
-# metadata only, the package is missing at runtime, and Dagster's
-# gRPC server fails with `ModuleNotFoundError: clear_pipeline`.
-#
-# Layer-cache trick: pyproject + uv.lock + src/ change at different
-# cadences. Splitting these COPYs means a source-only change only
-# invalidates the last `uv pip install` — not the earlier apt layer.
+# Layer-cache trick, part 1: install the LOCKED DEPENDENCIES before src/ is
+# copied. pyproject + uv.lock change rarely; src/ changes on most merges.
+# `uv sync --no-install-project` resolves straight from uv.lock (so the
+# [tool.uv.sources] torch → pytorch-cpu routing and the pins are honoured,
+# which a plain `uv export` + `pip install -r` would lose) and installs into
+# the image's system interpreter via UV_PROJECT_ENVIRONMENT. The result is a
+# layer that only rebuilds when the lock changes — ~1.3 min of torch/dagster/
+# great-expectations installs that used to re-run on every src-only build.
 COPY pyproject.toml uv.lock README.md ./
+RUN UV_PROJECT_ENVIRONMENT=/usr/local uv sync --frozen --no-dev --no-install-project --no-cache
+
+# Part 2: copy the source layout hatchling needs BEFORE the project itself is
+# installed. The build backend has `packages = ["src/clear_pipeline"]` in
+# pyproject.toml, so `src/` must exist on disk when the wheel is built —
+# otherwise hatchling silently produces a wheel containing pyproject metadata
+# only, the package is missing at runtime, and Dagster's gRPC server fails
+# with `ModuleNotFoundError: clear_pipeline`. `--no-deps` keeps this step to
+# the project wheel alone; everything it needs is already in the layer above.
 COPY src ./src
-RUN uv pip install --system --no-cache .
+RUN uv pip install --system --no-cache --no-deps .
 
 # Copy the rest of the repo (tests, docs, ancillary configs) after the
 # install so a change to those doesn't force a wheel rebuild.
