@@ -1,8 +1,10 @@
 # Medallion pipeline implementation: architecture and sources wired in
 
 Documents what got built in `defs/gx_pipeline/` — a generic bronze → silver →
-gold factory, GX-gated at every promotion. Dataminr, ACLED, and Darfur24 are
-wired in; IDMC is deliberately not (§3). ("Medallion" names the layering
+gold factory, GX-gated at every promotion. Dataminr, ACLED, Darfur24, and
+IDMC are wired in (§3) — IDMC for classify/geo/QA/filtering only; its
+event-grouping semantics and revision handling remain open, deliberately
+deferred questions (§3). ("Medallion" names the layering
 pattern; the package and class names below describe what the code is
 instead of which pattern built it — see §3.) Companion to the per-source
 projected-pipeline docs (`data-quality-dataminr-pipeline-map.md`, `-acled-`,
@@ -12,11 +14,11 @@ actually running.
 ## 1. Scope
 
 Implements the bronze/silver/gold layers and the incremental push to
-clear-api for Dataminr, ACLED, and Darfur24, built as a **generic
+clear-api for Dataminr, ACLED, Darfur24, and IDMC, built as a **generic
 factory** so each source is additive, not copy-paste — see §3 for the
-recipe and for why IDMC isn't wired in yet. Nothing here writes to
-clear-api until the final push step — bronze, silver, and gold are all
-S3 artifacts.
+recipe and for what's still deliberately open on IDMC specifically. Nothing
+here writes to clear-api until the final push step — bronze, silver, and
+gold are all S3 artifacts.
 
 Not covered: per-source quality-rule thresholds, aggregations for
 ontology-new business objects, and integration tests against real
@@ -147,14 +149,30 @@ enrich from), so `build_darfur24_signal_input` needed no change.
 resolved country L0 location id on first use, the same reasoning
 production's `Darfur24Connector._resolve_location_id` already used.
 
-**IDMC is deliberately not registered.** Production's own `IDMCConnector`
-sets `drained=False` for a real reason: "grouping signals into events
-works differently for IDMC and needs new features that aren't built yet."
-This factory has no equivalent of that flag — every registered source runs
-the full classify/geo/temporal/match chain, which *is* event-grouping — so
-adding an `IDMCGXSource` today would build on the same unresolved gap
-production explicitly deferred, not just reuse a pattern. Add it once
-IDMC's event-grouping has an actual design.
+**IDMC is registered (`IDMCGXSource`), scoped to classify/geo/QA/filtering
+only — its grouping and revision semantics are still open.** Production's
+own `IDMCConnector` sets `drained=False` for a real reason: "grouping
+signals into events works differently for IDMC and needs new features that
+aren't built yet." This factory has no equivalent of that flag — every
+registered source runs the full classify/geo/temporal/match chain, which
+*is* event-grouping — so IDMC runs that same district+type heuristic as-is.
+That's an accepted, known gap here, not a fix: the gold *events* table this
+produces is a QA-only Iceberg sandbox (§6) that never writes to clear-api —
+only `_push` does, and only Signal rows — so nothing here creates a real
+clear-api Event either way, and nothing is lost by deferring the
+grouping-semantics question to whenever production's own drain resolves it.
+
+Separately, IDMC is treated as **immutable** for now: IDU rows can revise in
+place (same `idu_id`, new content), but `IDMCGXSource.mark_seen` is
+currently a no-op and `_push` never calls `update_signal_content`, so a
+revision reaching `_push` would silently no-op against clear-api's
+idempotent create. The `signals` gold table's Type-1 upsert (§6) also
+preserves an already-set `pushedAt` on re-merge specifically to prevent a
+re-push loop, so once a row has been pushed once, nothing ever reconsiders
+it for push again either — a revision would sit correctly updated in gold
+but never reach clear-api. Add `(id, content_hash)` dedup (mirroring
+`IDMCConnector.post_create`, `defs/signals/connectors.py:492`) and an update
+path in `_push` before IDMC data is expected to reflect revisions.
 
 **On `defs/signals/`'s remaining dependency**: `factory.py` still imports
 `defs/signals/lake.py` for generic S3 read/write/list helpers
@@ -258,6 +276,34 @@ today.
 - **Single-writer S3 read-modify-write**, no cross-run locking (production
   wraps its equivalent step in `redis_lock`). Fine for one Dagster run at a
   time; add a lock if this ever runs concurrently.
+
+### 5.4 `filter_records`: an optional, IDMC-only bronze→silver hook
+
+IDMC's IDU feed can carry several role-tagged rows per `event_id`
+(analyst-reviewed `"Recommended figure"` vs. corroborating
+`"Triangulation"`) — no other source has this shape. A Recommended figure
+supersedes the Triangulation rows in its group; a group that's entirely
+Triangulation collapses to its single most recent row. This is a
+group-level decision (it needs every record sharing an `event_id` visible
+at once), which `to_silver_input`'s per-record signature can't answer no
+matter what's in its body — so it runs *before* `to_silver_input`, over the
+whole batch of parsed records, inside `_silver`.
+
+`filter_records` is deliberately **not** part of the `GXSource` Protocol.
+None of the four adapters actually inherit from `GXSource` — it's used
+purely structurally (`@runtime_checkable`/`isinstance`, §3) — so a default
+method body on the Protocol wouldn't reach them without introducing
+inheritance that doesn't exist anywhere in this package. Instead,
+`factory.py`'s `_silver` probes for the method with `getattr(source,
+"filter_records", None)`: `IDMCGXSource` defines it (delegating to
+`providers/idmc.py::filter_by_role`), and `Dataminr`/`ACLED`/`Darfur24`
+simply don't — zero change to those three, now or for any future source
+that needs a similar batch-level filter.
+
+Scoped to `gx_pipeline` only: `providers/idmc.py::fetch_idu_records` (used
+by production's `IDMCConnector`) is untouched, since that connector is
+being retired once this pipeline replaces it and its live behavior
+shouldn't change in the meantime.
 
 ## 6. Gold persistence: Iceberg tables, not S3 JSON
 
@@ -477,6 +523,7 @@ directly.
   task 2.
 - Aggregations for ontology business objects beyond Signal/Event/Alert →
   task 3 (blocked on business-side ontology clarifications).
-- IDMC adapter → §3, blocked on an actual event-grouping design (not a
-  recipe gap — ACLED/Darfur24 followed the same recipe and are done).
+- IDMC event-grouping design and revision handling → §3. `IDMCGXSource`
+  itself is done (same recipe as ACLED/Darfur24); grouping-semantics
+  correctness and revision propagation to clear-api remain open.
 - Integration tests against real S3/clear-api → task 6.

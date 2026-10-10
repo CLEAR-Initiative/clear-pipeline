@@ -1,5 +1,5 @@
 """Generic GX-gated bronze -> silver -> gold asset factory.
-``build_gx_source_assets(source)`` produces one source's full pipeline: 8
+``build_gx_source_assets(source)`` produces one source's full pipeline: 9
 assets + 6 GX checks + 1 job. Nothing writes to clear-api until
 ``<source>_push``. Bronze/silver stay S3 JSON; gold signals are Iceberg,
 Type-1 (`iceberg_signals.py`). Gold events persistence is STUBBED for now
@@ -10,7 +10,11 @@ signals until that lands.
 
 **Add a data source = add a ``GXSource`` to ``sources.py``** — this
 module needs no change, mirroring ``defs/signals/factory.py``'s
-``build_source_assets(connector)``.
+``build_source_assets(connector)``. Two optional hook pairs, probed via
+``getattr`` (outside the Protocol): ``group_member``/``resolve_group``
+(supersession in ``_reconcile``) and ``content_hash``/``content_update_input``
+(skip unchanged rows at bronze, push revisions and retractions). Without
+them a source passes through and is create-only; see ``IDMCGXSource``.
 
 Simplifications, each with an upgrade path (details in the doc §5):
 
@@ -19,12 +23,22 @@ Simplifications, each with an upgrade path (details in the doc §5):
     clear-api-resolved location, which only exists post-push). The
     authoritative admin-2 is resolved in ``<source>_push`` instead.
   - No LLM rewrite of merged event title/description — bootstrap only.
-  - Single-writer, no cross-run locking (production uses `redis_lock`
-    here); fine for one Dagster run at a time.
+  - Single-flight per source: ``_reconcile``, ``_gold`` and ``_push`` share
+    the ``gx_<source>_gold`` pool, and ``deploy/dagster.yaml`` runs pools at
+    run granularity with a limit of 1, so a run containing any of them queues
+    while another holds the slot. Pools sit on the assets, not the job, so an
+    ad-hoc UI materialization of a subset is queued too (a job run tag would
+    miss it). Load-bearing because ``_reconcile`` read-modify-writes whole
+    groups: Iceberg rejects the stale writer's commit (it validates against
+    the snapshot its table handle read), so an overlap fails a run rather than
+    corrupting gold — but only while the read and the write share one handle,
+    and ``_push`` calls clear-api before its own commit. In-process execution
+    (``dg launch``) skips the run queue and is not guarded.
 """
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import dagster as dg
 import great_expectations as gx
@@ -34,13 +48,27 @@ from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
 from clear_pipeline.defs.gx_pipeline.sources import GXSource
 from clear_pipeline.defs.signals import lake
+from clear_pipeline.providers.clear_api import (
+    ClearApiNotFound,
+    create_signal_for_sync,
+    update_signal_content,
+)
 from clear_pipeline.providers.signal_classifier import classify_signal
-from clear_pipeline.providers.clear_api import create_signal
 from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
 
 _BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
 _SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
+
+# Concurrency pool shared by every asset that writes a source's gold table
+# (see the module docstring and deploy/dagster.yaml's `concurrency.pools`).
+# https://dagster.io/docs/guides/operate/managing-concurrency/concurrency-pools
+def gold_pool(source: str) -> str:
+    return f"gx_{source}_gold"
+
+# The only `resolve_group` verdict that retracts. Any other value keeps the
+# row, so an unexpected value can never retract (contract: IDMCGXSource).
+_RETRACT = "retract"
 
 
 def _s3():
@@ -56,14 +84,26 @@ def _district_key(geoparsed: dict | None) -> str | None:
     return parts[1] if len(parts) > 1 else (parts[0] if parts else None)
 
 
+def _already_synced(polled_hash: str | None, gold_hash: str | None, pushed_state: str | None) -> bool:
+    """True iff gold holds this hash AND Postgres received it. Either check
+    alone misses a revert after a failed push (h1 -> h2, push fails -> h1)."""
+    return (
+        polled_hash is not None
+        and gold_hash == polled_hash
+        and (pushed_state or "").startswith(f"{polled_hash}|")
+    )
+
+
 def build_gx_source_assets(source: GXSource) -> list:
-    """Return one source's full GX-gated defs: [8 assets, 6 checks, 1 job]."""
+    """Return one source's full GX-gated defs: [9 assets, 6 checks, 1 job]."""
     src = source.source
     group = f"{src}_gx"
 
     # ══════════════════════════════════════════════════════════════════════
     # Bronze: raw records, untouched. GX-gated on shape before anything reads it.
     # ══════════════════════════════════════════════════════════════════════
+    content_hash = getattr(source, "content_hash", None)
+
     @dg.asset(
         name=f"{src}_bronze",
         group_name=group,
@@ -90,7 +130,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 lake.write_raw(s3, bucket, key, source.raw_bytes(record))
                 rows.append({"externalId": ext_id, "publishedAt": pub_at, "s3Key": key})
                 written += 1
-            except Exception:  # noqa: BLE001 — one bad record shouldn't drop the batch
+            except Exception:
                 context.log.exception("[%s bronze] failed to write a record", src)
                 failed += 1
 
@@ -101,8 +141,27 @@ def build_gx_source_assets(source: GXSource) -> list:
         else:
             context.log.warning("[%s bronze] %d record(s) failed — watermark held for retry", src, failed)
 
-        context.add_output_metadata({"records_fetched": len(records), "written": written, "failed": failed})
-        return pd.DataFrame(rows)
+        # Skip rows Postgres already holds unchanged. The blob is still written
+        # above, so it always carries the latest polled payload.
+        skipped = 0
+        if content_hash is not None and rows:
+            polled_hash = {source.external_id(r): content_hash(r) for r in records}
+            stored = iceberg_signals.sync_hashes(
+                iceberg_signals.get_signals_table(src), [r["externalId"] for r in rows]
+            )
+            kept = []
+            for row in rows:
+                if _already_synced(polled_hash.get(row["externalId"]), *stored.get(row["externalId"], (None, None))):
+                    skipped += 1
+                else:
+                    kept.append(row)
+            rows = kept
+
+        context.add_output_metadata({
+            "records_fetched": len(records), "written": written, "failed": failed,
+            "skipped_unchanged": skipped,
+        })
+        return pd.DataFrame(rows, columns=_BRONZE_COLUMNS)
 
     # ══════════════════════════════════════════════════════════════════════
     # Silver: cleansed, normalized, ONE row per record. No clear-api write.
@@ -119,18 +178,23 @@ def build_gx_source_assets(source: GXSource) -> list:
 
         source_id = source.api_source_id()
         s3, bucket = _s3()
-        rows: list[dict] = []
-        for row in bronze_df.to_dict("records"):
-            raw = s3.get_object(Bucket=bucket, Key=row["s3Key"])["Body"].read()
-            record = source.parse(raw)
-            signal_input = source.to_silver_input(record, source_id)
 
-            key = lake.raw_key(src, row["publishedAt"], row["externalId"], layer="silver")
+        parsed: list[tuple[dict, Any]] = []
+        for bronze_row in bronze_df.to_dict("records"):
+            raw = s3.get_object(Bucket=bucket, Key=bronze_row["s3Key"])["Body"].read()
+            parsed.append((bronze_row, source.parse(raw)))
+
+        rows: list[dict] = []
+        for bronze_row, record in parsed:
+            signal_input = source.to_silver_input(record, source_id)
+            signal_input["rawS3Key"] = bronze_row["s3Key"]
+
+            key = lake.raw_key(src, bronze_row["publishedAt"], bronze_row["externalId"], layer="silver")
             lake.write_json(s3, bucket, key, signal_input)
 
             rows.append({
-                "externalId": row["externalId"],
-                "publishedAt": row["publishedAt"],
+                "externalId": bronze_row["externalId"],
+                "publishedAt": bronze_row["publishedAt"],
                 "title": signal_input.get("title"),
                 "description": signal_input.get("description"),
                 "severity": signal_input.get("severity"),
@@ -144,14 +208,132 @@ def build_gx_source_assets(source: GXSource) -> list:
         return pd.DataFrame(rows)
 
     # ══════════════════════════════════════════════════════════════════════
+    # Reconcile: decide which rows in each supersession group survive, across
+    # the WHOLE gold table rather than just this batch. Optional per source.
+    # ══════════════════════════════════════════════════════════════════════
+    def _group_hooks():
+        """Both supersession hooks, or None. All-or-nothing: one alone can't
+        produce a verdict, and half-running silently is worse than not running."""
+        hooks = tuple(getattr(source, name, None)
+                      for name in ("group_member", "resolve_group"))
+        return hooks if all(hooks) else None
+
+    @dg.asset(
+        name=f"{src}_reconcile",
+        pool=gold_pool(src),
+        group_name=group,
+        ins={"silver_df": dg.AssetIn(key=f"{src}_silver")},
+        description=(
+            "Resolve supersession groups against the whole gold table (not just this "
+            "batch); drop superseded rows and flag retractions. Pass-through if the "
+            "source defines no group hooks."
+        ),
+    )
+    def _reconcile(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
+        """Must sit between `_silver` (it reads `signalInput`) and `_classify`:
+        a retracted row must never reach `_match`, which would fold it into
+        event severity/casualties totals. Gold is read by plain call, not an
+        `AssetIn` on `<source>_gold`: gold depends on this asset, so that would
+        be a cycle (same as `_load_open_gold_event_ids`)."""
+        df = silver_df.copy()
+        hooks = _group_hooks()
+        if df.empty or hooks is None:
+            # Every row survives; `_match` still reads `groupKey`/`retracted`.
+            df["groupKey"] = [None] * len(df)
+            df["retracted"] = [False] * len(df)
+            return df
+        group_member, resolve_group = hooks
+
+        # ── Batch side: one member per silver row that's in a group ───────
+        batch_members: dict[str, dict] = {}
+        # Every batch row's fresh signalInput, grouped or not: RETRACT rows
+        # skip `_gold`'s overwrite, so the gold-side loop below is the only
+        # place their stored content gets refreshed.
+        batch_signal_inputs: dict[str, Any] = {row.externalId: row.signalInput for row in df.itertuples()}
+        for row in df.itertuples():
+            member = group_member(row.externalId, (row.signalInput or {}).get("rawData"))
+            if member is not None:
+                batch_members[row.externalId] = member
+
+        if not batch_members:
+            df["groupKey"] = [None] * len(df)
+            df["retracted"] = [False] * len(df)
+            context.add_output_metadata({"rows_in": len(df), "rows_out": len(df), "groups": 0})
+            return df
+
+        # ── Gold side: every stored row in a group this poll touched, so a
+        # row superseded by a later poll is revisited, not judged batch-only.
+        signals_table = iceberg_signals.get_signals_table(src)
+        touched = sorted({m["groupKey"] for m in batch_members.values()})
+        gold_rows = iceberg_signals.signals_in_groups(signals_table, touched)
+
+        members_by_group: dict[str, list[dict]] = {}
+        for member in batch_members.values():
+            members_by_group.setdefault(member["groupKey"], []).append(member)
+        for gold_row in gold_rows:
+            # Rows on both sides use the freshly polled batch copy (role may be revised).
+            if gold_row["externalId"] in batch_members:
+                continue
+            member = group_member(gold_row["externalId"], (gold_row["signalInput"] or {}).get("rawData"))
+            if member is not None:
+                members_by_group.setdefault(member["groupKey"], []).append(member)
+
+        verdicts: dict[str, str] = {}
+        for members in members_by_group.values():
+            verdicts.update(resolve_group(members))
+
+        # ── Apply to gold: flip `retracted` and, independently, refresh content
+        # whenever the row is in this batch. RETRACT rows skip `_gold`'s
+        # overwrite, so otherwise their stored rawData freezes and a later poll
+        # that doesn't re-send them resolves the group from a stale role.
+        # Refresh even without a flip: a retracted row can still be revised.
+        changed: list[dict] = []
+        for gold_row in gold_rows:
+            ext_id = gold_row["externalId"]
+            should_retract = verdicts.get(ext_id) == _RETRACT
+            fresh_signal_input = batch_signal_inputs.get(ext_id)
+            retracted_changed = bool(gold_row.get("retracted")) != should_retract
+            if not retracted_changed and fresh_signal_input is None:
+                continue
+            # upsert_signals replaces the whole row: write back the full gold
+            # row, never a sparse patch (it would blank the other columns).
+            if fresh_signal_input is not None:
+                gold_row["signalInput"] = fresh_signal_input
+            gold_row["retracted"] = should_retract
+            changed.append(gold_row)
+        if changed:
+            # `_push` sends the flips: they change the row's sync_state.
+            iceberg_signals.upsert_signals(signals_table, changed)
+
+        # ── Apply to the batch: drop superseded rows rather than store them as
+        # retracted; absent from gold, they have nothing to correct downstream.
+        keep_mask = [verdicts.get(ext_id) != _RETRACT for ext_id in df["externalId"]]
+        df["groupKey"] = [
+            (batch_members[ext_id]["groupKey"] if ext_id in batch_members else None)
+            for ext_id in df["externalId"]
+        ]
+        df["retracted"] = [False] * len(df)
+        kept = df[keep_mask].reset_index(drop=True)
+
+        context.add_output_metadata({
+            "rows_in": len(df),
+            "rows_out": len(kept),
+            "groups": len(members_by_group),
+            "batch_rows_superseded": int(len(df) - len(kept)),
+            "gold_rows_retracted": sum(1 for r in changed if r["retracted"]),
+            "gold_rows_unretracted": sum(1 for r in changed if not r["retracted"]),
+        })
+        return kept
+
+    # ══════════════════════════════════════════════════════════════════════
     # Silver -> Gold business logic. Pure transforms, source-agnostic from
     # here on — nothing below reads or writes clear-api except `_push`.
     # ══════════════════════════════════════════════════════════════════════
     @dg.asset(
         name=f"{src}_classify",
         group_name=group,
-        ins={"silver_df": dg.AssetIn(key=f"{src}_silver")},
-        description="Relevance + event type (classify_signal: Jev primary, MiniLM fallback) — pure transform over silver.",
+        ins={"silver_df": dg.AssetIn(key=f"{src}_reconcile")},
+        description="Relevance + event type (classify_signal) — pure transform over reconciled silver.",
     )
     def _classify(context: dg.AssetExecutionContext, silver_df: pd.DataFrame) -> pd.DataFrame:
         df = silver_df.copy()
@@ -317,27 +499,58 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "matchOutcome": row.matchOutcome,
                 "createdAt": now_iso,
                 "pushedAt": None,
+                # Lets a later poll find this row's competitors by group.
+                "groupKey": row.groupKey,
+                "retracted": row.retracted,
                 "signalInput": row.signalInput,
             })
             casualties = (row.signalInput or {}).get("casualties")
             if casualties is not None:
                 bundle["casualties"] = (bundle.get("casualties") or 0) + casualties
 
-        context.add_output_metadata({"events": len(bundles), "signals": int(len(df))})
+        context.add_output_metadata({"events": len(bundles), "signals": len(df)})
         return list(bundles.values())
 
     # ══════════════════════════════════════════════════════════════════════
     # Gold: finished signal + event rows, GX-gated before they're eligible to push.
     # ══════════════════════════════════════════════════════════════════════
+    def _key_drift(signals_table, signal_rows: list[dict]) -> tuple[dict, int]:
+        """Revised rows whose `(districtKey, eventType)` differs from gold's
+        stored copy, as ``{externalId: {field: [stored, new]}}``, plus how many
+        revised rows could not be compared (a side unresolved). Detection only:
+        clear-api links are sticky, so such a row stays in its old event
+        (ADR-0011). An `eventType` change may be classifier noise, not a revision."""
+        stored = iceberg_signals.grouping_keys(signals_table, [r["externalId"] for r in signal_rows])
+        drift: dict[str, dict] = {}
+        unresolved = 0
+        for row in signal_rows:
+            if row["externalId"] not in stored:
+                continue  # new row: nothing to drift from
+            old = dict(zip(("districtKey", "eventType"), stored[row["externalId"]], strict=True))
+            if None in old.values() or row["districtKey"] is None or row["eventType"] is None:
+                unresolved += 1
+                continue
+            changed = {f: [old[f], row[f]] for f in old if old[f] != row[f]}
+            if changed:
+                drift[row["externalId"]] = changed
+        return drift, unresolved
+
     @dg.asset(
         name=f"{src}_gold",
+        pool=gold_pool(src),
         group_name=group,
         ins={"bundles": dg.AssetIn(key=f"{src}_match")},
         description="Upsert signal rows (Type-1) into Iceberg (§6). Event persistence is stubbed (iceberg_events.py).",
+        # Only sources that revise rows in place re-classify a stored row with
+        # new content; elsewhere a re-processed row's drift is classifier noise.
+        check_specs=[dg.AssetCheckSpec("grouping_key_drift", asset=f"{src}_gold")] if content_hash else [],
     )
-    def _gold(context: dg.AssetExecutionContext, bundles: list[dict]) -> pd.DataFrame:
+    def _gold(context: dg.AssetExecutionContext, bundles: list[dict]):
         if not bundles:
-            return pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"])
+            yield dg.Output(pd.DataFrame(columns=["externalId", "eventId", "severity", "populationAffectedContribution"]))
+            if content_hash:
+                yield dg.AssetCheckResult(check_name="grouping_key_drift", passed=True, metadata={"drifted": 0})
+            return
 
         events_table = iceberg_events.get_events_table(src)
         signals_table = iceberg_signals.get_signals_table(src)
@@ -357,60 +570,117 @@ def build_gx_source_assets(source: GXSource) -> list:
                 signal_rows.append(sig_row)
 
         # A re-merged signal (matchOutcome="merged") already has a gold row
-        # — preserve its pushedAt rather than letting the Type-1 upsert
-        # reset an already-pushed signal back to NULL (re-push loop).
-        already_pushed = iceberg_signals.existing_pushed_at(
+        # — preserve its push state rather than letting the Type-1 upsert
+        # reset an already-pushed signal back to unpushed (re-push loop).
+        push_state = iceberg_signals.existing_push_state(
             signals_table, [r["externalId"] for r in signal_rows]
         )
         for sig_row in signal_rows:
-            existing = already_pushed.get(sig_row["externalId"])
+            existing = push_state.get(sig_row["externalId"])
             if existing is not None:
-                sig_row["pushedAt"] = existing
+                sig_row["pushedAt"] = existing["pushedAt"]
+                sig_row["pushedState"] = existing["pushedState"]
+        # Read before the upsert overwrites the stored key.
+        drift, unresolved = _key_drift(signals_table, signal_rows) if content_hash else ({}, 0)
+        for ext_id, changed in drift.items():
+            context.log.warning("[%s gold] %s grouping key drifted %s — link kept", src, ext_id, changed)
         iceberg_signals.upsert_signals(signals_table, signal_rows)
 
-        context.add_output_metadata({
+        metadata = {
             "events_written": len(bundles), "signals_written": len(signal_rows),
             "event_versions_new": new_versions, "event_versions_unchanged": no_op_versions,
-        })
-        return pd.DataFrame(signal_rows)
+        }
+        if content_hash:
+            metadata.update({
+                "signals_revised": len(push_state),
+                "district_drift": sum("districtKey" in c for c in drift.values()),
+                "type_drift": sum("eventType" in c for c in drift.values()),
+                "drift_unresolved": unresolved,
+            })
+        yield dg.Output(pd.DataFrame(signal_rows), metadata=metadata)
+        if content_hash:
+            yield dg.AssetCheckResult(
+                check_name="grouping_key_drift",
+                passed=not drift,
+                # Detection only: nothing is blocked, and type drift may be noise.
+                severity=dg.AssetCheckSeverity.WARN,
+                metadata={"drifted": len(drift), "rows": dict(list(drift.items())[:50])},
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     # Push: the ONLY stage that writes to clear-api. Incremental — only rows
-    # with pushedAt IS NULL. Signals only — event push is stubbed, see
-    # iceberg_events.py's module docstring.
+    # whose sync_state Postgres doesn't hold yet. Signals only — event push
+    # is stubbed, see iceberg_events.py's module docstring.
     # ══════════════════════════════════════════════════════════════════════
+    content_update_input = getattr(source, "content_update_input", None)
+
+    def _send_update(row: dict, *, retracted: bool) -> None:
+        update_signal_content(content_update_input(row["signalInput"], retracted=retracted))
+
     @dg.asset(
         name=f"{src}_push",
+        pool=gold_pool(src),
         group_name=group,
         deps=[f"{src}_gold"],
-        description="Push unpushed gold signals (pushedAt IS NULL) to clear-api. Event push is stubbed (iceberg_events.py).",
+        description=(
+            "Create new gold signals in clear-api; send revisions and retractions for "
+            "sources with an update hook. Event push is stubbed (iceberg_events.py)."
+        ),
     )
     def _push(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         signals_table = iceberg_signals.get_signals_table(src)
-        unpushed = iceberg_signals.unpushed_signals(signals_table)
+        todo = iceberg_signals.signals_to_sync(signals_table, can_update=content_update_input is not None)
 
-        if not unpushed:
-            context.log.info("[%s push] nothing to push", src)
-            return dg.MaterializeResult(metadata={"pushed_signals": 0})
-
-        pushed_signals = failed = 0
+        counts = {"created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0}
         to_upsert: list[dict] = []
         now_iso = datetime.now(UTC).isoformat()
-        for row in unpushed:
-            try:
-                create_signal(row["signalInput"])
-                source.mark_seen(row["externalId"])
-                row["pushedAt"] = now_iso
+
+        for action, rows in todo.items():
+            for row in rows:
+                state = iceberg_signals.sync_state(row)
+                try:
+                    if action == "create":
+                        created = create_signal_for_sync(row["signalInput"])
+                        sent_hash = (row["signalInput"] or {}).get("contentHash")
+                        # get-or-create may return an older row (earlier half-failed
+                        # push, or one production created): bring it up to date.
+                        if content_update_input is not None and (
+                            created.get("contentHash") != sent_hash or created.get("retracted")
+                        ):
+                            _send_update(row, retracted=False)
+                        source.mark_seen(row["externalId"])
+                        row["pushedAt"] = now_iso
+                        counts["created"] += 1
+                    elif action == "update":
+                        try:
+                            _send_update(row, retracted=bool(row.get("retracted")))
+                            counts["updated"] += 1
+                        except ClearApiNotFound:
+                            # Deleted in clear-api (admin delete or DB reset): not re-created.
+                            context.log.warning(
+                                "[%s push] signal %s not found in clear-api — not re-created",
+                                src, row["externalId"],
+                            )
+                            counts["not_found"] += 1
+                    else:  # probe
+                        try:
+                            _send_update(row, retracted=True)
+                        except ClearApiNotFound:
+                            pass  # never created — nothing to retract
+                        counts["probed"] += 1
+                except Exception:
+                    context.log.exception(
+                        "[%s push] %s of signal %s failed — retried next poll", src, action, row["externalId"]
+                    )
+                    counts["failed"] += 1
+                    continue
+                row["pushedState"] = state
                 to_upsert.append(row)
-                pushed_signals += 1
-            except Exception:  # noqa: BLE001 — isolate one signal's push failure; it stays unpushed for retry
-                context.log.exception("[%s push] signal %s failed — stays unpushed for retry", src, row["externalId"])
-                failed += 1
 
         iceberg_signals.upsert_signals(signals_table, to_upsert)
 
-        context.log.info("[%s push] pushed_signals=%d failed=%d", src, pushed_signals, failed)
-        return dg.MaterializeResult(metadata={"pushed_signals": pushed_signals, "failed_signals": failed})
+        context.log.info("[%s push] %s", src, " ".join(f"{k}={v}" for k, v in counts.items()))
+        return dg.MaterializeResult(metadata=counts)
 
     # ══════════════════════════════════════════════════════════════════════
     # GX asset checks — blocking at bronze/silver/gold, observational at
@@ -448,6 +718,9 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_silver, blocking=True, name="silver_completeness")
     def _silver_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        if df.empty:
+            # Every polled row unchanged and skipped at bronze: nothing to validate.
+            return dg.AssetCheckResult(passed=True, metadata={"row_count": 0, "skipped": "nothing changed"})
         result = validate_dataframe(
             df, suite_name=f"{src}_silver",
             expectations=[
@@ -499,11 +772,11 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     job = dg.define_asset_job(
         name=f"{src}_gx",
-        selection=[_bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push],
+        selection=[_bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push],
     )
 
     return [
-        _bronze, _silver, _classify, _geo, _temporal, _match, _gold, _push,
+        _bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push,
         _bronze_check, _silver_check, _classify_check, _geo_check, _temporal_check, _gold_check,
         job,
     ]

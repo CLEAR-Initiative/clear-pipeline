@@ -6,12 +6,18 @@ fixtures, no network/DB — mirrors test_signals_ingest_drain.py's style.
 import logging
 from unittest.mock import patch
 
+from clear_pipeline.providers import idmc
 from clear_pipeline.providers.idmc import (
+    KEEP,
+    RETRACT,
     _content_hash,
     _parse_coordinate,
     _parse_event,
     build_idmc_signal_input,
     build_signal_content_update,
+    fetch_idu_records,
+    group_member,
+    resolve_group,
 )
 
 
@@ -98,6 +104,76 @@ def test_malformed_latitude_discards_valid_longitude_too():
     assert result is not None
     assert result["lat"] is None
     assert result["lng"] is None
+
+
+# ── group_member / resolve_group: event_id/role supersession ───────────────
+# Group primitives for `<source>_reconcile`, which assembles each group from
+# batch and gold, so competing rows get the same verdict in one poll or a week
+# apart. `resolve_group` takes one group and is total, so a reversal is detectable.
+
+
+def _member(external_id: str, **overrides) -> dict:
+    member = group_member(external_id, _raw(**overrides))
+    assert member is not None
+    return member
+
+
+def test_recommended_figure_retracts_triangulation_in_same_group():
+    recommended = _member("1", event_id="ev-1", role="Recommended figure")
+    triangulation = _member("2", event_id="ev-1", role="Triangulation")
+
+    assert resolve_group([recommended, triangulation]) == {"1": KEEP, "2": RETRACT}
+
+
+def test_all_triangulation_group_keeps_only_most_recent():
+    older = _member("1", event_id="ev-1", role="Triangulation", created_at="2026-01-01T00:00:00Z")
+    newer = _member("2", event_id="ev-1", role="Triangulation", created_at="2026-01-05T00:00:00Z")
+
+    assert resolve_group([older, newer]) == {"1": RETRACT, "2": KEEP}
+
+
+def test_mixed_roles_with_no_recommended_figure_all_keep():
+    """Neither rule applies (no Recommended figure, not ALL Triangulation)
+    — the group is left untouched rather than guessed at."""
+    triangulation = _member("1", event_id="ev-1", role="Triangulation")
+    other = _member("2", event_id="ev-1", role="Some other role")
+
+    assert resolve_group([triangulation, other]) == {"1": KEEP, "2": KEEP}
+
+
+def test_row_with_no_event_id_is_not_a_group_member():
+    """No event_id: a group of one, which `_reconcile` leaves alone."""
+    assert group_member("1", _raw(event_id=None)) is None
+    assert group_member("1", None) is None
+
+
+def test_group_member_reads_the_same_fields_from_a_raw_row():
+    """`rawData` holds the raw IDU row, so polled and gold rows normalize
+    identically: the basis of any cross-poll verdict."""
+    member = group_member("42", _raw(event_id=7, role="Triangulation", created_at="2026-01-06T00:00:00Z"))
+    assert member == {
+        "externalId": "42",
+        "groupKey": "idmc:eventId:7",  # namespaced — see group_key's docstring
+        "role": "Triangulation",
+        "createdAt": "2026-01-06T00:00:00Z",
+    }
+
+
+def test_group_member_normalizes_a_null_role():
+    """IDU can send a null role; the rules compare against exact strings, so
+    it has to land as "" rather than None (same `or ""` _parse_event uses)."""
+    assert _member("1", event_id="ev-1", role=None)["role"] == ""
+
+
+def test_resolve_group_is_total_so_a_reversal_is_detectable():
+    """Every member gets a verdict, keepers included, so a caller can spot a
+    retracted row coming back to life."""
+    members = [
+        _member("1", event_id="ev-1", role="Recommended figure"),
+        _member("2", event_id="ev-1", role="Triangulation"),
+        _member("3", event_id="ev-1", role="Some other role"),
+    ]
+    assert set(resolve_group(members)) == {"1", "2", "3"}
 
 
 # ── _content_hash / _round_centroid: coordinate-noise rounding ────────────
@@ -226,11 +302,22 @@ def test_calls_enrich_with_geoparser():
     mock_geoparse.assert_called_once()
 
 
+def test_promote_defaults_true_and_threads_through_to_geoparser():
+    parsed = _parsed()
+    with patch("clear_pipeline.providers.idmc.enrich_with_geoparser") as mock_geoparse:
+        build_idmc_signal_input(parsed, source_id="src-1")
+    assert mock_geoparse.call_args.kwargs["promote"] is True
+
+    with patch("clear_pipeline.providers.idmc.enrich_with_geoparser") as mock_geoparse:
+        build_idmc_signal_input(parsed, source_id="src-1", promote=False)
+    assert mock_geoparse.call_args.kwargs["promote"] is False
+
+
 # ── build_signal_content_update ──────────────────────────────────────────
 
 
-def test_build_signal_content_update_carries_required_fields():
-    input_data = {
+def _create_input(**over) -> dict:
+    data = {
         "sourceId": "src-1",
         "externalId": "idmc:174447",
         "rawData": {"figure": 1500},
@@ -240,8 +327,15 @@ def test_build_signal_content_update_carries_required_fields():
         "severity": 3,
         "contentHash": "hash123",
     }
-    update_input = build_signal_content_update(input_data, "signal-abc")
-    assert update_input["id"] == "signal-abc"
+    data.update(over)
+    return data
+
+
+def test_build_signal_content_update_is_keyed_by_natural_key():
+    update_input = build_signal_content_update(_create_input())
+    assert update_input["sourceId"] == "src-1"
+    assert update_input["externalId"] == "idmc:174447"
+    assert "id" not in update_input
     assert update_input["contentHash"] == "hash123"
     assert update_input["rawData"] == {"figure": 1500}
     assert update_input["title"] == "Clashes in Darfur"
@@ -249,38 +343,52 @@ def test_build_signal_content_update_carries_required_fields():
     assert update_input["severity"] == 3
 
 
+def test_build_signal_content_update_takes_no_signal_id():
+    import inspect
+
+    params = inspect.signature(build_signal_content_update).parameters
+    assert list(params) == ["input_data", "retracted"]
+    assert params["retracted"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_build_signal_content_update_retracted_absent_true_false():
+    assert "retracted" not in build_signal_content_update(_create_input())
+    assert build_signal_content_update(_create_input(), retracted=True)["retracted"] is True
+    assert build_signal_content_update(_create_input(), retracted=False)["retracted"] is False
+
+
+def test_build_signal_content_update_passes_raw_s3_key_through_never_as_none():
+    key = "raw/idmc/2026-01-06/174447.json"
+    assert build_signal_content_update(_create_input(rawS3Key=key))["rawS3Key"] == key
+    assert "rawS3Key" not in build_signal_content_update(_create_input())
+    assert "rawS3Key" not in build_signal_content_update(_create_input(rawS3Key=None))
+
+
+def test_content_hash_ignores_raw_s3_key():
+    """The hash is over the raw IDU row; rawS3Key is added after, on the
+    signal input, and never reaches it."""
+    parsed = _parsed()
+    with patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
+        signal_input = build_idmc_signal_input(parsed, source_id="src-1")
+    signal_input["rawS3Key"] = "raw/idmc/2026-01-06/1.json"
+    assert signal_input["contentHash"] == _content_hash(parsed["raw"])
+
+
 def test_build_signal_content_update_omits_absent_optional_fields():
     """lat/lng/geoparsedData stay absent when not in input_data — an absent
     key leaves that column alone, sending None would null it out. url (like
     title/description/severity) always syncs to the latest value instead, so
     it appears even when absent from input_data."""
-    input_data = {
-        "rawData": {"figure": 1500},
-        "title": "t",
-        "description": None,
-        "severity": 2,
-        "contentHash": "hash123",
-        # lat/lng/geoparsedData deliberately absent
-    }
-    update_input = build_signal_content_update(input_data, "signal-abc")
+    update_input = build_signal_content_update(_create_input(description=None))
     assert update_input["url"] is None
     for absent_field in ("lat", "lng", "geoparsedData"):
         assert absent_field not in update_input
 
 
 def test_build_signal_content_update_carries_present_optional_fields():
-    input_data = {
-        "rawData": {"figure": 1500},
-        "title": "t",
-        "description": "d",
-        "severity": 2,
-        "contentHash": "hash123",
-        "url": "https://example.com",
-        "lat": 13.6,
-        "lng": 24.7,
-        "geoparsedData": {"candidate": "Nyala"},
-    }
-    update_input = build_signal_content_update(input_data, "signal-abc")
+    update_input = build_signal_content_update(_create_input(
+        url="https://example.com", lat=13.6, lng=24.7, geoparsedData={"candidate": "Nyala"},
+    ))
     assert update_input["url"] == "https://example.com"
     assert update_input["lat"] == 13.6
     assert update_input["lng"] == 24.7
@@ -290,6 +398,51 @@ def test_build_signal_content_update_carries_present_optional_fields():
 def test_build_signal_content_update_never_includes_location_id():
     """locationId isn't produced by build_idmc_signal_input at all — it's
     resolved server-side from lat/lng — so it should never appear here."""
-    input_data = {"rawData": {}, "contentHash": "h"}
-    update_input = build_signal_content_update(input_data, "signal-abc")
-    assert "locationId" not in update_input
+    assert "locationId" not in build_signal_content_update(_create_input())
+
+
+# ── fetch_idu_records: no cross-poll dedup ───────────────────────────────
+
+
+class _NoRedis:
+    """Any Redis call from the fetch path is a failure."""
+
+    def __getattr__(self, name):
+        raise AssertionError(f"fetch_idu_records touched Redis: {name}")
+
+
+def test_fetch_idu_records_returns_every_row_on_each_poll_without_redis():
+    rows = [_raw(id=1), _raw(id=2, figure=250)]
+    with patch.object(idmc, "_fetch_all", return_value=rows), \
+         patch.object(idmc, "_redis", _NoRedis()):
+        first = fetch_idu_records()
+        second = fetch_idu_records()
+    assert [r["idu_id"] for r in first] == ["1", "2"]
+    assert [r["idu_id"] for r in second] == ["1", "2"]
+
+
+def test_fetch_idu_records_returns_in_batch_duplicate_once():
+    rows = [_raw(id=1), _raw(id=1)]
+    with patch.object(idmc, "_fetch_all", return_value=rows), \
+         patch.object(idmc, "_redis", _NoRedis()):
+        assert len(fetch_idu_records()) == 1
+
+
+def test_fetch_idu_records_keeps_a_revised_row_with_a_new_hash():
+    rows = [_raw(id=1, figure=100), _raw(id=1, figure=900)]
+    with patch.object(idmc, "_fetch_all", return_value=rows), \
+         patch.object(idmc, "_redis", _NoRedis()):
+        out = fetch_idu_records()
+    assert len(out) == 2
+    assert out[0]["content_hash"] != out[1]["content_hash"]
+
+
+def test_fetch_idu_records_still_computes_content_hash():
+    with patch.object(idmc, "_fetch_all", return_value=[_raw(id=1)]), \
+         patch.object(idmc, "_redis", _NoRedis()):
+        (rec,) = fetch_idu_records()
+    assert rec["content_hash"] == _content_hash(rec["raw"])
+
+
+def test_mark_seen_is_removed():
+    assert not hasattr(idmc, "mark_seen")

@@ -19,14 +19,16 @@ pure transform, no clear-api write, built on
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-import json
-
-from clear_pipeline.providers import acled, darfur24, dataminr
-from clear_pipeline.providers.clear_api import get_locations_by_level, get_source_id_by_name
+from clear_pipeline.providers import acled, darfur24, dataminr, idmc
+from clear_pipeline.providers.clear_api import (
+    get_locations_by_level,
+    get_source_id_by_name,
+)
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
 
@@ -232,17 +234,81 @@ class Darfur24GXSource:
         darfur24.mark_seen(external_id)
 
 
-# IDMC is NOT registered below, on purpose — not just "not yet written".
-# Production's own IDMCConnector (defs/signals/connectors.py) sets
-# drained=False for the same reason: grouping IDMC signals into events
-# needs design work that hasn't happened ("needs new features that aren't
-# built yet"). This factory has no equivalent of that flag — every
-# registered source runs the full classify/geo/temporal/match chain, which
-# IS event-grouping — so registering an IDMCGXSource today would build on
-# the exact gap production explicitly deferred, not just reuse a pattern.
-# Add it once IDMC event-grouping has a real design, not before.
+@dataclass(frozen=True)
+class IDMCGXSource:
+    """Calls `providers/idmc.py` directly, like `ACLEDGXSource`; IDMC's only
+    ingestion path. IDU rows revise in place (same `idu_id`), so the sync hooks
+    let bronze skip unchanged rows and `_push` send revisions and retractions."""
+
+    @property
+    def source(self) -> str:
+        return settings.idmc_source_name
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        return idmc.fetch_idu_records(since=since)
+
+    def external_id(self, record: Any) -> str:
+        return record["idu_id"]
+
+    def published_at(self, record: Any) -> str:
+        return record.get("created_at") or ""
+
+    def raw_bytes(self, record: Any) -> bytes:
+        return json.dumps(record).encode("utf-8")
+
+    def parse(self, raw: bytes) -> Any:
+        return json.loads(raw)
+
+    def api_source_id(self) -> str:
+        return get_source_id_by_name(settings.idmc_source_name)
+
+    def last_synced(self) -> datetime | None:
+        return idmc.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        idmc.set_last_synced(ts)
+
+    def to_silver_input(self, record: Any, source_id: str) -> dict:
+        return idmc.build_idmc_signal_input(record, source_id, promote=False)
+
+    def mark_seen(self, external_id: str) -> None:
+        # No seen-set: the bronze skip (gold hash + pushedState) dedups.
+        pass
+
+    # ── Optional sync hooks ────────────────────────────────────────────────
+    # Only IDMC revises rows in place. Probed via `getattr` in factory.py,
+    # like the group hooks below.
+
+    def content_hash(self, record: Any) -> str:
+        return record["content_hash"]
+
+    def content_update_input(self, signal_input: dict, *, retracted: bool) -> dict:
+        return idmc.build_signal_content_update(signal_input, retracted=retracted)
+
+    # ── Optional group-supersession hooks ─────────────────────────────────
+    # One IDU `event_id` can have several role-tagged rows (Recommended figure
+    # vs Triangulation) competing for the same displacement; rules in
+    # providers/idmc.py. Outside the Protocol: `_reconcile` probes via `getattr`.
+
+    def group_member(self, external_id: str, raw_data: dict | None) -> dict | None:
+        """Place a row in its group, or None. Reads only stored `rawData`, so a
+        polled row and a gold row compare alike in `_reconcile`."""
+        return idmc.group_member(external_id, raw_data)
+
+    def resolve_group(self, members: list[dict]) -> dict[str, str]:
+        """Verdict per member of ONE group: `"retract"` kills, anything else
+        keeps. Total over `members`, and reversible when the group changes."""
+        return idmc.resolve_group(members)
+
+
+# IDMC runs the full chain for QA and pre-push filtering, like ACLED/Darfur24.
+# IDMC-native event grouping is NOT designed: the district+type heuristic runs
+# as-is (as in the drain, IDMCConnector drained=True), and gold events are a
+# QA-only sandbox that never reaches clear-api. Only IDMCGXSource defines the
+# sync hooks; other sources stay create-only.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),
     Darfur24GXSource(),
+    IDMCGXSource(),
 ]
