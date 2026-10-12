@@ -10,8 +10,8 @@ classify_group drain-loop control flow, and the translation-hash helper.
 import json
 import subprocess
 import sys
-from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from contextlib import contextmanager, nullcontext
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -690,7 +690,12 @@ def _run_lanes(new_batches, recompute_batches, *, recompute=None, mark=None, inc
         calls.append(("recompute_event", event_id))
         return recompute(event_id) if recompute else False
 
+    enqueue_stub = (
+        patch.object(stages, "enqueue_translation")
+        if not isinstance(stages.enqueue_translation, Mock) else nullcontext()
+    )
     with (
+        enqueue_stub,
         patch.object(stages, "pending_signals", side_effect=pending_new),
         patch.object(stages, "pending_recomputes", side_effect=pending_rc),
         patch.object(stages, "recompute_event", side_effect=recompute_event),
@@ -713,11 +718,38 @@ def test_recompute_lane_recomputes_each_event_once_then_marks_with_revision():
     assert sync.call_args.args[1] == {"e1", "e2"}
 
 
-def test_recompute_lane_enqueues_translations_only_for_rewritten_events():
+def test_recompute_lane_enqueues_translations_for_every_recomputed_event():
     rows = [_rc("s1", ["e1", "e2"])]
-    with patch.object(stages, "_enqueue_translations") as enqueue:
+    with (
+        patch.object(stages, "configured_target_locales", return_value=["fr"]),
+        patch.object(stages, "enqueue_translation") as enqueue,
+    ):
         _run_lanes([], [rows, []], recompute=lambda event_id: event_id == "e1")  # only e1 rewritten
-    enqueue.assert_called_once_with("event", "e1")
+    assert [c.args for c in enqueue.call_args_list] == [("event", "e1", "fr"), ("event", "e2", "fr")]
+
+
+def test_failed_translation_enqueue_leaves_the_row_pending_for_a_retry():
+    # The rewrite saved its members hash, so the retry reports no rewrite; the
+    # enqueue must still happen then, or the corrected event keeps old translations.
+    with (
+        patch.object(stages, "configured_target_locales", return_value=["fr"]),
+        patch.object(stages, "enqueue_translation", side_effect=RuntimeError("clear-api 503")),
+    ):
+        result, _, marked, sync, incr = _run_lanes([], [[_rc("s1", ["e1"], revision=2)], []],
+                                                   recompute=lambda event_id: True)
+    assert marked == []
+    incr.assert_called_once_with("signal:recompute_attempts:s1:2")
+    assert result.metadata["recomputed_events"] == 0
+    assert "e1" in sync.call_args.args[1]  # its aggregates did change
+
+    with (
+        patch.object(stages, "configured_target_locales", return_value=["fr"]),
+        patch.object(stages, "enqueue_translation") as enqueue,
+    ):
+        _, _, marked, _, _ = _run_lanes([], [[_rc("s1", ["e1"], revision=2)], []],
+                                        recompute=lambda event_id: False)  # hash already saved
+    enqueue.assert_called_once_with("event", "e1", "fr")
+    assert marked == [("PROCESSED", [("s1", 2)])]
 
 
 def test_recompute_lane_failure_still_syncs_the_new_lanes_kb_cards():

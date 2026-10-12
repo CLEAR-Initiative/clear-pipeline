@@ -423,9 +423,13 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
                             raise
                 if rewrote:
                     llm_budget -= 1
-                    _enqueue_translations("event", event_id)  # the rewrite changed title/description
-                ok.add(event_id)
                 touched_events.add(event_id)
+                # Every time, not only on a rewrite: the rewrite saved its members
+                # hash, so a retry after a lost enqueue reports no rewrite. Raises,
+                # so the row stays pending; unchanged fields translate as a NOOP.
+                for locale in configured_target_locales():
+                    enqueue_translation("event", event_id, locale)
+                ok.add(event_id)
                 counts["recomputed_events"] += 1
             except ClearApiStaleMembers:
                 stale.add(event_id)  # still moving; next run, without spending an attempt
