@@ -830,6 +830,21 @@ def test_still_stale_after_retries_stays_pending_without_spending_an_attempt():
     assert "e1" not in sync.call_args.args[1]
 
 
+def test_a_head_left_pending_this_run_is_reported_as_blocking():
+    def recompute(event_id):
+        raise stages.ClearApiStaleMembers([{"message": "stale", "extensions": {"code": "STALE_EVENT_MEMBERS"}}])
+
+    head = [_rc("s1", ["e1"]), _rc("s2", ["e1"])]
+    result, calls, _, _, _ = _run_lanes([], [head, list(head)], recompute=recompute)
+    assert calls.count(("pending_recomputes",)) == 2
+    assert result.metadata["recompute_head_blocked"] == 2
+
+
+def test_a_drained_queue_is_not_reported_as_blocking():
+    result, _, _, _, _ = _run_lanes([], [[_rc("s1", ["e1"])], []])
+    assert result.metadata["recompute_head_blocked"] == 0
+
+
 def test_failed_rewrite_still_syncs_the_written_aggregates_and_spends_an_attempt():
     def recompute(event_id):
         raise stages.EventRewriteFailed(event_id)
@@ -971,6 +986,7 @@ def test_drain_metadata_keys():
     assert set(result.metadata) == {
         "processed", "dropped", "requeued", "failed", "mark_conflicts",
         "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred", "recompute_stale",
+        "recompute_head_blocked",
         "jev_classified", "jev_fallback", "jev_fallback_rate",
     }
 

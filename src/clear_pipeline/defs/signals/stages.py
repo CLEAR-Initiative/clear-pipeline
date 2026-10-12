@@ -394,7 +394,8 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
     and attempted at most once per run. Runs after, and bounded apart from, the
     NEW lane so stuck recomputes never block first grouping."""
     counts = {"recompute_rows": 0, "recomputed_events": 0, "recompute_failed": 0,
-              "recompute_deferred": 0, "recompute_stale": 0, "conflicts": 0}
+              "recompute_deferred": 0, "recompute_stale": 0, "recompute_head_blocked": 0,
+              "conflicts": 0}
     attempted: set[str] = set()
 
     def spend() -> None:
@@ -403,8 +404,13 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
         llm_budget -= 1
 
     for _ in range(_MAX_BATCHES):
-        rows = [r for r in pending_recomputes(first=_BATCH_SIZE) if r["id"] not in attempted]
+        fetched = pending_recomputes(first=_BATCH_SIZE)
+        rows = [r for r in fetched if r["id"] not in attempted]
         if not rows:
+            # The query has no cursor: a head of rows left pending this run hides
+            # every row behind it until it clears. Bounded today (only IDMC
+            # revises signals, daily), so surface it rather than page past it.
+            counts["recompute_head_blocked"] = len(fetched)
             break
         attempted.update(r["id"] for r in rows)
         counts["recompute_rows"] += len(rows)
