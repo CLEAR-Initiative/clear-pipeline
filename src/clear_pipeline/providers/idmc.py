@@ -75,6 +75,7 @@ def _parse_event(raw: dict) -> dict | None:
 
     return {
         "idu_id": str(idu_id),
+        "event_id": raw.get("event_id"),
         "iso3": raw.get("iso3") or "",
         "displacement_type": raw.get("displacement_type") or "",
         "figure": figure,
@@ -92,6 +93,66 @@ def _parse_event(raw: dict) -> dict | None:
         "created_at": raw.get("created_at"),
         "raw": raw,
     }
+
+
+_ROLE_RECOMMENDED = "Recommended figure"
+_ROLE_TRIANGULATION = "Triangulation"
+
+
+# ── Role-based supersession within an IDU `event_id` group ────────────────
+# One `event_id` can carry several role-tagged rows (reviewed "Recommended
+# figure" vs corroborating "Triangulation"). A verdict depends on the whole
+# group, including earlier polls' rows in gold, so these are group primitives,
+# not a batch filter; the caller (`<source>_reconcile`) assembles the group.
+
+KEEP = "keep"
+RETRACT = "retract"
+
+
+def group_key(raw_data: dict | None) -> str | None:
+    """`idmc:eventId:<event_id>`, or None without an `event_id` (group of one).
+    Namespaced because `groupKey` is one column shared by every source's gold table."""
+    if not raw_data:
+        return None
+    event_id = raw_data.get("event_id")
+    return f"idmc:eventId:{event_id}" if event_id else None
+
+
+def group_member(external_id: str, raw_data: dict | None) -> dict | None:
+    """Normalize a raw IDU row for `resolve_group`, or None if ungrouped.
+    `raw_data` is the verbatim row stored as `rawData`, so polled and gold rows
+    read alike. `external_id` is the bare `idu_id`, not the `idmc:`-prefixed one."""
+    key = group_key(raw_data)
+    if key is None or raw_data is None:
+        return None
+    return {
+        "externalId": external_id,
+        "groupKey": key,
+        # Same `or ""` normalization `_parse_event` applies — IDU can send a
+        # null role, and the rules below compare against exact strings.
+        "role": (raw_data.get("role") or ""),
+        "createdAt": raw_data.get("created_at") or "",
+    }
+
+
+def resolve_group(members: list[dict]) -> dict[str, str]:
+    """`KEEP`/`RETRACT` for every member of ONE `event_id` group: a Recommended
+    figure retracts all Triangulation rows; an all-Triangulation group keeps only
+    the latest `created_at`; any other mix keeps everything rather than guess.
+    Total, so a reversed verdict is detectable: callers must pass retracted rows too."""
+    roles = [m["role"] for m in members]
+    if _ROLE_RECOMMENDED in roles:
+        return {
+            m["externalId"]: (RETRACT if m["role"] == _ROLE_TRIANGULATION else KEEP)
+            for m in members
+        }
+    if roles and all(role == _ROLE_TRIANGULATION for role in roles):
+        most_recent = max(members, key=lambda m: m["createdAt"])
+        return {
+            m["externalId"]: (KEEP if m["externalId"] == most_recent["externalId"] else RETRACT)
+            for m in members
+        }
+    return {m["externalId"]: KEEP for m in members}
 
 
 # IDMC's backend recomputes this row's centroid independently on every poll,
@@ -183,12 +244,9 @@ def _parse_coordinate(pair: str) -> tuple[float, float] | None:
 
 def fetch_idu_records(since: datetime | None = None) -> list[dict]:
     """Fetch + filter IDU records for the configured countries and displacement
-    types, deduplicated against the Redis seen-set (id + content hash — see
-    `_content_hash`). `since` is accepted for `PollSource` protocol parity but
-    ignored: the API takes no client-controllable date filter, so every poll
-    re-scans IDMC's whole last-180-days window and the content-hash dedup does
-    the "what's new/changed" work instead.
-    """
+    types. `since` is ignored (`PollSource` parity): the API has no date filter,
+    so every poll re-scans the last 180 days. No cross-poll dedup: gx compares
+    `content_hash` against gold, and a seen-set here would hide revisions."""
     countries = {c.strip().upper() for c in settings.idmc_countries.split(",") if c.strip()}
     allowed_types = {t.strip() for t in settings.idmc_allowed_types.split(",") if t.strip()}
 
@@ -211,32 +269,19 @@ def fetch_idu_records(since: datetime | None = None) -> list[dict]:
             continue
 
         parsed["content_hash"] = _content_hash(parsed["raw"])
-        seen_key = f"idmc:seen:{parsed['idu_id']}:{parsed['content_hash']}"
-        if seen_key in batch_keys:
+        batch_key = f"{parsed['idu_id']}:{parsed['content_hash']}"
+        if batch_key in batch_keys:
             deduped += 1
             continue
-        # Renew, don't just check — unlike ACLED/GDACS, IDMC re-checks the same
-        # idu_id forever, so a fixed TTL would eventually expire on an unchanged
-        # row and misfire it as "new". EXPIRE renews and reports existence in one call
-        if _redis.expire(seen_key, settings.dedup_ttl_hours * 3600):
-            deduped += 1
-            continue
-        batch_keys.add(seen_key)
+        batch_keys.add(batch_key)
         events.append(parsed)
 
     logger.info(
-        "[IDMC] Result: %d new/changed events (parse_failed=%d, filtered_out=%d, "
-        "already_seen=%d) out of %d raw",
+        "[IDMC] Result: %d events (parse_failed=%d, filtered_out=%d, "
+        "duplicate_in_batch=%d) out of %d raw",
         len(events), parse_failed, filtered_out, deduped, len(raw_rows),
     )
     return events
-
-
-def mark_seen(idu_id: str, content_hash: str) -> None:
-    """Mark a (id, content_hash) revision ingested — called only after
-    createSignal is confirmed, so a failed persistence leaves the row eligible
-    for retry on the next poll."""
-    _redis.setex(f"idmc:seen:{idu_id}:{content_hash}", settings.dedup_ttl_hours * 3600, "1")
 
 
 def get_last_synced() -> datetime | None:
@@ -250,8 +295,9 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("idmc:last_synced", ts.isoformat())
 
 
-def build_idmc_signal_input(event: dict, source_id: str) -> dict:
-    """Convert a parsed IDU row into a CLEAR CreateSignalInput dict."""
+def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True) -> dict:
+    """Convert a parsed IDU row into a CLEAR CreateSignalInput dict. `promote`
+    threads through to `enrich_with_geoparser`, as in `acled.py::build_acled_signal_input`."""
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
 
     input_data: dict = {
@@ -288,37 +334,36 @@ def build_idmc_signal_input(event: dict, source_id: str) -> dict:
         input_data,
         title=event["title"],
         description=event.get("description"),
+        promote=promote,
         log_tag=f"idmc:{event.get('idu_id')}",
     )
 
     return input_data
 
 
-def build_signal_content_update(input_data: dict, signal_id: str) -> dict:
-    """Adapt a create_signal input dict (already built by
-    build_idmc_signal_input) into an updateSignalContent input dict targeting
-    an existing signal — reuses the same values rather than recomputing them,
-    so a revision's create and update calls always agree.
-
-    lat/lng/geoparsedData are spread in only when build_idmc_signal_input
-    actually set them, never defaulted via `.get()`. An ABSENT key tells
-    clear-api's Prisma update "leave this field alone"; sending an explicit
-    None instead would NULL OUT a previously-resolved value just because
-    this poll's data happened to be missing it transiently.
-    """
-    return {
-        "id": signal_id,
+def build_signal_content_update(input_data: dict, *, retracted: bool | None = None) -> dict:
+    """Adapt a build_idmc_signal_input dict into an updateSignalContent input keyed
+    by ``(sourceId, externalId)`` (gold never has the clear-api id), reusing its
+    values so create and update agree. lat/lng/geoparsedData/rawS3Key are omitted
+    when absent: an absent key leaves the field alone, None would erase a resolved
+    value on a transient gap. ``retracted=None`` leaves the flag unchanged."""
+    update = {
+        "sourceId": input_data["sourceId"],
+        "externalId": input_data["externalId"],
         "contentHash": input_data["contentHash"],
         "rawData": input_data["rawData"],
         "title": input_data.get("title"),
         "description": input_data.get("description"),
         "severity": input_data.get("severity"),
         "url": input_data.get("url"),
-        # lat/lng/geoparsedData can be transiently missing (bad coordinate
-        # data, or Nominatim being down) — omit, don't null a resolved value.
         **{
             k: input_data[k]
             for k in ("lat", "lng", "geoparsedData")
             if k in input_data
         },
     }
+    if input_data.get("rawS3Key"):
+        update["rawS3Key"] = input_data["rawS3Key"]
+    if retracted is not None:
+        update["retracted"] = retracted
+    return update
