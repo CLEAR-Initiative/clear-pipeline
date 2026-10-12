@@ -396,6 +396,12 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
     counts = {"recompute_rows": 0, "recomputed_events": 0, "recompute_failed": 0,
               "recompute_deferred": 0, "recompute_stale": 0, "conflicts": 0}
     attempted: set[str] = set()
+
+    def spend() -> None:
+        # Charged as each rewrite starts: failed and stale-refused calls cost too.
+        nonlocal llm_budget
+        llm_budget -= 1
+
     for _ in range(_MAX_BATCHES):
         rows = [r for r in pending_recomputes(first=_BATCH_SIZE) if r["id"] not in attempted]
         if not rows:
@@ -408,21 +414,24 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
         deferred: set[str] = set()
         stale: set[str] = set()
         for event_id in event_ids:
-            if llm_budget <= 0:
-                deferred.add(event_id)  # may need a rewrite; next run
-                continue
             try:
                 # A refused write means the members moved after the read; not every
                 # such change queues its own recompute, so re-read rather than skip.
+                # Each re-read may rewrite again, so every attempt needs budget.
+                recomputed = False
                 for attempt in range(_STALE_RETRIES + 1):
+                    if llm_budget <= 0:
+                        break
                     try:
-                        rewrote = recompute_event(event_id, _member_text)
+                        recompute_event(event_id, _member_text, on_rewrite=spend)
+                        recomputed = True
                         break
                     except ClearApiStaleMembers:
                         if attempt == _STALE_RETRIES:
                             raise
-                if rewrote:
-                    llm_budget -= 1
+                if not recomputed:
+                    deferred.add(event_id)  # may need a rewrite; next run
+                    continue
                 touched_events.add(event_id)
                 # Every time, not only on a rewrite: the rewrite saved its members
                 # hash, so a retry after a lost enqueue reports no rewrite. Raises,

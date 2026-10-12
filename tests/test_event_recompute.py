@@ -316,3 +316,37 @@ def test_only_the_aggregate_read_requests_glides(run):
     run(api)
     # The rewrite's prompt read never needs them.
     assert api.glide_calls == [True, False]
+
+
+def test_on_rewrite_fires_before_the_llm_even_when_it_fails():
+    api = FakeApi([m("a"), m("b", day=2)])
+    rewrites = []
+    llm = FakeLLM(fail=True)
+    llm_calls_at_rewrite = []
+
+    def on_rewrite():
+        rewrites.append(1)
+        llm_calls_at_rewrite.append(len(llm.calls))
+
+    with (
+        patch.object(ev.graphql, "event_members", side_effect=api.event_members),
+        patch.object(ev.graphql, "get_event_recompute_state", side_effect=api.get_event_recompute_state),
+        patch.object(ev.graphql, "set_event_aggregates", side_effect=api.set_event_aggregates),
+        patch.object(ev, "make_llm_provider", return_value=llm),
+        patch.object(ev, "_redis", MagicMock()),
+        pytest.raises(ev.EventRewriteFailed),
+    ):
+        ev.recompute_event("e1", text, on_rewrite=on_rewrite)
+    assert rewrites == [1] and llm_calls_at_rewrite == [0]
+
+    # Hash unchanged → no rewrite, nothing charged.
+    api.state["rewriteMembersHash"] = ev.members_hash(api.event_members("e1"))
+    rewrites.clear()
+    with (
+        patch.object(ev.graphql, "event_members", side_effect=api.event_members),
+        patch.object(ev.graphql, "get_event_recompute_state", side_effect=api.get_event_recompute_state),
+        patch.object(ev.graphql, "set_event_aggregates", side_effect=api.set_event_aggregates),
+        patch.object(ev, "_redis", MagicMock()),
+    ):
+        ev.recompute_event("e1", text, on_rewrite=on_rewrite)
+    assert rewrites == []

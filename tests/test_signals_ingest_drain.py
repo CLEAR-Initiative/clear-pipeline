@@ -674,7 +674,7 @@ def _items_recorder(sink):
     return mark
 
 
-def _run_lanes(new_batches, recompute_batches, *, recompute=None, mark=None, incr=1):
+def _run_lanes(new_batches, recompute_batches, *, recompute=None, mark=None, incr=1, rewrite=False):
     calls: list[tuple] = []
     marked: list = []
 
@@ -686,8 +686,10 @@ def _run_lanes(new_batches, recompute_batches, *, recompute=None, mark=None, inc
         calls.append(("pending_recomputes",))
         return recompute_batches.pop(0) if recompute_batches else []
 
-    def recompute_event(event_id, member_text):
+    def recompute_event(event_id, member_text, on_rewrite):
         calls.append(("recompute_event", event_id))
+        if rewrite:
+            on_rewrite()
         return recompute(event_id) if recompute else False
 
     enqueue_stub = (
@@ -874,7 +876,7 @@ def _drain_once(redis, *, new=(), recompute=()):
     """One full drain run in which every NEW signal and every recompute fails."""
     marked: list = []
 
-    def boom(*_):
+    def boom(*_, **__):
         raise RuntimeError("boom")
 
     with (
@@ -931,6 +933,29 @@ def test_llm_budget_defers_events_and_leaves_their_rows_unmarked():
     assert marked == [("PROCESSED", [("n1", 0)])]
     assert result.metadata["recompute_deferred"] == 1
     incr.assert_not_called()
+
+
+def test_failed_rewrites_spend_the_llm_budget():
+    def recompute(event_id):
+        raise stages.EventRewriteFailed(event_id)
+
+    rows = [_rc(f"s{i}", [f"e{i}"]) for i in range(3)]
+    with patch.object(stages.settings, "signal_max_signals_per_run", 2):
+        result, calls, _, _, _ = _run_lanes([], [rows, []], recompute=recompute, rewrite=True)
+    assert [c for c in calls if c[0] == "recompute_event"] == [("recompute_event", "e0"), ("recompute_event", "e1")]
+    assert result.metadata["recompute_deferred"] == 1
+
+
+def test_stale_retries_stop_when_their_rewrites_exhaust_the_budget():
+    def recompute(event_id):
+        raise stages.ClearApiStaleMembers([{"message": "stale", "extensions": {"code": "STALE_EVENT_MEMBERS"}}])
+
+    with patch.object(stages.settings, "signal_max_signals_per_run", 2):
+        result, calls, marked, _, incr = _run_lanes([], [[_rc("s1", ["e1"])], []], recompute=recompute, rewrite=True)
+    assert len([c for c in calls if c[0] == "recompute_event"]) == 2
+    assert marked == []
+    incr.assert_not_called()
+    assert result.metadata["recompute_deferred"] == 1
 
 
 def test_mark_conflicts_are_counted():

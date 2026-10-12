@@ -883,10 +883,12 @@ class EventRewriteFailed(Exception):
 def recompute_event(
     event_id: str,
     member_text: Callable[[dict], tuple[str | None, str | None]],
+    on_rewrite: Callable[[], None] = lambda: None,
 ) -> bool:
     """Rebuild an event's aggregates from its live members (idempotent, absolute);
     ``member_text`` gives each member's (title, description) as grouping saw it.
-    The LLM rewrite runs only when its newest members changed (``rewriteMembersHash``).
+    The LLM rewrite runs only when its newest members changed (``rewriteMembersHash``);
+    ``on_rewrite`` is called as it starts, so callers can charge failed calls too.
     On LLM failure, deterministic fields are still written, text and hash kept,
     and ``EventRewriteFailed`` raised for retry. Raises ``ClearApiStaleMembers``, writing
     nothing, when the members changed after they were read. Returns True when
@@ -923,6 +925,7 @@ def recompute_event(
     if members and live_hash != state.get("rewriteMembersHash"):
         types = state.get("types") or []
         level_2 = code_to_level2_map().get(types[0]) if types else None
+        on_rewrite()
         try:
             rewrite, _ = _rewrite_event(
                 event_id, _primary_location_name(state), level_2, raise_errors=True,
