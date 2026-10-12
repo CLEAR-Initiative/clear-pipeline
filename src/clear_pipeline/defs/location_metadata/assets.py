@@ -574,26 +574,22 @@ def usgs_earthquakes(
 # Jobs + schedules
 # ────────────────────────────────────────────────────────────────────
 
-# The daily job's 8 assets all hit the SAME HAPI rate limit, so running them
-# fully parallel triggers 429s. Cap how many run at once (the HTTP clients also
-# retry 429s with backoff, so this is burst-reduction, not the sole guard).
-# Tune with LOCATION_METADATA_MAX_CONCURRENT (default 2). The dependency on
-# location_pcode_index already serialises the first hop.
-_MAX_CONCURRENT = _int_env("LOCATION_METADATA_MAX_CONCURRENT", 2)
-_LIMITED_EXECUTION = {
-    "execution": {"config": {"multiprocess": {"max_concurrent": _MAX_CONCURRENT}}},
-}
+# The daily job's 8 assets all hit the SAME HAPI rate limit. Under the global
+# in_process executor (the OOM fix — see definitions.py) a run's steps execute
+# SEQUENTIALLY, one asset at a time, so they can no longer burst the API in
+# parallel — the old multiprocess `max_concurrent` cap is now both unnecessary
+# and invalid config (in_process has no `multiprocess` key). The HTTP clients
+# still retry 429s with backoff, and the dependency on location_pcode_index
+# serialises the first hop.
 
 location_metadata_daily_job = dg.define_asset_job(
     name="location_metadata_daily",
     selection=[location_pcode_index, *_HAPI_ASSETS, hapi_operational_presence],
-    config=_LIMITED_EXECUTION,
 )
 
 location_metadata_monthly_job = dg.define_asset_job(
     name="location_metadata_monthly",
     selection=[location_pcode_index, iom_dtm_displacement, acaps_seasonal_calendar],
-    config=_LIMITED_EXECUTION,
 )
 
 # HAPI updates land throughout the day; 04:00 UTC catches the prior day's

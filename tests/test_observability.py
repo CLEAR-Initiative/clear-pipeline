@@ -60,6 +60,19 @@ def test_global_executor_is_in_process():
     assert "in_process" in defs.executor.name
 
 
+def test_all_job_snapshots_build():
+    # Building a job snapshot validates each job's default run config against
+    # the active executor — the exact step that failed when a job still pinned
+    # `execution.multiprocess` after the switch to the in_process executor
+    # (in_process has no `multiprocess` config key). Guards against any job
+    # shipping run config the global executor can't accept.
+    defs = definitions.defs()
+    jobs = defs.resolve_all_job_defs()
+    assert jobs
+    for job in jobs:
+        job.get_job_snapshot_id()
+
+
 def test_sensors_run_on_deploy():
     # Both health sensors must ship RUNNING, or no alert ever fires.
     defs = definitions.defs()
