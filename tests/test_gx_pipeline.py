@@ -33,6 +33,21 @@ def test_registered_sources_conform_to_protocol():
     assert all(isinstance(s, GXSource) for s in sources.values())
 
 
+def test_only_idmc_gx_job_is_polled():
+    """gx is IDMC's only ingestion path, so its job needs a trigger. The other
+    sources share watermarks with the production poll and must not get one."""
+    sensors = {
+        s.source: [d for d in build_gx_source_assets(s) if isinstance(d, dg.SensorDefinition)]
+        for s in GX_SOURCES
+    }
+    assert {src: len(v) for src, v in sensors.items()} == {
+        "dataminr": 0, "acled": 0, "darfur24": 0, "idmc": 1,
+    }
+    (sensor,) = sensors["idmc"]
+    assert sensor.job_name == "idmc_gx"
+    assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
+
+
 def test_idmc_source_to_silver_input_is_pure_transform():
     """`to_silver_input` must never promote a geoparser candidate to an L4
     location (a clear-api write, forbidden before `_push`), like ACLEDGXSource."""

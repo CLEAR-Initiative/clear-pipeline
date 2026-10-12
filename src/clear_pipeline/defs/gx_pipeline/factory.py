@@ -48,6 +48,7 @@ from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
 from clear_pipeline.defs.gx_pipeline.sources import GXSource
 from clear_pipeline.defs.signals import lake
+from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ClearApiNotFound,
     create_signal_for_sync,
@@ -95,7 +96,8 @@ def _already_synced(polled_hash: str | None, gold_hash: str | None, pushed_state
 
 
 def build_gx_source_assets(source: GXSource) -> list:
-    """Return one source's full GX-gated defs: [9 assets, 6 checks, 1 job]."""
+    """Return one source's full GX-gated defs: [9 assets, 6 checks, 1 job,
+    + a poll sensor when the source sets ``poll_interval_minutes``]."""
     src = source.source
     group = f"{src}_gx"
 
@@ -775,8 +777,19 @@ def build_gx_source_assets(source: GXSource) -> list:
         selection=[_bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push],
     )
 
-    return [
+    defs = [
         _bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push,
         _bronze_check, _silver_check, _classify_check, _geo_check, _temporal_check, _gold_check,
         job,
     ]
+    # Only a source whose sole ingestion path is this job gets a trigger (see
+    # IDMCGXSource). RUNNING: a fresh sensor name inherits no UI toggle state.
+    poll_interval_minutes = getattr(source, "poll_interval_minutes", None)
+    if poll_interval_minutes is not None:
+        defs.append(build_poll_sensor(
+            name=f"{src}_gx_poll_sensor",
+            job=job,
+            default_interval_minutes=poll_interval_minutes,
+            default_status=dg.DefaultSensorStatus.RUNNING,
+        ))
+    return defs

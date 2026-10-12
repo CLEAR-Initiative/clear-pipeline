@@ -240,6 +240,11 @@ class IDMCGXSource:
     ingestion path. IDU rows revise in place (same `idu_id`), so the sync hooks
     let bronze skip unchanged rows and `_push` send revisions and retractions."""
 
+    # Optional, probed via `getattr` in factory.py: gives the job a poll sensor.
+    # Only IDMC sets it — the other sources' watermarks and seen-sets are shared
+    # with the production poll in `defs/signals`, which a second poller would race.
+    poll_interval_minutes: int = settings.idmc_poll_interval_minutes
+
     @property
     def source(self) -> str:
         return settings.idmc_source_name
