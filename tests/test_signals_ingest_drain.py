@@ -828,6 +828,18 @@ def test_still_stale_after_retries_stays_pending_without_spending_an_attempt():
     assert "e1" not in sync.call_args.args[1]
 
 
+def test_failed_rewrite_still_syncs_the_written_aggregates_and_spends_an_attempt():
+    def recompute(event_id):
+        raise stages.EventRewriteFailed(event_id)
+
+    result, _, marked, sync, incr = _run_lanes([], [[_rc("s1", ["e1"], revision=2)], []], recompute=recompute,
+                                               incr=stages._MAX_SIGNAL_ATTEMPTS)
+    assert marked == [("FAILED", [("s1", 2)])]
+    incr.assert_called_once_with("signal:recompute_attempts:s1:2")
+    assert result.metadata["recomputed_events"] == 0
+    assert "e1" in sync.call_args.args[1]  # corrected totals reach the card, even on the last attempt
+
+
 def test_a_real_failure_on_another_event_still_spends_an_attempt():
     def recompute(event_id):
         raise (stages.ClearApiStaleMembers([{"message": "stale", "extensions": {"code": "STALE_EVENT_MEMBERS"}}]) if event_id == "e1" else RuntimeError("boom"))

@@ -59,7 +59,7 @@ from clear_pipeline.providers.clear_api import (
     pending_translations,
     sync_event_cards,
 )
-from clear_pipeline.providers.event import group_signal, recompute_event
+from clear_pipeline.providers.event import EventRewriteFailed, group_signal, recompute_event
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import extract_population_affected_from_text
 from clear_pipeline.providers.translate import (
@@ -434,6 +434,11 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
             except ClearApiStaleMembers:
                 stale.add(event_id)  # still moving; next run, without spending an attempt
                 counts["recompute_stale"] += 1
+            except EventRewriteFailed:
+                # Aggregates were written before the rewrite failed: refresh the
+                # card now, or a last failed attempt leaves superseded figures.
+                touched_events.add(event_id)
+                context.log.exception("[classify_group] rewrite of event %s failed", event_id)
             except Exception:  # isolate one event's failure
                 context.log.exception("[classify_group] recompute of event %s failed", event_id)
 

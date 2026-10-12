@@ -227,8 +227,9 @@ def test_rewrite_prompt_takes_the_50_newest_but_aggregates_cover_all(run):
 
 def test_llm_failure_writes_deterministic_fields_only_then_raises(run):
     api = FakeApi([m("a", casualties=7)])
-    with pytest.raises(RuntimeError, match="LLM down"):
+    with pytest.raises(ev.EventRewriteFailed) as raised:
         run(api, FakeLLM(fail=True))
+    assert str(raised.value.__cause__) == "LLM down"
     api.redis.delete.assert_called_with(ev.ACTIVE_EVENTS_CACHE_KEY)
     w = api.writes[-1]
     assert w["casualties"] == 7

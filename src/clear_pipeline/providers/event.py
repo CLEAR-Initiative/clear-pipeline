@@ -875,6 +875,11 @@ def _primary_location_name(event: dict) -> str | None:
     return None
 
 
+class EventRewriteFailed(Exception):
+    """The LLM rewrite failed after ``recompute_event`` wrote the deterministic
+    aggregates: the event changed, but the recompute must still be retried."""
+
+
 def recompute_event(
     event_id: str,
     member_text: Callable[[dict], tuple[str | None, str | None]],
@@ -883,7 +888,7 @@ def recompute_event(
     ``member_text`` gives each member's (title, description) as grouping saw it.
     The LLM rewrite runs only when its newest members changed (``rewriteMembersHash``).
     On LLM failure, deterministic fields are still written, text and hash kept,
-    and the error re-raised for retry. Raises ``ClearApiStaleMembers``, writing
+    and ``EventRewriteFailed`` raised for retry. Raises ``ClearApiStaleMembers``, writing
     nothing, when the members changed after they were read. Returns True when
     the rewrite ran."""
     members = graphql.event_members(event_id, with_glide=True)
@@ -949,5 +954,5 @@ def recompute_event(
         _invalidate_events_cache()
 
     if rewrite_error is not None:
-        raise rewrite_error
+        raise EventRewriteFailed(event_id) from rewrite_error
     return rewrite is not None
