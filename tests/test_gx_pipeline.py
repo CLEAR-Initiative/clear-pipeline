@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import dagster as dg
 import pandas as pd
+import pytest
 import yaml
 
 from clear_pipeline.defs.gx_pipeline.factory import build_gx_source_assets, gold_pool
@@ -627,9 +628,12 @@ def test_iceberg_events_stubbed():
     assert merged["signalIds"] == ["r1"]  # passthrough, not persisted anywhere
 
 
-def test_gold_table_gains_new_columns_on_load(tmp_path):
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_gold_table_gains_new_columns_on_load(tmp_path, interrupted):
     """A gold table lacking the new columns is migrated additively on load, and
-    its pre-migration rows (`retracted` NULL) count as live, not stranded."""
+    its pre-migration rows (`retracted` NULL) count as live, not stranded.
+    `interrupted`: a prior run committed the columns but died before rewriting
+    the snapshot; the next load must still finish the migration."""
     import pyarrow as pa
     from pyiceberg.schema import Schema
     from pyiceberg.types import DoubleType, LongType, NestedField, StringType
@@ -670,6 +674,10 @@ def test_gold_table_gains_new_columns_on_load(tmp_path):
               "signalInputJson": '{"title": "Clash"}'}],
             schema=pre_migration_schema.as_arrow(),
         ))
+        if interrupted:
+            with old_table.update_schema() as update:
+                for field in iceberg_signals._SCHEMA.fields[len(pre_migration_schema.fields):]:
+                    update.add_column(field.name, field.field_type)
 
         table = iceberg_signals.get_signals_table("oldsrc")
         assert "groupKey" in table.schema().column_names

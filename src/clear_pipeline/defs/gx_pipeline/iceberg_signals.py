@@ -47,23 +47,27 @@ _SCHEMA = Schema(
 
 def _ensure_columns(cat, identifier: str, table):
     """Add any `_SCHEMA` column the table lacks (`_SCHEMA` applies only at
-    create), then rewrite existing rows once. `Table.upsert` scans via
-    `use_ref("main")`, which PyIceberg 0.12.0 projects through that snapshot's
-    schema, so a pre-evolution snapshot breaks the next upsert ("Target schema's
-    field names are not matching"). Atomic, but loads the table into memory."""
+    create), then rewrite the rows if the current snapshot predates the schema.
+    `Table.upsert` scans via `use_ref("main")`, which PyIceberg 0.12.0 projects
+    through that snapshot's schema, so a pre-evolution snapshot breaks the next
+    upsert ("Target schema's field names are not matching"). The two steps are
+    separate commits; keying the rewrite on the snapshot's `schema_id`, not on
+    missing columns, lets a run interrupted between them resume. Loads the
+    table into memory."""
     missing = [f for f in _SCHEMA.fields if f.name not in table.schema().column_names]
-    if not missing:
-        return table
-    with table.update_schema() as update:
-        for field in missing:
-            update.add_column(field.name, field.field_type)
-    table = cat.load_table(identifier)
-
-    existing = table.scan().to_arrow()  # projects the new columns as NULL
-    if existing.num_rows:
-        table.overwrite(existing)
+    if missing:
+        with table.update_schema() as update:
+            for field in missing:
+                update.add_column(field.name, field.field_type)
         table = cat.load_table(identifier)
-    return table
+
+    snapshot = table.current_snapshot()
+    if snapshot is None or snapshot.schema_id == table.metadata.current_schema_id:
+        return table
+    # Projects the new columns as NULL. Rewritten even when empty: the stale
+    # snapshot, not its rows, is what breaks the upsert.
+    table.overwrite(table.scan().to_arrow())
+    return cat.load_table(identifier)
 
 
 def get_signals_table(source: str):
