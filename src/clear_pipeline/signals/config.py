@@ -199,6 +199,10 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
     sentry_env: str = "development"
     log_level: str = "INFO"
+    # A run STARTED/STARTING longer than this is reported to GlitchTip by
+    # stuck_run_monitor_sensor (catches OOM-orphaned runs / launch stalls that
+    # would otherwise pin the queue unnoticed).
+    stuck_run_alert_minutes: int = 30
 
     # NOTE: the clear-pipeline `insights` per-Claude-call telemetry is intentionally
     # NOT wired in the Dagster port — LLM calls go through providers/llm.py, which

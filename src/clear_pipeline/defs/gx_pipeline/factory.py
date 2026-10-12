@@ -41,7 +41,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import dagster as dg
-import great_expectations as gx
 import pandas as pd
 
 from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
@@ -707,6 +706,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_bronze, blocking=True, name="bronze_shape")
     def _bronze_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        import great_expectations as gx  # lazy — heavy import, gx jobs only
         if df.empty:
             # An empty poll is the normal steady state, not a shape defect —
             # skip the row-count gate so a quiet run doesn't fail the job.
@@ -723,6 +723,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_silver, blocking=True, name="silver_completeness")
     def _silver_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        import great_expectations as gx  # lazy — heavy import, gx jobs only
         if df.empty:
             # Every polled row unchanged and skipped at bronze: nothing to validate.
             return dg.AssetCheckResult(passed=True, metadata={"row_count": 0, "skipped": "nothing changed"})
@@ -741,6 +742,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_classify, name="classify_populated")
     def _classify_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        import great_expectations as gx  # lazy — heavy import, gx jobs only
         result = validate_dataframe(
             df, suite_name=f"{src}_classify",
             expectations=[gx.expectations.ExpectColumnValuesToNotBeNull(column="relevanceScore")],
@@ -749,6 +751,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_geo, name="geo_resolution_rate")
     def _geo_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        import great_expectations as gx  # lazy — heavy import, gx jobs only
         result = validate_dataframe(
             df, suite_name=f"{src}_geo",
             expectations=[gx.expectations.ExpectColumnValuesToNotBeNull(column="districtKey", mostly=0.7)],
@@ -757,6 +760,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_temporal, name="temporal_match_ratio")
     def _temporal_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        import great_expectations as gx  # lazy — heavy import, gx jobs only
         result = validate_dataframe(
             df, suite_name=f"{src}_temporal",
             expectations=[gx.expectations.ExpectColumnValuesToBeInSet(column="matchOutcome", value_set=["new_event", "merged"])],
@@ -766,6 +770,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     @dg.asset_check(asset=_gold, blocking=True, name="gold_integrity")
     def _gold_check(df: pd.DataFrame) -> dg.AssetCheckResult:
+        import great_expectations as gx  # lazy — heavy import, gx jobs only
         result = validate_dataframe(
             df, suite_name=f"{src}_gold",
             expectations=[
