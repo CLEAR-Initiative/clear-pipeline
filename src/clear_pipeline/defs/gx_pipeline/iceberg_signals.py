@@ -13,7 +13,6 @@ source) is stored as a JSON string column — same pattern as
 import json
 
 import pandas as pd
-import pyarrow as pa
 from pyiceberg.expressions import In
 from pyiceberg.schema import Schema
 from pyiceberg.types import DoubleType, LongType, NestedField, StringType
@@ -69,6 +68,8 @@ def upsert_signals(table, rows: list[dict]) -> None:
     """Write-or-update by `externalId` — Type-1, no history kept."""
     if not rows:
         return
+    import pyarrow as pa  # lazy — keep the heavy arrow import out of module load
+
     arrow_rows = [_to_column_dict(r) for r in rows]
     arrow_table = pa.Table.from_pylist(arrow_rows, schema=table.schema().as_arrow())
     table.upsert(arrow_table, join_cols=["externalId"])

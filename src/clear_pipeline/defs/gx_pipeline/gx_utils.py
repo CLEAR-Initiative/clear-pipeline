@@ -12,8 +12,12 @@ caller's job; this module only does the suite-level warn/block call.
 import logging
 from dataclasses import dataclass, field
 
-import great_expectations as gx
 import pandas as pd
+
+# NOTE: `great_expectations` is imported lazily inside validate_dataframe (not at
+# module top level) — it's ~hundreds of MB of RSS, and only the gx_pipeline jobs
+# need it. Keeping it out of the module-import path keeps every other run process
+# (translate, drains, ingests) lean so concurrent runs don't OOM the cgroup.
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,8 @@ def validate_dataframe(
     `factory.py`) so the suite definition sits beside the pipeline stage it
     gates.
     """
+    import great_expectations as gx  # lazy — heavy import, gx jobs only
+
     context = gx.get_context(mode="ephemeral")
     data_source = context.data_sources.add_pandas("gx_pipeline_pandas")
     data_asset = data_source.add_dataframe_asset(name=f"{suite_name}_asset")
