@@ -16,16 +16,25 @@ from clear_pipeline.providers.s3 import s3_client  # re-exported for the assets
 __all__ = ["s3_client", "raw_key", "write_raw", "write_json", "read_json", "list_keys"]
 
 
-def raw_key(source: str, published_at: str, external_id: str, *, layer: str = "raw") -> str:
+def raw_key(
+    source: str, published_at: str, external_id: str, *, layer: str = "raw", revision: str | None = None,
+) -> str:
     """Medallion blob key: ``<layer>/<source>/<YYYY-MM-DD>/<external_id>.json``.
     Default ``layer="raw"`` is bronze, unchanged from before. Medallion silver
     assets pass ``layer="silver"`` to reuse the same day-partitioned key shape.
 
     Partitioned by publication date (the ISO-8601 prefix of ``published_at``) so
     a date-range backfill reads a bounded set of keys. ``external_id`` is the
-    source's stable id (e.g. Dataminr ``alertId``); slashes are escaped."""
+    source's stable id (e.g. Dataminr ``alertId``); slashes are escaped.
+
+    ``revision`` (a content hash, for sources revised in place) gives each
+    revision its own immutable ``…/<external_id>/<revision>.json``: a row's
+    ``rawS3Key`` then always names the payload of the revision clear-api holds,
+    even while a newer poll is still on its way there."""
     day = (published_at or "")[:10] or "unknown"
     safe = external_id.replace("/", "_")
+    if revision:
+        return f"{layer}/{source}/{day}/{safe}/{revision.replace('/', '_')}.json"
     return f"{layer}/{source}/{day}/{safe}.json"
 
 

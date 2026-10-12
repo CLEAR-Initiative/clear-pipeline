@@ -128,7 +128,10 @@ def build_gx_source_assets(source: GXSource) -> list:
             try:
                 ext_id = source.external_id(record)
                 pub_at = source.published_at(record)
-                key = lake.raw_key(src, pub_at, ext_id)
+                # Per-revision key: the stored rawS3Key moves only when _push
+                # lands the revision, so drains never read a newer blob.
+                revision = content_hash(record) if content_hash is not None else None
+                key = lake.raw_key(src, pub_at, ext_id, revision=revision)
                 lake.write_raw(s3, bucket, key, source.raw_bytes(record))
                 rows.append({"externalId": ext_id, "publishedAt": pub_at, "s3Key": key})
                 written += 1
@@ -143,8 +146,8 @@ def build_gx_source_assets(source: GXSource) -> list:
         else:
             context.log.warning("[%s bronze] %d record(s) failed — watermark held for retry", src, failed)
 
-        # Skip rows Postgres already holds unchanged. The blob is still written
-        # above, so it always carries the latest polled payload.
+        # Skip rows Postgres already holds unchanged (their blob was rewritten
+        # above with identical content, at the same per-revision key).
         skipped = 0
         if content_hash is not None and rows:
             polled_hash = {source.external_id(r): content_hash(r) for r in records}

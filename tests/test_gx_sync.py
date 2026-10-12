@@ -174,7 +174,7 @@ def h(tmp_path):
 def test_create_carries_the_bronze_key_as_raw_s3_key(h):
     h.poll([_rec("a")])
     assert h.pg.ops() == ["create"]
-    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-01/a.json"
+    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-01/a/h1.json"
     assert h.gold["a"]["pushedState"] == "h1|0"
 
 
@@ -192,7 +192,7 @@ def test_create_returning_an_older_row_is_followed_by_one_update(h):
     h.poll([_rec("a")])
     assert h.pg.ops() == ["create", "update"]
     assert h.pg_row("a")["contentHash"] == "h1"
-    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-01/a.json"
+    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-01/a/h1.json"
 
 
 def test_create_returning_an_identical_row_sends_no_update(h):
@@ -218,7 +218,7 @@ def test_unchanged_repoll_writes_the_blob_but_makes_no_calls_and_no_snapshot(h):
     result = h.poll([_rec("a"), _rec("b")])
 
     assert h.pg.calls == []
-    assert len(h.s3.puts) == 2  # blob always rewritten with the latest payload
+    assert len(h.s3.puts) == 2  # same per-revision key, identical content
     assert h.metadata(result, "bronze")["skipped_unchanged"] == 2
     assert "rows" not in h.metadata(result, "silver")  # empty bronze -> silver returns early
     assert h.snapshot_count() == snapshots
@@ -254,28 +254,40 @@ def test_revision_after_push_is_one_natural_key_update_then_quiet(h):
     assert "id" not in sent
     assert sent["contentHash"] == "h2"
     assert sent["retracted"] is False
-    assert sent["rawS3Key"] == "raw/fakesrc/2026-09-01/a.json"
+    assert sent["rawS3Key"] == "raw/fakesrc/2026-09-01/a/h2.json"
     assert h.gold["a"]["pushedState"] == "h2|0"
 
     h.poll([_rec("a", h="h2")])
     assert h.pg.calls == []
 
 
-def test_revision_overwrites_the_blob_at_the_same_key(h):
+def test_revision_gets_its_own_blob_and_leaves_the_old_one_intact(h):
     h.poll([_rec("a", h="h1")])
     h.poll([_rec("a", h="h2")])
-    key = "raw/fakesrc/2026-09-01/a.json"
-    assert [k for k, _ in h.s3.puts] == [key]
-    assert b'"hash": "h2"' in h.s3.objects[key]
-    assert h.pg_row("a")["rawS3Key"] == key
+    old, new = "raw/fakesrc/2026-09-01/a/h1.json", "raw/fakesrc/2026-09-01/a/h2.json"
+    assert [k for k, _ in h.s3.puts] == [new]
+    assert b'"hash": "h1"' in h.s3.objects[old]
+    assert b'"hash": "h2"' in h.s3.objects[new]
+    assert h.pg_row("a")["rawS3Key"] == new
+
+
+def test_failed_update_keeps_clear_api_on_the_blob_of_its_revision(h):
+    # A drain reading rawS3Key between bronze and a successful push must see
+    # the revision clear-api holds, not the newer poll.
+    h.poll([_rec("a", h="h1")])
+    h.pg.fail_next["update"] = RuntimeError("clear-api 500")
+    h.poll([_rec("a", h="h2")])
+    key = h.pg_row("a")["rawS3Key"]
+    assert key == "raw/fakesrc/2026-09-01/a/h1.json"
+    assert b'"hash": "h1"' in h.s3.objects[key]
 
 
 def test_key_moves_when_the_created_at_day_changes(h):
     # Known limitation: the blob key follows the created_at day.
     h.poll([_rec("a", h="h1", created_at="2026-09-01T00:00:00Z")])
     h.poll([_rec("a", h="h2", created_at="2026-09-02T00:00:00Z")])
-    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-02/a.json"
-    assert "raw/fakesrc/2026-09-01/a.json" in h.s3.objects  # orphaned, no cleanup
+    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-02/a/h2.json"
+    assert "raw/fakesrc/2026-09-01/a/h1.json" in h.s3.objects  # kept, no cleanup
 
 
 def test_update_not_found_is_logged_not_recreated_and_quiet_after(h):
@@ -319,7 +331,7 @@ def test_revert_after_a_failed_push_is_not_skipped_and_ends_quiet(h):
     assert h.metadata(result, "bronze")["skipped_unchanged"] == 0
     assert h.pg.calls == [], "Postgres already holds h1"
     assert h.gold["a"]["pushedState"] == "h1|0"
-    assert b'"hash": "h1"' in h.s3.objects["raw/fakesrc/2026-09-01/a.json"]
+    assert b'"hash": "h1"' in h.s3.objects["raw/fakesrc/2026-09-01/a/h1.json"]
 
 
 def test_rows_are_isolated(h):
@@ -353,7 +365,7 @@ def test_legacy_pushed_row_without_state_gets_one_update_with_its_key(h):
     h.poll([_rec("a", h="h1")])
 
     assert h.pg.ops() == ["update"]
-    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-01/a.json"
+    assert h.pg_row("a")["rawS3Key"] == "raw/fakesrc/2026-09-01/a/h1.json"
     h.poll([_rec("a", h="h1")])
     assert h.pg.calls == []
 

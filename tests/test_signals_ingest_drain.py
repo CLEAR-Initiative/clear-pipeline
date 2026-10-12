@@ -311,6 +311,12 @@ def test_raw_key_is_source_date_partitioned_and_slash_safe():
     assert lake.raw_key("gdacs", "", "x").startswith("raw/gdacs/unknown/")
 
 
+def test_raw_key_with_revision_is_one_immutable_blob_per_revision():
+    key = lake.raw_key("idmc", "2026-01-06T00:00:00Z", "174447", revision="abc")
+    assert key == "raw/idmc/2026-01-06/174447/abc.json"
+    assert lake.raw_key("idmc", "2026-01-06", "174447", revision=None) == "raw/idmc/2026-01-06/174447.json"
+
+
 # ── per-source projection dispatch (stages._project) ─────────────────────────
 
 def test_project_manual_from_signal_row():

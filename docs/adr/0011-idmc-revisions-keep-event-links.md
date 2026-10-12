@@ -108,6 +108,25 @@ revise rows in place (`content_hash` hook, i.e. IDMC):
   `drift_unresolved` (a side has no district or type, so it can't be compared).
 - Costs no LLM call: gx already re-classifies every revised row.
 
+## One blob per revision
+
+Recompute reads each member's text from its `rawS3Key` blob (`_member_text`)
+and its figures from clear-api. Both must describe the same revision.
+
+`_bronze` writes the blob on every poll, but clear-api only takes the revision
+later, at `_push`. With one key per signal, the blob would run ahead of
+clear-api from `_bronze` until a push succeeds. A drain in that window would
+pair the new text with the old figures. `setEventAggregates` would accept the
+result, because it guards on clear-api revisions and those have not moved.
+
+So sources that revise rows in place (`content_hash` hook) key the bronze blob
+by revision: `raw/<source>/<day>/<external_id>/<content_hash>.json`. The blob
+is never overwritten. `rawS3Key` moves to the new key in the same
+`updateSignalContent` that bumps the revision. A reader therefore always gets
+the payload of the revision clear-api holds, whether the push is still pending
+or has failed. Sources that never revise keep the flat `<external_id>.json`
+key.
+
 ## Consequences
 
 - Figure and text corrections made in place propagate through recompute.
@@ -122,6 +141,8 @@ revise rows in place (`content_hash` hook, i.e. IDMC):
 - Nothing alerts on a failed asset check: the check has to be read.
 - A revision that moves a row to another `event_id` leaves its old supersession
   group unresolved in `_reconcile` (tracked separately).
+- Revision blobs accumulate: one per revision, with no cleanup (no S3
+  lifecycle rule yet). IDMC volume is small.
 - Supersession only retracts a Triangulation row beside a Recommended figure, or
   a non-latest row in an all-Triangulation group. If a superseded row takes any
   other role, both figures stay live: confirm IDMC's role vocabulary.
