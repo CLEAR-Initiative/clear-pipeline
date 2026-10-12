@@ -31,14 +31,32 @@ schedule_storage:
     postgres_url:
       env: DAGSTER_POSTGRES_URL
 
-# Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
-# forks each run's step workers as subprocesses). The daemon dequeues up to
-# max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
-  config:
+
+# https://dagster.io/docs/guides/operate/managing-concurrency/concurrency-pools
+concurrency:
+  # Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
+  # forks each run's step workers as subprocesses). The daemon dequeues up to
+  # max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
+  runs:
     max_concurrent_runs: 4
+  # One in-flight run per `gx_<source>_gold` pool (gx_pipeline/factory.py):
+  # `_reconcile` read-modify-writes whole gold groups. `run` granularity holds
+  # the slot for the whole run, not per step, so reconcile -> gold -> push of
+  # two runs can't interleave; covers ad-hoc UI materializations, not just the
+  # job. Extra runs queue, not drop. NB: default_limit applies to EVERY pool.
+  pools:
+    granularity: run
+    default_limit: 1
+
+# A crashed run must not hold its pool slot forever: with a limit of 1 that
+# blocks every later run of that source.
+# https://dagster.io/docs/guides/operate/managing-concurrency/troubleshooting-concurrency
+run_monitoring:
+  enabled: true
+  free_slots_after_run_end_seconds: 300
 
 # DefaultRunLauncher forks each run as a subprocess of the process that
 # launches it (the daemon, here). Simplest launcher; fine for a single-node
