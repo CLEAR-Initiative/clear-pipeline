@@ -15,6 +15,11 @@ concurrency:
 jobs:
   tag:
     name: Create version tag
+    # workflow_dispatch's branch filter is NOT restricted by `push.branches`, so
+    # a manual run from any branch holding this file would otherwise publish that
+    # branch's code as :prod. Only ever tag/build/deploy from the prod branch.
+    # `build`/`deploy` need this job, so guarding it here gates the whole run.
+    if: github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,19 +28,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute version
+      - name: Tag next version (retry on a concurrent release)
         id: version
         run: |
-          LATEST=$(git ls-remote --tags --refs origin | sed 's#.*refs/tags/##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
-          IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST:-0.0.0}"
-          echo "version=${MAJOR}.${MINOR}.$((PATCH + 1))" >> "$GITHUB_OUTPUT"
-
-      - name: Create git tag
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          git tag "$VERSION" "$GITHUB_SHA"
-          git push origin "refs/tags/$VERSION"
+          # dev and prod bump the SAME global MAJOR.MINOR.PATCH sequence from
+          # separate concurrency groups, so two runs can compute the same next
+          # version and one `git push` of the tag loses. Re-read the latest tag
+          # and retry, so prod never silently skips its build/deploy on a lost
+          # race (the old tag-ref gate is gone).
+          for _ in $(seq 1 6); do
+            LATEST=$(git ls-remote --tags --refs origin | sed 's#.*refs/tags/##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST:-0.0.0}"
+            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            git tag "$VERSION" "$GITHUB_SHA"
+            if git push origin "refs/tags/$VERSION"; then
+              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "tag $VERSION already exists (concurrent release) — retrying"
+            git tag -d "$VERSION" || true
+            sleep $(( (RANDOM % 5) + 1 ))
+          done
+          echo "::error::could not allocate a version tag after retries"
+          exit 1
 
   build:
     name: Build & push image
