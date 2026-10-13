@@ -2,11 +2,28 @@
 (`iceberg_events.py`, `iceberg_signals.py`) — one SQL catalog, one
 warehouse, one `gold` namespace for both."""
 
+import os
+
 from pyiceberg.catalog import Catalog, load_catalog
 
 from clear_pipeline.signals.config import settings
 
 NAMESPACE = "gold"
+
+_CHECKSUM_ENV = ("AWS_REQUEST_CHECKSUM_CALCULATION", "AWS_RESPONSE_CHECKSUM_VALIDATION")
+
+
+def _require_checksums_when_required() -> None:
+    """Default the AWS SDK checksum mode to WHEN_REQUIRED; refuse any other value.
+
+    PyIceberg writes through pyarrow's AWS C++ SDK, which providers/s3.py's boto3
+    config doesn't reach. Any other mode streams every UploadPart as aws-chunked,
+    which the S3-compatible backend rejects (501). The SDK reads these per client.
+    """
+    for name in _CHECKSUM_ENV:
+        value = os.environ.setdefault(name, "WHEN_REQUIRED")
+        if value.upper() != "WHEN_REQUIRED":
+            raise RuntimeError(f"{name}={value!r}: the S3 backend needs WHEN_REQUIRED")
 
 
 def catalog() -> Catalog:
@@ -17,6 +34,7 @@ def catalog() -> Catalog:
         "warehouse": warehouse,
     }
     if warehouse.startswith("s3://"):
+        _require_checksums_when_required()
         properties |= {
             "s3.endpoint": settings.s3_endpoint,
             "s3.region": settings.s3_region,
