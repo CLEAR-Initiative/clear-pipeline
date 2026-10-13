@@ -56,3 +56,34 @@ def test_supports_source_attribution_probe():
         return_value={"__type": None},
     ):
         assert clear_api.supports_source_attribution() is False
+
+
+def test_supports_source_attribution_assumes_deployed_when_introspection_disabled():
+    # Production runs Apollo with introspection OFF, so the __type probe 400s with
+    # INTROSPECTION_DISABLED. We can't verify that way in prod, so assume deployed
+    # (source attribution has been live since PR #110) rather than hard-failing.
+    body = (
+        "clear-api 400 (non-retryable) for https://api.clearinitiative.io/graphql: "
+        '{"errors":[{"message":"GraphQL introspection is not allowed by Apollo '
+        'Server","extensions":{"validationErrorCode":"INTROSPECTION_DISABLED",'
+        '"code":"GRAPHQL_VALIDATION_FAILED"}}]}'
+    )
+    with patch(
+        "clear_pipeline.providers.clear_api._execute",
+        side_effect=clear_api.ClearApiError(body),
+    ):
+        assert clear_api.supports_source_attribution() is True
+
+
+def test_supports_source_attribution_reraises_other_client_errors():
+    # A non-introspection 400 (genuine broken request) must still propagate.
+    with patch(
+        "clear_pipeline.providers.clear_api._execute",
+        side_effect=clear_api.ClearApiError("clear-api 400 (non-retryable): boom"),
+    ):
+        try:
+            clear_api.supports_source_attribution()
+        except clear_api.ClearApiError:
+            pass
+        else:  # pragma: no cover
+            raise AssertionError("expected ClearApiError to propagate")
