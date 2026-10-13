@@ -1,6 +1,7 @@
 """The gold Iceberg catalog must upload to S3 without aws-chunked encoding,
 which the S3-compatible backend rejects with 501 NotImplemented."""
 
+import contextlib
 import http.server
 import os
 import threading
@@ -64,24 +65,31 @@ def s3_endpoint():
     server.shutdown()
 
 
-def test_catalog_uploads_without_aws_chunked(s3_endpoint, tmp_path):
-    checksum_vars = {
-        "AWS_REQUEST_CHECKSUM_CALCULATION",
-        "AWS_RESPONSE_CHECKSUM_VALIDATION",
-    }
-    env = {k: v for k, v in os.environ.items() if k not in checksum_vars}
+@contextlib.contextmanager
+def _s3_settings(s3_endpoint, tmp_path, **env_overrides):
+    """Point the catalog at `s3_endpoint`, with the checksum env cleared then overridden."""
     settings = iceberg_catalog.settings
-    with (
-        patch.dict(os.environ, env, clear=True),
-        patch.object(settings, "iceberg_warehouse", "s3://bucket/gold-iceberg"),
-        patch.object(
-            settings, "iceberg_catalog_uri", f"sqlite:///{tmp_path / 'catalog.db'}"
-        ),
-        patch.object(settings, "s3_endpoint", s3_endpoint),
-        patch.object(settings, "s3_region", "us-east-1"),
-        patch.object(settings, "s3_access_key_id", "key"),
-        patch.object(settings, "s3_secret_access_key", "secret"),
-    ):
+    env = {
+        k: v for k, v in os.environ.items() if k not in iceberg_catalog._CHECKSUM_ENV
+    }
+    with contextlib.ExitStack() as stack:
+        for ctx in (
+            patch.dict(os.environ, env | env_overrides, clear=True),
+            patch.object(settings, "iceberg_warehouse", "s3://bucket/gold-iceberg"),
+            patch.object(
+                settings, "iceberg_catalog_uri", f"sqlite:///{tmp_path / 'catalog.db'}"
+            ),
+            patch.object(settings, "s3_endpoint", s3_endpoint),
+            patch.object(settings, "s3_region", "us-east-1"),
+            patch.object(settings, "s3_access_key_id", "key"),
+            patch.object(settings, "s3_secret_access_key", "secret"),
+        ):
+            stack.enter_context(ctx)
+        yield
+
+
+def test_catalog_uploads_without_aws_chunked(s3_endpoint, tmp_path):
+    with _s3_settings(s3_endpoint, tmp_path):
         io = iceberg_catalog.catalog()._load_file_io(
             location="s3://bucket/gold-iceberg"
         )
@@ -94,3 +102,17 @@ def test_catalog_uploads_without_aws_chunked(s3_endpoint, tmp_path):
     for headers in _RecordingS3.puts:
         assert "aws-chunked" not in headers.get("content-encoding", "")
         assert "x-amz-trailer" not in headers
+
+
+@pytest.mark.parametrize("name", iceberg_catalog._CHECKSUM_ENV)
+def test_catalog_refuses_a_conflicting_checksum_mode(s3_endpoint, tmp_path, name):
+    with _s3_settings(s3_endpoint, tmp_path, **{name: "WHEN_SUPPORTED"}):
+        with pytest.raises(RuntimeError, match=name):
+            iceberg_catalog.catalog()
+
+
+def test_catalog_accepts_an_explicit_when_required(s3_endpoint, tmp_path):
+    with _s3_settings(
+        s3_endpoint, tmp_path, AWS_REQUEST_CHECKSUM_CALCULATION="when_required"
+    ):
+        iceberg_catalog.catalog()

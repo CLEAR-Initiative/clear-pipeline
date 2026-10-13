@@ -10,6 +10,19 @@ from clear_pipeline.signals.config import settings
 
 NAMESPACE = "gold"
 
+_CHECKSUM_ENV = ("AWS_REQUEST_CHECKSUM_CALCULATION", "AWS_RESPONSE_CHECKSUM_VALIDATION")
+
+
+def _require_checksums_when_required() -> None:
+    """Default the AWS SDK checksum mode to WHEN_REQUIRED; refuse any other value.
+
+    Any other mode makes uploads aws-chunked, which the S3 backend rejects with 501.
+    """
+    for name in _CHECKSUM_ENV:
+        value = os.environ.setdefault(name, "WHEN_REQUIRED")
+        if value.upper() != "WHEN_REQUIRED":
+            raise RuntimeError(f"{name}={value!r}: the S3 backend needs WHEN_REQUIRED")
+
 
 def catalog() -> Catalog:
     warehouse = settings.iceberg_warehouse or f"s3://{settings.s3_bucket}/gold-iceberg"
@@ -23,8 +36,7 @@ def catalog() -> Catalog:
         # providers/s3.py's `when_required` config doesn't reach it. Without
         # this the SDK streams every UploadPart as aws-chunked, which the
         # S3-compatible backend rejects (501 NotImplemented). Read per client.
-        os.environ.setdefault("AWS_REQUEST_CHECKSUM_CALCULATION", "WHEN_REQUIRED")
-        os.environ.setdefault("AWS_RESPONSE_CHECKSUM_VALIDATION", "WHEN_REQUIRED")
+        _require_checksums_when_required()
         properties |= {
             "s3.endpoint": settings.s3_endpoint,
             "s3.region": settings.s3_region,
