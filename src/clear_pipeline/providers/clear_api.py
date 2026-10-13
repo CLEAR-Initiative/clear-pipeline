@@ -557,6 +557,14 @@ def report_datapoints_exist(report_id: str, *, schema_version: str) -> bool:
     return bool(row) and row.get("schemaVersion") == schema_version
 
 
+def _is_introspection_disabled(exc: ClearApiError) -> bool:
+    """True when a ClearApiError is clear-api refusing GraphQL introspection.
+    Production Apollo runs with ``introspection: false``, so a ``__type``/``__schema``
+    query 400s with ``INTROSPECTION_DISABLED``. The message carries the raw body."""
+    text = str(exc)
+    return "INTROSPECTION_DISABLED" in text or "introspection is not allowed" in text
+
+
 def supports_source_attribution() -> bool:
     """True when the deployed clear-api understands source attribution — i.e. its
     ``UpsertReportDatapointsInput`` exposes ``sourceId`` (clear-api PR #110).
@@ -566,8 +574,25 @@ def supports_source_attribution() -> bool:
     preflight: schema v2 sends ``sourceId`` unconditionally, so running against an
     undeployed clear-api would 400 every report AFTER paying for its 6 LLM calls
     and finish the run green with zero data.
+
+    PRODUCTION disables GraphQL introspection (``introspection: false``), so the
+    ``__type`` probe 400s there with ``INTROSPECTION_DISABLED``. We cannot verify
+    the schema that way in prod, so we assume source attribution IS deployed (it
+    has been live since PR #110) and let the real upsert fail loudly if it somehow
+    is not — rather than hard-failing the whole run on a probe prod can't answer.
+    The introspection check still runs normally in dev, where it stays enabled.
     """
-    data = _execute(_PREFLIGHT_SOURCE_ATTRIBUTION)
+    try:
+        data = _execute(_PREFLIGHT_SOURCE_ATTRIBUTION)
+    except ClearApiError as exc:
+        if _is_introspection_disabled(exc):
+            logger.warning(
+                "clear-api introspection is disabled (production) — cannot verify "
+                "UpsertReportDatapointsInput.sourceId via __type; assuming source "
+                "attribution is deployed. The upsert still 400s loudly if it is not."
+            )
+            return True
+        raise
     type_ = data.get("__type") or {}
     fields = type_.get("inputFields") or []
     return any(f.get("name") == "sourceId" for f in fields)
