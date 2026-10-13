@@ -1,5 +1,5 @@
-"""The gold Iceberg catalog must upload to S3 without aws-chunked encoding,
-which the S3-compatible backend rejects with 501 NotImplemented."""
+"""The gold catalog's S3 uploads and its checksum-mode guard
+(iceberg_catalog._require_checksums_when_required)."""
 
 import contextlib
 import http.server

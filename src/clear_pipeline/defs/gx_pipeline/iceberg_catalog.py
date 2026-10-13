@@ -16,7 +16,9 @@ _CHECKSUM_ENV = ("AWS_REQUEST_CHECKSUM_CALCULATION", "AWS_RESPONSE_CHECKSUM_VALI
 def _require_checksums_when_required() -> None:
     """Default the AWS SDK checksum mode to WHEN_REQUIRED; refuse any other value.
 
-    Any other mode makes uploads aws-chunked, which the S3 backend rejects with 501.
+    PyIceberg writes through pyarrow's AWS C++ SDK, which providers/s3.py's boto3
+    config doesn't reach. Any other mode streams every UploadPart as aws-chunked,
+    which the S3-compatible backend rejects (501). The SDK reads these per client.
     """
     for name in _CHECKSUM_ENV:
         value = os.environ.setdefault(name, "WHEN_REQUIRED")
@@ -32,10 +34,6 @@ def catalog() -> Catalog:
         "warehouse": warehouse,
     }
     if warehouse.startswith("s3://"):
-        # PyIceberg writes through pyarrow's AWS C++ SDK, not boto3, so
-        # providers/s3.py's `when_required` config doesn't reach it. Without
-        # this the SDK streams every UploadPart as aws-chunked, which the
-        # S3-compatible backend rejects (501 NotImplemented). Read per client.
         _require_checksums_when_required()
         properties |= {
             "s3.endpoint": settings.s3_endpoint,
