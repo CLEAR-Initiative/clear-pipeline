@@ -1,38 +1,45 @@
-name: Build & deploy prod
+name: Tag, Build & deploy prod
+# Mirrors build-and-deploy-dev.yml: a merge to `prod` tags a new version, builds
+# the prod image, pushes it to GHCR, and rolls the Infomaniak prod VM. `prod`
+# merges are gated by human review (no-automerge), so the merge itself is the
+# deploy gate. `workflow_dispatch` also runs it from the `prod` branch.
 on:
+  push:
+    branches: [prod]
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  check:
-    name: Check tag
+  tag:
+    name: Create version tag
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Extract version from tag
+      - uses: actions/checkout@v4
+
+      - name: Compute version
         id: version
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$REF_TYPE" != "tag" ]]; then
-            echo "::error::This workflow must be run on a tag, got $REF_TYPE '$REF_NAME'"
-            exit 1
-          fi
-          if [[ ! "$REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag '$REF_NAME' does not match MAJOR.MINOR.PATCH"
-            exit 1
-          fi
-          echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
+          LATEST=$(git ls-remote --tags --refs origin | sed 's#.*refs/tags/##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST:-0.0.0}"
+          echo "version=${MAJOR}.${MINOR}.$((PATCH + 1))" >> "$GITHUB_OUTPUT"
+
+      - name: Create git tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
 
   build:
     name: Build & push image
-    needs: check
+    needs: tag
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +50,7 @@ jobs:
       - uses: ./.github/actions/build-image
         with:
           environment: prod
-          version: ${{ needs.check.outputs.version }}
+          version: ${{ needs.tag.outputs.version }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}
 
   deploy:
