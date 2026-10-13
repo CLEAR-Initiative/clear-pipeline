@@ -1,14 +1,18 @@
 """GlitchTip/Sentry reporting must be a safe no-op without a DSN, and the
 run-health sensors must be registered so a stuck/failed run pages next time."""
 
+import http.server
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import dagster as dg
+import sentry_sdk
+import sentry_sdk.transport
 
 import clear_pipeline.definitions as definitions
 from clear_pipeline.defs import observability as observability_defs
-from clear_pipeline.providers import observability
+from clear_pipeline.providers import idmc, observability
 
 NOW = 1_000_000.0  # fixed "now" for deterministic ages
 THRESHOLD_S = 30 * 60
@@ -143,3 +147,44 @@ def test_run_failure_alert_falls_back_when_job_name_missing():
     run = SimpleNamespace(run_id="r-1", job_name=None)
     alert = observability_defs.run_failure_alert(run, "boom")
     assert alert["tags"]["job"] == "unknown"
+
+
+class _CapturingTransport(sentry_sdk.transport.Transport):
+    def __init__(self, options=None):
+        super().__init__(options)
+        self.envelopes = []
+
+    def capture_envelope(self, envelope):
+        self.envelopes.append(envelope.serialize().decode())
+
+
+class _Forbidden(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(403)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def test_glitchtip_events_never_carry_the_idmc_client_id(monkeypatch):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Forbidden)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    transport = _CapturingTransport()
+    real_init = sentry_sdk.init
+    monkeypatch.setattr(sentry_sdk, "init", lambda **kw: real_init(transport=transport, **kw))
+    monkeypatch.setattr(observability.settings, "sentry_dsn", "http://key@127.0.0.1:1/1")
+    monkeypatch.setattr(observability, "_initialized", False)
+    monkeypatch.setattr(idmc.settings, "idmc_client_id", "s3cret")
+    monkeypatch.setattr(idmc, "IDU_URL", f"http://127.0.0.1:{server.server_address[1]}/idus/")
+    try:
+        observability.init_sentry()
+        assert idmc._fetch_all() == []
+        sentry_sdk.flush()
+    finally:
+        server.shutdown()
+        real_init()  # detach the capturing client
+
+    assert any("API request failed" in e for e in transport.envelopes)
+    assert not any("s3cret" in e for e in transport.envelopes)

@@ -203,6 +203,12 @@ def _fetch_all() -> list[dict]:
     """Fetch IDMC's last-180-days IDU feed. No country/type filter — the
     endpoint ignores those query params server-side; the 302 lands on an S3
     dump of every row IDMC currently serves for this window."""
+    if not settings.idmc_client_id:
+        raise RuntimeError(
+            "IDMC client_id not configured. "
+            "Set IDMC_CLIENT_ID in .env (locally) or in the deployment's infra env"
+        )
+
     logger.info("[IDMC] fetching last-180-days IDU feed from %s", IDU_URL)
     try:
         resp = httpx.get(
@@ -212,8 +218,16 @@ def _fetch_all() -> list[dict]:
             timeout=120,
         )
         resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # str(e) embeds the request URL: client_id, or the S3 hop's presigned signature.
+        logger.error(
+            "[IDMC] API request failed: HTTP %d for %s",
+            e.response.status_code,
+            e.request.url.copy_with(query=None),
+        )
+        return []
     except httpx.HTTPError as e:
-        logger.error("[IDMC] API request failed: %s", e)
+        logger.error("[IDMC] API request failed: %s: %s", type(e).__name__, e)
         return []
 
     try:

@@ -34,12 +34,16 @@ def init_sentry() -> None:
         return
     try:
         import sentry_sdk
+        from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
 
         sentry_sdk.init(
             dsn=dsn,
             environment=settings.sentry_env,
             # Errors only — no performance tracing (keeps GlitchTip volume + cost down).
             traces_sample_rate=0.0,
+            # The httpx integration records every request's query string in a
+            # breadcrumb, which carries secrets such as IDMC's client_id.
+            event_scrubber=EventScrubber(denylist=DEFAULT_DENYLIST + ["http.query"]),
             # Unhandled exceptions + ERROR-level logs become GlitchTip events via
             # the SDK's default logging/excepthook integrations.
         )

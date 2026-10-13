@@ -6,6 +6,9 @@ fixtures, no network/DB — mirrors test_signals_ingest_drain.py's style.
 import logging
 from unittest.mock import patch
 
+import httpx
+import pytest
+
 from clear_pipeline.providers import idmc
 from clear_pipeline.providers.idmc import (
     KEEP,
@@ -446,3 +449,20 @@ def test_fetch_idu_records_still_computes_content_hash():
 
 def test_mark_seen_is_removed():
     assert not hasattr(idmc, "mark_seen")
+
+
+def test_fetch_all_refuses_an_unset_client_id_before_any_request():
+    with patch.object(idmc.settings, "idmc_client_id", ""), \
+         patch.object(idmc.httpx, "get", side_effect=AssertionError("request sent")), \
+         pytest.raises(RuntimeError, match="IDMC_CLIENT_ID"):
+        idmc._fetch_all()
+
+
+def test_fetch_all_logs_a_failed_request_without_the_client_id(caplog):
+    request = httpx.Request("GET", idmc.IDU_URL, params={"client_id": "s3cret"})
+    with patch.object(idmc.settings, "idmc_client_id", "s3cret"), \
+         patch.object(idmc.httpx, "get", return_value=httpx.Response(403, request=request)), \
+         caplog.at_level(logging.ERROR, logger=idmc.logger.name):
+        assert idmc._fetch_all() == []
+    assert "HTTP 403" in caplog.text
+    assert "s3cret" not in caplog.text
