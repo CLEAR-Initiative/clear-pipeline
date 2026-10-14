@@ -75,6 +75,9 @@ jobs:
 
       - uses: ./.github/actions/deploy
         with:
-          host: ${{ secrets.APP_VM_HOST }}
+          # Dagster runs on its own private VM (clear-infra components/dagster-vm,
+          # pinned at 10.10.0.30 in every env); the app VM is the SSH jump host.
+          host: ${{ vars.DAGSTER_VM_HOST || '10.10.0.30' }}
+          jump-host: ${{ secrets.APP_VM_HOST }}
           ssh-key: ${{ secrets.APP_VM_SSH_KEY }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}

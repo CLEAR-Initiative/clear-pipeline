@@ -1,12 +1,17 @@
 name: Deploy
-description: Pull the latest clear-pipeline image on the VM and recreate the Dagster services in order
+description: Pull the latest clear-pipeline image on the Dagster VM and recreate the Dagster services in order
 
 inputs:
   host:
-    description: VM host
+    description: >-
+      Dagster VM address. It has no public IP: this is its private IP,
+      reached through jump-host.
+    required: true
+  jump-host:
+    description: Public address of the env's app VM, used as the SSH jump host
     required: true
   ssh-key:
-    description: SSH private key for the VM
+    description: SSH private key, authorised on both the app VM and the Dagster VM
     required: true
   registry-token:
     description: Token allowed to pull from the registry
@@ -23,6 +28,9 @@ runs:
         host: ${{ inputs.host }}
         username: ubuntu
         key: ${{ inputs.ssh-key }}
+        proxy_host: ${{ inputs.jump-host }}
+        proxy_username: ubuntu
+        proxy_key: ${{ inputs.ssh-key }}
         envs: GHCR_TOKEN
         script: |
           set -e
