@@ -11,10 +11,10 @@ Six SAF sectors, one LLM call each. Every call:
 Per-sector isolation: a failure in one sector returns that sector's
 empty default; the other five still ship.
 
-Prompt caching: the system-prompt scaffolding is identical to
-`narrative.py`'s so the same doc-level cache (aggregated figures)
-gets reused across the 4 narrative calls + 6 sector calls. All 10
-calls in a country-year run share one `cache_key`.
+Prompt caching: the shared `BASE_INSTRUCTIONS` in `prompts.py` plus
+aggregated figures keep the system-prompt prefix byte-identical across
+the 4 narrative calls + 6 sector calls. All 10 calls in a country-year
+run share one `cache_key`.
 """
 
 import logging
@@ -26,6 +26,7 @@ from clear_pipeline.defs.situation.citations import (
     merge_contributing,
     resolve_bullets,
 )
+from clear_pipeline.defs.situation.prompts import BASE_INSTRUCTIONS
 from clear_pipeline.defs.situation.rag_helper import fetch_rag_context
 from clear_pipeline.defs.situation.schemas import (
     InformationCoverageArea,
@@ -151,37 +152,6 @@ class _SectorLLM(BaseModel):
     )
 
 
-# ────────────────────────────────────────────────────────────────────
-# Prompts
-#
-# Kept in this module (not narrative.py) to avoid a circular import
-# and because the sector prompts have their own scaffolding — the
-# system prompt still shares the base instructions block but the
-# per-sector user prompt is quite different from the narrative
-# components' user prompts.
-# ────────────────────────────────────────────────────────────────────
-
-
-_BASE_INSTRUCTIONS = (
-    "You are a humanitarian analyst producing a per-sector situation "
-    "briefing for the Norwegian Refugee Council. Every claim MUST be "
-    "grounded in the retrieved evidence — do not invent numbers or "
-    "attributions. When the evidence is thin, prefer emitting fewer "
-    "bullets over speculating.\n"
-    "\n"
-    "Rules:\n"
-    "- Preserve number formats and units exactly as the source cites.\n"
-    "- Use the local admin names as they appear in the sources.\n"
-    "- Neutral factual tone. No editorialising, no calls to action.\n"
-    "- Bullets are terse fragments (max 15 words), not sentences. Lead with the figure or fact; drop filler.\n"
-    "- Cite evidence inline. A bullet's marker(s) MUST come at its very END, "
-    "  NEVER at the start. Use the bracketed evidence numbers you drew from, "
-    "  e.g. [R2] or [R1][R4], matching the [Rn] items in RETRIEVED EVIDENCE. "
-    "  Cite only evidence you actually used; a bullet that uses none gets no "
-    "  marker.\n"
-)
-
-
 def _build_system_prompt(
     country_name: str,
     period_label: str,
@@ -193,7 +163,7 @@ def _build_system_prompt(
     prompt cache tolerates this small variation; the country context
     block (which is the largest cached section) stays byte-identical."""
     return (
-        f"{_BASE_INSTRUCTIONS}\n"
+        f"{BASE_INSTRUCTIONS}\n"
         f"---\n"
         f"AREA: {country_name}\n"
         f"PERIOD: {period_label}\n"
