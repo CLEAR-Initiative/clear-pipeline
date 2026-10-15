@@ -1,7 +1,12 @@
-name: Tag, Build & deploy dev
+name: Release / prod
+# Mirrors release-dev.yml: a merge to `prod` tags a new MAJOR version,
+# builds the prod image and pushes it to GHCR. Deployment happens outside this repo.
+# A prod deploy is a MAJOR release (X.0.0); dev deploys that follow are MINOR
+# releases within it (X.1.0, X.2.0, …). `prod` merges are human-gated
+# (no-automerge), so the merge itself is the deploy gate.
 on:
   push:
-    branches: [dev]
+    branches: [prod]
   workflow_dispatch:
 
 concurrency:
@@ -9,12 +14,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The version tag used to be its own job: ~6 s of work billed as a full
-  # minute plus a checkout and a scheduling hop on the merge-to-live path.
-  # It now runs at the top of the build job, still strictly before the image
-  # is built so the tag and the image version never disagree.
   build:
     name: Build & push image
+    # workflow_dispatch's branch filter is NOT restricted by `push.branches`, and
+    # this job hardcodes environment=prod — so without this guard a manual run
+    # from another branch would publish that branch's code as :prod. Only ever
+    # tag/build from the prod branch.
+    if: github.ref == 'refs/heads/prod'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -22,9 +28,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Idempotent: a re-run of a failed build reuses the version tag this
-      # commit already has instead of allocating the next one and leaving the
-      # previous tag without an image.
+      # Idempotent: a re-run of a failed build reuses the version tag this commit
+      # already has instead of allocating the next one and orphaning the previous
+      # tag. A prod deploy bumps the MAJOR (dev bumps the MINOR), so dev and prod
+      # never compute the same next version and can't contend for a tag.
       - name: Compute version
         id: version
         run: |
@@ -38,10 +45,7 @@ jobs:
           fi
           LATEST=$(echo "$TAGS" | sed 's#.*refs/tags/##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
           IFS=. read -r MAJOR MINOR PATCH <<< "${LATEST:-0.0.0}"
-          # dev deploys bump the MINOR within the current prod MAJOR; a prod
-          # deploy bumps the MAJOR (build-and-deploy-prod.yml). The two never
-          # pick the same next version, so they can't contend for a tag.
-          echo "version=${MAJOR}.$((MINOR + 1)).0" >> "$GITHUB_OUTPUT"
+          echo "version=$((MAJOR + 1)).0.0" >> "$GITHUB_OUTPUT"
           echo "existing=false" >> "$GITHUB_OUTPUT"
 
       - name: Create git tag
@@ -54,23 +58,6 @@ jobs:
 
       - uses: ./.github/actions/build-image
         with:
-          environment: ${{ github.ref_name }}
+          environment: prod
           version: ${{ steps.version.outputs.version }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}
-
-  # deploy:
-  #   name: Deploy to ${{ github.ref_name }}
-  #   needs: build
-  #   runs-on: ubuntu-latest
-  #   permissions:
-  #     contents: read
-  #     packages: read
-  #   environment: ${{ github.ref_name }}
-  #   steps:
-  #     - uses: actions/checkout@v4
-
-  #     - uses: ./.github/actions/deploy
-  #       with:
-  #         host: ${{ secrets.APP_VM_HOST }}
-  #         ssh-key: ${{ secrets.APP_VM_SSH_KEY }}
-  #         registry-token: ${{ secrets.GITHUB_TOKEN }}
