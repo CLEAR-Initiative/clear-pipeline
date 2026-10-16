@@ -1,7 +1,7 @@
 """Jev (TypeSafe System One) disaster-type classifier, via OpenRouter's
-Decisions API. Drop-in replacement for ``classify_locally``: returns the same
-``SignalClassification`` so signal grouping + event classification are unchanged
-downstream (events reuse this result — see ``providers/event.py``).
+Decisions API. The sole signal/event classifier: returns a
+``SignalClassification`` that signal grouping + event classification reuse
+downstream (see ``providers/event.py``).
 
 Jev reads text and returns typed answers with calibrated probabilities (not
 generated prose). One Decisions call runs two parallel questions over the signal:
@@ -16,12 +16,12 @@ a signal can be clearly a real incident yet genuinely ambiguous between two code
 (low Choice confidence) — it must still create an event.
 
 Failure posture (every path that isn't a confident, well-formed answer raises
-``JevError`` so the caller falls back to the local classifier):
+``JevError`` so the caller can requeue the signal — there is no local fallback):
   * HTTP/transport errors, non-retryable 4xx, retries exhausted on 429/5xx;
   * a 200 whose answer is malformed — missing ``choice`` or a missing/non-numeric
     ``noul`` — rather than silently classifying "ot" or gating relevance to 0.0;
-  * the circuit is open (a sustained outage fast-fails to MiniLM instead of
-    paying the per-call timeout on every signal and stacking past the drain lock).
+  * the circuit is open (a sustained outage fast-fails instead of paying the
+    per-call timeout on every signal and stacking past the drain lock).
 
 Config (env):
   OPENROUTER_API_KEY            required — the OpenRouter key.
@@ -82,7 +82,7 @@ _RELEVANT_CRITERIA = {
 
 class JevError(RuntimeError):
     """Raised on any Jev/OpenRouter failure (incl. malformed answers and an open
-    circuit) so the caller can fall back to the local classifier."""
+    circuit) so the caller can requeue the signal (there is no local fallback)."""
 
 
 class _CircuitBreaker:
@@ -110,7 +110,7 @@ class _CircuitBreaker:
             self._open_until = time.monotonic() + self._open_seconds
             logger.error(
                 "[JEV CLASSIFY] circuit OPEN after %d consecutive failures — "
-                "fast-failing to MiniLM for %.0fs", self._failures, self._open_seconds,
+                "fast-failing (signals requeue) for %.0fs", self._failures, self._open_seconds,
             )
 
 
@@ -176,9 +176,9 @@ def classify_with_jev(
     description: str | None,
     source_severity: int | None = None,
 ) -> SignalClassification:
-    """Classify one signal with Jev. Same contract as ``classify_locally``.
-    Raises ``JevError`` on any failure (incl. a malformed answer or an open
-    circuit) so the caller falls back to the local classifier."""
+    """Classify one signal with Jev. Raises ``JevError`` on any failure (incl. a
+    malformed answer or an open circuit) so the caller can requeue the signal —
+    there is no local fallback."""
     if _BREAKER.is_open():
         raise JevError("Jev circuit breaker is open — skipping call")
 

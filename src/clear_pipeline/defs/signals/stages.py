@@ -37,6 +37,7 @@ from clear_pipeline.defs.signals.connectors import (
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
+from clear_pipeline.providers.jev import JevError
 from clear_pipeline.providers.signal_classifier import (
     classifier_stats_snapshot,
     classify_signal,
@@ -145,8 +146,9 @@ def _group(view: SignalView, created: dict) -> dict | None:
     """Classify + group one signal into an event (create or add-to-existing).
     Returns the event dict, or None when below the relevance threshold.
 
-    Classification goes through `classify_signal` (Jev primary, MiniLM fallback);
-    the event reuses this result downstream (see providers/event.py)."""
+    Classification goes through `classify_signal` (Jev only — raises JevError on a
+    Jev/OpenRouter failure, which the caller turns into a requeue); the event
+    reuses this result downstream (see providers/event.py)."""
     classification = classify_signal(view.title, view.description, created.get("severity"))
     if classification.relevance < settings.relevance_threshold:
         return None
@@ -188,7 +190,20 @@ def _process_one_signal(created: dict, touched_events: set[str]) -> str:
     with redis_lock(lock_key, ttl_seconds=_SIGNAL_LOCK_TTL_SECONDS, wait_seconds=0) as acquired:
         if not acquired:
             return _REQUEUE  # a peer holds it (or is processing it) — leave NEW
-        event = _group(view, created)
+        try:
+            event = _group(view, created)
+        except JevError as exc:
+            # No local fallback anymore: a Jev/OpenRouter failure is an
+            # infrastructure outage, not a bad signal. Leave it NEW (requeue) so
+            # the next drain retries once Jev recovers — never drop or
+            # misclassify it, and don't charge it against the poison-pill attempts
+            # counter (which would mark a perfectly good signal FAILED during an
+            # outage).
+            logger.warning(
+                "[classify_group] signal %s: Jev classify failed (%s) — leaving NEW for retry",
+                created["id"], exc,
+            )
+            return _REQUEUE
         if event:
             _enqueue_translations("event", event["id"])
             # Record the event as touched so the incident-tier KB card is
@@ -343,28 +358,28 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         _sync_event_cards(context, touched_events)
     conflicts += recompute.pop("conflicts")
 
-    # Surface how often Jev actually served vs. silently fell back to MiniLM. A
-    # Jev/OpenRouter outage is otherwise invisible — every signal still classifies,
-    # just at MiniLM's lower accuracy — so emit the rate and log an error when it
-    # crosses the alert threshold (makes a sustained outage page-able off logs).
+    # Surface how often Jev served vs. failed (and got requeued). A sustained
+    # Jev/OpenRouter outage shows up as a rising requeue count AND a high failure
+    # rate here — emit the rate and log an error when it crosses the alert
+    # threshold (makes a sustained outage page-able off logs).
     stats = classifier_stats_snapshot()
     jev_ok = stats.get("jev", 0)
-    jev_fallback = stats.get("fallback", 0)
-    jev_total = jev_ok + jev_fallback
-    fallback_rate = (jev_fallback / jev_total) if jev_total else 0.0
-    if jev_total and fallback_rate >= settings.signal_jev_fallback_alert_rate:
+    jev_failed = stats.get("jev_failed", 0)
+    jev_total = jev_ok + jev_failed
+    failure_rate = (jev_failed / jev_total) if jev_total else 0.0
+    if jev_total and failure_rate >= settings.signal_jev_failure_alert_rate:
         context.log.error(
-            "[classify_group] Jev fallback rate %.0f%% (%d/%d) ≥ alert threshold %.0f%% — "
-            "OpenRouter/Jev likely degraded; classifications running on MiniLM",
-            fallback_rate * 100, jev_fallback, jev_total,
-            settings.signal_jev_fallback_alert_rate * 100,
+            "[classify_group] Jev failure rate %.0f%% (%d/%d) ≥ alert threshold %.0f%% — "
+            "OpenRouter/Jev likely degraded; signals are being requeued, not classified",
+            failure_rate * 100, jev_failed, jev_total,
+            settings.signal_jev_failure_alert_rate * 100,
         )
 
     metadata = {
         "processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed,
         "mark_conflicts": conflicts, **recompute,
-        "jev_classified": jev_ok, "jev_fallback": jev_fallback,
-        "jev_fallback_rate": round(fallback_rate, 4),
+        "jev_classified": jev_ok, "jev_failed": jev_failed,
+        "jev_failure_rate": round(failure_rate, 4),
     }
     context.log.info("[classify_group] %s", " ".join(f"{k}={v}" for k, v in metadata.items()))
     return dg.MaterializeResult(metadata=metadata)
