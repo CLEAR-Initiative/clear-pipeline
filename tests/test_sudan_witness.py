@@ -1,0 +1,276 @@
+"""Unit tests for the Sudan Witness provider (fetch, parse, signal mapping),
+its gx adapter and its drain connector. Plain dict fixtures shaped like real
+layer rows; ArcGIS is mocked at the module's `_get` boundary — no network/DB.
+"""
+
+import json
+from unittest.mock import patch
+
+import httpx
+
+from clear_pipeline.defs.gx_pipeline.sources import SudanWitnessGXSource
+from clear_pipeline.defs.signals.connectors import SudanWitnessConnector
+from clear_pipeline.providers import sudan_witness
+from clear_pipeline.providers.sudan_witness import (
+    build_signal_content_update,
+    build_sudan_witness_signal_input,
+    fetch_sudan_witness_records,
+    parse_feature,
+)
+
+LAYER = sudan_witness.settings.sudan_witness_layer_url
+EDIT_DATE = 1791790020939
+
+
+def _feature(**overrides) -> dict:
+    attributes = {
+        "Entry_Number": "SUW11503",
+        "OBJECTID": 11503,
+        "OBJECTID1": 42,
+        "A_CIR_Status": "Reviewed - Verified",
+        "B_Data_Type": "CIR VERIFIED",
+        "Link": "https://t.me/azwyokgsbzzz/57209",
+        "C_Brief_Description": "SAF inside Kurmuk",
+        "D_Verified_Date": 1783555200000,  # 2026-07-09T00:00:00Z
+        "D_Chronolocation_status": "Post date,Most likely",
+        "D_Location_status": "Geolocated",
+        "D_Country": "Sudan",
+        "D_States": "Blue Nile (ولاية النيل الأزرق Wilāyat an-Nīl al-Azraq)",
+        "D_City": "Al Kurmuk",
+        "D_Latitude": 10.5525,
+        "D_Longitude": 34.2861,
+        "Map_category": "Conflict activity",
+        "E_Activities_of_military_police_and_armed_groups": "Locations & Movements",
+        "E_Visible_Verified_Perpetrators": "SAF",
+        "E_Alleged_claimed_Perpetrators": None,
+        "E_Harm_to_Persons": None,
+        "E_Reported_CivCas": "false",
+    }
+    attributes.update(overrides)
+    return {"attributes": attributes, "geometry": {"x": attributes["D_Longitude"], "y": attributes["D_Latitude"]}}
+
+
+def _record(**overrides) -> dict:
+    record = parse_feature(_feature(**overrides))
+    assert record is not None
+    return record
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# parse_feature / content hash
+# ──────────────────────────────────────────────────────────────────────────────
+def test_parse_feature_normalises_the_entry_number_and_date():
+    record = _record()
+    assert record["suw_id"] == "suw:11503"
+    assert record["published_at"] == "2026-07-09T00:00:00+00:00"
+    assert record["raw"] == _feature()
+
+
+def test_parse_feature_drops_zero_padding_so_both_spellings_share_a_key():
+    assert _record(Entry_Number="SUW0050")["suw_id"] == "suw:50"
+    assert _record(Entry_Number=" SUW50 ")["suw_id"] == "suw:50"
+
+
+def test_parse_feature_skips_rows_that_cannot_become_signals():
+    assert parse_feature(_feature(D_Verified_Date=None)) is None
+    assert parse_feature(_feature(Entry_Number="X-12")) is None
+    assert parse_feature(_feature(Entry_Number=None)) is None
+
+
+def test_content_hash_ignores_the_id_arcgis_regenerates_on_republish():
+    assert _record(OBJECTID1=1)["content_hash"] == _record(OBJECTID1=999)["content_hash"]
+
+
+def test_content_hash_changes_when_cir_revises_the_row():
+    assert _record()["content_hash"] != _record(E_Harm_to_Persons="Death")["content_hash"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Signal mapping
+# ──────────────────────────────────────────────────────────────────────────────
+def test_signal_input_core_fields():
+    record = _record()
+    out = build_sudan_witness_signal_input(record, "source-1")
+    assert out["sourceId"] == "source-1"
+    assert out["externalId"] == "suw:11503"
+    assert out["publishedAt"] == "2026-07-09T00:00:00+00:00"
+    assert out["title"] == "SAF inside Kurmuk"
+    assert out["url"] == "https://t.me/azwyokgsbzzz/57209"
+    assert out["contentHash"] == record["content_hash"]
+    assert (out["lat"], out["lng"]) == (10.5525, 34.2861)
+    assert out["rawData"] == record["raw"]["attributes"]
+    # No count field exists, and the geolocation URL is not media of the event.
+    assert "casualties" not in out
+    assert "media" not in out
+
+
+def test_title_strips_the_video_segment_prefix_but_description_keeps_it():
+    brief = "[0:12 - 0:20] RSF commanders congratulate troops"
+    out = build_sudan_witness_signal_input(_record(C_Brief_Description=brief), "s")
+    assert out["title"] == "RSF commanders congratulate troops"
+    assert out["description"].startswith(brief)
+    for prefixed in ("(0:55 - 1:11) Drone strike", "Video (@1:03) Drone strike", "[Original] Drone strike"):
+        assert build_sudan_witness_signal_input(_record(C_Brief_Description=prefixed), "s")["title"] == "Drone strike"
+
+
+def test_description_labels_visible_and_alleged_perpetrators_separately():
+    out = build_sudan_witness_signal_input(
+        _record(E_Visible_Verified_Perpetrators="RSF", E_Alleged_claimed_Perpetrators="SAF,Unknown"), "s"
+    )
+    lines = out["description"].splitlines()
+    assert "Visible perpetrator (verified): RSF" in lines
+    assert "Alleged perpetrator (claimed): SAF, Unknown" in lines
+    assert "Place: Al Kurmuk, Blue Nile, Sudan" in lines
+    assert "Date basis: Post date, Most likely" in lines
+
+
+def test_description_says_when_the_date_basis_is_missing():
+    out = build_sudan_witness_signal_input(_record(D_Chronolocation_status=None), "s")
+    assert "Date basis: not stated" in out["description"].splitlines()
+
+
+def test_severity_comes_from_recorded_harm_only():
+    sev = lambda **o: build_sudan_witness_signal_input(_record(**o), "s")["severity"]  # noqa: E731
+    assert sev(E_Harm_to_Persons="Displacement,Death") == 4
+    assert sev(E_Harm_to_Persons="Mass graves & Burial sites") == 4
+    assert sev(E_Harm_to_Persons="Arrest Detention & Abduction") == 3
+    assert sev(E_Reported_CivCas="true") == 3
+    # Unknown stays null (ADR-0010) — Map_category alone never sets it.
+    assert sev(Map_category="Harm to persons") is None
+
+
+def test_url_drops_links_analysts_cannot_open_and_repairs_malformed_ones():
+    url = lambda link: build_sudan_witness_signal_input(_record(Link=link), "s")["url"]  # noqa: E731
+    assert url("https://sentinelshare.page.link/xE9a") is None
+    assert url("https://drive.google.com/drive/folders/195BeArT6") is None
+    assert url("https://scontent-lhr8-1.xx.fbcdn.net/o1/v/t2/f2/m69/AQ") is None
+    assert url(None) is None
+    assert url("link.dataspace.copernicus.eu/r94w\r") == "https://link.dataspace.copernicus.eu/r94w"
+    assert url("\nhttps://x.com/a/status/1") == "https://x.com/a/status/1"
+
+
+def test_coordinates_are_omitted_when_missing():
+    out = build_sudan_witness_signal_input(_record(D_Latitude=None), "s")
+    assert "lat" not in out and "lng" not in out
+
+
+def test_content_update_reuses_the_create_payload():
+    signal_input = build_sudan_witness_signal_input(_record(), "s")
+    update = build_signal_content_update(signal_input, retracted=False)
+    assert update["externalId"] == "suw:11503"
+    assert update["contentHash"] == signal_input["contentHash"]
+    assert update["retracted"] is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fetch
+# ──────────────────────────────────────────────────────────────────────────────
+class FakeLayer:
+    """Answers the three request kinds the fetch makes: layer metadata, count,
+    and paged feature queries."""
+
+    def __init__(self, features, page_size=2, edit_dates=None):
+        self.features = features
+        self.page_size = page_size
+        self.edit_dates = list(edit_dates or [])
+
+    def __call__(self, url, **params):
+        if url == LAYER:
+            edit = self.edit_dates.pop(0) if self.edit_dates else EDIT_DATE
+            return {"editingInfo": {"dataLastEditDate": edit}}
+        if params.get("returnCountOnly"):
+            return {"count": len(self.features)}
+        offset = int(params["resultOffset"])
+        page = self.features[offset:offset + self.page_size]
+        return {"features": page, "exceededTransferLimit": offset + self.page_size < len(self.features)}
+
+
+def test_fetch_pages_through_the_whole_layer():
+    features = [_feature(Entry_Number=f"SUW{i}") for i in range(1, 6)]
+    with patch.object(sudan_witness, "_get", FakeLayer(features)):
+        records = fetch_sudan_witness_records()
+    assert [r["suw_id"] for r in records] == [f"suw:{i}" for i in range(1, 6)]
+
+
+def test_fetch_keeps_sudan_and_countryless_rows_only():
+    features = [
+        _feature(Entry_Number="SUW1"),
+        _feature(Entry_Number="SUW2", D_Country=None),
+        _feature(Entry_Number="SUW3", D_Country="Chad"),
+        _feature(Entry_Number="SUW4", D_Verified_Date=None),
+    ]
+    with patch.object(sudan_witness, "_get", FakeLayer(features, page_size=10)):
+        records = fetch_sudan_witness_records()
+    assert [r["suw_id"] for r in records] == ["suw:1", "suw:2"]
+
+
+def test_fetch_keeps_one_row_per_normalised_id():
+    features = [_feature(Entry_Number="SUW0050"), _feature(Entry_Number="SUW50")]
+    with patch.object(sudan_witness, "_get", FakeLayer(features, page_size=10)):
+        assert len(fetch_sudan_witness_records()) == 1
+
+
+def test_fetch_retries_when_the_layer_is_republished_mid_pull():
+    features = [_feature()]
+    layer = FakeLayer(features, edit_dates=[EDIT_DATE, EDIT_DATE + 1, EDIT_DATE + 1, EDIT_DATE + 1])
+    with patch.object(sudan_witness, "_get", layer), patch.object(sudan_witness.time, "sleep") as sleep:
+        records = fetch_sudan_witness_records()
+    assert len(records) == 1
+    sleep.assert_called_once()
+
+
+def test_fetch_gives_up_if_the_layer_keeps_changing():
+    layer = FakeLayer([_feature()], edit_dates=range(EDIT_DATE, EDIT_DATE + 20))
+    with patch.object(sudan_witness, "_get", layer), patch.object(sudan_witness.time, "sleep"):
+        assert fetch_sudan_witness_records() == []
+
+
+def test_fetch_returns_nothing_on_http_failure():
+    with patch.object(sudan_witness, "_get", side_effect=httpx.ConnectError("down")):
+        assert fetch_sudan_witness_records() == []
+
+
+def test_arcgis_errors_reported_with_http_200_are_raised():
+    response = httpx.Response(200, json={"error": {"code": 400, "message": "Invalid query"}},
+                              request=httpx.Request("GET", LAYER))
+    with patch.object(sudan_witness.httpx, "get", return_value=response):
+        assert fetch_sudan_witness_records() == []
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# gx adapter + drain connector
+# ──────────────────────────────────────────────────────────────────────────────
+def test_gx_source_round_trips_records_through_the_lake():
+    source = SudanWitnessGXSource()
+    record = _record()
+    assert source.source == "sudan_witness"
+    assert source.external_id(record) == "suw:11503"
+    assert source.published_at(record) == "2026-07-09T00:00:00+00:00"
+    assert source.parse(source.raw_bytes(record)) == record
+    assert source.content_hash(record) == record["content_hash"]
+
+
+def test_gx_source_silver_input_is_the_provider_mapping():
+    record = _record()
+    assert SudanWitnessGXSource().to_silver_input(record, "s") == build_sudan_witness_signal_input(record, "s")
+
+
+def test_gx_source_update_hook_carries_the_retraction_flag():
+    signal_input = build_sudan_witness_signal_input(_record(), "s")
+    assert SudanWitnessGXSource().content_update_input(signal_input, retracted=True)["retracted"] is True
+
+
+def test_connector_is_ingest_only_until_grouping_handles_backdated_signals():
+    connector = SudanWitnessConnector()
+    assert (connector.polled, connector.drained) == (False, False)
+
+
+def test_connector_projects_the_gx_blob():
+    record = _record()
+    raw = json.dumps(record).encode("utf-8")
+    created = {"id": "sig-1", "title": "SAF inside Kurmuk", "publishedAt": record["published_at"],
+               "description": "desc", "url": "https://t.me/azwyokgsbzzz/57209"}
+    view = SudanWitnessConnector().project(SudanWitnessConnector().parse(raw), created)
+    assert view.external_id == "suw:11503"
+    assert view.location_name == "Al Kurmuk"
+    assert (view.lat, view.lng) == (10.5525, 34.2861)

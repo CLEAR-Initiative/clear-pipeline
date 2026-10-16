@@ -76,6 +76,23 @@ class Settings(BaseSettings):
     idmc_source_name: str = "idmc"
     idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
 
+    # Sudan Witness (Centre for Information Resilience) — verified open-source
+    # evidence on a public ArcGIS feature layer, no auth. CIR republishes the
+    # whole layer (cadence unknown) and rows arrive weeks after their event
+    # date, so every poll fetches the full layer and gx's content hash skips
+    # unchanged rows — no date watermark.
+    sudan_witness_source_name: str = "sudan_witness"
+    sudan_witness_layer_url: str = (
+        "https://services-eu1.arcgis.com/06WOSMGHsCnaFyMp/arcgis/rest/services/"
+        "SUW_Incidents/FeatureServer/0"
+    )
+    sudan_witness_page_size: int = 1000  # the layer's maxRecordCount
+    # D_Country values to keep. Rows with no country are always kept (they sit
+    # inside Sudan); the ~1% elsewhere (Chad, Ethiopia…) is RSF diplomacy and
+    # foreign logistics, which CIR's own public map hides too.
+    sudan_witness_countries: str = "Sudan"
+    sudan_witness_poll_interval_minutes: int = 6 * 60
+
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
     # a drain sensor checks for pending manual signals every N minutes (low so

@@ -17,6 +17,7 @@ capability flags:
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
+  │ sudan_wit.†│  False  │  False  │ downloaded by gx; NOT grouped               │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
@@ -25,6 +26,7 @@ capability flags:
     (``MANUAL_SOURCE_NAME``) plus ``field_officer`` / ``partner`` / ``government``
     (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
     ``createManualSignal`` accepts.
+  † ``sudan_witness`` (``SudanWitnessConnector``).
 
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
@@ -32,7 +34,8 @@ capability flags:
   ``POST /api/x/ingest``) or gx (``idmc``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage.
-  ``dtm`` is the exception: a bulletin can span many districts, so its signals
+  ``dtm`` and ``sudan_witness`` are the exceptions: a DTM bulletin can span many
+  districts, and Sudan Witness rows arrive backdated by weeks, so their signals
   are ingested but not grouped into events (see ``DRAINED_SOURCES``).
 
 Connectors reuse the consolidated ``clear_pipeline.providers`` modules
@@ -477,6 +480,42 @@ class IDMCConnector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sudan Witness — CIR's verified open-source evidence (downloaded by gx, NOT drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class SudanWitnessConnector:
+    """Downloaded only by ``gx_pipeline`` (``SudanWitnessGXSource``), like IDMC.
+
+    ``drained = False``: rows reach the layer weeks after their event date, and
+    grouping matches a signal against events active in the last 7 days of *now*
+    (``providers/event.py``), so a backdated signal would join an unrelated
+    current event or open an orphan one. ``project`` is ready for when grouping
+    matches on the signal's own date."""
+
+    source = settings.sudan_witness_source_name
+    polled = False
+    drained = False
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def parse(self, raw: bytes) -> dict:
+        return json.loads(raw)
+
+    def project(self, record: dict | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"sudan_witness signal {created['id']} has no rawS3Key")
+        attributes = record["raw"]["attributes"]
+        return SignalView(
+            external_id=record["suw_id"],
+            title=created.get("title") or attributes.get("C_Brief_Description") or "",
+            timestamp=created.get("publishedAt") or record.get("published_at") or "",
+            description=created.get("description"),
+            location_name=attributes.get("D_City") or _first_location_name(created),
+            url=created.get("url"),
+            lat=attributes.get("D_Latitude"),
+            lng=attributes.get("D_Longitude"),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # IOM DTM Flash Alerts — Sudan displacement narrative bulletins
 # ──────────────────────────────────────────────────────────────────────────────
 class DTMFlashAlertConnector:
@@ -647,6 +686,7 @@ CONNECTORS: list[SignalSource] = [
     GDACSConnector(),
     Darfur24Connector(),
     IDMCConnector(),
+    SudanWitnessConnector(),
     DTMFlashAlertConnector(),
     *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
