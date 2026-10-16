@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # inside Sudan); the ~1% elsewhere (Chad, Ethiopia…) is RSF diplomacy and
     # foreign logistics, which CIR's own public map hides too.
     sudan_witness_countries: str = "Sudan"
-    sudan_witness_poll_interval_minutes: int = 6 * 60
+    sudan_witness_poll_interval_minutes: int = 24 * 60  # daily; CIR reload cadence unknown (one reload seen, 2026-10-12)
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
