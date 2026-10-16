@@ -2,9 +2,9 @@
 
 Shaped after `providers.classify.SignalClassification` (severity 1-5 +
 glide-code disaster type) per the ticket's "reuse SignalClassification"
-instruction — but produced by an LLM call over raw chat text instead of
-`classify_locally`'s local sentence-transformer classifier, which needs an
-already-extracted title/description that hotline messages don't have.
+instruction — but produced by an LLM call over raw chat text instead of the
+signal classifier (Jev), which needs an already-extracted title/description that
+hotline messages don't have.
 """
 
 import json
@@ -23,7 +23,7 @@ HotlineMessageClassification = Literal[
     "field_report", "news_digest", "operational", "chatter"
 ]
 
-# Loaded once from the same taxonomy file `classify_locally` uses
+# Loaded once from the same taxonomy file the signal classifier uses
 # (id_type == "glide_number" for every entry today — see
 # disasterTypes.idType on clear-api). A lightweight JSON read; does NOT
 # import the classifier class, so no sentence-transformer model load.
@@ -47,9 +47,8 @@ class HotlineEnrichment(BaseModel):
     title: str
     """1-5 scale, same range as signals.severity."""
     severity: Literal[1, 2, 3, 4, 5]
-    """Glide code (e.g. "fl", "cf") from the same taxonomy
-    `classify_locally` matches against, or null when no disaster type
-    applies (e.g. pure chatter)."""
+    """Glide code (e.g. "fl", "cf") from the same taxonomy the signal
+    classifier uses, or null when no disaster type applies (e.g. pure chatter)."""
     disaster_type: str | None
     """Contributor's own uncertainty tag ("unconfirmed", "rumour"), if the
     message text carries one. Null when absent."""

@@ -585,10 +585,10 @@ def group_signal(
         return existing
 
     # ── 1. Reuse the classifier prediction ─────────────────────────────
-    # classify_locally already ran the taxonomy classifier on the same
-    # title + description (upstream, for the relevance gate) and carried its full
-    # result on `classification`. Reuse it instead of running a SECOND inference
-    # here — a re-prediction could pick a different glide/level_2 than the one that
+    # classify_signal (Jev) already classified the same title + description
+    # (upstream, for the relevance gate) and carried its full result on
+    # `classification`. Reuse it instead of running a SECOND inference here — a
+    # re-prediction could pick a different glide/level_2 than the one that
     # admitted the signal, and doubles the model cost per signal.
     glide_code: str | None = classification.disaster_types[0] if classification.disaster_types else None
     level_1: str | None = classification.type_level_1

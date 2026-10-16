@@ -1,13 +1,14 @@
 """Jev (TypeSafe System One) disaster-type classifier, via OpenRouter's
-Decisions API. Drop-in replacement for ``classify_locally``: returns the same
-``SignalClassification`` so signal grouping + event classification are unchanged
-downstream (events reuse this result — see ``providers/event.py``).
+Decisions API. The sole signal/event classifier: returns a
+``SignalClassification`` that signal grouping + event classification reuse
+downstream (see ``providers/event.py``).
 
 Jev reads text and returns typed answers with calibrated probabilities (not
 generated prose). One Decisions call runs two parallel questions over the signal:
 
-  * ``glide``    — a Choice over the 52 GLIDE codes → the disaster type (+ a
-                   calibrated confidence in that code).
+  * ``glide``    — a Choice over the 52 GLIDE codes PLUS an explicit "none"
+                   no-match option → the disaster type (+ a calibrated confidence
+                   in that code).
   * ``relevant`` — a Noul "is this an actual, current incident?" → the
                    probability used as the relevance gate.
 
@@ -15,13 +16,20 @@ Relevance (the event-creation gate) is the **Noul**, NOT the Choice confidence:
 a signal can be clearly a real incident yet genuinely ambiguous between two codes
 (low Choice confidence) — it must still create an event.
 
+Anti-misclassification: to avoid force-fitting a code onto an incident that fits
+none of the specific types, the glide Choice offers an explicit ``none`` option,
+and a specific code picked only weakly (confidence below
+``settings.signal_jev_min_code_confidence``) is treated the same way. Either case
+is recorded as the taxonomy's existing "other" catch-all (``ot``/``po``) — still a
+valid glide code downstream — rather than an unreliable specific type.
+
 Failure posture (every path that isn't a confident, well-formed answer raises
-``JevError`` so the caller falls back to the local classifier):
+``JevError`` so the caller can requeue the signal — there is no local fallback):
   * HTTP/transport errors, non-retryable 4xx, retries exhausted on 429/5xx;
   * a 200 whose answer is malformed — missing ``choice`` or a missing/non-numeric
     ``noul`` — rather than silently classifying "ot" or gating relevance to 0.0;
-  * the circuit is open (a sustained outage fast-fails to MiniLM instead of
-    paying the per-call timeout on every signal and stacking past the drain lock).
+  * the circuit is open (a sustained outage fast-fails instead of paying the
+    per-call timeout on every signal and stacking past the drain lock).
 
 Config (env):
   OPENROUTER_API_KEY            required — the OpenRouter key.
@@ -50,8 +58,19 @@ from clear_pipeline.providers.classify import (
     code_to_level2_map,
     code_to_level3_map,
 )
+from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Sentinel the glide Choice may return when no listed disaster type fits (added to
+# the criteria in `_glide_criteria`). Not a real glide code — mapped to the
+# taxonomy's existing "other" catch-all for storage (see `classify_with_jev`), so
+# every downstream consumer still sees a valid code.
+NONE_CHOICE = "none"
+# The taxonomy's two "other" buckets. A none/low-confidence result is recorded as
+# one of these rather than a force-fit specific code.
+OTHER_NATURAL = "ot"   # natural hazard > other
+OTHER_CONFLICT = "po"  # conflict > ... > other
 
 JEV_MODEL = os.environ.get("JEV_MODEL", "typesafe/jev-1.13")
 # OpenRouter serves Jev through the Decisions API (not chat-completions). The API
@@ -67,7 +86,9 @@ _RETRYABLE_4XX = {408, 409, 425, 429}
 _GLIDE_INSTRUCTIONS = (
     "Classify the emergency/disaster signal in `text` into exactly one GLIDE "
     "disaster-type code. Pick the single code whose category best matches the "
-    "PRIMARY hazard or event described. If several apply, choose the dominant one."
+    "PRIMARY hazard or event described. If several apply, choose the dominant one. "
+    f'Pick "{NONE_CHOICE}" ONLY when the text describes an incident that genuinely '
+    "fits none of the specific disaster types — prefer this over force-fitting a code."
 )
 _RELEVANT_INSTRUCTIONS = (
     "Does `text` report an ACTUAL, CURRENT humanitarian, disaster, or security "
@@ -82,7 +103,7 @@ _RELEVANT_CRITERIA = {
 
 class JevError(RuntimeError):
     """Raised on any Jev/OpenRouter failure (incl. malformed answers and an open
-    circuit) so the caller can fall back to the local classifier."""
+    circuit) so the caller can requeue the signal (there is no local fallback)."""
 
 
 class _CircuitBreaker:
@@ -110,7 +131,7 @@ class _CircuitBreaker:
             self._open_until = time.monotonic() + self._open_seconds
             logger.error(
                 "[JEV CLASSIFY] circuit OPEN after %d consecutive failures — "
-                "fast-failing to MiniLM for %.0fs", self._failures, self._open_seconds,
+                "fast-failing (signals requeue) for %.0fs", self._failures, self._open_seconds,
             )
 
 
@@ -134,6 +155,12 @@ def _glide_criteria() -> dict[str, str]:
         )
         cues = "; ".join((row.get("key_phrases") or [])[:3])
         criteria[code] = f"{path} (e.g. {cues})" if cues else path
+    # Explicit no-match outcome (TypeSafe Choice idiom): a clear decline path so
+    # the model says "nothing fits" instead of force-fitting the nearest code.
+    criteria[NONE_CHOICE] = (
+        "None of the above — a real incident that does not clearly fit any of the "
+        "listed disaster types. Prefer this over guessing a specific code."
+    )
     return criteria
 
 
@@ -176,9 +203,9 @@ def classify_with_jev(
     description: str | None,
     source_severity: int | None = None,
 ) -> SignalClassification:
-    """Classify one signal with Jev. Same contract as ``classify_locally``.
-    Raises ``JevError`` on any failure (incl. a malformed answer or an open
-    circuit) so the caller falls back to the local classifier."""
+    """Classify one signal with Jev. Raises ``JevError`` on any failure (incl. a
+    malformed answer or an open circuit) so the caller can requeue the signal —
+    there is no local fallback."""
     if _BREAKER.is_open():
         raise JevError("Jev circuit breaker is open — skipping call")
 
@@ -216,20 +243,49 @@ def classify_with_jev(
     _BREAKER.record_success()
     code_confidence = float(glide.get("confidence") or 0.0)
     relevance = float(noul)
+
+    # Prevent force-fit misclassification. Record the taxonomy's existing "other"
+    # catch-all instead of an unreliable specific type when either:
+    #   * the model declined (chose NONE_CHOICE), or
+    #   * it picked a specific code only weakly (confidence below the configured
+    #     floor — a flat probability distribution).
+    # "other" stays a valid glide code everywhere downstream (grouping, KB, alerts).
+    # For the low-confidence case the code's level_1 is still trustworthy, so keep
+    # it (conflict → "po", else "ot"); an explicit "none" carries no level_1, so
+    # default to "ot".
+    resolved_code = code
+    demote_reason: str | None = None
+    if code == NONE_CHOICE:
+        resolved_code = OTHER_NATURAL
+        demote_reason = "model chose none-of-the-above"
+    elif code_confidence < settings.signal_jev_min_code_confidence:
+        resolved_code = (
+            OTHER_CONFLICT if code_to_level1_map().get(code) == "conflict" else OTHER_NATURAL
+        )
+        demote_reason = (
+            f"low code confidence {code_confidence:.2f} < "
+            f"{settings.signal_jev_min_code_confidence:.2f}"
+        )
+
     summary_src = (title or description or "").strip()
-    summary = summary_src[:200] if summary_src else (code_to_level3_map().get(code) or "unknown event")
+    summary = summary_src[:200] if summary_src else (code_to_level3_map().get(resolved_code) or "unknown event")
 
     classification = SignalClassification(
-        disaster_types=[code],
+        disaster_types=[resolved_code],
         relevance=relevance,
         severity=source_severity,  # None when the source gave none — not invented
         summary=summary,
-        type_level_1=code_to_level1_map().get(code),
-        type_level_2=code_to_level2_map().get(code),
-        type_level_3=code_to_level3_map().get(code),
+        type_level_1=code_to_level1_map().get(resolved_code),
+        type_level_2=code_to_level2_map().get(resolved_code),
+        type_level_3=code_to_level3_map().get(resolved_code),
     )
+    if demote_reason:
+        logger.info(
+            "[JEV CLASSIFY] unclassifiable (%s): model code=%s → stored %s",
+            demote_reason, code, resolved_code,
+        )
     logger.info(
         "[JEV CLASSIFY] code=%s code_conf=%.2f relevance=%.2f severity=%s (source=%s)",
-        code, code_confidence, relevance, classification.severity, source_severity,
+        resolved_code, code_confidence, relevance, classification.severity, source_severity,
     )
     return classification

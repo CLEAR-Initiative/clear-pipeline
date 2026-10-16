@@ -1,8 +1,8 @@
 """Hotline-message enrichment prompt.
 
-Unlike `classify_locally` (a local sentence-transformer classifier over an
-already-extracted title+description), hotline messages are raw chat text
-with neither — so this asks an LLM to produce the whole
+Unlike the signal classifier (Jev, over an already-extracted
+title+description), hotline messages are raw chat text with neither — so this
+asks an LLM to produce the whole
 classification/headline/severity/disaster-type shape in one structured
 call. Output is enforced by `LLMProvider.complete_structured` +
 `schemas.HotlineEnrichment`, so there's no "respond with JSON" boilerplate

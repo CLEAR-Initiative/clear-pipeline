@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Prototype + eval: Jev (TypeSafe System One, via OpenRouter) for GLIDE
-disaster-type classification, head-to-head against the current MiniLM + keyword
-classifier (`classify_locally`).
+disaster-type classification, scored against a gold set. (The old MiniLM +
+keyword classifier it used to be compared against has been removed — Jev is now
+the only classifier.)
 
 Jev is served through OpenRouter's *Decisions* API (NOT chat-completions): you
 send `state` + typed `questions` and get back typed answers with calibrated
@@ -24,8 +25,6 @@ Run (needs an OpenRouter key with Jev access — this calls a paid API):
 Flags:
     --dry-run        Build + print the Jev request for each example; no API call,
                      no key, no cost. Use to inspect the prompt/criteria.
-    --no-baseline    Skip the MiniLM baseline (avoids the torch/sentence-
-                     transformers import + model load).
     --gold PATH      JSON file of real labelled signals: [{"text": "...",
                      "code": "<glide>", "relevant": true}, ...]. `relevant` is
                      optional (see the threshold sweep below). Defaults to the
@@ -142,6 +141,25 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
     return sorted_vals[idx]
 
 
+def _report_code_confidence(confs: list[float]) -> None:
+    """Print the glide-code confidence distribution — the data needed to pick
+    `signal_jev_min_code_confidence` (below it a specific code is demoted to the
+    'other' catch-all). Watch the low tail: set the floor under the bulk of CORRECT
+    answers, or correct-but-split classifications get demoted to 'other'."""
+    if not confs:
+        return
+    s = sorted(confs)
+    n = len(s)
+    print("\n" + "=" * 60)
+    print("Code-confidence distribution — floor (signal_jev_min_code_confidence) demotes below this")
+    print(f"  min {s[0]:.2f}  p10 {_percentile(s, 10):.2f}  p25 {_percentile(s, 25):.2f}  "
+          f"median {_percentile(s, 50):.2f}  mean {sum(s)/n:.2f}  max {s[-1]:.2f}")
+    buckets = [0] * 10
+    for v in s:
+        buckets[min(9, int(v * 10))] += 1
+    print("  histogram (0.0→1.0): " + " ".join(f"{b}" for b in buckets))
+
+
 def _report_noul(gold: list[dict], nouls: list[float]) -> None:
     """Print the Noul distribution, the lowest-Noul rows, and a gate sweep — the
     data needed to pick `relevance_threshold`."""
@@ -189,7 +207,6 @@ def _report_noul(gold: list[dict], nouls: list[float]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--no-baseline", action="store_true")
     ap.add_argument("--gold")
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
@@ -231,16 +248,12 @@ def main() -> None:
     if not api_key:
         raise SystemExit("Set OPENROUTER_API_KEY (or use --dry-run).")
 
-    baseline = None
-    if not args.no_baseline:
-        baseline = C.classify_locally  # lazy — loads MiniLM on first call
-
     jev_code_hits = jev_l1_hits = 0
-    base_code_hits = base_l1_hits = 0
     total_cost = 0.0
     total_latency = 0.0
     conf_sum = 0.0
     nouls: list[float] = []
+    confs: list[float] = []
     rows: list[str] = []
 
     for g in gold:
@@ -252,23 +265,16 @@ def main() -> None:
         conf = ans["confidence"]
         noul = ans["noul"]
         nouls.append(noul)
+        confs.append(conf)
         total_cost += ans["_cost"]
         total_latency += ans["_latency_ms"]
         conf_sum += conf
         jev_code_hits += jc == gold_code
         jev_l1_hits += code_to_l1.get(jc) == gold_l1
 
-        bc = None
-        if baseline is not None:
-            bres = baseline(title=text, description=None)
-            bc = (bres.disaster_types or [None])[0]
-            base_code_hits += bc == gold_code
-            base_l1_hits += code_to_l1.get(bc) == gold_l1
-
         mark = "✓" if jc == gold_code else ("~" if code_to_l1.get(jc) == gold_l1 else "✗")
         rows.append(
             f"{mark} gold={gold_code:<4} jev={str(jc):<4} conf={conf:.2f} noul={noul:.2f}"
-            + (f"  base={str(bc):<4}" if baseline else "")
             + f"  | {text[:52]}"
         )
 
@@ -278,11 +284,10 @@ def main() -> None:
     print(f"N={n}   (✓ exact code · ~ right L1 only · ✗ wrong L1)")
     print(f"Jev      code-acc {jev_code_hits/n:.1%}   L1-acc {jev_l1_hits/n:.1%}   "
           f"mean-conf {conf_sum/n:.2f}")
-    if baseline:
-        print(f"MiniLM   code-acc {base_code_hits/n:.1%}   L1-acc {base_l1_hits/n:.1%}   (baseline)")
     print(f"Jev cost ${total_cost:.5f} total (${total_cost/n:.6f}/signal)   "
           f"avg latency {total_latency/n:.0f} ms")
 
+    _report_code_confidence(confs)
     _report_noul(gold, nouls)
 
 

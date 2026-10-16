@@ -1,26 +1,25 @@
-"""Signal disaster-type classifier selector — the single entry point used by
-both the signals drain (``defs/signals/stages.py``) and the gx_pipeline
-(``defs/gx_pipeline/factory.py``).
+"""Signal disaster-type classifier entry point — used by both the signals drain
+(``defs/signals/stages.py``) and the gx_pipeline (``defs/gx_pipeline/factory.py``).
 
-Runs Jev (TypeSafe System One via OpenRouter) by default and falls back to the
-local MiniLM classifier on an OpenRouter outage, so a transient API failure never
-drops classification to zero. ``SIGNAL_CLASSIFIER=minilm`` forces the local path
-(instant rollback without a deploy).
+Jev (TypeSafe System One via OpenRouter) is the ONLY classifier. There is no
+local fallback: a Jev/OpenRouter failure raises ``JevError`` so the caller can
+leave the signal NEW and retry it on the next drain (the signals drain maps the
+failure to a requeue; see ``defs/signals/stages.py``). A transient outage stalls
+the oldest-first queue head until Jev recovers rather than silently classifying
+on a lower-accuracy local model.
 
-Process-local counters (``jev``, ``fallback``, ``minilm``) let a caller surface
-how often Jev is actually serving vs. silently falling back — a Jev outage would
-otherwise be invisible (every signal still classifies, just via MiniLM). The
-signals drain snapshots + resets these per run and emits a fallback rate into its
-``MaterializeResult`` metadata (see ``defs/signals/stages.py``)."""
+Process-local counters (``jev`` = served, ``jev_failed`` = raised → requeued)
+let a caller surface how often Jev is failing. The signals drain snapshots +
+resets these per run and emits a Jev failure rate into its ``MaterializeResult``
+metadata (see ``defs/signals/stages.py``)."""
 
 from __future__ import annotations
 
 import logging
 from collections import Counter
 
-from clear_pipeline.providers.classify import SignalClassification, classify_locally
+from clear_pipeline.providers.classify import SignalClassification
 from clear_pipeline.providers.jev import JevError, classify_with_jev
-from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +28,8 @@ _STATS: Counter[str] = Counter()
 
 
 def classifier_stats_snapshot() -> dict[str, int]:
-    """Current classifier outcome counts (``jev`` = Jev served, ``fallback`` =
-    Jev failed → MiniLM, ``minilm`` = MiniLM forced by config)."""
+    """Current classifier outcome counts (``jev`` = Jev served, ``jev_failed`` =
+    Jev failed and the signal was requeued)."""
     return dict(_STATS)
 
 
@@ -45,20 +44,16 @@ def classify_signal(
     description: str | None,
     source_severity: int | None = None,
 ) -> SignalClassification:
-    """Classify a signal's disaster type. Jev primary (unless
-    ``SIGNAL_CLASSIFIER=minilm``), MiniLM fallback on any Jev/OpenRouter failure."""
-    if settings.signal_classifier == "jev":
-        try:
-            result = classify_with_jev(
-                title=title, description=description, source_severity=source_severity,
-            )
-            _STATS["jev"] += 1
-            return result
-        except JevError as exc:
-            _STATS["fallback"] += 1
-            logger.warning(
-                "[CLASSIFY] Jev classify failed (%s) — falling back to local MiniLM classifier", exc,
-            )
-    else:
-        _STATS["minilm"] += 1
-    return classify_locally(title=title, description=description, source_severity=source_severity)
+    """Classify a signal's disaster type with Jev. Raises ``JevError`` on any
+    Jev/OpenRouter failure (incl. a malformed answer or an open circuit) — there
+    is no local fallback, so the caller must handle it (the signals drain leaves
+    the signal NEW and retries next run)."""
+    try:
+        result = classify_with_jev(
+            title=title, description=description, source_severity=source_severity,
+        )
+    except JevError:
+        _STATS["jev_failed"] += 1
+        raise
+    _STATS["jev"] += 1
+    return result

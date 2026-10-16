@@ -96,9 +96,8 @@ def test_casualties_null_when_nothing_resolves(run):
 
 def test_defaults_use_the_event_type_and_never_classify(run):
     api = FakeApi([m("a"), m("b", day=2)], {"types": ["fl"]})  # no figures in the text
-    with (
-        patch("clear_pipeline.providers.classify.classify_locally", side_effect=AssertionError),
-        patch("clear_pipeline.providers.signal_classifier.classify_signal", side_effect=AssertionError),
+    with patch(
+        "clear_pipeline.providers.signal_classifier.classify_signal", side_effect=AssertionError
     ):
         run(api)
     # ADR-0010: no figure and no flood stat -> null, not an invented default.

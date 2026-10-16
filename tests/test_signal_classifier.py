@@ -1,5 +1,6 @@
-"""Unit tests for the Jev/MiniLM selector (providers/signal_classifier.py).
-Both classifiers are mocked — no network, no torch."""
+"""Unit tests for the signal classifier entry point (providers/signal_classifier.py).
+Jev is the only classifier (mocked — no network); a Jev failure propagates as
+JevError, there is no local fallback."""
 
 import pytest
 
@@ -19,39 +20,24 @@ def _reset_stats():
     sc.reset_classifier_stats()
 
 
-def test_jev_primary_used_when_enabled(monkeypatch):
-    monkeypatch.setattr(sc.settings, "signal_classifier", "jev")
+def test_jev_result_is_returned(monkeypatch):
     monkeypatch.setattr(sc, "classify_with_jev", lambda **k: _clf("jev"))
-    monkeypatch.setattr(sc, "classify_locally", lambda **k: pytest.fail("MiniLM should not run"))
     out = sc.classify_signal("flood", None, 4)
     assert out.disaster_types == ["jev"]
 
 
-def test_falls_back_to_minilm_on_jev_error(monkeypatch):
-    monkeypatch.setattr(sc.settings, "signal_classifier", "jev")
+def test_jev_error_propagates_with_no_fallback(monkeypatch):
+    # No local fallback: a Jev failure must surface as JevError so the caller
+    # (the signals drain) can requeue the signal.
     def boom(**k):
         raise JevError("openrouter down")
+
     monkeypatch.setattr(sc, "classify_with_jev", boom)
-    called = {}
-    def fake_local(**k):
-        called["yes"] = True
-        return _clf("minilm")
-    monkeypatch.setattr(sc, "classify_locally", fake_local)
-    out = sc.classify_signal("flood", None, 4)
-    assert out.disaster_types == ["minilm"] and called.get("yes")
+    with pytest.raises(JevError):
+        sc.classify_signal("flood", None, 4)
 
 
-def test_minilm_forced_skips_jev(monkeypatch):
-    monkeypatch.setattr(sc.settings, "signal_classifier", "minilm")
-    monkeypatch.setattr(sc, "classify_with_jev", lambda **k: pytest.fail("Jev should not run when forced to minilm"))
-    monkeypatch.setattr(sc, "classify_locally", lambda **k: _clf("minilm"))
-    out = sc.classify_signal("flood", None, None)
-    assert out.disaster_types == ["minilm"]
-
-
-def test_stats_count_jev_success_and_fallback(monkeypatch):
-    monkeypatch.setattr(sc.settings, "signal_classifier", "jev")
-    monkeypatch.setattr(sc, "classify_locally", lambda **k: _clf("minilm"))
+def test_stats_count_jev_success_and_failure(monkeypatch):
     calls = {"n": 0}
 
     def flaky(**k):
@@ -62,5 +48,6 @@ def test_stats_count_jev_success_and_fallback(monkeypatch):
 
     monkeypatch.setattr(sc, "classify_with_jev", flaky)
     sc.classify_signal("flood", None, 4)   # jev ok
-    sc.classify_signal("quake", None, 4)   # jev fails → fallback
-    assert sc.classifier_stats_snapshot() == {"jev": 1, "fallback": 1}
+    with pytest.raises(JevError):
+        sc.classify_signal("quake", None, 4)   # jev fails → counted, re-raised
+    assert sc.classifier_stats_snapshot() == {"jev": 1, "jev_failed": 1}
