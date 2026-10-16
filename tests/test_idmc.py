@@ -99,6 +99,19 @@ def test_malformed_figure_returns_none():
     assert _parse_event(_raw(figure="not-a-number")) is None
 
 
+def test_description_html_is_cleaned():
+    text = (
+        "<b> Sudan:               76 displacements, 01 July      - 30 July      </b>"
+        " <br> A total of 76 people were displaced. <BR/> IOM DTM - 24 September 2026"
+    )
+    result = _parse_event(_raw(standard_popup_text=text))
+    assert result["description"] == (
+        "Sudan: 76 displacements, 01 July - 30 July\n"
+        "A total of 76 people were displaced.\n"
+        "IOM DTM - 24 September 2026"
+    )
+
+
 def test_malformed_latitude_discards_valid_longitude_too():
     """The lat/lng parse is one shared try/except — a bad latitude raises
     before the longitude line ever runs, so a perfectly good longitude is
