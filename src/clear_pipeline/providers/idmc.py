@@ -21,6 +21,7 @@ Docs: https://helix-tools-api.idmcdb.org/external-api/#/IDU/idus_last_180_days_r
 
 import hashlib
 import logging
+import re
 from datetime import UTC, datetime
 
 import httpx
@@ -35,6 +36,21 @@ logger = logging.getLogger(__name__)
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/"
+
+# IDMC's popup/info text is HTML-ish: a `<b>` headline (fields padded to a
+# fixed width), then `<br>`-separated body and source lines. Drop the bold
+# tags, collapse the padding, and turn each break into a newline, swallowing
+# the whitespace around it so lines aren't padded.
+_BOLD_RE = re.compile(r"</?b\s*>", re.IGNORECASE)
+_SPACES_RE = re.compile(r"[ \t]+")
+_BR_RE = re.compile(r" ?<br\s*/?> ?", re.IGNORECASE)
+
+
+def _clean_description(text: str | None) -> str | None:
+    if not text:
+        return text
+    text = _SPACES_RE.sub(" ", _BOLD_RE.sub("", text))
+    return _BR_RE.sub("\n", text).strip()
 
 
 def _parse_event(raw: dict) -> dict | None:
@@ -81,7 +97,9 @@ def _parse_event(raw: dict) -> dict | None:
         "figure": figure,
         "role": raw.get("role") or "",
         "title": raw.get("event_name") or "",
-        "description": raw.get("standard_popup_text") or raw.get("standard_info_text"),
+        "description": _clean_description(
+            raw.get("standard_popup_text") or raw.get("standard_info_text")
+        ),
         "severity": severity,
         "lat": lat,
         "lng": lng,
