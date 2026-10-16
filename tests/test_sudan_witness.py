@@ -4,9 +4,11 @@ layer rows; ArcGIS is mocked at the module's `_get` boundary — no network/DB.
 """
 
 import json
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from clear_pipeline.defs.gx_pipeline.sources import SudanWitnessGXSource
 from clear_pipeline.defs.signals.connectors import SudanWitnessConnector
@@ -235,6 +237,69 @@ def test_arcgis_errors_reported_with_http_200_are_raised():
                               request=httpx.Request("GET", LAYER))
     with patch.object(sudan_witness.httpx, "get", return_value=response):
         assert fetch_sudan_witness_records() == []
+
+
+class _KV:
+    """The two redis calls the provider makes."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value):
+        self.store[key] = value
+
+
+@pytest.fixture
+def fake_redis():
+    return _KV()
+
+
+def _synced_layer(fake_redis, layer, *, age=timedelta(hours=1)):
+    """A clean poll `age` ago of `layer`; returns the `since` gx would pass next."""
+    since = datetime.now(UTC) - age
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", layer):
+        fetch_sudan_witness_records()
+        sudan_witness.set_last_synced(since)
+    return since
+
+
+def test_fetch_skips_the_pull_when_the_layer_is_unchanged(fake_redis):
+    layer = FakeLayer([_feature()])
+    since = _synced_layer(fake_redis, layer)
+    with patch.object(sudan_witness, "_redis", fake_redis), \
+         patch.object(sudan_witness, "_get", layer), \
+         patch.object(sudan_witness, "_pull_features") as pull:
+        assert fetch_sudan_witness_records(since=since) == []
+    pull.assert_not_called()
+
+
+def test_fetch_pulls_when_the_edit_date_or_row_count_moved(fake_redis):
+    since = _synced_layer(fake_redis, FakeLayer([_feature()]))
+    with patch.object(sudan_witness, "_redis", fake_redis), \
+         patch.object(sudan_witness, "_get", FakeLayer([_feature()], edit_dates=[EDIT_DATE + 1] * 3)):
+        assert len(fetch_sudan_witness_records(since=since)) == 1
+    two_rows = FakeLayer([_feature(), _feature(Entry_Number="SUW7")])
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", two_rows):
+        assert len(fetch_sudan_witness_records(since=since)) == 2
+
+
+def test_fetch_forces_a_full_pull_once_the_last_one_is_too_old(fake_redis):
+    layer = FakeLayer([_feature()])
+    max_age = timedelta(hours=sudan_witness.settings.sudan_witness_full_pull_max_age_hours)
+    since = _synced_layer(fake_redis, layer, age=max_age)
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", layer):
+        assert len(fetch_sudan_witness_records(since=since)) == 1
+
+
+def test_fingerprint_is_only_committed_by_a_clean_bronze_batch(fake_redis):
+    layer = FakeLayer([_feature()])
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", layer):
+        fetch_sudan_witness_records()  # bronze fails after this: no set_last_synced
+        since = datetime.now(UTC) - timedelta(hours=1)
+        assert len(fetch_sudan_witness_records(since=since)) == 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────

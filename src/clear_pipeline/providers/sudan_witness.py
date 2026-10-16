@@ -10,8 +10,16 @@ Verified" (location verified; the date often is only the post date — see
 Fetch semantics (why this looks like IDMC, not ACLED):
   - CIR republishes the whole layer from its internal database (cadence
     unknown), and rows land weeks to months after their event date. A date
-    watermark would skip them, so every poll fetches the full layer (~2k rows,
-    3 requests) and gx's content hash skips unchanged rows. `since` is ignored.
+    watermark would skip them, so a poll fetches the full layer (~2k rows,
+    3 requests) and gx's content hash skips unchanged rows.
+  - The full pull is gated on the layer fingerprint (`dataLastEditDate` +
+    row count): unchanged since the last clean poll → nothing fetched, so
+    bronze doesn't rewrite ~2k blobs for nothing. The fingerprint is committed
+    by `set_last_synced`, which gx calls only after a clean bronze batch. A full
+    pull is forced anyway once `since` is older than
+    `sudan_witness_full_pull_max_age_hours` — the safety net for a failure
+    after bronze, and for a republish that leaves `dataLastEditDate` unchanged
+    (unverified either way).
   - `OBJECTID1` is regenerated on republish; the key is `Entry_Number`,
     normalised to its integer (CIR's zero-padding varies: SUW0050 vs SUW3217).
   - The pull is retried if `dataLastEditDate` moves mid-pagination.
@@ -58,6 +66,13 @@ _ENTRY_NUMBER = re.compile(r"SUW(\d+)")
 _UNSTABLE_FIELDS = ("OBJECTID1",)
 _PULL_ATTEMPTS = 3
 _PULL_RETRY_SECONDS = 30
+_SYNCED_KEY = "suw:last_synced"
+_FINGERPRINT_KEY = "suw:layer_fingerprint"
+
+# Fingerprint of the last pull, committed by `set_last_synced` once gx's bronze
+# batch lands cleanly. Process-local: bronze polls and sets the watermark in
+# the same op.
+_pending_fingerprint: str | None = None
 
 # Video-segment prefixes CIR puts in front of the description:
 # "[0:12 - 0:20] …", "(0:55 - 1:11) …", "Video (@1:03) …", "[Original] …".
@@ -105,6 +120,15 @@ def _data_last_edit() -> int:
     return _get(settings.sudan_witness_layer_url)["editingInfo"]["dataLastEditDate"]
 
 
+def _count() -> int:
+    return _get(f"{settings.sudan_witness_layer_url}/query", where="1=1", returnCountOnly="true")["count"]
+
+
+def _fingerprint() -> str:
+    """Cheap layer version: 2 requests, no features."""
+    return f"{_data_last_edit()}:{_count()}"
+
+
 def _pull_features() -> list[dict]:
     query_url = f"{settings.sudan_witness_layer_url}/query"
     features: list[dict] = []
@@ -124,17 +148,18 @@ def _pull_features() -> list[dict]:
             return features
 
 
-def _fetch_all() -> list[dict]:
-    """Every feature of the layer, from one consistent version of it. Returns []
-    (logged) on HTTP failure or if the layer keeps changing during the pull."""
+def _fetch_all() -> tuple[list[dict], str | None]:
+    """Every feature of the layer, from one consistent version of it, and that
+    version's fingerprint. Returns ([], None) (logged) on HTTP failure or if the
+    layer keeps changing during the pull."""
     try:
         for attempt in range(1, _PULL_ATTEMPTS + 1):
             before = _data_last_edit()
-            count = _get(f"{settings.sudan_witness_layer_url}/query", where="1=1", returnCountOnly="true")["count"]
+            count = _count()
             features = _pull_features()
             if before == _data_last_edit() and len(features) == count:
                 logger.info("[SUDAN_WITNESS] fetched %d features", len(features))
-                return features
+                return features, f"{before}:{count}"
             logger.warning(
                 "[SUDAN_WITNESS] layer changed during pull (attempt %d/%d) — retrying",
                 attempt, _PULL_ATTEMPTS,
@@ -143,9 +168,27 @@ def _fetch_all() -> list[dict]:
                 time.sleep(_PULL_RETRY_SECONDS)
     except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as e:
         logger.error("[SUDAN_WITNESS] fetch failed: %s: %s", type(e).__name__, e)
-        return []
+        return [], None
     logger.error("[SUDAN_WITNESS] layer kept changing during pull — skipping this poll")
-    return []
+    return [], None
+
+
+def _layer_unchanged_since(since: datetime | None) -> bool:
+    """True when the last clean poll is recent and the layer's fingerprint still
+    matches it — the full pull would only re-fetch rows gx already holds."""
+    if since is None:
+        return False
+    if (datetime.now(UTC) - since).total_seconds() >= settings.sudan_witness_full_pull_max_age_hours * 3600:
+        return False
+    stored = cast("str | None", _redis.get(_FINGERPRINT_KEY))
+    if stored is None:
+        return False
+    try:
+        current = _fingerprint()
+    except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as e:
+        logger.warning("[SUDAN_WITNESS] fingerprint check failed (%s) — full pull", type(e).__name__)
+        return False
+    return current == stored
 
 
 def _content_hash(attributes: dict) -> str:
@@ -181,12 +224,18 @@ def fetch_sudan_witness_records(since: datetime | None = None) -> list[dict]:
     """Every row of the layer as a parsed record, filtered to
     `sudan_witness_countries` (rows with no country are kept: in practice they
     sit inside Sudan, and clear-api resolves the location from the coordinates).
-    `since` is ignored (`PollSource` parity) — see the module docstring."""
+    `since` (the last clean poll) only gates the pull: [] when the layer hasn't
+    changed since — see the module docstring."""
+    global _pending_fingerprint
+    if _layer_unchanged_since(since):
+        logger.info("[SUDAN_WITNESS] layer unchanged since %s — nothing fetched", since)
+        return []
+    features, _pending_fingerprint = _fetch_all()
     countries = {c.strip() for c in settings.sudan_witness_countries.split(",") if c.strip()}
     records: list[dict] = []
     skipped = filtered_out = duplicates = 0
     seen: set[str] = set()
-    for feature in _fetch_all():
+    for feature in features:
         record = parse_feature(feature)
         if record is None:
             skipped += 1
@@ -208,13 +257,17 @@ def fetch_sudan_witness_records(since: datetime | None = None) -> list[dict]:
 
 
 def get_last_synced() -> datetime | None:
-    """Informational only — the fetch ignores it (full-layer poll)."""
-    val = cast("str | None", _redis.get("suw:last_synced"))
+    """Time of the last clean poll — gates the next pull, never filters rows."""
+    val = cast("str | None", _redis.get(_SYNCED_KEY))
     return datetime.fromisoformat(val) if val else None
 
 
 def set_last_synced(ts: datetime) -> None:
-    _redis.set("suw:last_synced", ts.isoformat())
+    """Called by gx after a clean bronze batch: commits the pulled fingerprint
+    with it, so a failed batch is pulled again next poll."""
+    _redis.set(_SYNCED_KEY, ts.isoformat())
+    if _pending_fingerprint is not None:
+        _redis.set(_FINGERPRINT_KEY, _pending_fingerprint)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

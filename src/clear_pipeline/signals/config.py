@@ -79,8 +79,9 @@ class Settings(BaseSettings):
     # Sudan Witness (Centre for Information Resilience) — verified open-source
     # evidence on a public ArcGIS feature layer, no auth. CIR republishes the
     # whole layer (cadence unknown) and rows arrive weeks after their event
-    # date, so every poll fetches the full layer and gx's content hash skips
-    # unchanged rows — no date watermark.
+    # date, so a poll fetches the full layer — only when its fingerprint
+    # (dataLastEditDate + row count) moved — and gx's content hash skips
+    # unchanged rows. No date watermark.
     sudan_witness_source_name: str = "sudan_witness"
     sudan_witness_layer_url: str = (
         "https://services-eu1.arcgis.com/06WOSMGHsCnaFyMp/arcgis/rest/services/"
@@ -92,6 +93,8 @@ class Settings(BaseSettings):
     # foreign logistics, which CIR's own public map hides too.
     sudan_witness_countries: str = "Sudan"
     sudan_witness_poll_interval_minutes: int = 24 * 60  # daily; CIR reload cadence unknown (one reload seen, 2026-10-12)
+    # Forced full pull even when the layer fingerprint is unchanged (safety net).
+    sudan_witness_full_pull_max_age_hours: int = 7 * 24
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
