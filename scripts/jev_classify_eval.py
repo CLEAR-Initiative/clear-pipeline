@@ -141,6 +141,25 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
     return sorted_vals[idx]
 
 
+def _report_code_confidence(confs: list[float]) -> None:
+    """Print the glide-code confidence distribution — the data needed to pick
+    `signal_jev_min_code_confidence` (below it a specific code is demoted to the
+    'other' catch-all). Watch the low tail: set the floor under the bulk of CORRECT
+    answers, or correct-but-split classifications get demoted to 'other'."""
+    if not confs:
+        return
+    s = sorted(confs)
+    n = len(s)
+    print("\n" + "=" * 60)
+    print("Code-confidence distribution — floor (signal_jev_min_code_confidence) demotes below this")
+    print(f"  min {s[0]:.2f}  p10 {_percentile(s, 10):.2f}  p25 {_percentile(s, 25):.2f}  "
+          f"median {_percentile(s, 50):.2f}  mean {sum(s)/n:.2f}  max {s[-1]:.2f}")
+    buckets = [0] * 10
+    for v in s:
+        buckets[min(9, int(v * 10))] += 1
+    print("  histogram (0.0→1.0): " + " ".join(f"{b}" for b in buckets))
+
+
 def _report_noul(gold: list[dict], nouls: list[float]) -> None:
     """Print the Noul distribution, the lowest-Noul rows, and a gate sweep — the
     data needed to pick `relevance_threshold`."""
@@ -234,6 +253,7 @@ def main() -> None:
     total_latency = 0.0
     conf_sum = 0.0
     nouls: list[float] = []
+    confs: list[float] = []
     rows: list[str] = []
 
     for g in gold:
@@ -245,6 +265,7 @@ def main() -> None:
         conf = ans["confidence"]
         noul = ans["noul"]
         nouls.append(noul)
+        confs.append(conf)
         total_cost += ans["_cost"]
         total_latency += ans["_latency_ms"]
         conf_sum += conf
@@ -266,6 +287,7 @@ def main() -> None:
     print(f"Jev cost ${total_cost:.5f} total (${total_cost/n:.6f}/signal)   "
           f"avg latency {total_latency/n:.0f} ms")
 
+    _report_code_confidence(confs)
     _report_noul(gold, nouls)
 
 

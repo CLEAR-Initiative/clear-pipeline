@@ -148,6 +148,15 @@ class Settings(BaseSettings):
     # gold set has true-noise rows (routine news / forecasts / op-eds) that reveal
     # a separating threshold — the current incidents-only set can't.
     relevance_threshold: float = 0.3
+    # Anti-misclassification floor on Jev's glide-code confidence. A specific code
+    # picked below this is treated as unclassifiable and recorded as the taxonomy's
+    # "other" catch-all (ot/po) instead of a force-fit specific type; Jev also has
+    # an explicit "none" option (providers/jev.py). Conservative default — only very
+    # flat (uncertain) distributions are caught. CALIBRATE before raising it: with 52
+    # options a correct answer can still split probability across near-synonyms, so
+    # too high a floor would demote correct classifications to "other". The eval
+    # script (scripts/jev_classify_eval.py) prints the code-confidence distribution.
+    signal_jev_min_code_confidence: float = 0.15
     # When the Jev failure rate in a single drain crosses this, the drain logs an
     # error (OpenRouter/Jev likely degraded — signals are being requeued, not
     # classified). Only evaluated when at least one signal was attempted in the run.

@@ -95,6 +95,46 @@ def test_model_returned_ot_is_accepted(monkeypatch):
     assert c.disaster_types == ["ot"]
 
 
+# ── none / low-confidence → "other" catch-all (anti-misclassification) ───────
+
+def test_glide_criteria_includes_the_none_option():
+    assert jev.NONE_CHOICE in jev._glide_criteria()
+
+
+def test_none_choice_is_recorded_as_natural_other(monkeypatch):
+    # Model declined (no specific type fits) → stored as "ot", not force-fit.
+    _patch_post(monkeypatch, _FakeResp(_answers(choice=jev.NONE_CHOICE, confidence=0.9)))
+    c = jev.classify_with_jev(title="some ambiguous incident", description=None)
+    assert c.disaster_types == ["ot"]
+    assert c.type_level_1 == "natural hazard"
+
+
+def test_low_confidence_specific_code_demoted_to_other(monkeypatch):
+    # A weakly-picked NATURAL code (fl, conf 0.1 < floor) → "ot", preserving L1.
+    monkeypatch.setattr(jev.settings, "signal_jev_min_code_confidence", 0.5)
+    _patch_post(monkeypatch, _FakeResp(_answers(choice="fl", confidence=0.1)))
+    c = jev.classify_with_jev(title="maybe a flood?", description=None)
+    assert c.disaster_types == ["ot"]
+    assert c.type_level_1 == "natural hazard"
+
+
+def test_low_confidence_conflict_code_demoted_to_po(monkeypatch):
+    # A weakly-picked CONFLICT code (ba, conf 0.1 < floor) keeps its L1 → "po".
+    monkeypatch.setattr(jev.settings, "signal_jev_min_code_confidence", 0.5)
+    _patch_post(monkeypatch, _FakeResp(_answers(choice="ba", confidence=0.1)))
+    c = jev.classify_with_jev(title="possible clash", description=None)
+    assert c.disaster_types == ["po"]
+    assert c.type_level_1 == "conflict"
+
+
+def test_confident_specific_code_is_kept(monkeypatch):
+    # Above the floor → the specific code stands.
+    monkeypatch.setattr(jev.settings, "signal_jev_min_code_confidence", 0.5)
+    _patch_post(monkeypatch, _FakeResp(_answers(choice="fl", confidence=0.9)))
+    c = jev.classify_with_jev(title="rivers burst their banks", description=None)
+    assert c.disaster_types == ["fl"]
+
+
 def test_missing_noul_raises_jeverror(monkeypatch):
     _patch_post(monkeypatch, _FakeResp({"answers": {
         "glide": {"type": "choice", "choice": "fl"},
@@ -118,7 +158,9 @@ def test_sends_two_parallel_questions_over_all_codes(monkeypatch):
     assert body["state"]["text"] == "flood villages submerged"
     qs = body["questions"]
     assert qs["glide"]["type"] == "choice" and qs["relevant"]["type"] == "noul"
-    assert len(qs["glide"]["criteria"]) == 52  # all GLIDE codes offered
+    criteria = qs["glide"]["criteria"]
+    assert len(criteria) == 53  # 52 GLIDE codes + the explicit "none" no-match option
+    assert jev.NONE_CHOICE in criteria
     assert captured["headers"]["Authorization"] == "Bearer sk-or-test"
 
 
