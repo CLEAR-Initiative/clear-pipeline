@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_pipeline.providers import acled, darfur24, dataminr, idmc
+from clear_pipeline.providers import acled, darfur24, dataminr, idmc, sudan_witness
 from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
     get_source_id_by_name,
@@ -241,8 +241,9 @@ class IDMCGXSource:
     let bronze skip unchanged rows and `_push` send revisions and retractions."""
 
     # Optional, probed via `getattr` in factory.py: gives the job a poll sensor.
-    # Only IDMC sets it — the other sources' watermarks and seen-sets are shared
-    # with the production poll in `defs/signals`, which a second poller would race.
+    # Only gx-only sources (IDMC, Sudan Witness) set it — the other sources'
+    # watermarks and seen-sets are shared with the production poll in
+    # `defs/signals`, which a second poller would race.
     poll_interval_minutes: int = settings.idmc_poll_interval_minutes
 
     @property
@@ -281,8 +282,8 @@ class IDMCGXSource:
         pass
 
     # ── Optional sync hooks ────────────────────────────────────────────────
-    # Only IDMC revises rows in place. Probed via `getattr` in factory.py,
-    # like the group hooks below.
+    # IDMC revises rows in place (so does Sudan Witness). Probed via `getattr`
+    # in factory.py, like the group hooks below.
 
     def content_hash(self, record: Any) -> str:
         return record["content_hash"]
@@ -306,14 +307,68 @@ class IDMCGXSource:
         return idmc.resolve_group(members)
 
 
+
+@dataclass(frozen=True)
+class SudanWitnessGXSource:
+    """Calls `providers/sudan_witness.py` directly; its only ingestion path,
+    like IDMC. CIR republishes the whole layer, so every poll fetches all of it:
+    the sync hooks skip unchanged rows at bronze and push revisions. No seen-set
+    and no group hooks (one row = one piece of evidence, nothing supersedes it)."""
+
+    poll_interval_minutes: int = settings.sudan_witness_poll_interval_minutes
+
+    @property
+    def source(self) -> str:
+        return settings.sudan_witness_source_name
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        return sudan_witness.fetch_sudan_witness_records(since=since)
+
+    def external_id(self, record: Any) -> str:
+        return record["suw_id"]
+
+    def published_at(self, record: Any) -> str:
+        return record["published_at"]
+
+    def raw_bytes(self, record: Any) -> bytes:
+        return json.dumps(record, ensure_ascii=False).encode("utf-8")
+
+    def parse(self, raw: bytes) -> Any:
+        return json.loads(raw)
+
+    def api_source_id(self) -> str:
+        return get_source_id_by_name(settings.sudan_witness_source_name)
+
+    def last_synced(self) -> datetime | None:
+        return sudan_witness.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        sudan_witness.set_last_synced(ts)
+
+    def to_silver_input(self, record: Any, source_id: str) -> dict:
+        # Already a pure transform: no geoparser, so no `promote` to pass.
+        return sudan_witness.build_sudan_witness_signal_input(record, source_id)
+
+    def mark_seen(self, external_id: str) -> None:
+        pass  # No seen-set: the bronze skip (gold hash + pushedState) dedups.
+
+    # ── Optional sync hooks (probed via `getattr` in factory.py) ──────────
+    def content_hash(self, record: Any) -> str:
+        return record["content_hash"]
+
+    def content_update_input(self, signal_input: dict, *, retracted: bool) -> dict:
+        return sudan_witness.build_signal_content_update(signal_input, retracted=retracted)
+
+
 # IDMC runs the full chain for QA and pre-push filtering, like ACLED/Darfur24.
 # IDMC-native event grouping is NOT designed: the district+type heuristic runs
 # as-is (as in the drain, IDMCConnector drained=True), and gold events are a
-# QA-only sandbox that never reaches clear-api. Only IDMCGXSource defines the
-# sync hooks; other sources stay create-only.
+# QA-only sandbox that never reaches clear-api. Only IDMCGXSource and
+# SudanWitnessGXSource define the sync hooks; other sources stay create-only.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),
     Darfur24GXSource(),
     IDMCGXSource(),
+    SudanWitnessGXSource(),
 ]
