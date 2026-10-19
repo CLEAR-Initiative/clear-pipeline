@@ -169,14 +169,16 @@ def test_content_update_reuses_the_create_payload():
 # ──────────────────────────────────────────────────────────────────────────────
 class FakeLayer:
     """Answers the three request kinds the fetch makes: layer metadata, count,
-    and paged feature queries."""
+    and paged feature queries. Ignores `where`; records every query."""
 
     def __init__(self, features, page_size=2, edit_dates=None):
         self.features = features
         self.page_size = page_size
         self.edit_dates = list(edit_dates or [])
+        self.queries: list[dict] = []
 
     def __call__(self, url, **params):
+        self.queries.append(params)
         if url == LAYER:
             edit = self.edit_dates.pop(0) if self.edit_dates else EDIT_DATE
             return {"editingInfo": {"dataLastEditDate": edit}}
@@ -221,22 +223,62 @@ def test_fetch_retries_when_the_layer_is_republished_mid_pull():
     sleep.assert_called_once()
 
 
-def test_fetch_gives_up_if_the_layer_keeps_changing():
-    layer = FakeLayer([_feature()], edit_dates=range(EDIT_DATE, EDIT_DATE + 20))
-    with patch.object(sudan_witness, "_get", layer), patch.object(sudan_witness.time, "sleep"):
-        assert fetch_sudan_witness_records() == []
+def test_fetch_raises_on_http_failure():
+    with patch.object(sudan_witness, "_get", side_effect=httpx.ConnectError("down")), \
+         pytest.raises(httpx.ConnectError):
+        fetch_sudan_witness_records()
 
 
-def test_fetch_returns_nothing_on_http_failure():
-    with patch.object(sudan_witness, "_get", side_effect=httpx.ConnectError("down")):
-        assert fetch_sudan_witness_records() == []
-
-
-def test_arcgis_errors_reported_with_http_200_are_raised():
+def test_fetch_raises_on_arcgis_errors_reported_with_http_200():
     response = httpx.Response(200, json={"error": {"code": 400, "message": "Invalid query"}},
                               request=httpx.Request("GET", LAYER))
-    with patch.object(sudan_witness.httpx, "get", return_value=response):
-        assert fetch_sudan_witness_records() == []
+    with patch.object(sudan_witness.httpx, "get", return_value=response), pytest.raises(RuntimeError):
+        fetch_sudan_witness_records()
+
+
+def test_fetch_raises_on_malformed_metadata():
+    with patch.object(sudan_witness, "_get", return_value={"name": "SUW_Incidents"}), pytest.raises(KeyError):
+        fetch_sudan_witness_records()
+
+
+def test_fetch_raises_on_an_empty_page_that_claims_more_results():
+    def layer(url, **params):
+        if url == LAYER:
+            return {"editingInfo": {"dataLastEditDate": EDIT_DATE}}
+        if params.get("returnCountOnly"):
+            return {"count": 5}
+        return {"features": [], "exceededTransferLimit": True}
+
+    with patch.object(sudan_witness, "_get", layer), pytest.raises(RuntimeError, match="exceededTransferLimit"):
+        fetch_sudan_witness_records()
+
+
+# 2025-12-31T00:00:00Z — one day before the default floor (2026-01-01).
+PRE_FLOOR = 1767139200000
+
+
+def test_fetch_drops_rows_dated_before_the_floor_even_if_the_server_ignores_it():
+    features = [_feature(Entry_Number="SUW1"), _feature(Entry_Number="SUW2", D_Verified_Date=PRE_FLOOR)]
+    with patch.object(sudan_witness, "_get", FakeLayer(features, page_size=10)):
+        assert [r["suw_id"] for r in fetch_sudan_witness_records()] == ["suw:1"]
+
+
+def test_the_pull_and_its_consistency_count_carry_the_floor():
+    layer = FakeLayer([_feature()])
+    with patch.object(sudan_witness, "_get", layer):
+        fetch_sudan_witness_records()
+    floor = "D_Verified_Date >= DATE '2026-01-01'"
+    pages = [q for q in layer.queries if "resultOffset" in q]
+    assert pages and all(q["where"] == floor for q in pages)
+    # Fingerprint count stays whole-layer; the consistency count matches the pull.
+    assert {q["where"] for q in layer.queries if q.get("returnCountOnly")} == {floor, "1=1"}
+
+
+def test_every_poll_logs_the_layer_edit_date(caplog):
+    with caplog.at_level("INFO", logger=sudan_witness.__name__), \
+         patch.object(sudan_witness, "_get", FakeLayer([_feature()])):
+        fetch_sudan_witness_records()
+    assert "2026-10-12" in caplog.text
 
 
 class _KV:
@@ -266,14 +308,59 @@ def _synced_layer(fake_redis, layer, *, age=timedelta(hours=1)):
     return since
 
 
-def test_fetch_skips_the_pull_when_the_layer_is_unchanged(fake_redis):
+def test_fetch_skips_the_pull_when_the_layer_is_unchanged(fake_redis, caplog):
     layer = FakeLayer([_feature()])
     since = _synced_layer(fake_redis, layer)
-    with patch.object(sudan_witness, "_redis", fake_redis), \
+    with caplog.at_level("INFO", logger=sudan_witness.__name__), \
+         patch.object(sudan_witness, "_redis", fake_redis), \
          patch.object(sudan_witness, "_get", layer), \
          patch.object(sudan_witness, "_pull_features") as pull:
         assert fetch_sudan_witness_records(since=since) == []
     pull.assert_not_called()
+    (unchanged,) = [r for r in caplog.records if "unchanged" in r.getMessage()]
+    assert unchanged.levelname == "INFO"
+    assert "2026-10-12" in unchanged.getMessage()
+
+
+def test_fetch_gives_up_if_the_layer_keeps_changing(fake_redis, caplog):
+    since = datetime.now(UTC) - timedelta(hours=1)
+    churning = FakeLayer([_feature()], edit_dates=range(EDIT_DATE, EDIT_DATE + 20))
+    with patch.object(sudan_witness, "_redis", fake_redis), \
+         patch.object(sudan_witness, "_get", churning), patch.object(sudan_witness.time, "sleep"):
+        assert fetch_sudan_witness_records() == []
+        sudan_witness.set_last_synced(since)
+    assert any(r.levelname == "WARNING" and "kept changing" in r.getMessage() for r in caplog.records)
+    # No fingerprint committed: the next poll pulls even though the layer now holds still.
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", FakeLayer([_feature()])):
+        assert len(fetch_sudan_witness_records(since=since)) == 1
+
+
+def test_a_failed_poll_leaves_the_watermark_and_fingerprint_untouched(fake_redis):
+    layer = FakeLayer([_feature()])
+    since = _synced_layer(fake_redis, layer)
+    stored = dict(fake_redis.store)
+    with patch.object(sudan_witness, "_redis", fake_redis), \
+         patch.object(sudan_witness, "_get", FakeLayer([_feature(), _feature(Entry_Number="SUW7")])), \
+         patch.object(sudan_witness, "_pull_features", side_effect=httpx.ConnectError("down")), \
+         pytest.raises(httpx.ConnectError):
+        fetch_sudan_witness_records(since=since)
+    assert fake_redis.store == stored
+    with patch.object(sudan_witness, "_redis", fake_redis):
+        assert sudan_witness.get_last_synced() == since
+
+
+def test_a_failed_fingerprint_check_falls_back_to_a_full_pull(fake_redis):
+    since = _synced_layer(fake_redis, FakeLayer([_feature()]))
+    layer = FakeLayer([_feature()])
+    flaky = iter([httpx.ConnectError("blip")])
+
+    def get(url, **params):
+        if url == LAYER and (err := next(flaky, None)):
+            raise err
+        return layer(url, **params)
+
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", get):
+        assert len(fetch_sudan_witness_records(since=since)) == 1
 
 
 def test_fetch_pulls_when_the_edit_date_or_row_count_moved(fake_redis):
@@ -325,9 +412,9 @@ def test_gx_source_update_hook_carries_the_retraction_flag():
     assert SudanWitnessGXSource().content_update_input(signal_input, retracted=True)["retracted"] is True
 
 
-def test_connector_is_ingest_only_until_grouping_handles_backdated_signals():
+def test_connector_is_drained():
     connector = SudanWitnessConnector()
-    assert (connector.polled, connector.drained) == (False, False)
+    assert (connector.polled, connector.drained) == (False, True)
 
 
 def test_connector_projects_the_gx_blob():

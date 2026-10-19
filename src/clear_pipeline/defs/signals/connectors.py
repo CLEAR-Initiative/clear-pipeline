@@ -17,7 +17,7 @@ capability flags:
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
-  │ sudan_wit.†│  False  │  False  │ downloaded by gx; NOT grouped               │
+  │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
@@ -31,11 +31,10 @@ capability flags:
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
-  ``POST /api/x/ingest``) or gx (``idmc``). The drain projects from the blob
+  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage.
-  ``dtm`` and ``sudan_witness`` are the exceptions: a DTM bulletin can span many
-  districts, and Sudan Witness rows arrive backdated by weeks, so their signals
+  ``dtm`` is the exception: a bulletin can span many districts, so its signals
   are ingested but not grouped into events (see ``DRAINED_SOURCES``).
 
 Connectors reuse the consolidated ``clear_pipeline.providers`` modules
@@ -480,20 +479,18 @@ class IDMCConnector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sudan Witness — CIR's verified open-source evidence (downloaded by gx, NOT drained)
+# Sudan Witness — CIR's verified open-source evidence (downloaded by gx, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class SudanWitnessConnector:
     """Downloaded only by ``gx_pipeline`` (``SudanWitnessGXSource``), like IDMC.
 
-    ``drained = False``: rows reach the layer weeks after their event date, and
-    grouping matches a signal against events active in the last 7 days of *now*
-    (``providers/event.py``), so a backdated signal would join an unrelated
-    current event or open an orphan one. ``project`` is ready for when grouping
-    matches on the signal's own date."""
+    Drained like any source: the district + type heuristic runs as-is, though
+    rows arrive weeks after their event date (cross-matching with current events
+    accepted). ``project`` reads the gx blob."""
 
     source = settings.sudan_witness_source_name
     polled = False
-    drained = False
+    drained = True
     poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
 
     def parse(self, raw: bytes) -> dict:

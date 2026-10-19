@@ -10,11 +10,12 @@ Verified" (location verified; the date often is only the post date — see
 Fetch semantics (why this looks like IDMC, not ACLED):
   - CIR republishes the whole layer from its internal database (cadence
     unknown), and rows land weeks to months after their event date. A date
-    watermark would skip them, so a poll fetches the full layer (~2k rows,
-    3 requests) and gx's content hash skips unchanged rows.
+    watermark would skip them, so a poll fetches every row dated on/after
+    `sudan_witness_min_incident_date` (in the query, then again client-side)
+    and gx's content hash skips unchanged rows.
   - The full pull is gated on the layer fingerprint (`dataLastEditDate` +
-    row count): unchanged since the last clean poll → nothing fetched, so
-    bronze doesn't rewrite ~2k blobs for nothing. The fingerprint is committed
+    row count, whole layer): unchanged since the last clean poll → nothing
+    fetched, so bronze doesn't rewrite blobs for nothing. The fingerprint is committed
     by `set_last_synced`, which gx calls only after a clean bronze batch. A full
     pull is forced anyway once `since` is older than
     `sudan_witness_full_pull_max_age_hours` — the safety net for a failure
@@ -22,11 +23,14 @@ Fetch semantics (why this looks like IDMC, not ACLED):
     (unverified either way).
   - `OBJECTID1` is regenerated on republish; the key is `Entry_Number`,
     normalised to its integer (CIR's zero-padding varies: SUW0050 vs SUW3217).
-  - The pull is retried if `dataLastEditDate` moves mid-pagination.
+  - The pull is retried if `dataLastEditDate` moves mid-pagination; after 3
+    attempts the poll returns nothing (WARNING) and the next one retries.
+  - Any HTTP / ArcGIS / malformed-response failure raises: the gx bronze
+    asset fails, so a broken endpoint never looks like an unchanged layer.
 
 Known gaps:
-  - A row CIR withdraws simply disappears from the layer; gx has no
-    "absent from a full snapshot" retraction yet, so it stays live in clear-api.
+  - A row CIR withdraws (or re-dates below the floor) disappears from the pull;
+    gx has no "absent from a full snapshot" retraction yet, so it stays live.
   - No casualties: the layer has no count field (`E_Affected_Persons` is
     categorical) and the free text carries only unverified poster claims.
 
@@ -120,22 +124,35 @@ def _data_last_edit() -> int:
     return _get(settings.sudan_witness_layer_url)["editingInfo"]["dataLastEditDate"]
 
 
-def _count() -> int:
-    return _get(f"{settings.sudan_witness_layer_url}/query", where="1=1", returnCountOnly="true")["count"]
+def _count(where: str = "1=1") -> int:
+    return _get(f"{settings.sudan_witness_layer_url}/query", where=where, returnCountOnly="true")["count"]
 
 
 def _fingerprint() -> str:
-    """Cheap layer version: 2 requests, no features."""
+    """Cheap layer version: 2 requests, no features. Whole layer, not floored."""
     return f"{_data_last_edit()}:{_count()}"
 
 
-def _pull_features() -> list[dict]:
+def _edit_date(ms: int | str) -> str:
+    return datetime.fromtimestamp(int(ms) / 1000, UTC).isoformat()
+
+
+def _floor_ms() -> int:
+    floor = settings.sudan_witness_min_incident_date
+    return int(datetime(floor.year, floor.month, floor.day, tzinfo=UTC).timestamp() * 1000)
+
+
+def _floor_where() -> str:
+    return f"D_Verified_Date >= DATE '{settings.sudan_witness_min_incident_date.isoformat()}'"
+
+
+def _pull_features(where: str) -> list[dict]:
     query_url = f"{settings.sudan_witness_layer_url}/query"
     features: list[dict] = []
     while True:
         page = _get(
             query_url,
-            where="1=1",
+            where=where,
             outFields="*",
             returnGeometry="true",
             outSR="4326",
@@ -143,52 +160,53 @@ def _pull_features() -> list[dict]:
             resultOffset=str(len(features)),
             resultRecordCount=str(settings.sudan_witness_page_size),
         )
-        features += page.get("features", [])
+        batch = page["features"]
+        features += batch
         if not page.get("exceededTransferLimit"):
             return features
+        if not batch:  # same offset again → infinite loop
+            raise RuntimeError(f"ArcGIS page at offset {len(features)} empty despite exceededTransferLimit")
 
 
 def _fetch_all() -> tuple[list[dict], str | None]:
-    """Every feature of the layer, from one consistent version of it, and that
-    version's fingerprint. Returns ([], None) (logged) on HTTP failure or if the
-    layer keeps changing during the pull."""
-    try:
-        for attempt in range(1, _PULL_ATTEMPTS + 1):
-            before = _data_last_edit()
-            count = _count()
-            features = _pull_features()
-            if before == _data_last_edit() and len(features) == count:
-                logger.info("[SUDAN_WITNESS] fetched %d features", len(features))
-                return features, f"{before}:{count}"
-            logger.warning(
-                "[SUDAN_WITNESS] layer changed during pull (attempt %d/%d) — retrying",
-                attempt, _PULL_ATTEMPTS,
-            )
-            if attempt < _PULL_ATTEMPTS:
-                time.sleep(_PULL_RETRY_SECONDS)
-    except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as e:
-        logger.error("[SUDAN_WITNESS] fetch failed: %s: %s", type(e).__name__, e)
-        return [], None
-    logger.error("[SUDAN_WITNESS] layer kept changing during pull — skipping this poll")
+    """Every feature since the floor, from one consistent layer version, and that
+    version's fingerprint. ([], None) if the layer keeps changing. Fetch errors raise."""
+    where = _floor_where()
+    for attempt in range(1, _PULL_ATTEMPTS + 1):
+        before = _data_last_edit()
+        if attempt == 1:
+            logger.info("[SUDAN_WITNESS] layer last edited %s — pulling", _edit_date(before))
+        total, count = _count(), _count(where)
+        features = _pull_features(where)
+        if before == _data_last_edit() and len(features) == count:
+            logger.info("[SUDAN_WITNESS] fetched %d features", len(features))
+            return features, f"{before}:{total}"
+        logger.warning(
+            "[SUDAN_WITNESS] layer changed during pull (attempt %d/%d) — retrying",
+            attempt, _PULL_ATTEMPTS,
+        )
+        if attempt < _PULL_ATTEMPTS:
+            time.sleep(_PULL_RETRY_SECONDS)
+    logger.warning("[SUDAN_WITNESS] layer kept changing during pull — skipping this poll")
     return [], None
 
 
-def _layer_unchanged_since(since: datetime | None) -> bool:
-    """True when the last clean poll is recent and the layer's fingerprint still
-    matches it — the full pull would only re-fetch rows gx already holds."""
+def _unchanged_fingerprint(since: datetime | None) -> str | None:
+    """Stored fingerprint if the last clean poll is recent and the layer still
+    matches it (a pull would only re-fetch rows gx holds), else None."""
     if since is None:
-        return False
+        return None
     if (datetime.now(UTC) - since).total_seconds() >= settings.sudan_witness_full_pull_max_age_hours * 3600:
-        return False
+        return None
     stored = cast("str | None", _redis.get(_FINGERPRINT_KEY))
     if stored is None:
-        return False
+        return None
     try:
         current = _fingerprint()
     except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as e:
         logger.warning("[SUDAN_WITNESS] fingerprint check failed (%s) — full pull", type(e).__name__)
-        return False
-    return current == stored
+        return None
+    return stored if current == stored else None
 
 
 def _content_hash(attributes: dict) -> str:
@@ -221,24 +239,33 @@ def parse_feature(feature: dict) -> dict | None:
 
 
 def fetch_sudan_witness_records(since: datetime | None = None) -> list[dict]:
-    """Every row of the layer as a parsed record, filtered to
+    """Every row dated on/after the floor as a parsed record, filtered to
     `sudan_witness_countries` (rows with no country are kept: in practice they
     sit inside Sudan, and clear-api resolves the location from the coordinates).
     `since` (the last clean poll) only gates the pull: [] when the layer hasn't
-    changed since — see the module docstring."""
+    changed since — see the module docstring. Raises on fetch failure."""
     global _pending_fingerprint
-    if _layer_unchanged_since(since):
-        logger.info("[SUDAN_WITNESS] layer unchanged since %s — nothing fetched", since)
+    _pending_fingerprint = None  # a raise below must not leave a stale one to commit
+    if stored := _unchanged_fingerprint(since):
+        logger.info(
+            "[SUDAN_WITNESS] layer unchanged since %s (last edited %s) — nothing fetched",
+            since, _edit_date(stored.split(":")[0]),
+        )
         return []
     features, _pending_fingerprint = _fetch_all()
     countries = {c.strip() for c in settings.sudan_witness_countries.split(",") if c.strip()}
+    floor_ms = _floor_ms()
     records: list[dict] = []
-    skipped = filtered_out = duplicates = 0
+    skipped = before_floor = filtered_out = duplicates = 0
     seen: set[str] = set()
     for feature in features:
         record = parse_feature(feature)
         if record is None:
             skipped += 1
+            continue
+        # Server already floors; guards against a misread date clause.
+        if record["raw"]["attributes"]["D_Verified_Date"] < floor_ms:
+            before_floor += 1
             continue
         country = record["raw"]["attributes"].get("D_Country")
         if country is not None and country not in countries:
@@ -250,8 +277,8 @@ def fetch_sudan_witness_records(since: datetime | None = None) -> list[dict]:
         seen.add(record["suw_id"])
         records.append(record)
     logger.info(
-        "[SUDAN_WITNESS] %d records (skipped=%d, outside_countries=%d, duplicate_id=%d)",
-        len(records), skipped, filtered_out, duplicates,
+        "[SUDAN_WITNESS] %d records (skipped=%d, before_floor=%d, outside_countries=%d, duplicate_id=%d)",
+        len(records), skipped, before_floor, filtered_out, duplicates,
     )
     return records
 

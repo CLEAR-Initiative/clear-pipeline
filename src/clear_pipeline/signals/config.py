@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic_settings import BaseSettings
 
 
@@ -79,9 +81,9 @@ class Settings(BaseSettings):
     # Sudan Witness (Centre for Information Resilience) — verified open-source
     # evidence on a public ArcGIS feature layer, no auth. CIR republishes the
     # whole layer (cadence unknown) and rows arrive weeks after their event
-    # date, so a poll fetches the full layer — only when its fingerprint
-    # (dataLastEditDate + row count) moved — and gx's content hash skips
-    # unchanged rows. No date watermark.
+    # date, so a poll fetches every row since the floor — only when the layer
+    # fingerprint (dataLastEditDate + row count) moved — and gx's content hash
+    # skips unchanged rows. No date watermark.
     sudan_witness_source_name: str = "sudan_witness"
     sudan_witness_layer_url: str = (
         "https://services-eu1.arcgis.com/06WOSMGHsCnaFyMp/arcgis/rest/services/"
@@ -92,6 +94,9 @@ class Settings(BaseSettings):
     # inside Sudan); the ~1% elsewhere (Chad, Ethiopia…) is RSF diplomacy and
     # foreign logistics, which CIR's own public map hides too.
     sudan_witness_countries: str = "Sudan"
+    # Min incident date (D_Verified_Date) ingested — in the query and client-side.
+    # Fixed floor, not a rolling window: lower it to backfill.
+    sudan_witness_min_incident_date: date = date(2026, 1, 1)
     sudan_witness_poll_interval_minutes: int = 24 * 60  # daily; CIR reload cadence unknown (one reload seen, 2026-10-12)
     # Forced full pull even when the layer fingerprint is unchanged (safety net).
     sudan_witness_full_pull_max_age_hours: int = 7 * 24

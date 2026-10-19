@@ -99,7 +99,7 @@ EXPECTED_FLAGS = {
     "gdacs": (True, True),
     "darfur24": (True, True),
     "idmc": (False, True),
-    "sudan_witness": (False, False),
+    "sudan_witness": (False, True),
     "dtm": (True, False),
     "manual": (False, True),
     "field_officer": (False, True),

@@ -311,8 +311,8 @@ class IDMCGXSource:
 @dataclass(frozen=True)
 class SudanWitnessGXSource:
     """Calls `providers/sudan_witness.py` directly; its only ingestion path,
-    like IDMC. CIR republishes the whole layer, so every poll fetches all of it:
-    the sync hooks skip unchanged rows at bronze and push revisions. No seen-set
+    like IDMC. CIR republishes the whole layer, so every poll fetches all rows
+    since the floor: the sync hooks skip unchanged rows at bronze and push revisions. No seen-set
     and no group hooks (one row = one piece of evidence, nothing supersedes it)."""
 
     poll_interval_minutes: int = settings.sudan_witness_poll_interval_minutes
