@@ -1854,7 +1854,9 @@ def escalate_event(event_id: str, user_id: str) -> dict:
     return result["escalateEvent"]
 
 
-def create_alert(input_data: dict) -> dict:
+def create_alert(input_data: dict) -> dict | None:
+    # `createAlert` returns null (no error) when the event's types are all
+    # NRC-irrelevant — callers treat None as "no alert raised", not a failure.
     result = _execute(CREATE_ALERT, {"input": input_data})
     return result["createAlert"]
 

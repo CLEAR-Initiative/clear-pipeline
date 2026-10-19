@@ -32,11 +32,22 @@ def is_stale_signal(published_at: str | None) -> bool:
     return age_hours > max_age_hours
 
 
-def escalate_to_alert(event: dict, status: str = "published") -> dict:
+def escalate_to_alert(event: dict, status: str = "published") -> dict | None:
     """Create a published alert for an event. ``createAlert`` is idempotent per
     eventId, so re-escalating an already-alerted event returns the existing alert.
+
+    Returns ``None`` (not an error) when the event is NOT raised: clear-api's
+    ``createAlert`` returns null when the event's types are all NRC-irrelevant.
+    That is an expected skip — we LOG it and move on rather than dereferencing a
+    null alert, which would otherwise surface as a GlitchTip error on a perfectly
+    normal "this event isn't alert-worthy" outcome.
     """
     logger.info("[ALERT] Escalating event %s (status=%s)", event["id"], status)
     alert = create_alert({"eventId": event["id"], "status": status})
+    if alert is None:
+        logger.info(
+            "[ALERT] Event %s not raised — its types are not relevant to NRC", event["id"]
+        )
+        return None
     logger.info("[ALERT] Created alert id=%s for event %s", alert["id"], event["id"])
     return alert
