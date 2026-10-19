@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import dagster as dg
 
+from clear_pipeline.providers.metrics import CheckOutcome, push_run_metrics
 from clear_pipeline.providers.observability import capture_message, init_sentry
 from clear_pipeline.signals.config import settings
 
@@ -134,3 +135,52 @@ def run_failure_glitchtip_sensor(context: dg.RunFailureSensorContext) -> None:
     """Report every run failure to GlitchTip with run id + job + reason."""
     alert = run_failure_alert(context.dagster_run, context.failure_event.message)
     capture_message(alert["message"], level="error", **alert["tags"])
+
+
+def check_outcomes(events) -> list[CheckOutcome]:
+    """Asset-check (GX gate) results from a run's event-log entries."""
+    outcomes = []
+    for entry in events:
+        ev = entry.dagster_event
+        if ev is None or ev.event_type != dg.DagsterEventType.ASSET_CHECK_EVALUATION:
+            continue
+        data = ev.event_specific_data
+        outcomes.append(
+            CheckOutcome(
+                asset="/".join(data.asset_key.path),
+                check=data.check_name,
+                passed=bool(data.passed),
+                severity=data.severity.value,
+            )
+        )
+    return outcomes
+
+
+def _push_for_run(context: dg.RunStatusSensorContext, success: bool) -> None:
+    run = context.dagster_run
+    record = context.instance.get_run_record_by_id(run.run_id)
+    duration = None
+    if record and record.start_time and record.end_time:
+        duration = record.end_time - record.start_time
+    events = context.instance.all_logs(run.run_id, of_type=dg.DagsterEventType.ASSET_CHECK_EVALUATION)
+    push_run_metrics(run.job_name or "unknown", success, duration, check_outcomes(events))
+
+
+@dg.run_status_sensor(
+    name="run_success_metrics_sensor",
+    run_status=dg.DagsterRunStatus.SUCCESS,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+def run_success_metrics_sensor(context: dg.RunStatusSensorContext) -> None:
+    """Push duration + GX gate outcomes of every successful run to the Pushgateway."""
+    _push_for_run(context, success=True)
+
+
+@dg.run_status_sensor(
+    name="run_failure_metrics_sensor",
+    run_status=dg.DagsterRunStatus.FAILURE,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+def run_failure_metrics_sensor(context: dg.RunStatusSensorContext) -> None:
+    """Same for failed runs (gates that ran before the failure are included)."""
+    _push_for_run(context, success=False)

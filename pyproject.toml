@@ -45,6 +45,7 @@ dependencies = [
     "great-expectations>=1.22,<2",
     "pandas>=2.3.3",
     "pyiceberg[pyarrow,sql-sqlite]>=0.12.0",
+    "prometheus-client>=0.26.0",
 ]
 
 [dependency-groups]

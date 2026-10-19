@@ -12,7 +12,7 @@ import sentry_sdk.transport
 
 import clear_pipeline.definitions as definitions
 from clear_pipeline.defs import observability as observability_defs
-from clear_pipeline.providers import idmc, observability
+from clear_pipeline.providers import idmc, metrics, observability
 
 NOW = 1_000_000.0  # fixed "now" for deterministic ages
 THRESHOLD_S = 30 * 60
@@ -56,6 +56,7 @@ def test_run_health_sensors_are_registered():
     names = {s.name for s in defs.sensors}
     assert "stuck_run_monitor_sensor" in names
     assert "run_failure_glitchtip_sensor" in names
+    assert {"run_success_metrics_sensor", "run_failure_metrics_sensor"} <= names
 
 
 def test_global_executor_is_in_process():
@@ -188,3 +189,32 @@ def test_glitchtip_events_never_carry_the_idmc_client_id(monkeypatch):
 
     assert any("API request failed" in e for e in transport.envelopes)
     assert not any("s3cret" in e for e in transport.envelopes)
+
+
+def _check_event(asset, check, passed, severity=dg.AssetCheckSeverity.WARN):
+    data = SimpleNamespace(asset_key=dg.AssetKey(asset), check_name=check, passed=passed, severity=severity)
+    ev = SimpleNamespace(event_type=dg.DagsterEventType.ASSET_CHECK_EVALUATION, event_specific_data=data)
+    return SimpleNamespace(dagster_event=ev)
+
+
+def test_check_outcomes_extracts_gx_gates_and_skips_other_events():
+    other = SimpleNamespace(dagster_event=SimpleNamespace(event_type=dg.DagsterEventType.STEP_SUCCESS))
+    events = [_check_event(["acled", "bronze"], "bronze_shape", False, dg.AssetCheckSeverity.ERROR), other]
+    out = observability_defs.check_outcomes(events + [SimpleNamespace(dagster_event=None)])
+    assert out == [metrics.CheckOutcome("acled/bronze", "bronze_shape", False, "ERROR")]
+
+
+def test_build_registry_exposes_run_and_gate_gauges():
+    reg = metrics.build_registry("acled_job", False, 12.5, [metrics.CheckOutcome("a/b", "c", True, "WARN")])
+    labels = {"job": "acled_job", "service": "clear-context-pipeline"}
+    assert reg.get_sample_value("dagster_run_last_success", labels) == 0
+    assert reg.get_sample_value("dagster_run_last_duration_seconds", labels) == 12.5
+    gate = {**labels, "asset": "a/b", "check": "c", "severity": "WARN"}
+    assert reg.get_sample_value("dagster_asset_check_last_passed", gate) == 1
+
+
+def test_push_is_noop_without_url_and_swallows_errors(monkeypatch):
+    monkeypatch.setattr(metrics.settings, "pushgateway_url", "")
+    metrics.push_run_metrics("j", True, 1.0)  # no URL: nothing happens
+    monkeypatch.setattr(metrics.settings, "pushgateway_url", "http://127.0.0.1:1")
+    metrics.push_run_metrics("j", True, 1.0)  # unreachable: logged, not raised
