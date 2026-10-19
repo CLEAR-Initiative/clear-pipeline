@@ -45,7 +45,7 @@ COPY . .
 ENV DAGSTER_HOME=/opt/dagster
 
 # Bake the instance + workspace config into DAGSTER_HOME so hosts WITHOUT a
-# mount (Railway, plain `docker run`) pick them up automatically. The VM/
+# mount (e.g. plain `docker run`) pick them up automatically. The VM/
 # compose deployment bind-mounts its own dagster.yaml / workspace.yaml over
 # these, so this changes nothing there.
 RUN mkdir -p /opt/dagster

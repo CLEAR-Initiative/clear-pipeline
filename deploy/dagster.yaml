@@ -2,13 +2,13 @@
 # (see Dockerfile). The webserver + daemon read it automatically.
 #
 # All run / event-log / schedule metadata lives in Postgres so it SURVIVES
-# redeploys — a Railway (or any container) filesystem is ephemeral. Point
+# redeploys — a container filesystem is ephemeral. Point
 # DAGSTER_POSTGRES_URL at a Postgres DEDICATED to Dagster (its own database,
 # NOT clear-api's — Dagster owns and migrates its own schema). Dagster
 # auto-creates its tables on first boot.
 #
 # The VM/compose deployment bind-mounts its own dagster.yaml over this file,
-# so this baked copy is only used where nothing is mounted (Railway, docker run).
+# so this baked copy is only used where nothing is mounted (e.g. plain docker run).
 
 run_storage:
   module: dagster_postgres.run_storage
@@ -60,7 +60,7 @@ run_monitoring:
 
 # DefaultRunLauncher forks each run as a subprocess of the process that
 # launches it (the daemon, here). Simplest launcher; fine for a single-node
-# Railway deployment. The daemon service therefore needs the run memory.
+# deployment. The daemon service therefore needs the run memory.
 run_launcher:
   module: dagster.core.launcher
   class: DefaultRunLauncher
