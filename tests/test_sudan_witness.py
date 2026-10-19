@@ -4,7 +4,7 @@ layer rows; ArcGIS is mocked at the module's `_get` boundary — no network/DB.
 """
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import patch
 
 import httpx
@@ -253,21 +253,25 @@ def test_fetch_raises_on_an_empty_page_that_claims_more_results():
         fetch_sudan_witness_records()
 
 
-# 2025-12-31T00:00:00Z — one day before the default floor (2026-01-01).
-PRE_FLOOR = 1767139200000
+@pytest.fixture
+def floor_jul_1():
+    """Non-default floor: proves the setting drives both filters. Fixture rows are 2026-07-09."""
+    with patch.object(sudan_witness.settings, "sudan_witness_min_incident_date", date(2026, 7, 1)):
+        yield
 
 
-def test_fetch_drops_rows_dated_before_the_floor_even_if_the_server_ignores_it():
-    features = [_feature(Entry_Number="SUW1"), _feature(Entry_Number="SUW2", D_Verified_Date=PRE_FLOOR)]
+def test_fetch_drops_rows_dated_before_the_floor_even_if_the_server_ignores_it(floor_jul_1):
+    jun_30 = int(datetime(2026, 6, 30, tzinfo=UTC).timestamp() * 1000)
+    features = [_feature(Entry_Number="SUW1"), _feature(Entry_Number="SUW2", D_Verified_Date=jun_30)]
     with patch.object(sudan_witness, "_get", FakeLayer(features, page_size=10)):
         assert [r["suw_id"] for r in fetch_sudan_witness_records()] == ["suw:1"]
 
 
-def test_the_pull_and_its_consistency_count_carry_the_floor():
+def test_the_pull_and_its_consistency_count_carry_the_floor(floor_jul_1):
     layer = FakeLayer([_feature()])
     with patch.object(sudan_witness, "_get", layer):
         fetch_sudan_witness_records()
-    floor = "D_Verified_Date >= DATE '2026-01-01'"
+    floor = "D_Verified_Date >= DATE '2026-07-01'"
     pages = [q for q in layer.queries if "resultOffset" in q]
     assert pages and all(q["where"] == floor for q in pages)
     # Fingerprint count stays whole-layer; the consistency count matches the pull.
