@@ -42,6 +42,16 @@ concurrency:
   # max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
   runs:
     max_concurrent_runs: 4
+    # Cap HEAVY runs independently of the global 4. The weekly reliefweb job fans
+    # out one heavy run per country (PDF text + LLM enrichment + embeddings),
+    # tagged `clear/weight: heavy` on the job (defs/reliefweb_to_s3.py). Landing
+    # 3-at-once starved the in-process code server's heartbeat → the server shut
+    # down → in-flight runs died (DagsterExecutionInterruptedError). Capping to 1
+    # serialises them while leaving the other 3 slots for the 1-minute sensor jobs.
+    tag_concurrency_limits:
+      - key: "clear/weight"
+        value: "heavy"
+        limit: 1
   # One in-flight run per `gx_<source>_gold` pool (gx_pipeline/factory.py):
   # `_reconcile` read-modify-writes whole gold groups. `run` granularity holds
   # the slot for the whole run, not per step, so reconcile -> gold -> push of
@@ -51,12 +61,25 @@ concurrency:
     granularity: run
     default_limit: 1
 
-# A crashed run must not hold its pool slot forever: with a limit of 1 that
-# blocks every later run of that source.
+# Run monitoring keeps the queue healthy:
+#   * free_slots_after_run_end_seconds — a crashed run must not hold its pool slot
+#     forever; with a pool limit of 1 that would block every later run of that
+#     source.
+#   * the timeout nets fail runs whose process died without reporting back (e.g. a
+#     code-server heartbeat shutdown killing the runs it forked) and runs that
+#     can't start within start_timeout. Without them a killed run stays STARTED,
+#     holds one of the max_concurrent_runs slots forever, and once enough
+#     accumulate the queue pins at 4/4 and ticks stall ("unhealthy queue").
+#     max_runtime caps a genuinely stuck run; raise it (or set the
+#     `dagster/max_runtime` tag on a job) if a legitimate run ever needs longer.
 # https://dagster.io/docs/guides/operate/managing-concurrency/troubleshooting-concurrency
 run_monitoring:
   enabled: true
   free_slots_after_run_end_seconds: 300
+  start_timeout_seconds: 300
+  cancel_timeout_seconds: 180
+  max_runtime_seconds: 21600
+  poll_interval_seconds: 120
 
 # DefaultRunLauncher forks each run as a subprocess of the process that
 # launches it (the daemon, here). Simplest launcher; fine for a single-node

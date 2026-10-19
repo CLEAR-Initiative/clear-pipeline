@@ -437,6 +437,11 @@ def reliefweb_weekly_pdfs_in_s3(
 # Job + schedule
 # ────────────────────────────────────────────────────────────────────────
 
+# `clear/weight: heavy` caps these against the run queue's tag_concurrency_limits
+# (deploy/dagster.yaml) so the per-country fan-out serialises to one heavy run at
+# a time instead of starving the in-process code server's heartbeat on Railway.
+_HEAVY_RUN_TAGS = {"clear/weight": "heavy"}
+
 reliefweb_weekly_job = dg.define_asset_job(
     name="reliefweb_weekly_to_s3",
     selection=[
@@ -444,6 +449,7 @@ reliefweb_weekly_job = dg.define_asset_job(
         reliefweb_weekly_pdf_manifest,
         reliefweb_weekly_pdfs_in_s3,
     ],
+    tags=_HEAVY_RUN_TAGS,
 )
 
 # The full weekly pipeline: ReliefWeb ingest → PDF text → chunks →
@@ -453,6 +459,7 @@ reliefweb_weekly_job = dg.define_asset_job(
 reliefweb_weekly_kb_job = dg.define_asset_job(
     name="reliefweb_weekly_knowledgebase",
     selection=dg.AssetSelection.groups("reliefweb", "reliefweb_kb"),
+    tags=_HEAVY_RUN_TAGS,
 )
 
 # Tuesday 06:00 UTC — by the time we run, all of "last week" is settled in
