@@ -36,6 +36,47 @@ def invalidate_locations_cache() -> None:
     global _locations_cache, _country_ids_cache
     _locations_cache = None
     _country_ids_cache = None
+    _scoped_locations_cache.clear()
+
+
+# Deepest admin level offered to the LLM when a resolution is scoped to one
+# country: country (0), state (1), district (2). L4 rows are mostly
+# coordinate-named landmark points ("Point 12.89, 23.47") that would bloat the
+# prompt without giving the model anything it can match a place name to.
+SCOPED_MAX_LEVEL = 2
+
+# Country name → that country's L0..SCOPED_MAX_LEVEL locations (cached).
+_scoped_locations_cache: dict[str, list[dict]] = {}
+
+
+def _country_scoped_locations(country: str) -> list[dict]:
+    """The named country's L0 row plus its descendants down to
+    ``SCOPED_MAX_LEVEL``, walked via ``parent`` links. Empty when the country
+    isn't a known level-0 location."""
+    key = _normalise_country_name(country)
+    if key in _scoped_locations_cache:
+        return _scoped_locations_cache[key]
+    locations = _get_locations()
+    by_id = {loc["id"]: loc for loc in locations if loc.get("id")}
+    root = next(
+        (loc for loc in locations
+         if loc.get("level") == 0 and _normalise_country_name(loc.get("name") or "") == key),
+        None,
+    )
+    scoped: list[dict] = []
+    if root is not None:
+        for loc in locations:
+            if (loc.get("level") or 0) > SCOPED_MAX_LEVEL:
+                continue
+            node, seen = loc, set()
+            while node is not None and node["id"] not in seen:
+                if node["id"] == root["id"]:
+                    scoped.append(loc)
+                    break
+                seen.add(node["id"])
+                node = by_id.get((node.get("parent") or {}).get("id") or "")
+    _scoped_locations_cache[key] = scoped
+    return scoped
 
 
 # Normalised admin-0 name → locations.id (cached in memory, like _locations_cache)
@@ -145,9 +186,15 @@ def resolve_signal_location(
     title: str | None,
     description: str | None,
     dataminr_location_name: str | None,
+    *,
+    country: str | None = None,
 ) -> dict:
     """
     Use Claude to extract location from signal text and resolve to CLEAR location IDs.
+
+    ``country`` (a level-0 location name, e.g. "Sudan") restricts the candidate
+    list to that country's admin areas down to district level — for sources
+    known to cover a single country. Omitted, every location is offered.
 
     Returns dict with keys:
       - location_type: "displacement" | "general"
@@ -155,7 +202,7 @@ def resolve_signal_location(
       - destination_id: str | None
       - location_id: str | None
     """
-    locations = _get_locations()
+    locations = _country_scoped_locations(country) if country else _get_locations()
     if not locations:
         logger.warning("No locations in CLEAR API — skipping location resolution")
         return {"location_type": "general", "origin_id": None, "destination_id": None, "location_id": None}
@@ -193,3 +240,22 @@ def resolve_signal_location(
     except Exception as e:
         logger.error("Location resolution failed: %s", e)
         return {"location_type": "general", "origin_id": None, "destination_id": None, "location_id": None}
+
+
+def locate_in_country(title: str | None, description: str | None, country: str) -> str | None:
+    """Best location id for a signal from a single-country source: the most
+    specific admin area (state/district) Claude can match in ``country`` from
+    the text, else the country's own level-0 row. None only when ``country``
+    isn't a known level-0 location.
+
+    Works on non-English text (the Arabic X posts of ``sudan-war-x``), which
+    the regex geoparser can't read. A displacement signal is pinned to its
+    origin — where the incident happened — falling back to its destination.
+    """
+    resolved = resolve_signal_location(title, description, None, country=country)
+    location_id = (
+        resolved["location_id"] or resolved["origin_id"] or resolved["destination_id"]
+    )
+    if location_id:
+        return location_id
+    return resolve_country_only_location(country)

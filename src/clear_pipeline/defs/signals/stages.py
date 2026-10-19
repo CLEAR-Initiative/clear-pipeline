@@ -33,6 +33,7 @@ from clear_pipeline.defs.signals.connectors import (
     CONNECTORS,
     CONNECTORS_BY_SOURCE,
     DRAINED_SOURCES,
+    LocatingSource,
     SignalView,
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
@@ -59,6 +60,7 @@ from clear_pipeline.providers.clear_api import (
     pending_signals,
     pending_translations,
     sync_event_cards,
+    update_signal_location,
 )
 from clear_pipeline.providers.event import EventRewriteFailed, group_signal, recompute_event
 from clear_pipeline.providers.redis_lock import redis_lock
@@ -128,6 +130,29 @@ def _event_location_id(created: dict) -> str | None:
     return None
 
 
+def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
+    """For a connector that can locate its own signals (``LocatingSource`` —
+    push feeds that arrive with no location), resolve and persist a location
+    before grouping, and return the row with ``generalLocation`` filled in so
+    ``group_signal`` keys the event on the right district. Rows that already
+    have a location, and every other source, pass through untouched.
+
+    A clear-api failure while persisting propagates: the drain's per-signal
+    retry leaves the signal NEW rather than grouping it location-less."""
+    if _event_location_id(created) or not isinstance(connector, LocatingSource):
+        return created
+    location_id = connector.locate(view)
+    if not location_id:
+        logger.info("[classify_group] signal %s: no location resolved", created["id"])
+        return created
+    updated = update_signal_location(created["id"], location_id)
+    logger.info(
+        "[classify_group] signal %s: located → %s",
+        created["id"], (updated.get("generalLocation") or {}).get("name") or location_id,
+    )
+    return {**created, "generalLocation": updated.get("generalLocation")}
+
+
 def _enqueue_translations(entity_type: str, entity_id: str) -> None:
     """Enqueue an entity for (re)translation at every configured target locale.
     Idempotent per (entity, locale); the translate stage's staleness check skips
@@ -190,6 +215,7 @@ def _process_one_signal(created: dict, touched_events: set[str]) -> str:
     with redis_lock(lock_key, ttl_seconds=_SIGNAL_LOCK_TTL_SECONDS, wait_seconds=0) as acquired:
         if not acquired:
             return _REQUEUE  # a peer holds it (or is processing it) — leave NEW
+        created = _locate_if_unplaced(connector, view, created)
         try:
             event = _group(view, created)
         except JevError as exc:
