@@ -26,9 +26,6 @@ existing hub rather than build a parallel one:
   `glitchtip_dsn_*` Terraform variable wired to a `SENTRY_DSN` env var.
   Dagster's exceptions land as raw text in OpenObserve's logs, not as
   deduped, triage-able GlitchTip issues the way clear-api's are.
-- **The VM itself is moving**, from a Railway-hosted box to the
-  `clear-infra` Terraform-managed Infomaniak VM. Whatever host-level
-  visibility existed on Railway (if any) doesn't carry over automatically.
 
 ## 2. Goals / decisions
 

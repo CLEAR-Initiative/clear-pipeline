@@ -365,8 +365,8 @@ instead of hand-rolling versioned files + a compaction story.
 
 The deciding factor is **governance, not engineering**, and it matters
 more here than usual because this project already leans toward
-self-hosted, sovereignty-conscious infrastructure (S3-compatible storage,
-Scaleway as the intended second cloud) rather than a single managed
+self-hosted, sovereignty-conscious infrastructure (Infomaniak,
+S3-compatible storage) rather than a single managed
 vendor's stack:
 
 - **Iceberg** was donated by Netflix to the **Apache Software
