@@ -2,9 +2,7 @@
 #
 # In-process module load (NOT a separate `dagster api grpc` sidecar): the
 # webserver and daemon each import `clear_pipeline.definitions`
-# directly. This is the simplest prod shape on Railway, whose private network
-# is IPv6-only — a grpc code-server bound on 0.0.0.0 (IPv4) isn't reachable
-# across services there, so we avoid the cross-service hop entirely.
+# directly, so there is no separate code-server process to run or reach.
 #
 # location_name matches clear-api's DAGSTER_REPOSITORY_LOCATION_NAME default
 # (hyphen form) so the GraphQL run-launch mutation resolves the location.

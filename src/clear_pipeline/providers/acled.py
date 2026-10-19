@@ -147,8 +147,10 @@ def _parse_event(raw: dict) -> dict | None:
     except (ValueError, TypeError):
         pass
 
-    # Severity estimation: higher for events with fatalities or civilian violence
-    severity = 2
+    # Severity estimation from fatalities / event type. Null (not an invented
+    # floor of 2) when the event has no fatalities and no qualifying type — we
+    # don't fabricate a magnitude we can't infer.
+    severity: int | None = None
     if fatalities >= 10:
         severity = 5
     elif fatalities >= 3:

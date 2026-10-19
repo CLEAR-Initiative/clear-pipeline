@@ -173,6 +173,12 @@ class LLMProvider(Protocol):
     role: LLMRole
     model: str
     provider_name: str
+    #: Token usage of the most recent call that returned — ``{"input_tokens",
+    #: "output_tokens"}`` — or ``None`` before the first. Read it right after
+    #: the call, under the same caveat as ``FallbackProvider.model``: it is
+    #: the last call that finished, so keep one provider per sequential job
+    #: when spend is recorded (the Task Worker does).
+    last_usage: dict[str, int] | None
 
     def complete_structured(
         self,
@@ -253,7 +259,17 @@ class AnthropicProvider:
     ) -> None:
         self.role = role
         self.model = model
+        self.last_usage: dict[str, int] | None = None
         self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+
+    def _note_usage(self, response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        self.last_usage = {
+            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        }
 
     @retry(
         retry=retry_if_exception_type(
@@ -306,6 +322,7 @@ class AnthropicProvider:
             tool_choice={"type": "tool", "name": tool["name"]},
             messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
+        self._note_usage(response)
 
         for block in response.content:
             if block.type == "tool_use" and block.name == tool["name"]:
@@ -347,6 +364,7 @@ class AnthropicProvider:
             system=system_blocks,
             messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
+        self._note_usage(response)
         text = _strip_code_fence("".join(getattr(b, "text", "") for b in response.content))
         if not text:
             raise EmptyResponseError(f"empty text response from {self.model}")
@@ -441,6 +459,24 @@ def _to_strict_json_schema(node: Any) -> Any:
     return node
 
 
+def _openai_usage(raw: Any) -> dict[str, int] | None:
+    usage = getattr(raw, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "input_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "output_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+    }
+
+
+def _add_usage(a: dict[str, int] | None, b: dict[str, int] | None) -> dict[str, int] | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return {k: a.get(k, 0) + b.get(k, 0) for k in ("input_tokens", "output_tokens")}
+
+
 class OpenAICompatibleProvider:
     """Provider for any /v1/chat/completions endpoint.
 
@@ -471,6 +507,7 @@ class OpenAICompatibleProvider:
     ) -> None:
         self.role = role
         self.model = model
+        self.last_usage: dict[str, int] | None = None
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         # Non-standard request-body fields sent via the OpenAI `extra_body`:
@@ -546,6 +583,7 @@ class OpenAICompatibleProvider:
             response_format=response_format,  # type: ignore[arg-type]
             **self._extra_kwargs,
         )
+        self.last_usage = _openai_usage(raw)
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         text = _strip_code_fence(raw.choices[0].message.content or "")
@@ -576,6 +614,7 @@ class OpenAICompatibleProvider:
                 ],
                 response_format=response_format,  # type: ignore[arg-type]
             )
+            self.last_usage = _add_usage(self.last_usage, _openai_usage(repair))
             repaired_text = _strip_code_fence(repair.choices[0].message.content or "")
             return schema.model_validate_json(repaired_text)
 
@@ -617,6 +656,7 @@ class OpenAICompatibleProvider:
             ],
             **self._extra_kwargs,
         )
+        self.last_usage = _openai_usage(raw)
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         # Cheap OSS models wrap free text in ```fences``` (the same reason
@@ -670,6 +710,13 @@ class FallbackProvider:
         # same lock as the breaker state.
         self._served_model = primary.model
         self.provider_name = f"{primary.provider_name}->fallback:{fallback.provider_name}"
+
+    @property
+    def last_usage(self) -> dict[str, int] | None:
+        """Usage of the most recent call, from whichever provider served it."""
+        with self._lock:
+            served = self._fallback if self._served_model == self._fallback.model else self._primary
+        return getattr(served, "last_usage", None)
 
     @property
     def model(self) -> str:

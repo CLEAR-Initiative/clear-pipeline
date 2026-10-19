@@ -82,7 +82,19 @@ class Settings(BaseSettings):
     # an analyst's signal is classified/grouped promptly). MANUAL_SOURCE_NAME must
     # match a data_sources row and the `source` clear-api tags on those signals.
     manual_source_name: str = "manual"
+    # The data_sources rows clear-api's createManualSignal accepts — a mirror of
+    # its TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts). Drained exactly
+    # like MANUAL_SOURCE_NAME; a name missing here is marked FAILED as an unknown
+    # source instead of being grouped. Comma-separated.
+    manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
+    # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
+    # works Tasks. Tasks are user-requested and slow to produce; 5 minutes
+    # keeps the Event page's "requested" state short without hammering the queue.
+    task_poll_interval_minutes: int = 5
+    # How often a Worker extends its lease while a handler runs (clear-api's
+    # lease is 15 minutes by default; three heartbeats fit comfortably).
+    task_heartbeat_minutes: int = 5
 
     # sudan-war-x — X posts pushed by an external poller to clear-api's
     # `POST /api/x/ingest` (clear-api ADR 0005: one DataSource row per push
@@ -127,7 +139,38 @@ class Settings(BaseSettings):
 
     # Pipeline
     initial_lookback_days: int = 7
-    relevance_threshold: float = 0.5
+    # Below this the signal is dropped (no event created). Relevance is derived from
+    # the glide Choice distribution as 1 - P("none") — Jev's total probability that
+    # the text is SOME real disaster type rather than the explicit no-match option
+    # (providers/jev.py). Recall-safe default (missing a real disaster costs far more
+    # than processing a borderline non-event). NOTE: this replaced the earlier
+    # `relevant` Noul, whose 0.47–0.55 calibration no longer applies — re-calibrate
+    # against a live run with the distribution-based score (scripts/jev_classify_eval.py)
+    # before tightening. Caveat: this gate measures "is it a real disaster TYPE", not
+    # "is it a CURRENT incident" — a confident classification of a retrospective or
+    # forecast about a real hazard scores high and is NOT filtered here.
+    relevance_threshold: float = 0.3
+    # Multilabel: a signal can carry several co-occurring disaster types. Beyond the
+    # primary (the Choice's top code), every code whose probability in the glide
+    # distribution is at/above this floor joins `disaster_types` (primary first).
+    # Lower = more secondary labels. A Choice spreads probability across COMPETING
+    # options, so this also surfaces near-synonym ambiguity (flood vs flash-flood),
+    # not only genuine co-occurrence — keep it conservative. CALIBRATE on live data
+    # (scripts/jev_classify_eval.py prints the distribution).
+    signal_jev_multilabel_threshold: float = 0.15
+    # Anti-misclassification floor on Jev's glide-code confidence. A specific code
+    # picked below this is treated as unclassifiable and recorded as the taxonomy's
+    # "other" catch-all (ot/po) instead of a force-fit specific type; Jev also has
+    # an explicit "none" option (providers/jev.py). Conservative default — only very
+    # flat (uncertain) distributions are caught. CALIBRATE before raising it: with 52
+    # options a correct answer can still split probability across near-synonyms, so
+    # too high a floor would demote correct classifications to "other". The eval
+    # script (scripts/jev_classify_eval.py) prints the code-confidence distribution.
+    signal_jev_min_code_confidence: float = 0.15
+    # When the Jev failure rate in a single drain crosses this, the drain logs an
+    # error (OpenRouter/Jev likely degraded — signals are being requeued, not
+    # classified). Only evaluated when at least one signal was attempted in the run.
+    signal_jev_failure_alert_rate: float = 0.25
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination
@@ -170,6 +213,10 @@ class Settings(BaseSettings):
     sentry_dsn: str = ""
     sentry_env: str = "development"
     log_level: str = "INFO"
+    # A run STARTED/STARTING longer than this is reported to GlitchTip by
+    # stuck_run_monitor_sensor (catches OOM-orphaned runs / launch stalls that
+    # would otherwise pin the queue unnoticed).
+    stuck_run_alert_minutes: int = 30
 
     # NOTE: the clear-pipeline `insights` per-Claude-call telemetry is intentionally
     # NOT wired in the Dagster port — LLM calls go through providers/llm.py, which
@@ -194,15 +241,9 @@ class Settings(BaseSettings):
     # email is technically correct but stale. Set to 0 to disable the gate.
     alert_max_signal_age_hours: int = 48
 
-    # Last-resort default for `events.population_displaced` when neither
-    # the signal text nor the admin-2 DTM row provides a value.
-    default_population_displaced: int = 1670
-
-    # Last-resort default for `events.population_affected` when neither the
-    # raw signal extraction (ACLED has none, GDACS exposure data,
-    # Dataminr/manual regex) nor the per-event-type lookup (median pop_1km
-    # via acled_event_type_stats.json) produces a value.
-    default_population_affected: int = 33_000
+    # (Removed: default_population_displaced / default_population_affected — the
+    # pipeline no longer invents a last-resort population constant; an unknown
+    # population is left null rather than fabricated.)
 
     # IOM DTM API — displaced-person data per admin level
     iom_dtm_base_url: str = "https://dtmapi.iom.int/v3"

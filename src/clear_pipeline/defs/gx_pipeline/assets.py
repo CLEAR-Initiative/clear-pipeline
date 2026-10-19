@@ -1,6 +1,6 @@
 """Per-source defs — generated from the source registry.
 
-Each source's 8 assets + 6 checks + 1 job come from
+Each source's 9 assets + 6 checks + 1 job come from
 ``build_gx_source_assets(source)`` over ``sources.GX_SOURCES``; bound
 to module-level names so ``load_from_defs_folder`` auto-discovers them.
 

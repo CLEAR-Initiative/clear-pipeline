@@ -2,13 +2,13 @@
 # (see Dockerfile). The webserver + daemon read it automatically.
 #
 # All run / event-log / schedule metadata lives in Postgres so it SURVIVES
-# redeploys — a Railway (or any container) filesystem is ephemeral. Point
+# redeploys — a container filesystem is ephemeral. Point
 # DAGSTER_POSTGRES_URL at a Postgres DEDICATED to Dagster (its own database,
 # NOT clear-api's — Dagster owns and migrates its own schema). Dagster
 # auto-creates its tables on first boot.
 #
 # The VM/compose deployment bind-mounts its own dagster.yaml over this file,
-# so this baked copy is only used where nothing is mounted (Railway, docker run).
+# so this baked copy is only used where nothing is mounted (e.g. plain docker run).
 
 run_storage:
   module: dagster_postgres.run_storage
@@ -31,38 +31,51 @@ schedule_storage:
     postgres_url:
       env: DAGSTER_POSTGRES_URL
 
-# Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
-# forks each run's step workers as subprocesses). The daemon dequeues up to
-# max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
-#
-# tag_concurrency_limits caps HEAVY runs independently of the global 4. On
-# Railway the code location is loaded in-process (workspace.yaml `python_module`)
-# and the daemon supervises that code server by heartbeat while ALSO forking
-# every run under it (DefaultRunLauncher). When the weekly reliefweb job fans
-# out one heavy run per country (PDF text + LLM enrichment + embeddings) they
-# used to land 3-at-once, starving the daemon's heartbeat → the code server
-# shut down → in-flight runs died with DagsterExecutionInterruptedError. Capping
-# `clear/weight: heavy` to 1 serialises those heavy runs while leaving the other
-# 3 slots free for the many 1-minute sensor jobs, so throughput is unchanged.
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
-  config:
+
+# https://dagster.io/docs/guides/operate/managing-concurrency/concurrency-pools
+concurrency:
+  # Cap concurrent runs so an overlapping backfill can't OOM the daemon (which
+  # forks each run's step workers as subprocesses). The daemon dequeues up to
+  # max_concurrent_runs at a time — 4 within the ~4 GB allotted to Dagster.
+  runs:
     max_concurrent_runs: 4
+    # Cap HEAVY runs independently of the global 4. The weekly reliefweb job fans
+    # out one heavy run per country (PDF text + LLM enrichment + embeddings),
+    # tagged `clear/weight: heavy` on the job (defs/reliefweb_to_s3.py). Landing
+    # 3-at-once starved the in-process code server's heartbeat → the server shut
+    # down → in-flight runs died (DagsterExecutionInterruptedError). Capping to 1
+    # serialises them while leaving the other 3 slots for the 1-minute sensor jobs.
     tag_concurrency_limits:
       - key: "clear/weight"
         value: "heavy"
         limit: 1
+  # One in-flight run per `gx_<source>_gold` pool (gx_pipeline/factory.py):
+  # `_reconcile` read-modify-writes whole gold groups. `run` granularity holds
+  # the slot for the whole run, not per step, so reconcile -> gold -> push of
+  # two runs can't interleave; covers ad-hoc UI materializations, not just the
+  # job. Extra runs queue, not drop. NB: default_limit applies to EVERY pool.
+  pools:
+    granularity: run
+    default_limit: 1
 
-# Run monitoring keeps the queue healthy: the daemon fails runs whose process
-# died without reporting back (e.g. a code-server heartbeat shutdown killing the
-# runs it forked) and runs that can't start within start_timeout. Without it a
-# killed run stays STARTED, holds one of the max_concurrent_runs slots forever,
-# and once enough accumulate the queue pins at 4/4 and ticks stall ("unhealthy
-# queue"). max_runtime caps a genuinely stuck run; raise it (or set the
-# `dagster/max_runtime` tag on a job) if a legitimate run ever needs longer.
+# Run monitoring keeps the queue healthy:
+#   * free_slots_after_run_end_seconds — a crashed run must not hold its pool slot
+#     forever; with a pool limit of 1 that would block every later run of that
+#     source.
+#   * the timeout nets fail runs whose process died without reporting back (e.g. a
+#     code-server heartbeat shutdown killing the runs it forked) and runs that
+#     can't start within start_timeout. Without them a killed run stays STARTED,
+#     holds one of the max_concurrent_runs slots forever, and once enough
+#     accumulate the queue pins at 4/4 and ticks stall ("unhealthy queue").
+#     max_runtime caps a genuinely stuck run; raise it (or set the
+#     `dagster/max_runtime` tag on a job) if a legitimate run ever needs longer.
+# https://dagster.io/docs/guides/operate/managing-concurrency/troubleshooting-concurrency
 run_monitoring:
   enabled: true
+  free_slots_after_run_end_seconds: 300
   start_timeout_seconds: 300
   cancel_timeout_seconds: 180
   max_runtime_seconds: 21600
@@ -70,7 +83,7 @@ run_monitoring:
 
 # DefaultRunLauncher forks each run as a subprocess of the process that
 # launches it (the daemon, here). Simplest launcher; fine for a single-node
-# Railway deployment. The daemon service therefore needs the run memory.
+# deployment. The daemon service therefore needs the run memory.
 run_launcher:
   module: dagster.core.launcher
   class: DefaultRunLauncher

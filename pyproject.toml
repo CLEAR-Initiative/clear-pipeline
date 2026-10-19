@@ -32,6 +32,7 @@ dependencies = [
     # ── Signal pipeline (ported from clear-pipeline, Celery→Dagster consolidation) ──
     "pydantic-settings>=2.7", # the ported signal domain's config (src.config → signals.config)
     "redis>=5.0", # dedup locks, classification cache, watermarks (signal drain)
+    "sentry-sdk>=2.0", # GlitchTip error + stuck/failed-run reporting (providers/observability.py)
     "sentence-transformers>=3.0", # local event classifier / grouping
     # Direct (not just transitive via sentence-transformers) so the CPU-index
     # override in [tool.uv.sources] applies — see the note at the end of the file.
@@ -60,7 +61,7 @@ dev = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 
-# Ruff runs in CI (.github/workflows/ci.yml) at a pinned version. The rule set
+# Ruff runs in CI (.github/workflows/check.yml) at a pinned version. The rule set
 # is deliberately small — syntax errors + pyflakes (undefined names, unused
 # imports/variables) — so the check is green today. Widen it in its own PR,
 # alongside the autofixes it needs.

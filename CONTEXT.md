@@ -24,6 +24,10 @@ _Avoid_: Affected, beneficiaries, caseload
 People forced from their homes. Cuts across the other three rather than nesting cleanly inside them.
 _Avoid_: Refugees (a specific legal status — a displaced person who crossed an international border), IDPs (a displaced person who did not)
 
+### Severity
+
+A 1-5 signal/event magnitude. It is **nullable**: `null` means *unknown* (the source gave none), which is NOT the scale floor. Unknown values stay null — we never invent a default (no `?? 1`, `?? 3`, or per-source floor). Event severity averages only the signals that have one; null-severity signals still belong to the event but aren't counted. See [ADR-0010](docs/adr/0010-unknown-values-stay-null.md) for how null severity is treated in the event mean, range filters, alert matching, and sorting.
+
 ### Reports and incidents
 
 **Report**:
@@ -73,3 +77,31 @@ _Avoid_: Report, summary, briefing
 **SAF Sector**:
 One of the six NRC Sector Analysis Framework sectors: education, food security, health, shelter, WASH, protection. A fixed taxonomy — not an open list.
 _Avoid_: Cluster (the OCHA coordination concept, which is a different taxonomy)
+
+### Tasks and Workers
+
+**Task**:
+One unit of work of a named kind about one subject, kept by clear-api in its generic Task
+queue (clear-api ADR-0010; vocabulary owned by clear-api's CONTEXT.md). This pipeline is a
+**Task Worker** on that queue, not its owner.
+_Avoid_: job, request, drain item
+
+**Task Worker**:
+The `drain_tasks` asset acting on clear-api's Worker protocol — claim, heartbeat, complete,
+fail — as the `worker` service user. A new kind of work is a **handler** registered by kind.
+_Avoid_: agent, bot, enricher
+
+**Handler**:
+The function that turns one claimed Task into a `TaskOutcome` (raw result, and usage if it
+ran a model). Handlers never write to clear-api themselves; the Worker loop does. None is
+registered today (see **ImpactPrior**).
+_Avoid_: processor, job runner
+
+**ImpactPrior**:
+What has typically happened before given a hazard type and a country, with its evidence
+basis (vocabulary owned by clear-api's CONTEXT.md). No longer this pipeline's concern: its
+`event.impact_prior.clear` handler — the first **Handler** — was retired on 2026-10-08,
+because clear-api now computes the ImpactPrior from accepted history and the web Worker (a
+Claude routine) proposes individual cases for analysts to accept. The generic **Task
+Worker** stays for future kinds.
+_Avoid_: precedent, history, prior events

@@ -16,23 +16,24 @@ capability flags:
   │ acled      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
-  │ idmc       │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
+  │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
-  │ manual     │  False  │  True   │ no ingest — analyst-created; feeds stages   │
+  │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
+  * one ``ManualConnector`` per analyst-created source: ``manual``
+    (``MANUAL_SOURCE_NAME``) plus ``field_officer`` / ``partner`` / ``government``
+    (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
+    ``createManualSignal`` accepts.
 
-- **polled** — has an external API to poll. The factory builds an ingest asset +
-  poll sensor: it writes raw blobs to the lake and ``createSignal(status=NEW,
-  rawS3Key=…)``. The shared classify/group stage rehydrates the record from the
-  blob (``parse`` → ``project``). Manual signals are analyst-created directly in
-  clear-api (no poll, no lake blob) so ``project`` reads the signal row itself
-  (``record=None``). Push feeds (``sudan-war-x``, delivered by an external
-  poller to clear-api's ``POST /api/x/ingest``) work the same way.
+- **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
+  blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
+  clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
+  ``POST /api/x/ingest``) or gx (``idmc``). The drain projects from the blob
+  (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage.
-  ``idmc`` is the one exception: its grouping logic is different and needs new
-  features that aren't built yet, so its signals are ingested but not grouped
-  into events for now (see ``DRAINED_SOURCES``).
+  ``dtm`` is the exception: a bulletin can span many districts, so its signals
+  are ingested but not grouped into events (see ``DRAINED_SOURCES``).
 
 Connectors reuse the consolidated ``clear_pipeline.providers`` modules
 (dataminr, acled, gdacs, darfur24, signal, …) so every source shares one
@@ -51,7 +52,6 @@ from clear_pipeline.providers import (
     darfur24,
     dataminr,
     gdacs,
-    idmc,
     iom_dtm_flash_alerts,
 )
 from clear_pipeline.providers.clear_api import (
@@ -95,7 +95,8 @@ class SignalSource(Protocol):
     #: DataSource name in clear-api. Doubles as the S3 lake prefix
     #: (``raw/<source>/…``) and the ``pendingSignals(source=…)`` drain filter.
     source: str
-    #: Has an external API to poll (→ ingest asset + poll sensor). False = manual.
+    #: Polled by this pipeline (→ ingest asset + poll sensor). False = the signal
+    #: is created in clear-api by something else (analyst, push feed, gx).
     polled: bool
     #: Its NEW signals are processed by the classify/group stage. All current sources drained.
     drained: bool
@@ -107,7 +108,7 @@ class SignalSource(Protocol):
     def project(self, record: Any, created: dict) -> SignalView:
         """Project a record (+ its clear-api row) into the canonical
         :class:`SignalView` the generic drain consumes. ``record`` is the parsed
-        lake blob for a polled source, or ``None`` for a manual source (project
+        lake blob for a polled source, or ``None`` for a non-polled source (project
         from ``created`` alone). The ONLY per-source field-extraction code."""
         ...
 
@@ -445,59 +446,24 @@ class Darfur24Connector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# IDMC IDU — internal displacement updates (polled, NOT drained)
+# IDMC IDU — internal displacement updates (downloaded by gx, drained from S3)
 # ──────────────────────────────────────────────────────────────────────────────
 class IDMCConnector:
-    """IDU has no server-side filter or pagination — one poll fetches the
-    entire global dataset and filters to configured countries/displacement
-    types client-side, deduplicating on (id, content hash) rather than id
-    alone so a revised figure (same id, changed role/figure/dates) is
-    detected and re-submitted instead of silently skipped. See
-    ``providers/idmc.py`` for the fetch/dedup mechanics.
-
-    ``drained = False``: grouping signals into events works differently for
-    IDMC and needs new features that aren't built yet, so grouping is
-    deliberately deferred to a follow-up PR."""
+    """Downloaded only by ``gx_pipeline``, which writes the lake blob and creates
+    the signal. No ingest asset here: the drain projects the blob gx wrote, so
+    ``parse``/``project`` must match the record format gx writes."""
 
     source = settings.idmc_source_name
-    polled = True
-    drained = False
-    poll_interval_minutes = settings.idmc_poll_interval_minutes
-
-    def poll(self, since: datetime | None) -> list[Any]:
-        return idmc.fetch_idu_records(since=since)
-
-    def external_id(self, record: Any) -> str:
-        return record["idu_id"]
-
-    def published_at(self, record: Any) -> str:
-        return record.get("created_at") or ""
-
-    def raw_bytes(self, record: Any) -> bytes:
-        return json.dumps(record).encode("utf-8")
-
-    def api_source_id(self) -> str:
-        return get_source_id_by_name(settings.idmc_source_name)
-
-    def to_signal_input(self, record: Any, api_source_id: str) -> dict:
-        return idmc.build_idmc_signal_input(record, api_source_id)
-
-    def last_synced(self) -> datetime | None:
-        return idmc.get_last_synced()
-
-    def set_watermark(self, ts: datetime) -> None:
-        idmc.set_last_synced(ts)
-
-    def post_create(self, record: Any) -> None:
-        idmc.mark_seen(record["idu_id"], record["content_hash"])  # only after createSignal confirmed
-
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return idmc.build_signal_content_update(input_data, created["id"])
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
 
     def parse(self, raw: bytes) -> dict:
         return json.loads(raw)
 
-    def project(self, record: dict, created: dict) -> SignalView:
+    def project(self, record: dict | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"idmc signal {created['id']} has no rawS3Key")
         return SignalView(
             external_id=record["idu_id"],
             title=record["title"],
@@ -606,14 +572,21 @@ class DTMFlashAlertConnector:
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
-    """No external API: analysts create ``source=manual`` signals directly in
-    clear-api. There is no ingest asset and no lake blob — the drain reads NEW
-    manual signals and ``project`` builds the view from the signal row itself."""
+    """No external API: analysts create signals directly in clear-api
+    (``createManualSignal``). There is no ingest asset and no lake blob — the
+    drain reads NEW manual signals and ``project`` builds the view from the
+    signal row itself.
 
-    source = settings.manual_source_name
+    One instance per analyst-created source name (see ``_manual_source_names``):
+    clear-api files them under ``field_officer`` / ``partner`` / ``government``,
+    and each needs its own registry entry so the drain dispatches it here."""
+
     polled = False
     drained = True
     poll_interval_minutes = settings.manual_poll_interval_minutes
+
+    def __init__(self, source: str) -> None:
+        self.source = source
 
     def project(self, record: Any, created: dict) -> SignalView:
         # record is None — everything comes from the clear-api signal row.
@@ -658,6 +631,13 @@ class SudanWarXConnector:
         )
 
 
+def _manual_source_names() -> list[str]:
+    """``MANUAL_SOURCE_NAME`` plus clear-api's trusted sources
+    (``MANUAL_TRUSTED_SOURCE_NAMES``), in order, without duplicates."""
+    names = [settings.manual_source_name, *settings.manual_trusted_source_names.split(",")]
+    return list(dict.fromkeys(n.strip() for n in names if n.strip()))
+
+
 #: The connector registry — the factory builds every source's ingest defs from
 #: this, and the shared drain stages dispatch per-signal projection through
 #: CONNECTORS_BY_SOURCE.
@@ -668,13 +648,30 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     DTMFlashAlertConnector(),
-    ManualConnector(),
+    *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]
 
+
+def _index_by_source(connectors: list[SignalSource]) -> dict[str, SignalSource]:
+    """Map source name → connector, refusing a name two connectors claim. A
+    manual name configured to match a polled source (e.g. ``dataminr``) would
+    otherwise silently replace that source's connector and skip its blob
+    projection."""
+    by_source: dict[str, SignalSource] = {}
+    for c in connectors:
+        if c.source in by_source:
+            raise ValueError(
+                f"Two connectors claim source {c.source!r} — check "
+                "MANUAL_SOURCE_NAME / MANUAL_TRUSTED_SOURCE_NAMES"
+            )
+        by_source[c.source] = c
+    return by_source
+
+
 #: source name → connector, so the shared classify/group stage can rehydrate +
 #: project a signal from ANY source (dispatch on ``created["source"]["name"]``).
-CONNECTORS_BY_SOURCE: dict[str, SignalSource] = {c.source: c for c in CONNECTORS}
+CONNECTORS_BY_SOURCE: dict[str, SignalSource] = _index_by_source(CONNECTORS)
 
 #: Sources whose NEW signals the classify/group stage should process. All current
 #: sources are drained; an ingest-only source (drained=False) would be excluded.

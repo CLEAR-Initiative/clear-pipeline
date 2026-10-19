@@ -39,6 +39,7 @@ from clear_pipeline.defs.situation.citations import (
     resolve_bullets,
     resolve_prose,
 )
+from clear_pipeline.defs.situation.prompts import BASE_INSTRUCTIONS
 from clear_pipeline.defs.situation.rag_helper import (
     RAGContext,
     fetch_rag_context,
@@ -192,38 +193,6 @@ class _ScenariosLLM(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Shared system-prompt scaffolding
-# ────────────────────────────────────────────────────────────────────
-
-
-_BASE_INSTRUCTIONS = (
-    "You are a humanitarian analyst producing a situation summary for "
-    "the Norwegian Refugee Council. Every claim you emit MUST be "
-    "grounded in the retrieved evidence — do not invent numbers, "
-    "dates, or attributions. When the evidence is thin, prefer "
-    "returning fewer bullets over speculating.\n"
-    "\n"
-    "Rules:\n"
-    "- Bullets are terse fragments, NOT full sentences. Aim for 15 words "
-    "  or fewer. Lead with the figure or the fact; drop filler openers "
-    "  ('there is', 'it is reported that', 'continues to'). One claim per "
-    "  bullet.\n"
-    "- Report every number the way the source cites it (with unit and "
-    "  scale). Do not extrapolate.\n"
-    "- Use the country name and admin-region names as they appear in "
-    "  the sources. Preserve local naming (e.g. 'Kordofan', 'Darfur').\n"
-    "- Prefer verified / reported sources over media when both cover "
-    "  the same claim. If they conflict, prefer the more recent report.\n"
-    "- Neutral, factual tone. No editorialising. No calls to action.\n"
-    "- Cite evidence inline. A bullet's or sentence's marker(s) MUST come at "
-    "  its very END — after the full stop — NEVER at the start. Placing a "
-    "  marker before the text it cites will mis-attribute it to the previous "
-    "  line. Use the bracketed evidence numbers you drew from, e.g. [R2] or "
-    "  [R1][R4], matching the [Rn] items in RETRIEVED EVIDENCE. Cite only "
-    "  evidence you actually used; a line that uses none gets no marker.\n"
-)
-
-
 def _build_system_prompt(country_name: str, period_label: str, agg_context: str) -> str:
     """One prompt reused across all four component calls in a run.
 
@@ -232,7 +201,7 @@ def _build_system_prompt(country_name: str, period_label: str, agg_context: str)
     means calls 2–4 read from cache at ~10% of the input cost.
     """
     return (
-        f"{_BASE_INSTRUCTIONS}\n"
+        f"{BASE_INSTRUCTIONS}\n"
         f"---\n"
         f"AREA: {country_name}\n"
         f"PERIOD: {period_label}\n"

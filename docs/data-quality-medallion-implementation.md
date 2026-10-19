@@ -1,8 +1,10 @@
 # Medallion pipeline implementation: architecture and sources wired in
 
 Documents what got built in `defs/gx_pipeline/` — a generic bronze → silver →
-gold factory, GX-gated at every promotion. Dataminr, ACLED, and Darfur24 are
-wired in; IDMC is deliberately not (§3). ("Medallion" names the layering
+gold factory, GX-gated at every promotion. Dataminr, ACLED, Darfur24, and
+IDMC are wired in (§3). IDMC also syncs in-place revisions and
+supersession retractions to clear-api (§3, §5.4). IDMC-native event grouping
+is still undesigned. ("Medallion" names the layering
 pattern; the package and class names below describe what the code is
 instead of which pattern built it — see §3.) Companion to the per-source
 projected-pipeline docs (`data-quality-dataminr-pipeline-map.md`, `-acled-`,
@@ -12,11 +14,11 @@ actually running.
 ## 1. Scope
 
 Implements the bronze/silver/gold layers and the incremental push to
-clear-api for Dataminr, ACLED, and Darfur24, built as a **generic
+clear-api for Dataminr, ACLED, Darfur24, and IDMC, built as a **generic
 factory** so each source is additive, not copy-paste — see §3 for the
-recipe and for why IDMC isn't wired in yet. Nothing here writes to
-clear-api until the final push step — bronze, silver, and gold are all
-S3 artifacts.
+recipe and IDMC's revision/supersession hooks. Nothing
+here writes to clear-api until the final push step — bronze, silver, and
+gold are all S3 artifacts.
 
 Not covered: per-source quality-rule thresholds, aggregations for
 ontology-new business objects, and integration tests against real
@@ -27,7 +29,7 @@ S3/clear-api — those stay open per the per-source mapping docs.
 ```
 src/clear_pipeline/defs/gx_pipeline/
 ├── sources.py    # GXSource protocol + per-source adapters (ONLY per-source code)
-├── factory.py    # build_gx_source_assets(source) -> 8 assets + 6 GX checks + 1 job
+├── factory.py    # build_gx_source_assets(source) -> 9 assets + 6 GX checks + 1 job
 ├── gx_utils.py   # Great Expectations Core helper, fully source-agnostic
 ├── iceberg_catalog.py  # shared PyIceberg catalog/namespace for both gold tables
 ├── iceberg_events.py   # gold events, SCD2 (§6) — technology-specific, not pattern-named
@@ -57,12 +59,13 @@ time), not a replacement for it yet.
 ```mermaid
 flowchart LR
     Bronze["&lt;source&gt;_bronze<br/>raw record -> S3"] -->|"bronze_shape<br/>BLOCKING"| Silver["&lt;source&gt;_silver<br/>normalize, no clear-api write"]
-    Silver -->|"silver_completeness<br/>BLOCKING"| Classify["&lt;source&gt;_classify<br/>relevance + type"]
+    Silver -->|"silver_completeness<br/>BLOCKING"| Reconcile["&lt;source&gt;_reconcile<br/>supersession vs whole gold table<br/>(pass-through without group hooks)"]
+    Reconcile --> Classify["&lt;source&gt;_classify<br/>relevance + type"]
     Classify -->|"classify_populated<br/>observational"| Geo["&lt;source&gt;_geo<br/>heuristic district key"]
     Geo -->|"geo_resolution_rate<br/>observational"| Temporal["&lt;source&gt;_temporal<br/>new-vs-merged vs active window"]
     Temporal -->|"temporal_match_ratio<br/>observational"| Match["&lt;source&gt;_match<br/>create-or-merge, in-memory"]
     Match --> Gold["&lt;source&gt;_gold<br/>write signals + events tables"]
-    Gold -->|"gold_integrity<br/>BLOCKING"| Push["&lt;source&gt;_push<br/>pushedAt IS NULL only -> clear-api"]
+    Gold -->|"gold_integrity<br/>BLOCKING"| Push["&lt;source&gt;_push<br/>create / update / probe vs pushedState -> clear-api"]
 ```
 
 Solid arrows are the data path (each asset's output feeds the next via
@@ -147,14 +150,50 @@ enrich from), so `build_darfur24_signal_input` needed no change.
 resolved country L0 location id on first use, the same reasoning
 production's `Darfur24Connector._resolve_location_id` already used.
 
-**IDMC is deliberately not registered.** Production's own `IDMCConnector`
-sets `drained=False` for a real reason: "grouping signals into events
-works differently for IDMC and needs new features that aren't built yet."
-This factory has no equivalent of that flag — every registered source runs
-the full classify/geo/temporal/match chain, which *is* event-grouping — so
-adding an `IDMCGXSource` today would build on the same unresolved gap
-production explicitly deferred, not just reuse a pattern. Add it once
-IDMC's event-grouping has an actual design.
+**IDMC is registered (`IDMCGXSource`) and is the only ingest path for IDU
+rows.** Production's `IDMCConnector` no longer polls (`polled=False`). It is
+`drained=True`: gx downloads the feed, writes the bronze blob and creates the
+signal, and the drain projects that blob (`IDMCConnector.project`) and groups
+the `NEW` signal into a clear-api Event with the same district+type
+`group_signal` every other source uses. The gx-side
+classify/geo/temporal/match chain still runs on IDMC for QA. Its gold
+*events* table is the stubbed Iceberg sandbox (§6), so the real IDMC Events
+come from the drain, not from gx.
+
+**Revisions and retractions reach clear-api.** IDU revises rows in place (same
+`idu_id`, new content). `IDMCGXSource` defines two optional hook pairs that
+`factory.py` probes with `getattr`, outside the `GXSource` Protocol. Every
+other source defines neither and stays create-only:
+
+- `content_hash` / `content_update_input` (revision sync):
+  - `_bronze` keys each blob per revision (`lake.raw_key(..., revision=)`).
+    It skips a polled row only when gold holds the same hash **and**
+    `pushedState` shows Postgres received it (`_already_synced`). Checking
+    only one of them misses a revert after a failed push (h1 → h2, push
+    fails → h1).
+  - `_push` selects rows by `iceberg_signals.signals_to_sync`. Its `create`
+    set is unpushed live rows. Its `update` set is rows whose `sync_state`
+    (`"<contentHash>|<retracted>"`) differs from the stored `pushedState`.
+    Its `probe` set is unpushed retracted rows, retracted in case a create
+    landed unrecorded. Updates go through
+    `update_signal_content(idmc.build_signal_content_update(...))`, keyed by
+    `(sourceId, externalId)`. A create whose get-or-create returns an older
+    or retracted row is followed by an update immediately. `ClearApiNotFound`
+    on update is logged and never re-created.
+  - `pushedAt` is still preserved across `_gold`'s Type-1 upsert. Re-push is
+    driven by `pushedState`, not `pushedAt`, so a revised row is
+    reconsidered without a create loop.
+  - `mark_seen` stays a no-op on purpose: dedup is the bronze hash skip, and
+    a seen-set would hide revisions (`fetch_idu_records` has none either).
+  - clear-api's `updateSignalContent` sets `NEEDS_RECOMPUTE`. The drain then
+    re-aggregates the events the signal is already linked to and never
+    re-groups it. ADR 0011 covers why, and what goes wrong if a revision
+    changes district or type.
+- `group_member` / `resolve_group` (supersession, `<source>_reconcile`; §5.4).
+
+`grouping_key_drift` (a WARN-only check on `<source>_gold`, registered only
+for sources with `content_hash`) flags revised rows whose district or type key
+moved. Those links are kept. This check detects drift and does not fix it.
 
 **On `defs/signals/`'s remaining dependency**: `factory.py` still imports
 `defs/signals/lake.py` for generic S3 read/write/list helpers
@@ -259,6 +298,44 @@ today.
   wraps its equivalent step in `redis_lock`). Fine for one Dagster run at a
   time; add a lock if this ever runs concurrently.
 
+### 5.4 `<source>_reconcile`: supersession across the whole gold table
+
+IDMC's IDU feed can carry several role-tagged rows per `event_id`
+(analyst-reviewed `"Recommended figure"` vs. corroborating
+`"Triangulation"`). No other source has this shape. Rules
+(`providers/idmc.py::resolve_group`):
+
+- A Recommended figure retracts every Triangulation row in its group.
+- An all-Triangulation group keeps only the latest `created_at`.
+- Any other mix keeps everything.
+
+The verdict depends on the whole group, **including rows earlier polls already
+wrote to gold**. A batch-only filter inside `_silver` would treat a row
+superseded by a later poll as final. It also could not reverse a
+retraction.
+
+`<source>_reconcile` sits between `_silver` and `_classify`. A retracted row
+must never reach `_match`, which would fold it into event totals. Steps:
+
+1. `group_member` places each silver row in its group
+   (`idmc:eventId:<event_id>`). Stored `rawData` is the only input, so polled
+   and gold rows compare alike.
+2. Every gold row in a touched group is loaded with
+   `iceberg_signals.signals_in_groups`, retracted rows included. The freshly
+   polled copy wins for rows on both sides.
+3. `resolve_group` returns a verdict for every member. Verdicts are
+   reversible when the group changes.
+4. Gold rows whose `retracted` flag flips, or that are in this batch, are
+   written back whole. `upsert_signals` replaces whole rows, so a sparse patch
+   would blank columns. `_push` then sends the flip as an update or probe (§3).
+5. Batch rows judged `retract` are dropped, not stored. They're absent from
+   gold, so nothing downstream needs correcting.
+
+The hooks are all-or-nothing (`_group_hooks`). Sources without them pass
+through with `groupKey=None`, `retracted=False`. `_reconcile` shares the
+`gx_<source>_gold` pool with `_gold`/`_push` because it read-modify-writes
+gold (see `factory.py`'s docstring).
+
 ## 6. Gold persistence: Iceberg tables, not S3 JSON
 
 Bronze and silver stay plain S3 JSON — raw and cleansed per-record blobs,
@@ -268,11 +345,12 @@ one:
 
 | Gold table | Nature | SCD2? | Write path |
 |---|---|---|---|
-| `signals` | written once, `pushedAt` flips null → timestamp — one status flip, no history worth keeping | No — Type-1 | `Table.upsert` keyed on `externalId` (`iceberg_signals.py`) |
+| `signals` | one row per signal, overwritten in place, no history kept. Most sources: written once, then `pushedAt` flips null → timestamp. **IDMC is a special case**: rows are also rewritten on each in-place revision and each supersession flip (`signalInput`, `retracted`), and `pushedState` tracks which revision clear-api holds (§3, §5.4) | No — Type-1 | `Table.upsert` keyed on `externalId` (`iceberg_signals.py`) |
 | `events` | title/description/severity/population/signalIds all change as signals merge in over the active window | **Yes** | append/overwrite versioning (`iceberg_events.py`) |
 
 Both still had to be Iceberg, not one Iceberg and one S3 JSON: `push`
-queries "every unpushed signal" and "every open event" as filtered scans,
+queries "every unpushed signal" (for IDMC, also "every signal whose
+`pushedState` lags") and "every open event" as filtered scans,
 not point reads by key, and gold is the layer clear-api's incremental push
 depends on — worth one query surface, not two storage formats picked
 per-table on a whim. The SCD2 machinery below (§6.2/§6.3) is specific to
@@ -287,8 +365,8 @@ instead of hand-rolling versioned files + a compaction story.
 
 The deciding factor is **governance, not engineering**, and it matters
 more here than usual because this project already leans toward
-self-hosted, sovereignty-conscious infrastructure (S3-compatible storage,
-Scaleway as the intended second cloud) rather than a single managed
+self-hosted, sovereignty-conscious infrastructure (Infomaniak,
+S3-compatible storage) rather than a single managed
 vendor's stack:
 
 - **Iceberg** was donated by Netflix to the **Apache Software
@@ -422,8 +500,10 @@ content change producing v2 with v1 closed, full history queryable) and
 the end-to-end Dagster test asserts against the actual Iceberg table
 (`current_events_df`/`current_event`) instead of S3 JSON.
 
-Gold **signals** keeps its original shape (S3 JSON, `pushedAt` overwrite)
-— it was never a slowly-changing dimension, see §6's table.
+Gold **signals** stays Type-1 (Iceberg `Table.upsert`, no versioning
+columns). That holds even for IDMC: clear-api keeps the current revision,
+and gold only needs `pushedState` to know whether that revision was sent, not
+a history of earlier ones. See §6's table.
 
 ## 7. A real wiring bug, found by testing rather than assumed away
 
@@ -450,13 +530,23 @@ directly.
 
 ## 8. Verification
 
-- **`tests/test_medallion_pipeline.py`** — a real `dagster.materialize()`
+- **`tests/test_gx_pipeline.py`** — a real `dagster.materialize()`
   run (not mocked at the Dagster level) against a fake in-memory S3 and
   fake `create_signal`/`create_event`/`escalate_to_alert`. Two synthetic
-  records in the same district merge into one gold event; both push and
-  get `pushedAt` stamped; a second run against the same state re-pushes
-  nothing, confirming the incremental cursor. This is the test that would
-  have caught §7's bug.
+  records in the same district merge into one gold event. Both push and
+  get `pushedAt` stamped, and a second run against the same state
+  re-pushes nothing, confirming the incremental cursor. This is the test
+  that would have caught §7's bug. The `test_reconcile_*` cases cover
+  supersession (§5.4).
+- **`tests/test_gx_sync.py`** — **IDMC is a special case.** For sources
+  with sync hooks, "re-pushes nothing" only holds while content and
+  `retracted` are unchanged. A revision or a supersession flip must produce
+  exactly one `updateSignalContent` and then go quiet. These tests run the
+  same real Dagster graph against a naturally keyed in-memory clear-api to
+  cover that. They cover create / update / probe, the bronze skip and its
+  revert-after-failed-push case, `ClearApiNotFound`, retraction and
+  reversal, and `grouping_key_drift`. They also assert that hookless sources
+  never update or probe.
 - **`ruff check`** — clean on every new/changed file.
 - **`ty check`** — clean on `gx_utils.py` and `sources.py` (fixed one real
   finding: `DataminrGXSource.source` was a read-only `@property`
@@ -477,6 +567,7 @@ directly.
   task 2.
 - Aggregations for ontology business objects beyond Signal/Event/Alert →
   task 3 (blocked on business-side ontology clarifications).
-- IDMC adapter → §3, blocked on an actual event-grouping design (not a
-  recipe gap — ACLED/Darfur24 followed the same recipe and are done).
+- IDMC-native event grouping → still undesigned. IDMC uses the drain's
+  district+type grouping as-is, and revisions keep their event links
+  (ADR 0011, still `proposed`; type-drift measurement open).
 - Integration tests against real S3/clear-api → task 6.

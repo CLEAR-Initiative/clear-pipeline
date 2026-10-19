@@ -32,10 +32,43 @@ from clear_pipeline.providers.situation_prose import extract_situation_prose
 logger = logging.getLogger(__name__)
 
 
+class GraphQLErrors(RuntimeError):
+    """clear-api answered 200 with an ``errors`` array. ``errors`` keeps the
+    parsed list so a caller can branch on ``extensions.code`` / ``subCode``
+    instead of the stringified message. Retryable by ``_execute`` like any
+    RuntimeError (a transient server-side state can look like this too)."""
+
+    def __init__(self, errors: list[dict[str, Any]]) -> None:
+        super().__init__(f"clear-api GraphQL errors: {errors}")
+        self.errors = errors
+
+    def codes(self) -> set[str]:
+        return {str((e.get("extensions") or {}).get("code") or "") for e in self.errors}
+
+    def sub_codes(self) -> set[str]:
+        return {str((e.get("extensions") or {}).get("subCode") or "") for e in self.errors}
+
+    def messages(self) -> str:
+        """clear-api's own messages, joined — what a person should read."""
+        return "; ".join(str(e.get("message") or "") for e in self.errors if e.get("message"))
+
+
 class ClearApiError(RuntimeError):
     """Non-retryable clear-api failure - schema mismatch, auth error,
     validation reject, etc. Callers should surface + skip the batch
     rather than retrying and amplifying the bad request."""
+
+
+class ClearApiNotFound(ClearApiError, GraphQLErrors):
+    """The target row doesn't exist (GraphQL ``extensions.code ==
+    "NOT_FOUND"``). An answer, not a transient failure, so never retried. A
+    ``GraphQLErrors`` too, so ``codes()``-based handlers still see it."""
+
+
+class ClearApiStaleMembers(ClearApiError, GraphQLErrors):
+    """setEventAggregates refused a write computed from members that changed
+    since they were read (``extensions.code == "STALE_EVENT_MEMBERS"``). A newer
+    recompute supersedes it, so never retried."""
 
 
 _RESOLVE_LOCATION = """
@@ -321,6 +354,7 @@ def _execute(
     variables: dict[str, Any] | None = None,
     *,
     retries: int = 3,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     """POST a GraphQL operation with the same retry semantics
     clear-pipeline uses.
@@ -335,7 +369,9 @@ def _execute(
       server-side state like a lock conflict).
     """
     url = _require_env("CLEAR_API_URL")
-    api_key = _require_env("CLEAR_API_KEY")
+    # The pipeline's own key by default; a Task Worker call passes the
+    # `worker`-role key instead (see the Tasks section at the end).
+    api_key = api_key or _require_env("CLEAR_API_KEY")
 
     headers = {
         "Content-Type": "application/json",
@@ -364,6 +400,11 @@ def _execute(
             if "errors" in result:
                 errs = result["errors"]
                 err_text = str(errs)
+                err_list = errs if isinstance(errs, list) else [errs]
+                if any((e.get("extensions") or {}).get("code") == "NOT_FOUND" for e in err_list):
+                    raise ClearApiNotFound(err_list)
+                if any((e.get("extensions") or {}).get("code") == "STALE_EVENT_MEMBERS" for e in err_list):
+                    raise ClearApiStaleMembers(err_list)
                 # A schema/version mismatch — e.g. the signal-drain endpoints from
                 # clear-api PR #127 not yet deployed — is PERMANENT, not transient.
                 # Raise a clear, non-retryable error instead of retrying every
@@ -374,13 +415,19 @@ def _execute(
                         f"translation drain + eventsPendingAlert) deployed? {err_text[:300]}"
                     )
                 logger.error("clear-api GraphQL errors: %s", errs)
-                raise RuntimeError(f"clear-api GraphQL errors: {errs}")
+                raise GraphQLErrors(err_list)
 
             return result["data"]
 
         except ClearApiError:
             raise
         except (httpx.HTTPError, RuntimeError) as exc:
+            # A NOT_FOUND GraphQL error is permanent — the entity is gone, so
+            # retrying never helps (and the translation drain relies on seeing it
+            # promptly to drop the stale queue row). Other GraphQL errors can
+            # reflect transient server state, so they still retry.
+            if isinstance(exc, GraphQLErrors) and "NOT_FOUND" in exc.codes():
+                raise
             if attempt < retries:
                 wait = 2 ** attempt
                 logger.warning(
@@ -1188,7 +1235,24 @@ mutation UpdateSignalContent($input: UpdateSignalContentInput!) {
   updateSignalContent(input: $input) {
     id
     contentHash
+    retracted
+    revision
+    rawS3Key
     lastRevisedAt
+  }
+}
+"""
+
+# gx's create: CREATE_SIGNAL plus the fields gx compares to decide a follow-up
+# update. Separate so production ingest never selects fields an older clear-api lacks.
+CREATE_SIGNAL_FOR_SYNC = """
+mutation CreateSignalForSync($input: CreateSignalInput!) {
+  createSignal(input: $input) {
+    id
+    externalId
+    contentHash
+    retracted
+    rawS3Key
   }
 }
 """
@@ -1198,6 +1262,15 @@ mutation UpdateSignalSeverity($id: String!, $severity: Int!) {
   updateSignalSeverity(id: $id, severity: $severity) {
     id
     severity
+  }
+}
+"""
+
+SET_SIGNAL_GLIDE_CODE = """
+mutation SetSignalGlideCode($id: String!, $glideCode: String!) {
+  setSignalGlideCode(id: $id, glideCode: $glideCode) {
+    id
+    glideCode
   }
 }
 """
@@ -1565,9 +1638,7 @@ query DisasterTypes {
 # Signals awaiting downstream processing (status = NEW), oldest-first. The
 # selection mirrors CREATE_SIGNAL so the drain feeds the SAME classify→group→
 # alert code the Celery path uses. Raw payload stays in S3 (rawS3Key).
-PENDING_SIGNALS = """
-query PendingSignals($first: Int, $source: String) {
-  pendingSignals(first: $first, source: $source) {
+_PENDING_SIGNAL_FIELDS = """
     id
     externalId
     title
@@ -1575,20 +1646,84 @@ query PendingSignals($first: Int, $source: String) {
     severity
     casualties
     publishedAt
+    url
     status
+    revision
+    retracted
     rawS3Key
     source { id name }
     originLocation { id name level ancestorIds }
     destinationLocation { id name level ancestorIds }
     generalLocation { id name level ancestorIds }
     events { id title types severity casualties populationAffected }
+"""
+
+PENDING_SIGNALS = f"""
+query PendingSignals($first: Int, $source: String) {{
+  pendingSignals(first: $first, source: $source) {{{_PENDING_SIGNAL_FIELDS}  }}
+}}
+"""
+
+PENDING_RECOMPUTES = f"""
+query PendingRecomputes($first: Int) {{
+  pendingRecomputes(first: $first) {{{_PENDING_SIGNAL_FIELDS}  }}
+}}
+"""
+
+MARK_SIGNALS_PROCESSED = """
+mutation MarkSignalsProcessed($items: [SignalRevisionInput!]!, $status: SignalStatus) {
+  markSignalsProcessed(items: $items, status: $status)
+}
+"""
+
+# Live (non-retracted) members of an event, newest first. `rawS3Key` + locations
+# let the recompute project each member exactly as first grouping did.
+EVENT_MEMBERS = """
+query EventMembers($eventId: String!, $first: Int) {
+  eventMembers(eventId: $eventId, first: $first) {
+    id
+    revision
+    externalId
+    title
+    description
+    severity
+    casualties
+    publishedAt
+    url
+    rawS3Key
+    source { id name type }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
   }
 }
 """
 
-MARK_SIGNALS_PROCESSED = """
-mutation MarkSignalsProcessed($ids: [String!]!, $status: SignalStatus) {
-  markSignalsProcessed(ids: $ids, status: $status)
+EVENT_MEMBERS_WITH_GLIDE = EVENT_MEMBERS.replace("    casualties\n", "    casualties\n    glideCode\n")
+
+EVENT_RECOMPUTE_STATE = """
+query EventRecomputeState($id: String!) {
+  event(id: $id) {
+    id
+    title
+    description
+    severity
+    types
+    rewriteMembersHash
+    originLocation { name }
+    generalLocation { name }
+    destinationLocation { name }
+  }
+}
+"""
+
+SET_EVENT_AGGREGATES = """
+mutation SetEventAggregates(
+  $id: String!, $input: EventAggregatesInput!, $members: [SignalRevisionInput!]!
+) {
+  setEventAggregates(id: $id, input: $input, members: $members) {
+    id
+  }
 }
 """
 
@@ -1601,10 +1736,17 @@ def create_signal(input_data: dict) -> dict:
     return result["createSignal"]
 
 
+def create_signal_for_sync(input_data: dict) -> dict:
+    """gx's get-or-create: also returns ``contentHash``/``retracted`` so the
+    caller can tell an existing, out-of-date row from the one it sent."""
+    result = _execute(CREATE_SIGNAL_FOR_SYNC, {"input": input_data})
+    return result["createSignal"]
+
+
 def update_signal_content(input_data: dict) -> dict:
-    """Apply an in-place content revision to an existing signal (e.g. an IDMC
-    IDU row revised upstream). Hash-gated server-side — a no-op retry with an
-    unchanged contentHash returns the row untouched."""
+    """Apply an in-place revision or retraction to an existing signal, keyed by
+    ``(sourceId, externalId)``. A no-op resend returns the row untouched.
+    Raises ``ClearApiNotFound`` when no such signal exists."""
     result = _execute(UPDATE_SIGNAL_CONTENT, {"input": input_data})
     return result["updateSignalContent"]
 
@@ -1620,13 +1762,54 @@ def pending_signals(first: int = 100, source: str | None = None) -> list[dict]:
     return result["pendingSignals"]
 
 
-def mark_signals_processed(ids: list[str], status: str = "PROCESSED") -> int:
-    """Mark signals done for the drain — PROCESSED (default) or FAILED. Returns
-    the number of rows updated. Idempotent (clear-api #467)."""
-    if not ids:
+def mark_signals_processed(items: list[dict], status: str = "PROCESSED") -> int:
+    """Mark signals done for the drain — PROCESSED (default) or FAILED.
+    ``items`` are ``{"id", "revision"}`` as fetched: a row whose revision moved
+    since (revised or retracted meanwhile) is left for the next run. Returns
+    the number of rows updated."""
+    if not items:
         return 0
-    result = _execute(MARK_SIGNALS_PROCESSED, {"ids": ids, "status": status})
+    result = _execute(MARK_SIGNALS_PROCESSED, {"items": items, "status": status})
     return result["markSignalsProcessed"]
+
+
+def pending_recomputes(first: int = 100) -> list[dict]:
+    """Signals whose events must be recomputed: changed after grouping
+    (NEEDS_RECOMPUTE), or NEW but already linked. Oldest first."""
+    result = _execute(PENDING_RECOMPUTES, {"first": first})
+    return result["pendingRecomputes"]
+
+
+def event_members(
+    event_id: str, first: int | None = None, *, with_glide: bool = False,
+) -> list[dict]:
+    """Live members of an event, newest first; ``first`` bounds the count.
+    ``with_glide`` also selects each member's ``glideCode`` (needs a clear-api
+    that has the field)."""
+    variables: dict = {"eventId": event_id}
+    if first is not None:
+        variables["first"] = first
+    result = _execute(EVENT_MEMBERS_WITH_GLIDE if with_glide else EVENT_MEMBERS, variables)
+    return result["eventMembers"]
+
+
+def get_event_recompute_state(event_id: str) -> dict | None:
+    """The event fields a recompute keeps or compares (text, severity,
+    types, location name, ``rewriteMembersHash``)."""
+    result = _execute(EVENT_RECOMPUTE_STATE, {"id": event_id})
+    return result.get("event")
+
+
+def set_event_aggregates(event_id: str, input_data: dict, members: list[dict]) -> dict:
+    """Absolute write of an event's aggregates. Absent keys are left unchanged;
+    explicit None clears the field. ``members`` are the live members the values
+    were computed from: if they changed since, nothing is written and
+    ``ClearApiStaleMembers`` is raised (a newer recompute supersedes this one)."""
+    snapshot = [{"id": m["id"], "revision": m["revision"]} for m in members]
+    result = _execute(
+        SET_EVENT_AGGREGATES, {"id": event_id, "input": input_data, "members": snapshot},
+    )
+    return result["setEventAggregates"]
 
 
 def get_signal(signal_id: str) -> dict | None:
@@ -1643,6 +1826,12 @@ def update_signal_severity(signal_id: str, severity: int) -> dict:
     """Update a signal's severity score (1-5)."""
     result = _execute(UPDATE_SIGNAL_SEVERITY, {"id": signal_id, "severity": severity})
     return result["updateSignalSeverity"]
+
+
+def set_signal_glide_code(signal_id: str, glide_code: str) -> dict:
+    """Record the glide code grouping used for a signal (overwrites)."""
+    result = _execute(SET_SIGNAL_GLIDE_CODE, {"id": signal_id, "glideCode": glide_code})
+    return result["setSignalGlideCode"]
 
 
 def update_signal_geoparsed_data(signal_id: str, geoparsed_data: dict) -> dict:
@@ -1690,7 +1879,9 @@ def escalate_event(event_id: str, user_id: str) -> dict:
     return result["escalateEvent"]
 
 
-def create_alert(input_data: dict) -> dict:
+def create_alert(input_data: dict) -> dict | None:
+    # `createAlert` returns null (no error) when the event's types are all
+    # NRC-irrelevant — callers treat None as "no alert raised", not a failure.
     result = _execute(CREATE_ALERT, {"input": input_data})
     return result["createAlert"]
 
@@ -2146,6 +2337,25 @@ query GroundMessageForTranslation($id: String!) {
 """
 
 
+def _execute_allow_missing(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    """``_execute`` for canonical fetches: a NOT_FOUND GraphQL error — the entity
+    was deleted/superseded after it was enqueued — returns ``{}`` instead of
+    raising, so the caller's ``result.get(key)`` yields ``None`` and the
+    translation drain drops the stale queue rows (rather than re-failing the same
+    poison entry every tick). Any other error still propagates.
+
+    Needed because clear-api's `crisis` resolver *throws* NOT_FOUND where the
+    `event`/`location`/… resolvers return null; this normalises both to None.
+    """
+    try:
+        return _execute(query, variables)
+    except GraphQLErrors as exc:
+        if "NOT_FOUND" in exc.codes():
+            logger.info("clear-api NOT_FOUND for %s — entity gone, treating as missing", variables)
+            return {}
+        raise
+
+
 def get_crisis_canonical(crisis_id: str) -> dict | None:
     """Fetch only the four translatable fields of a crisis. Used by the
     translation step in tasks/crisis.py to feed Claude the current
@@ -2156,7 +2366,7 @@ def get_crisis_canonical(crisis_id: str) -> dict | None:
     changes, swap to an explicit `Accept-Language: en` header in
     `_execute`.
     """
-    result = _execute(GET_CRISIS_CANONICAL, {"id": crisis_id})
+    result = _execute_allow_missing(GET_CRISIS_CANONICAL, {"id": crisis_id})
     return result.get("crisis")
 
 
@@ -2164,14 +2374,14 @@ def get_event_canonical(event_id: str) -> dict | None:
     """Fetch the two translatable fields of an event (title,
     description). Same pipeline-language invariant as
     get_crisis_canonical above."""
-    result = _execute(GET_EVENT_CANONICAL, {"id": event_id})
+    result = _execute_allow_missing(GET_EVENT_CANONICAL, {"id": event_id})
     return result.get("event")
 
 
 def get_location_canonical(location_id: str) -> dict | None:
     """Fetch the one translatable field of a location (name). Same
     pipeline-language invariant as get_crisis_canonical above."""
-    result = _execute(GET_LOCATION_CANONICAL, {"id": location_id})
+    result = _execute_allow_missing(GET_LOCATION_CANONICAL, {"id": location_id})
     return result.get("location")
 
 
@@ -2185,7 +2395,7 @@ def get_situation_canonical(situation_analysis_id: str) -> dict | None:
     `data` field is overlaid per-locale by the resolver, so this returns
     canonical English only while the pipeline user's language is 'en'.
     """
-    result = _execute(GET_SITUATION_CANONICAL, {"id": situation_analysis_id})
+    result = _execute_allow_missing(GET_SITUATION_CANONICAL, {"id": situation_analysis_id})
     row = result.get("situationAnalysisById")
     if not row:
         return None
@@ -2197,7 +2407,7 @@ def get_analysis_canonical(analysis_id: str) -> dict | None:
     translatable prose. The payload shares the situation-analysis taxonomy, so
     the same prose extractor applies (including the scenarios prose). Same
     pipeline-language ('en') invariant as get_situation_canonical."""
-    result = _execute(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
+    result = _execute_allow_missing(GET_ANALYSIS_CANONICAL, {"id": analysis_id})
     row = result.get("analysisById")
     if not row:
         return None
@@ -2210,7 +2420,7 @@ def get_ground_message_canonical(message_id: str) -> dict | None:
     phone-redacted at ingest) — NOT English — and ``language`` is clear-api's
     intake detection (``"ar"``, ``"en"``, …), None when unknown. No sender
     identity is exposed. None when the message no longer exists."""
-    result = _execute(GET_GROUND_MESSAGE_CANONICAL, {"id": message_id})
+    result = _execute_allow_missing(GET_GROUND_MESSAGE_CANONICAL, {"id": message_id})
     row = result.get("groundMessageForTranslation")
     if not row:
         return None
@@ -2624,3 +2834,125 @@ def events_pending_alert(
         {"first": first, "minSeverity": min_severity, "maxAgeHours": max_age_hours},
     )
     return result.get("eventsPendingAlert") or []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tasks and Workers (clear-api ADR-0010)
+#
+# The generic Task queue: a Worker claims Tasks of a kind under a lease,
+# heartbeats, and completes or fails them. Every call here authenticates as
+# the `worker` service user (CLEAR_WORKER_API_KEY), never the pipeline user:
+# `worker` is the only role allowed to claim, and it can write nothing but
+# the Tasks it holds. The per-claim `leaseToken` the
+# claim returns must accompany every later write.
+# ═══════════════════════════════════════════════════════════════════════════
+
+TASK_FIELDS = """
+    id
+    kind
+    subjectType
+    subjectId
+    payload
+    status
+    leaseToken
+    leaseExpiresAt
+    attempts
+    maxAttempts
+    cancelRequestedAt
+    outcome
+    lastError
+    completedAt
+"""
+
+CLAIM_TASKS = f"""
+mutation ClearPipelineClaimTasks($kind: String!, $limit: Int) {{
+  claimTasks(kind: $kind, limit: $limit) {{ {TASK_FIELDS} }}
+}}
+"""
+
+HEARTBEAT_TASK = f"""
+mutation ClearPipelineHeartbeatTask($id: String!, $leaseToken: String!) {{
+  heartbeatTask(id: $id, leaseToken: $leaseToken) {{ {TASK_FIELDS} }}
+}}
+"""
+
+COMPLETE_TASK = f"""
+mutation ClearPipelineCompleteTask(
+  $id: String!, $leaseToken: String!, $result: JSON!, $usage: TaskUsageInput
+) {{
+  completeTask(id: $id, leaseToken: $leaseToken, result: $result, usage: $usage) {{
+    {TASK_FIELDS}
+  }}
+}}
+"""
+
+FAIL_TASK = f"""
+mutation ClearPipelineFailTask($id: String!, $leaseToken: String!, $error: String!) {{
+  failTask(id: $id, leaseToken: $leaseToken, error: $error) {{ {TASK_FIELDS} }}
+}}
+"""
+
+# The lease outcomes a Worker branches on (clear-api `extensions.subCode`).
+_LEASE_SUB_CODES = ("NOT_LEASE_OWNER", "NOT_LEASED")
+
+
+class TaskLeaseError(RuntimeError):
+    """The Task is no longer this Worker's to write: the lease lapsed and was
+    reclaimed (NOT_LEASE_OWNER) or the Task is no longer LEASED at all
+    (NOT_LEASED — completed, failed or cancelled elsewhere). Stop working on
+    it; never retry the write."""
+
+
+def _worker_key() -> str:
+    return _require_env("CLEAR_WORKER_API_KEY")
+
+
+def _task_write(query: str, variables: dict[str, Any], field: str) -> dict[str, Any]:
+    """A Worker write: one attempt (a lease write is not idempotent across a
+    reclaim). clear-api's answer is read from the error's ``extensions``: a
+    lease subCode is a TaskLeaseError (the Task is no longer ours), a
+    BAD_USER_INPUT is a ClearApiError (the write itself is wrong and must not
+    be retried)."""
+    try:
+        data = _execute(query, variables, retries=1, api_key=_worker_key())
+    except GraphQLErrors as exc:
+        if exc.sub_codes() & set(_LEASE_SUB_CODES):
+            raise TaskLeaseError(str(exc)) from exc
+        if "BAD_USER_INPUT" in exc.codes():
+            raise ClearApiError(exc.messages() or str(exc)) from exc
+        raise
+    return data[field]
+
+
+def claim_tasks(kind: str, *, limit: int = 1) -> list[dict[str, Any]]:
+    """Lease up to ``limit`` of the oldest claimable Tasks of ``kind``. Each
+    returned Task carries the ``leaseToken`` every later write needs."""
+    data = _execute(CLAIM_TASKS, {"kind": kind, "limit": limit}, api_key=_worker_key())
+    return data.get("claimTasks") or []
+
+
+def heartbeat_task(task_id: str, lease_token: str) -> dict[str, Any]:
+    """Extend the lease. Read ``status`` on the result: CANCELLED means stop."""
+    return _task_write(HEARTBEAT_TASK, {"id": task_id, "leaseToken": lease_token}, "heartbeatTask")
+
+
+def complete_task(
+    task_id: str,
+    lease_token: str,
+    *,
+    result: dict[str, Any],
+    usage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Report the Task done with the handler's ``result`` (and ``usage`` if it
+    ran a model). clear-api answers BAD_USER_INPUT (a ClearApiError here) if
+    it rejects the write."""
+    variables: dict[str, Any] = {"id": task_id, "leaseToken": lease_token, "result": result}
+    if usage is not None:
+        variables["usage"] = usage
+    return _task_write(COMPLETE_TASK, variables, "completeTask")
+
+
+def fail_task(task_id: str, lease_token: str, error: str) -> dict[str, Any]:
+    """Give the Task up with an error: PENDING again while attempts remain,
+    FAILED with this error once they are used up."""
+    return _task_write(FAIL_TASK, {"id": task_id, "leaseToken": lease_token, "error": error[:2000]}, "failTask")
