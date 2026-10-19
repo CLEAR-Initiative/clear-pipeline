@@ -610,8 +610,10 @@ def test_classification_carries_taxonomy_for_group_reuse(monkeypatch):
             @staticmethod
             def json():
                 return {"answers": {
-                    "glide": {"type": "choice", "choice": "fl", "confidence": 0.9},
-                    "relevant": {"type": "noul", "noul": 0.95},
+                    "glide": {
+                        "type": "choice", "choice": "fl", "confidence": 0.9,
+                        "probabilities": {"fl": 0.9, "none": 0.0},
+                    },
                 }}
         return _R()
 

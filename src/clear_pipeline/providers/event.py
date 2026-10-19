@@ -431,14 +431,16 @@ def _invalidate_events_cache() -> None:
 
 def _event_matches(event: dict, target_admin2: str, target_level2: str) -> bool:
     """True iff the event's primary location resolves to `target_admin2` AND
-    its `types[]` contains a code whose level_2 == `target_level2`."""
+    its PRIMARY type (`types[0]`) has level_2 == `target_level2`."""
     types: list[str] = event.get("types") or []
     if not types:
         return False
 
+    # Match on the PRIMARY type only. Events are grouped and locked by their primary
+    # level_2 (see group_signal's lock_key = group:v2:{admin2}:{level_2}); matching a
+    # SECONDARY multilabel code here would merge events the create path keeps apart.
     code_l2 = code_to_level2_map()
-    event_l2s = {code_l2.get(t) for t in types if code_l2.get(t)}
-    if target_level2 not in event_l2s:
+    if code_l2.get(types[0]) != target_level2:
         return False
 
     # Event location — pick the first non-null, resolve its admin-2
@@ -816,7 +818,9 @@ def _match_and_act(
         "validTo": valid_to,
         "firstSignalCreatedAt": ts,
         "lastSignalCreatedAt": ts,
-        "types": [glide_code],
+        # Multilabel: carry all of the founding signal's disaster types (primary
+        # first); fall back to the resolved primary when the classifier returned none.
+        "types": classification.disaster_types or [glide_code],
         "rank": 0.0,
         "locationId": event_location_id,
     }

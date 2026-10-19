@@ -19,13 +19,13 @@ from pydantic import BaseModel
 class SignalClassification(BaseModel):
     """Output from signal classification (disaster types, relevance, severity)."""
 
-    disaster_types: list[str]  # glide numbers e.g. ["fl", "ff"]
-    relevance: float  # 0.0-1.0 (the relevance gate — Jev's `relevant` Noul)
+    disaster_types: list[str]  # glide codes, PRIMARY first, e.g. ["fl", "ls"] (multilabel)
+    relevance: float  # 0.0-1.0 relevance gate: Jev's P(real disaster type) = 1 - P("none")
     severity: int | None  # 1-5, or None when the source supplied no severity
     summary: str
-    # Full taxonomy prediction carried so the grouping stage can reuse it instead
-    # of running a second inference on the same text. ``disaster_types[0]`` is the
-    # glide code.
+    # Full taxonomy prediction for the PRIMARY type (``disaster_types[0]``), carried
+    # so the grouping stage can reuse it instead of running a second inference on the
+    # same text. Secondary multilabel codes live in ``disaster_types`` only.
     type_level_1: str | None = None
     type_level_2: str | None = None
     type_level_3: str | None = None

@@ -139,15 +139,25 @@ class Settings(BaseSettings):
 
     # Pipeline
     initial_lookback_days: int = 7
-    # Below this the signal is dropped (no event created). Jev gates on the
-    # `relevant` Noul probability (is-this-an-incident), not the code confidence.
-    # Calibrated against a live Jev run (scripts/jev_classify_eval.py): genuine
-    # incidents bottomed out around 0.47–0.55 Noul, so the gate is held low
-    # (recall-safe — missing a real disaster costs far more than processing a
-    # borderline non-event). Matches the deployed value. Tighten only once the
-    # gold set has true-noise rows (routine news / forecasts / op-eds) that reveal
-    # a separating threshold — the current incidents-only set can't.
+    # Below this the signal is dropped (no event created). Relevance is derived from
+    # the glide Choice distribution as 1 - P("none") — Jev's total probability that
+    # the text is SOME real disaster type rather than the explicit no-match option
+    # (providers/jev.py). Recall-safe default (missing a real disaster costs far more
+    # than processing a borderline non-event). NOTE: this replaced the earlier
+    # `relevant` Noul, whose 0.47–0.55 calibration no longer applies — re-calibrate
+    # against a live run with the distribution-based score (scripts/jev_classify_eval.py)
+    # before tightening. Caveat: this gate measures "is it a real disaster TYPE", not
+    # "is it a CURRENT incident" — a confident classification of a retrospective or
+    # forecast about a real hazard scores high and is NOT filtered here.
     relevance_threshold: float = 0.3
+    # Multilabel: a signal can carry several co-occurring disaster types. Beyond the
+    # primary (the Choice's top code), every code whose probability in the glide
+    # distribution is at/above this floor joins `disaster_types` (primary first).
+    # Lower = more secondary labels. A Choice spreads probability across COMPETING
+    # options, so this also surfaces near-synonym ambiguity (flood vs flash-flood),
+    # not only genuine co-occurrence — keep it conservative. CALIBRATE on live data
+    # (scripts/jev_classify_eval.py prints the distribution).
+    signal_jev_multilabel_threshold: float = 0.15
     # Anti-misclassification floor on Jev's glide-code confidence. A specific code
     # picked below this is treated as unclassifiable and recorded as the taxonomy's
     # "other" catch-all (ot/po) instead of a force-fit specific type; Jev also has

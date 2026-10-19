@@ -4,21 +4,31 @@ Decisions API. The sole signal/event classifier: returns a
 downstream (see ``providers/event.py``).
 
 Jev reads text and returns typed answers with calibrated probabilities (not
-generated prose). One Decisions call runs two parallel questions over the signal:
+generated prose). One Decisions call runs a single Choice question over the signal:
 
-  * ``glide``    — a Choice over the 52 GLIDE codes PLUS an explicit "none"
-                   no-match option → the disaster type (+ a calibrated confidence
-                   in that code).
-  * ``relevant`` — a Noul "is this an actual, current incident?" → the
-                   probability used as the relevance gate.
+  * ``glide`` — a Choice over the 52 GLIDE codes PLUS an explicit "none" no-match
+                option. It returns the single best (primary) code, a calibrated
+                confidence in it, and the full probability distribution over every
+                code.
 
-Relevance (the event-creation gate) is the **Noul**, NOT the Choice confidence:
-a signal can be clearly a real incident yet genuinely ambiguous between two codes
-(low Choice confidence) — it must still create an event.
+Multilabel: a signal can describe several co-occurring hazards (a flood that also
+triggers landslides and displacement). The Choice picks the one PRIMARY code, and
+its probability distribution supplies the rest — every code at or above
+``settings.signal_jev_multilabel_threshold`` joins ``disaster_types`` (primary
+first). ``disaster_types[0]`` stays the primary code everything downstream keys on.
+
+Relevance (the event-creation gate) is derived from that same distribution as
+``1 - P("none")`` — Jev's total probability that the text is SOME real disaster
+type rather than the explicit no-match option. Signals below
+``settings.relevance_threshold`` are dropped from grouping (see
+``defs/signals/stages.py``). This is deliberately distribution-based, not the
+Choice confidence: a real incident whose probability is SPLIT across several real
+codes (low confidence, high multilabel) still scores ~1.0 and must create an event.
+It replaces the earlier ``relevant`` Noul — there is no separate relevance question.
 
 Anti-misclassification: to avoid force-fitting a code onto an incident that fits
 none of the specific types, the glide Choice offers an explicit ``none`` option,
-and a specific code picked only weakly (confidence below
+and a PRIMARY code picked only weakly (confidence below
 ``settings.signal_jev_min_code_confidence``) is treated the same way. Either case
 is recorded as the taxonomy's existing "other" catch-all (``ot``/``po``) — still a
 valid glide code downstream — rather than an unreliable specific type.
@@ -26,8 +36,8 @@ valid glide code downstream — rather than an unreliable specific type.
 Failure posture (every path that isn't a confident, well-formed answer raises
 ``JevError`` so the caller can requeue the signal — there is no local fallback):
   * HTTP/transport errors, non-retryable 4xx, retries exhausted on 429/5xx;
-  * a 200 whose answer is malformed — missing ``choice`` or a missing/non-numeric
-    ``noul`` — rather than silently classifying "ot" or gating relevance to 0.0;
+  * a 200 whose answer is malformed — a missing ``glide`` answer or ``choice`` —
+    rather than silently classifying "ot" or gating relevance to 0.0;
   * the circuit is open (a sustained outage fast-fails instead of paying the
     per-call timeout on every signal and stacking past the drain lock).
 
@@ -90,17 +100,6 @@ _GLIDE_INSTRUCTIONS = (
     f'Pick "{NONE_CHOICE}" ONLY when the text describes an incident that genuinely '
     "fits none of the specific disaster types — prefer this over force-fitting a code."
 )
-_RELEVANT_INSTRUCTIONS = (
-    "Does `text` report an ACTUAL, CURRENT humanitarian, disaster, or security "
-    "incident — a real event that has happened or is happening?"
-)
-_RELEVANT_CRITERIA = {
-    "true": "A concrete incident/event is described (e.g. a flood, clash, outbreak, strike).",
-    "false": "Routine news, analysis or opinion, a retrospective/anniversary, a "
-    "forecast or warning with no event yet, or an unrelated topic.",
-}
-
-
 class JevError(RuntimeError):
     """Raised on any Jev/OpenRouter failure (incl. malformed answers and an open
     circuit) so the caller can requeue the signal (there is no local fallback)."""
@@ -216,7 +215,6 @@ def classify_with_jev(
             "state": {"text": text},
             "questions": {
                 "glide": {"type": "choice", "instructions": _GLIDE_INSTRUCTIONS, "criteria": _glide_criteria()},
-                "relevant": {"type": "noul", "instructions": _RELEVANT_INSTRUCTIONS, "criteria": _RELEVANT_CRITERIA},
             },
         }
         answers = _post_decisions(body)
@@ -224,15 +222,11 @@ def classify_with_jev(
         # Reject malformed-but-200 answers rather than silently classifying "ot"
         # or gating relevance to 0.0 (which would drop every event, invisibly).
         glide = answers.get("glide")
-        relevant = answers.get("relevant")
-        if not isinstance(glide, dict) or not isinstance(relevant, dict):
-            raise JevError("Jev response missing `glide`/`relevant` answer")
+        if not isinstance(glide, dict):
+            raise JevError("Jev response missing `glide` answer")
         code = glide.get("choice")
         if not code:
             raise JevError("Jev response missing `choice`")
-        noul = relevant.get("noul")
-        if not isinstance(noul, (int, float)) or isinstance(noul, bool):
-            raise JevError(f"Jev response has missing/non-numeric `noul`: {noul!r}")
     except JevError:
         _BREAKER.record_failure()
         raise
@@ -242,24 +236,35 @@ def classify_with_jev(
 
     _BREAKER.record_success()
     code_confidence = float(glide.get("confidence") or 0.0)
-    relevance = float(noul)
+    probabilities = glide.get("probabilities")
+    if not isinstance(probabilities, dict):
+        probabilities = {}
 
-    # Prevent force-fit misclassification. Record the taxonomy's existing "other"
-    # catch-all instead of an unreliable specific type when either:
-    #   * the model declined (chose NONE_CHOICE), or
-    #   * it picked a specific code only weakly (confidence below the configured
-    #     floor — a flat probability distribution).
+    # Relevance gate, derived from the glide distribution: Jev's total probability
+    # that the text is SOME real disaster type = 1 - P("none"). Replaces the old
+    # `relevant` Noul. Multilabel-friendly — a real incident whose probability is
+    # SPLIT across several real codes still scores ~1.0 (only the explicit no-match
+    # option counts against it). Falls back to the code confidence when the model
+    # returned no distribution (e.g. an older Jev build).
+    if probabilities:
+        relevance = max(0.0, 1.0 - float(probabilities.get(NONE_CHOICE) or 0.0))
+    else:
+        relevance = 0.0 if code == NONE_CHOICE else code_confidence
+
+    # Resolve the PRIMARY code. Prevent force-fit misclassification: record the
+    # taxonomy's existing "other" catch-all instead of an unreliable specific type
+    # when either the model declined (chose NONE_CHOICE) or it picked a specific
+    # code only weakly (confidence below the configured floor — a flat distribution).
     # "other" stays a valid glide code everywhere downstream (grouping, KB, alerts).
-    # For the low-confidence case the code's level_1 is still trustworthy, so keep
-    # it (conflict → "po", else "ot"); an explicit "none" carries no level_1, so
-    # default to "ot".
-    resolved_code = code
+    # For the low-confidence case the code's level_1 is still trustworthy (conflict
+    # → "po", else "ot"); an explicit "none" carries no level_1, so default to "ot".
+    primary = code
     demote_reason: str | None = None
     if code == NONE_CHOICE:
-        resolved_code = OTHER_NATURAL
+        primary = OTHER_NATURAL
         demote_reason = "model chose none-of-the-above"
     elif code_confidence < settings.signal_jev_min_code_confidence:
-        resolved_code = (
+        primary = (
             OTHER_CONFLICT if code_to_level1_map().get(code) == "conflict" else OTHER_NATURAL
         )
         demote_reason = (
@@ -267,25 +272,44 @@ def classify_with_jev(
             f"{settings.signal_jev_min_code_confidence:.2f}"
         )
 
+    # Multilabel: when the primary stands (a trusted specific code), add every OTHER
+    # code at/above the multilabel threshold from the distribution, ordered by
+    # probability. When the primary was demoted to "other" the specific codes aren't
+    # trustworthy either, so keep a single "other" label.
+    if demote_reason:
+        disaster_types = [primary]
+    else:
+        extras = sorted(
+            (
+                c
+                for c, p in probabilities.items()
+                if c != NONE_CHOICE and c != primary
+                and float(p) >= settings.signal_jev_multilabel_threshold
+            ),
+            key=lambda c: float(probabilities[c]),
+            reverse=True,
+        )
+        disaster_types = [primary, *extras]
+
     summary_src = (title or description or "").strip()
-    summary = summary_src[:200] if summary_src else (code_to_level3_map().get(resolved_code) or "unknown event")
+    summary = summary_src[:200] if summary_src else (code_to_level3_map().get(primary) or "unknown event")
 
     classification = SignalClassification(
-        disaster_types=[resolved_code],
+        disaster_types=disaster_types,
         relevance=relevance,
         severity=source_severity,  # None when the source gave none — not invented
         summary=summary,
-        type_level_1=code_to_level1_map().get(resolved_code),
-        type_level_2=code_to_level2_map().get(resolved_code),
-        type_level_3=code_to_level3_map().get(resolved_code),
+        type_level_1=code_to_level1_map().get(primary),
+        type_level_2=code_to_level2_map().get(primary),
+        type_level_3=code_to_level3_map().get(primary),
     )
     if demote_reason:
         logger.info(
             "[JEV CLASSIFY] unclassifiable (%s): model code=%s → stored %s",
-            demote_reason, code, resolved_code,
+            demote_reason, code, primary,
         )
     logger.info(
-        "[JEV CLASSIFY] code=%s code_conf=%.2f relevance=%.2f severity=%s (source=%s)",
-        resolved_code, code_confidence, relevance, classification.severity, source_severity,
+        "[JEV CLASSIFY] codes=%s primary_conf=%.2f relevance=%.2f severity=%s (source=%s)",
+        disaster_types, code_confidence, relevance, classification.severity, source_severity,
     )
     return classification
