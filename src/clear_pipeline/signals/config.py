@@ -88,6 +88,14 @@ class Settings(BaseSettings):
     # source instead of being grouped. Comma-separated.
     manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
+    # Whether `signals_drain_sensor` ships RUNNING. Non-polled sources (manual
+    # signals, the sudan-war-x push feed) materialise no ingest asset, so this
+    # sensor is the only thing that drains them; STOPPED, they wait until a
+    # polled source happens to ingest. Set false (SIGNALS_DRAIN_SENSOR_RUNNING)
+    # for an environment that hasn't cut over to the Dagster drain yet. Like
+    # every default_status, it only applies until the sensor is toggled in the
+    # Dagster UI.
+    signals_drain_sensor_running: bool = True
     # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
     # works Tasks. Tasks are user-requested and slow to produce; 5 minutes
     # keeps the Event page's "requested" state short without hammering the queue.

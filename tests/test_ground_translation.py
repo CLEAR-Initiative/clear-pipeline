@@ -292,6 +292,20 @@ def test_translate_has_its_own_running_poll_sensor():
 
 
 def test_poll_sensors_still_ship_stopped_by_default():
+    # Polled-source ingest sensors keep the STOPPED default (enabled at cutover);
+    # only drains that a user-facing path waits on opt into RUNNING.
     import dagster as dg
 
-    assert stages.signals_drain_sensor.default_status == dg.DefaultSensorStatus.STOPPED
+    from clear_pipeline.definitions import defs
+
+    loaded = defs()
+    assert loaded.get_sensor_def("dataminr_poll_sensor").default_status == dg.DefaultSensorStatus.STOPPED
+
+
+def test_signals_drain_sensor_ships_running():
+    # Manual signals and push feeds (sudan-war-x) have no ingest asset to
+    # trigger the drain eagerly — this sensor is the only thing that drains them.
+    import dagster as dg
+
+    assert stages.signals_drain_sensor.default_status == dg.DefaultSensorStatus.RUNNING
+    assert stages.signals_drain_sensor.job_name == "classify_group_job"

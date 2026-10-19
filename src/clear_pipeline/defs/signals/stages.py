@@ -712,13 +712,20 @@ translate_drain_sensor = build_poll_sensor(
 
 
 # ── manual-signal trigger ─────────────────────────────────────────────────────
-# Manual signals materialise no ingest asset, so eager automation never fires for
-# them. This sensor ticks classify_group on an interval to drain them (and acts as
-# a safety net for any source). Concurrent runs are safe: the per-signal Redis lock
-# + NEW→PROCESSED status markers make the drain idempotent.
+# Manual signals and push feeds (sudan-war-x) materialise no ingest asset, so
+# eager automation never fires for them. This sensor ticks classify_group on an
+# interval to drain them (and acts as a safety net for any source). Ships
+# RUNNING (settings.signals_drain_sensor_running): stopped, those signals sit NEW
+# until some polled source happens to ingest. Concurrent runs are safe: the
+# per-signal Redis lock + NEW→PROCESSED status markers make the drain idempotent.
 classify_group_job = dg.define_asset_job(name="classify_group_job", selection=[classify_group])
 signals_drain_sensor = build_poll_sensor(
     name="signals_drain_sensor",
     job=classify_group_job,
     default_interval_minutes=settings.manual_poll_interval_minutes,
+    default_status=(
+        dg.DefaultSensorStatus.RUNNING
+        if settings.signals_drain_sensor_running
+        else dg.DefaultSensorStatus.STOPPED
+    ),
 )
