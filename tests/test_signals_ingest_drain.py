@@ -591,16 +591,36 @@ def test_translate_unknown_entity_type_is_dropped():
     assert result.metadata["cleared"] == 1
 
 
-# ── single-inference: group_signal reuses classify_locally's prediction ──────
+# ── single-inference: group_signal reuses the classifier's prediction ────────
 
-def test_classify_locally_carries_taxonomy_for_group_reuse():
-    from clear_pipeline.providers.classify import SignalClassification, classify_locally
+def test_classification_carries_taxonomy_for_group_reuse(monkeypatch):
+    from clear_pipeline.providers import jev
 
     # group_signal reads glide (disaster_types[0]) + type_level_2 off the
-    # classification instead of re-running the model, so classify_locally must
-    # carry them.
+    # classification instead of re-running the model, so classify_with_jev (the
+    # only classifier now) must carry them. HTTP is mocked — no network.
+    from clear_pipeline.providers.classify import SignalClassification
+
     assert "type_level_2" in SignalClassification.model_fields
-    c = classify_locally(title="Flooding displaces thousands", description="Heavy rains in the region")
+
+    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        class _R:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"answers": {
+                    "glide": {
+                        "type": "choice", "choice": "fl", "confidence": 0.9,
+                        "probabilities": {"fl": 0.9, "none": 0.0},
+                    },
+                }}
+        return _R()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setattr(jev.httpx, "post", fake_post)
+    jev._BREAKER.record_success()
+    c = jev.classify_with_jev(title="Flooding displaces thousands", description="Heavy rains in the region")
     assert c.type_level_2 is not None
     assert c.disaster_types and c.disaster_types[0]  # glide code
 
@@ -987,7 +1007,7 @@ def test_drain_metadata_keys():
         "processed", "dropped", "requeued", "failed", "mark_conflicts",
         "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred", "recompute_stale",
         "recompute_head_blocked",
-        "jev_classified", "jev_fallback", "jev_fallback_rate",
+        "jev_classified", "jev_failed", "jev_failure_rate",
     }
 
 
