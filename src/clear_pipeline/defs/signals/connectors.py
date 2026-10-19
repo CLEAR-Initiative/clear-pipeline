@@ -58,6 +58,7 @@ from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
     get_source_id_by_name,
 )
+from clear_pipeline.providers.location import locate_in_country
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
 
@@ -110,6 +111,18 @@ class SignalSource(Protocol):
         :class:`SignalView` the generic drain consumes. ``record`` is the parsed
         lake blob for a polled source, or ``None`` for a non-polled source (project
         from ``created`` alone). The ONLY per-source field-extraction code."""
+        ...
+
+
+@runtime_checkable
+class LocatingSource(SignalSource, Protocol):
+    """A connector whose signals can arrive with no location (a push feed whose
+    sender sends none). The drain calls ``locate`` before grouping a signal that
+    has no origin/general/destination location, so it pins to a district and
+    groups instead of landing as a lone, location-less event."""
+
+    def locate(self, view: SignalView) -> str | None:
+        """Resolve a ``locations.id`` for the signal, or None if nothing fits."""
         ...
 
 
@@ -619,6 +632,14 @@ class SudanWarXConnector:
     polled = False
     drained = True
     poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def locate(self, view: SignalView) -> str | None:
+        """Every post on this feed is about Sudan, but the poller sends no
+        location: resolve the most specific Sudanese state/district Claude can
+        match in the (mostly Arabic) text, else Sudan itself."""
+        return locate_in_country(
+            view.title, view.description, settings.sudan_war_x_default_country
+        )
 
     def project(self, record: Any, created: dict) -> SignalView:
         # record is None — everything comes from the clear-api signal row.

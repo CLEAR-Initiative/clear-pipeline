@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     # sensor picks NEW rows up at `manual_poll_interval_minutes`. Must match
     # the feed's data_sources row name.
     sudan_war_x_source_name: str = "sudan-war-x"
+    # Every post on the feed is about Sudan, but it arrives with no location —
+    # the drain resolves one from the (mostly Arabic) text, scoped to this
+    # country, and falls back to the country itself. Must match a level-0
+    # location `name` in the CLEAR API.
+    sudan_war_x_default_country: str = "Sudan"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

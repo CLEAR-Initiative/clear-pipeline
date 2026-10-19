@@ -1287,6 +1287,7 @@ UPDATE_SIGNAL_LOCATION = """
 mutation UpdateSignalLocation($id: String!, $locationId: String!) {
   updateSignalLocation(id: $id, locationId: $locationId) {
     id
+    generalLocation { id name level ancestorIds }
   }
 }
 """
@@ -1846,11 +1847,11 @@ def update_signal_geoparsed_data(signal_id: str, geoparsed_data: dict) -> dict:
 
 
 def update_signal_location(signal_id: str, location_id: str) -> dict:
-    """Set an existing signal's `generalLocation`. Used by the manual-signal
-    pipeline path when the user didn't pick a location and the geoparser
-    resolved a landmark — we promote the landmark to an L4 and wire the
-    signal to it so downstream event grouping can key on the correct
-    admin-2 district."""
+    """Set an existing signal's `generalLocation`; returns ``{id,
+    generalLocation}`` with the location in the same shape ``pendingSignals``
+    selects, so the drain can patch its row and group on the new district.
+    Used by the drain for push feeds that arrive without a location
+    (``LocatingSource``)."""
     result = _execute(
         UPDATE_SIGNAL_LOCATION,
         {"id": signal_id, "locationId": location_id},
