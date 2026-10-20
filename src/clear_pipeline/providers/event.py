@@ -404,8 +404,15 @@ def _get_active_events() -> list[dict]:
     if cached:
         return json.loads(cached)
 
-    events = get_events()
     cutoff = datetime.now(UTC) - timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
+    # Bound the fetch SERVER-SIDE: ask clear-api for only the window, instead of
+    # pulling the whole events table and filtering here. The full-table fetch (+
+    # translation includes), re-run on every cache-miss as the drain grows the
+    # table, once ran clear-api to 6.2 GB and OOM-killed dev-app (2026-10-20).
+    events = get_events(last_signal_since=cutoff.isoformat())
+    # Belt-and-suspenders: re-apply the window client-side (handles any row the
+    # server filter can't bound, e.g. a null lastSignalCreatedAt falling back to
+    # validFrom) and keep the total/kept log line.
     recent: list[dict] = []
     for e in events:
         try:
