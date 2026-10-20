@@ -97,7 +97,8 @@ class Settings(BaseSettings):
     # Min incident date (D_Verified_Date) ingested — in the query and client-side.
     # Fixed floor, not a rolling window: lower it to backfill.
     sudan_witness_min_incident_date: date = date(2026, 1, 1)
-    sudan_witness_poll_interval_minutes: int = 24 * 60  # daily; CIR reload cadence unknown (one reload seen, 2026-10-12)
+    # Daily. CIR reloads seen Mon 2026-10-12 and 2026-10-19, both ~07:26 UTC; cadence unconfirmed.
+    sudan_witness_poll_interval_minutes: int = 24 * 60
     # Forced full pull even when the layer fingerprint is unchanged (safety net).
     sudan_witness_full_pull_max_age_hours: int = 7 * 24
 
