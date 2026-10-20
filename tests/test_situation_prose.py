@@ -25,15 +25,31 @@ def _full_payload() -> dict:
             "security": {
                 "bullets": ["Armed clashes in the north."],
                 "source_report_ids": ["r3"],
+                "completeness": 0.6,
+                "questions_not_answered": ["What is the trend in civilian casualties?"],
             },
         },
         "hazards_and_vulnerabilities": {
             "hazards": [{"description": "Seasonal flooding", "source_report_ids": ["r4"]}],
             "vulnerabilities": [{"description": "Weak health system", "source_report_ids": []}],
+            "completeness": 0.5,
+            "questions_not_answered": ["Which pre-crisis vulnerabilities dominate?"],
         },
         "displacement": {
             "push_factors": [{"description": "Conflict", "source_report_ids": ["r5"]}],
             "return_intention": [],
+            "questions_not_answered": ["What drives return decisions?"],
+        },
+        "humanitarian_access": {
+            "barriers": [
+                {"description": "Checkpoints delay aid convoys", "source_report_ids": ["r7"]},
+            ],
+            "constraints": [
+                {"description": "Seasonal flooding blocks secondary roads", "source_report_ids": ["r8"]},
+            ],
+            "completeness": 0.4,
+            "questions_not_answered": ["Where are bureaucratic impediments worst?"],
+            "contributing_sources": {"r7": ["Checkpoints delay aid convoys"]},
         },
         "sectors": {
             "health": {
@@ -48,6 +64,8 @@ def _full_payload() -> dict:
                 ],
                 "source_report_ids": ["r6"],
                 "evidence_scope": "sector",
+                "completeness": 0.7,
+                "questions_not_answered": ["Which facilities remain functional?"],
             },
         },
         "changes": {
@@ -90,11 +108,13 @@ def test_sector_keeps_prose_drops_enums_ids_ratings():
         "top_needs": ["Medicine"],
         "priority_interventions": ["Mobile clinics"],
         "information_coverage": [{"area": "Access"}],
+        "questions_not_answered": ["Which facilities remain functional?"],
     }
-    # No severity/evidence_scope/source_report_ids leaked to the translator.
+    # No severity/evidence_scope/source_report_ids/completeness leaked to the translator.
     assert "severity" not in health
     assert "evidence_scope" not in health
     assert "source_report_ids" not in health
+    assert "completeness" not in health
 
 
 def test_bullets_reduced_to_descriptions():
@@ -102,8 +122,38 @@ def test_bullets_reduced_to_descriptions():
     assert prose["hazards_and_vulnerabilities"]["hazards"] == [
         {"description": "Seasonal flooding"},
     ]
+    assert prose["hazards_and_vulnerabilities"]["questions_not_answered"] == [
+        "Which pre-crisis vulnerabilities dominate?",
+    ]
     assert prose["displacement"]["push_factors"] == [{"description": "Conflict"}]
     assert prose["displacement"]["return_intention"] == []
+    assert prose["displacement"]["questions_not_answered"] == [
+        "What drives return decisions?",
+    ]
+
+
+def test_humanitarian_access_projected():
+    prose = extract_situation_prose(_full_payload())
+    access = prose["humanitarian_access"]
+    assert access == {
+        "barriers": [{"description": "Checkpoints delay aid convoys"}],
+        "constraints": [{"description": "Seasonal flooding blocks secondary roads"}],
+        "questions_not_answered": ["Where are bureaucratic impediments worst?"],
+    }
+    assert "completeness" not in access
+    assert "contributing_sources" not in access
+    assert "source_report_ids" not in access
+
+
+def test_context_risks_include_questions_not_answered():
+    prose = extract_situation_prose(_full_payload())
+    security = prose["context_risks"]["security"]
+    assert security == {
+        "bullets": ["Armed clashes in the north."],
+        "questions_not_answered": ["What is the trend in civilian casualties?"],
+    }
+    assert "completeness" not in security
+    assert "source_report_ids" not in security
 
 
 def test_change_notes_are_prose_values_only():
@@ -116,5 +166,10 @@ def test_empty_payload_yields_stable_empty_shape():
     assert set(prose.keys()) == set(PROSE_COMPONENTS)
     assert prose["ai_summary"] == {"text": "", "key_findings": []}
     assert prose["context_risks"] == {}
+    assert prose["humanitarian_access"] == {
+        "barriers": [],
+        "constraints": [],
+        "questions_not_answered": [],
+    }
     assert prose["sectors"] == {}
     assert prose["changes"] == {"notes": {}}

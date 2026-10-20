@@ -84,10 +84,8 @@ logger = logging.getLogger(__name__)
 # the dashboard still gets fresh Datapoints + Sources.
 _SKIP_NARRATIVE_ENV = "SITUATION_SKIP_NARRATIVE"
 
-# Situation narrative/sector calls go through OpenRouter → DeepSeek V4 Flash
-# (structured JSON via openai_compat). Override model/base URL with
-# LLM_NARRATIVE_MODEL / LLM_NARRATIVE_BASE_URL; key from
-# LLM_NARRATIVE_API_KEY or OPENROUTER_API_KEY.
+# Situation narrative/sector calls are fixed to OpenRouter → DeepSeek Flash.
+# Only OPENROUTER_API_KEY is required (same key as Jev / evals).
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _SITUATION_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 
@@ -97,21 +95,16 @@ def _skip_narrative() -> bool:
 
 
 def make_situation_llm() -> LLMProvider:
-    """OpenRouter-hosted DeepSeek V4 Flash for situation LLM components."""
-    api_key = (
-        os.environ.get("OPENROUTER_API_KEY")
-    )
+    """OpenRouter-hosted DeepSeek Flash for situation LLM components."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "Missing OPENROUTER_API_KEY for "
-            "situation analysis LLM calls.",
+            "Missing OPENROUTER_API_KEY for situation analysis LLM calls.",
         )
     return OpenAICompatibleProvider(
         role="narrative",
-        model=(os.environ.get("LLM_NARRATIVE_MODEL") or _SITUATION_MODEL).strip(),
-        base_url=(
-            os.environ.get("LLM_NARRATIVE_BASE_URL") or _OPENROUTER_BASE_URL
-        ).strip(),
+        model=_SITUATION_MODEL,
+        base_url=_OPENROUTER_BASE_URL,
         api_key=api_key.strip(),
         require_parameters=True,
     )
@@ -600,29 +593,45 @@ def generate_and_upsert_for_frame(
                 scope_label, exc,
             )
 
+    def _ids_from_bullets(bullets: list[Any] | None) -> list[str]:
+        out: list[str] = []
+        for b in bullets or []:
+            out.extend(getattr(b, "source_report_ids", None) or [])
+        return out
+
+    context_source_ids: list[str] = []
+    if context_risks_component is not None:
+        for domain_name in type(context_risks_component).model_fields:
+            domain = getattr(context_risks_component, domain_name)
+            context_source_ids.extend(domain.source_report_ids)
+
+    hazards_source_ids: list[str] = []
+    if hazards_component is not None:
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.hazards))
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.vulnerabilities))
+
+    displacement_source_ids: list[str] = []
+    if displacement_component is not None:
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.push_factors))
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.return_intention))
+
+    ha_source_ids: list[str] = []
+    if humanitarian_access_component is not None:
+        ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.barriers))
+        ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.constraints))
+
     sector_source_ids: list[str] = []
     if sectors_component is not None:
         for sector_name in type(sectors_component).model_fields:
             sector = getattr(sectors_component, sector_name)
             sector_source_ids.extend(sector.source_report_ids)
 
-    ha_source_ids: list[str] = []
-    if humanitarian_access_component is not None:
-        if humanitarian_access_component.barriers:
-            ha_source_ids.extend(
-                humanitarian_access_component.barriers[0].source_report_ids,
-            )
-        elif humanitarian_access_component.constraints:
-            ha_source_ids.extend(
-                humanitarian_access_component.constraints[0].source_report_ids,
-            )
-
     all_source_ids: list[str] = list(dict.fromkeys([
         *deterministic_source_ids,
         *(ai_summary_component.source_report_ids if ai_summary_component else []),
-        *(context_risks_component.demographics.source_report_ids if context_risks_component else []),
-        *(hazards_component.hazards[0].source_report_ids if hazards_component and hazards_component.hazards else []),
-        *(displacement_component.push_factors[0].source_report_ids if displacement_component and displacement_component.push_factors else []),
+        *context_source_ids,
+        *hazards_source_ids,
+        *displacement_source_ids,
         *ha_source_ids,
         *sector_source_ids,
         *(scenarios_component.source_report_ids if scenarios_component else []),
