@@ -209,7 +209,11 @@ def build_gx_source_assets(source: GXSource) -> list:
             })
 
         context.add_output_metadata({"rows": len(rows)})
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        # Mixed int/None would infer float64, turning unknown severity into NaN:
+        # classify_signal rejects it and `_match` counts it as a known value.
+        df["severity"] = pd.Series([r["severity"] for r in rows], dtype=object)
+        return df
 
     # ══════════════════════════════════════════════════════════════════════
     # Reconcile: decide which rows in each supersession group survive, across

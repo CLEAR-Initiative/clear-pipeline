@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic_settings import BaseSettings
 
 
@@ -75,6 +77,30 @@ class Settings(BaseSettings):
     idmc_allowed_types: str = "Conflict,Disaster"
     idmc_source_name: str = "idmc"
     idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
+
+    # Sudan Witness (Centre for Information Resilience) — verified open-source
+    # evidence on a public ArcGIS feature layer, no auth. CIR republishes the
+    # whole layer (cadence unknown) and rows arrive weeks after their event
+    # date, so a poll fetches every row since the floor — only when the layer
+    # fingerprint (dataLastEditDate + row count) moved — and gx's content hash
+    # skips unchanged rows. No date watermark.
+    sudan_witness_source_name: str = "sudan_witness"
+    sudan_witness_layer_url: str = (
+        "https://services-eu1.arcgis.com/06WOSMGHsCnaFyMp/arcgis/rest/services/"
+        "SUW_Incidents/FeatureServer/0"
+    )
+    sudan_witness_page_size: int = 1000  # the layer's maxRecordCount
+    # D_Country values to keep. Rows with no country are always kept (they sit
+    # inside Sudan); the ~1% elsewhere (Chad, Ethiopia…) is RSF diplomacy and
+    # foreign logistics, which CIR's own public map hides too.
+    sudan_witness_countries: str = "Sudan"
+    # Min incident date (D_Verified_Date) ingested — in the query and client-side.
+    # Fixed floor, not a rolling window: lower it to backfill.
+    sudan_witness_min_incident_date: date = date(2026, 1, 1)
+    # Daily. CIR reloads seen Mon 2026-10-12 and 2026-10-19, both ~07:26 UTC; cadence unconfirmed.
+    sudan_witness_poll_interval_minutes: int = 24 * 60
+    # Forced full pull even when the layer fingerprint is unchanged (safety net).
+    sudan_witness_full_pull_max_age_hours: int = 7 * 24
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;

@@ -17,6 +17,7 @@ capability flags:
   │ gdacs      │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
+  │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
@@ -25,11 +26,12 @@ capability flags:
     (``MANUAL_SOURCE_NAME``) plus ``field_officer`` / ``partner`` / ``government``
     (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
     ``createManualSignal`` accepts.
+  † ``sudan_witness`` (``SudanWitnessConnector``).
 
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
-  ``POST /api/x/ingest``) or gx (``idmc``). The drain projects from the blob
+  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage.
   ``dtm`` is the exception: a bulletin can span many districts, so its signals
@@ -490,6 +492,40 @@ class IDMCConnector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sudan Witness — CIR's verified open-source evidence (downloaded by gx, drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class SudanWitnessConnector:
+    """Downloaded only by ``gx_pipeline`` (``SudanWitnessGXSource``), like IDMC.
+
+    Drained like any source: the district + type heuristic runs as-is, though
+    rows arrive weeks after their event date (cross-matching with current events
+    accepted). ``project`` reads the gx blob."""
+
+    source = settings.sudan_witness_source_name
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def parse(self, raw: bytes) -> dict:
+        return json.loads(raw)
+
+    def project(self, record: dict | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"sudan_witness signal {created['id']} has no rawS3Key")
+        attributes = record["raw"]["attributes"]
+        return SignalView(
+            external_id=record["suw_id"],
+            title=created.get("title") or attributes.get("C_Brief_Description") or "",
+            timestamp=created.get("publishedAt") or record.get("published_at") or "",
+            description=created.get("description"),
+            location_name=attributes.get("D_City") or _first_location_name(created),
+            url=created.get("url"),
+            lat=attributes.get("D_Latitude"),
+            lng=attributes.get("D_Longitude"),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # IOM DTM Flash Alerts — Sudan displacement narrative bulletins
 # ──────────────────────────────────────────────────────────────────────────────
 class DTMFlashAlertConnector:
@@ -668,6 +704,7 @@ CONNECTORS: list[SignalSource] = [
     GDACSConnector(),
     Darfur24Connector(),
     IDMCConnector(),
+    SudanWitnessConnector(),
     DTMFlashAlertConnector(),
     *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
