@@ -213,8 +213,37 @@ def test_build_registry_exposes_run_and_gate_gauges():
     assert reg.get_sample_value("dagster_asset_check_last_passed", gate) == 1
 
 
-def test_push_is_noop_without_url_and_swallows_errors(monkeypatch):
+def test_registry_uses_run_end_time_not_now():
+    reg = metrics.build_registry("j", True, 1.0, [], finished_at=123.0)
+    labels = {"job": "j", "service": "clear-context-pipeline"}
+    assert reg.get_sample_value("dagster_run_last_timestamp_seconds", labels) == 123.0
+
+
+def test_push_sends_job_and_registry_when_configured_and_nothing_when_not(monkeypatch):
+    calls = []
+    monkeypatch.setattr("prometheus_client.push_to_gateway", lambda *a, **k: calls.append((a, k)))
     monkeypatch.setattr(metrics.settings, "pushgateway_url", "")
-    metrics.push_run_metrics("j", True, 1.0)  # no URL: nothing happens
-    monkeypatch.setattr(metrics.settings, "pushgateway_url", "http://127.0.0.1:1")
-    metrics.push_run_metrics("j", True, 1.0)  # unreachable: logged, not raised
+    metrics.push_run_metrics("j", True, 1.0)
+    assert calls == []
+    monkeypatch.setattr(metrics.settings, "pushgateway_url", "http://pg:9091")
+    metrics.push_run_metrics("j", False, 2.0, finished_at=5.0)
+    (args, kwargs), = calls
+    assert args == ("http://pg:9091",) and kwargs["job"] == "j"
+    labels = {"job": "j", "service": "clear-context-pipeline"}
+    assert kwargs["registry"].get_sample_value("dagster_run_last_success", labels) == 0
+
+
+def test_push_failure_is_swallowed(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("down")
+
+    monkeypatch.setattr("prometheus_client.push_to_gateway", boom)
+    monkeypatch.setattr(metrics.settings, "pushgateway_url", "http://pg:9091")
+    metrics.push_run_metrics("j", True, 1.0)  # logged, not raised
+
+
+def test_older_success_does_not_replace_newer_failure():
+    newer = SimpleNamespace(dagster_run=SimpleNamespace(run_id="new"))
+    assert not observability_defs.is_latest_finished([newer], "old")
+    assert observability_defs.is_latest_finished([newer], "new")
+    assert observability_defs.is_latest_finished([], "any")

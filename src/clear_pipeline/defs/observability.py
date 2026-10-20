@@ -156,14 +156,38 @@ def check_outcomes(events) -> list[CheckOutcome]:
     return outcomes
 
 
+def is_latest_finished(latest_records, run_id: str) -> bool:
+    """True when `run_id` is the job's most recent finished run (or none is known).
+
+    The success and failure sensors have independent cursors, so an older
+    success can be evaluated after a newer failure was pushed. Pushing it would
+    replace the newer run's metrics; the newer run's own sensor tick covers it."""
+    return not latest_records or latest_records[0].dagster_run.run_id == run_id
+
+
 def _push_for_run(context: dg.RunStatusSensorContext, success: bool) -> None:
     run = context.dagster_run
+    if run.job_name:
+        # SUCCESS/FAILURE only: a newer cancelled run has no sensor to push it,
+        # so it must not suppress an older success.
+        latest = context.instance.get_run_records(
+            filters=dg.RunsFilter(
+                job_name=run.job_name,
+                statuses=[dg.DagsterRunStatus.SUCCESS, dg.DagsterRunStatus.FAILURE],
+            ),
+            limit=1,
+            order_by="update_timestamp",
+        )
+        if not is_latest_finished(latest, run.run_id):
+            return
     record = context.instance.get_run_record_by_id(run.run_id)
-    duration = None
-    if record and record.start_time and record.end_time:
-        duration = record.end_time - record.start_time
+    duration = finished_at = None
+    if record and record.end_time:
+        finished_at = record.end_time
+        if record.start_time:
+            duration = record.end_time - record.start_time
     events = context.instance.all_logs(run.run_id, of_type=dg.DagsterEventType.ASSET_CHECK_EVALUATION)
-    push_run_metrics(run.job_name or "unknown", success, duration, check_outcomes(events))
+    push_run_metrics(run.job_name or "unknown", success, duration, check_outcomes(events), finished_at)
 
 
 @dg.run_status_sensor(

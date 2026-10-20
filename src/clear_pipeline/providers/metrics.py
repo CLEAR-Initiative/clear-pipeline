@@ -25,8 +25,15 @@ class CheckOutcome:
     severity: str
 
 
-def build_registry(job: str, success: bool, duration_s: float | None, checks: Iterable[CheckOutcome]):
-    """Gauges for one finished run. Split from the push so it is testable."""
+def build_registry(
+    job: str,
+    success: bool,
+    duration_s: float | None,
+    checks: Iterable[CheckOutcome],
+    finished_at: float | None = None,
+):
+    """Gauges for one finished run. Split from the push so it is testable.
+    `finished_at` is the run's end time; falls back to now when unknown."""
     from prometheus_client import CollectorRegistry, Gauge
 
     reg = CollectorRegistry()
@@ -37,7 +44,7 @@ def build_registry(job: str, success: bool, duration_s: float | None, checks: It
     )
     Gauge("dagster_run_last_timestamp_seconds", "Unix time the last run finished", labels, registry=reg).labels(
         **base
-    ).set(time.time())
+    ).set(time.time() if finished_at is None else finished_at)
     if duration_s is not None:
         Gauge("dagster_run_last_duration_seconds", "Duration of the last run", labels, registry=reg).labels(
             **base
@@ -53,13 +60,19 @@ def build_registry(job: str, success: bool, duration_s: float | None, checks: It
     return reg
 
 
-def push_run_metrics(job: str, success: bool, duration_s: float | None, checks: Iterable[CheckOutcome] = ()) -> None:
+def push_run_metrics(
+    job: str,
+    success: bool,
+    duration_s: float | None,
+    checks: Iterable[CheckOutcome] = (),
+    finished_at: float | None = None,
+) -> None:
     url = (settings.pushgateway_url or "").strip()
     if not url:
         return
     try:
         from prometheus_client import push_to_gateway
 
-        push_to_gateway(url, job=job, registry=build_registry(job, success, duration_s, checks), timeout=10)
+        push_to_gateway(url, job=job, registry=build_registry(job, success, duration_s, checks, finished_at), timeout=10)
     except Exception:  # noqa: BLE001 — never let metrics fail a run
         logger.warning("[metrics] Pushgateway push failed for job %s", job, exc_info=True)
