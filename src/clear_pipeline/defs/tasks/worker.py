@@ -23,6 +23,7 @@ from typing import Any
 
 import dagster as dg
 
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.redis_lock import redis_lock
@@ -252,7 +253,7 @@ def drain_tasks(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 drain_tasks_job = dg.define_asset_job(
     name="drain_tasks_job",
     selection=[drain_tasks],
-    tags={"dagster/priority": str(_RUN_PRIORITY)},
+    tags=max_runtime_tags(3600, {"dagster/priority": str(_RUN_PRIORITY)}),
 )
 
 

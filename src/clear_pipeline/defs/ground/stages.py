@@ -31,6 +31,7 @@ from clear_pipeline.defs.ground.prompts import (
     build_hotline_enrich_prompt,
 )
 from clear_pipeline.defs.ground.schemas import HotlineEnrichment
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ground_messages_for_classification,
@@ -313,7 +314,9 @@ def ground_hotline_enrich(context: dg.AssetExecutionContext) -> dg.MaterializeRe
 # asset — nothing to be eager on, so this is sensor-only (same reason
 # `manual` signals need signals_drain_sensor instead of eager automation).
 ground_hotline_enrich_job = dg.define_asset_job(
-    name="ground_hotline_enrich_job", selection=[ground_hotline_enrich]
+    name="ground_hotline_enrich_job",
+    selection=[ground_hotline_enrich],
+    tags=max_runtime_tags(900),
 )
 ground_hotline_enrich_sensor = build_poll_sensor(
     name="ground_hotline_enrich_sensor",
