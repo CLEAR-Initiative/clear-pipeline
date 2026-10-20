@@ -171,10 +171,11 @@ class FakeLayer:
     """Answers the three request kinds the fetch makes: layer metadata, count,
     and paged feature queries. Ignores `where`; records every query."""
 
-    def __init__(self, features, page_size=2, edit_dates=None):
+    def __init__(self, features, page_size=2, edit_dates=None, floored_count=None):
         self.features = features
         self.page_size = page_size
         self.edit_dates = list(edit_dates or [])
+        self.floored_count = floored_count
         self.queries: list[dict] = []
 
     def __call__(self, url, **params):
@@ -183,6 +184,8 @@ class FakeLayer:
             edit = self.edit_dates.pop(0) if self.edit_dates else EDIT_DATE
             return {"editingInfo": {"dataLastEditDate": edit}}
         if params.get("returnCountOnly"):
+            if self.floored_count is not None and params.get("where", "1=1") != "1=1":
+                return {"count": self.floored_count}
             return {"count": len(self.features)}
         offset = int(params["resultOffset"])
         page = self.features[offset:offset + self.page_size]
@@ -214,13 +217,17 @@ def test_fetch_keeps_one_row_per_normalised_id():
         assert len(fetch_sudan_witness_records()) == 1
 
 
-def test_fetch_retries_when_the_layer_is_republished_mid_pull():
-    features = [_feature()]
-    layer = FakeLayer(features, edit_dates=[EDIT_DATE, EDIT_DATE + 1, EDIT_DATE + 1, EDIT_DATE + 1])
-    with patch.object(sudan_witness, "_get", layer), patch.object(sudan_witness.time, "sleep") as sleep:
-        records = fetch_sudan_witness_records()
-    assert len(records) == 1
-    sleep.assert_called_once()
+def test_fetch_raises_when_the_layer_is_republished_mid_pull():
+    layer = FakeLayer([_feature()], edit_dates=[EDIT_DATE, EDIT_DATE + 1])
+    with patch.object(sudan_witness, "_get", layer), pytest.raises(RuntimeError, match="republished"):
+        fetch_sudan_witness_records()
+
+
+def test_fetch_raises_when_the_pull_misses_rows_the_floored_count_promised():
+    # Whole-layer count matches the pull; only the floored count catches the gap.
+    layer = FakeLayer([_feature()], floored_count=2)
+    with patch.object(sudan_witness, "_get", layer), pytest.raises(RuntimeError, match="floored count says 2"):
+        fetch_sudan_witness_records()
 
 
 def test_fetch_raises_on_http_failure():
@@ -326,27 +333,26 @@ def test_fetch_skips_the_pull_when_the_layer_is_unchanged(fake_redis, caplog):
     assert "2026-10-12" in unchanged.getMessage()
 
 
-def test_fetch_gives_up_if_the_layer_keeps_changing(fake_redis, caplog):
-    since = datetime.now(UTC) - timedelta(hours=1)
-    churning = FakeLayer([_feature()], edit_dates=range(EDIT_DATE, EDIT_DATE + 20))
-    with patch.object(sudan_witness, "_redis", fake_redis), \
-         patch.object(sudan_witness, "_get", churning), patch.object(sudan_witness.time, "sleep"):
-        assert fetch_sudan_witness_records() == []
-        sudan_witness.set_last_synced(since)
-    assert any(r.levelname == "WARNING" and "kept changing" in r.getMessage() for r in caplog.records)
-    # No fingerprint committed: the next poll pulls even though the layer now holds still.
-    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", FakeLayer([_feature()])):
-        assert len(fetch_sudan_witness_records(since=since)) == 1
+_GROWN = [_feature(), _feature(Entry_Number="SUW7")]
 
 
-def test_a_failed_poll_leaves_the_watermark_and_fingerprint_untouched(fake_redis):
-    layer = FakeLayer([_feature()])
-    since = _synced_layer(fake_redis, layer)
+def _down(url, **params):
+    raise httpx.ConnectError("down")
+
+
+@pytest.mark.parametrize("layer, error", [
+    pytest.param(_down, httpx.ConnectError, id="http-failure"),
+    # Edit-date reads: fingerprint check, before the pull, after it.
+    pytest.param(FakeLayer(_GROWN, edit_dates=[EDIT_DATE + 1, EDIT_DATE + 1, EDIT_DATE + 2]),
+                 RuntimeError, id="republished-mid-pull"),
+    pytest.param(FakeLayer(_GROWN, floored_count=3), RuntimeError, id="short-pull"),
+])
+def test_a_failed_poll_leaves_the_watermark_and_fingerprint_untouched(fake_redis, layer, error):
+    since = _synced_layer(fake_redis, FakeLayer([_feature()]))
     stored = dict(fake_redis.store)
     with patch.object(sudan_witness, "_redis", fake_redis), \
-         patch.object(sudan_witness, "_get", FakeLayer([_feature(), _feature(Entry_Number="SUW7")])), \
-         patch.object(sudan_witness, "_pull_features", side_effect=httpx.ConnectError("down")), \
-         pytest.raises(httpx.ConnectError):
+         patch.object(sudan_witness, "_get", layer), \
+         pytest.raises(error):
         fetch_sudan_witness_records(since=since)
     assert fake_redis.store == stored
     with patch.object(sudan_witness, "_redis", fake_redis):
