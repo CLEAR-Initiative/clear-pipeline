@@ -193,6 +193,37 @@ class FakeSource:
         }
 
 
+class PartialSeverityFakeSource(FakeSource):
+    """r1 has no source severity (e.g. Sudan Witness with no recorded harm)."""
+
+    def to_silver_input(self, record, source_id):
+        return {**super().to_silver_input(record, source_id), "severity": None if record["id"] == "r1" else 3}
+
+
+def test_unknown_severity_stays_none_through_silver(tmp_path):
+    """A batch mixing int and None severities must not become a float64 column:
+    NaN fails SignalClassification and `_match` counts it as a known value."""
+    defs_list = build_gx_source_assets(PartialSeverityFakeSource())
+    assets = [d for d in defs_list if isinstance(d, dg.AssetsDefinition)]
+    upto_classify = [a for a in assets if any(k.to_user_string() in {
+        "fakesrc_bronze", "fakesrc_silver", "fakesrc_reconcile", "fakesrc_classify"} for k in a.keys)]
+
+    with (
+        patch("clear_pipeline.defs.gx_pipeline.factory.lake.s3_client", return_value=FakeS3()),
+        patch("clear_pipeline.defs.gx_pipeline.factory.settings.s3_bucket", "test-bucket"),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_warehouse", f"file://{tmp_path / 'warehouse'}"),
+        patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", f"sqlite:///{tmp_path / 'catalog.db'}"),
+        patch("clear_pipeline.defs.gx_pipeline.factory.classify_signal") as mock_classify,
+    ):
+        mock_classify.return_value.relevance = 0.9
+        mock_classify.return_value.type_level_2 = "conflict"
+        mock_classify.return_value.disaster_types = ["cv"]
+        assert dg.materialize(upto_classify).success
+
+    severities = {c.kwargs["title"]: c.kwargs["source_severity"] for c in mock_classify.call_args_list}
+    assert severities == {"Clash in Testville": None, "Clash near Testville": 3}
+
+
 def test_gold_writers_share_a_single_flight_pool():
     """`_reconcile`'s whole-group read-modify-write needs one in-flight run per
     source. The pool sits on the assets (not the job) so ad-hoc subset runs
