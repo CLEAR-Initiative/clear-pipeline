@@ -1572,8 +1572,8 @@ query LatestSignal {
 """
 
 GET_EVENTS = """
-query Events {
-  events {
+query Events($lastSignalSince: DateTime) {
+  events(lastSignalSince: $lastSignalSince) {
     id
     title
     description
@@ -1915,8 +1915,12 @@ def get_latest_signal_timestamp() -> str | None:
     return max(signals, key=lambda s: s["publishedAt"])["publishedAt"]
 
 
-def get_events() -> list[dict]:
-    result = _execute(GET_EVENTS)
+def get_events(last_signal_since: str | None = None) -> list[dict]:
+    """Active events. Pass ``last_signal_since`` (ISO-8601) to have clear-api
+    return ONLY events whose newest signal is at/after that instant — bounding
+    the fetch server-side instead of pulling the whole (growing) events table.
+    Omitted → the full feed (back-compat)."""
+    result = _execute(GET_EVENTS, {"lastSignalSince": last_signal_since})
     return result.get("events", [])
 
 
