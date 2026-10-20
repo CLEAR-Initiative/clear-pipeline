@@ -94,6 +94,36 @@ backoff. Otherwise the same Task would be re-claimed at once and lose every atte
 
 ## Learn more
 
+### Run-time caps and the orphaned-run reaper
+
+Runs are child processes of the `dagster-code` gRPC server. When that container is
+replaced while runs are in flight (Watchtower rolling a new image, a `--force-recreate`,
+a host reboot) the workers die without writing a failure event, the runs sit in
+`STARTED`, and each one holds a `max_concurrent_runs` slot until the daemon's 6 h
+`max_runtime_seconds` fails it. Four of those and the queue is dead (2026-10-20).
+
+Two guards, both in code so they ship with the image:
+
+- **`orphaned_run_reaper_sensor`** (`defs/orphaned_runs.py`, RUNNING, every 60 s) runs
+  inside the code-server container and fails any `STARTED` run whose worker started
+  before the container did. Those workers cannot exist any more; the failure event
+  frees the slot and pages via `run_failure_glitchtip_sensor`. Drains are idempotent,
+  so the poll sensors simply re-enqueue the work.
+- **Per-job `dagster/max_runtime` tags** (`defs/run_limits.py`) bound a worker that
+  hangs *inside* a live container. Caps are roughly 5–10× each job's observed p95:
+
+  | Job | Cap |
+  |---|---|
+  | `translate_job`, `*_ingest`, `location_metadata_usgs` | 30 min |
+  | `drain_analysis_requests_job`, `drain_analysis_automations_job`, `ground_hotline_enrich_job`, `ground_transcribe_job` | 15 min |
+  | `drain_tasks_job`, `*_gx` | 60 min |
+  | `location_metadata_daily`, `location_metadata_monthly` | 2 h |
+  | `classify_group_job` | 3 h |
+  | `reliefweb_weekly_*`, manual document ingest, evals | instance default (6 h) |
+
+  Runs launched by eager asset automation (`__ASSET_JOB`) carry no job tags and keep
+  the instance default; the reaper still covers them.
+
 To learn more about this template and Dagster in general:
 
 - [Dagster Documentation](https://docs.dagster.io/)

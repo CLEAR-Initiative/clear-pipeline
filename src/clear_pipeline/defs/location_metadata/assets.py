@@ -28,6 +28,7 @@ import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.providers import acaps, clear_api, hapi, iom_dtm, usgs
 
 # Load .env at import so env read at import time (the job's concurrency config
@@ -585,11 +586,13 @@ def usgs_earthquakes(
 location_metadata_daily_job = dg.define_asset_job(
     name="location_metadata_daily",
     selection=[location_pcode_index, *_HAPI_ASSETS, hapi_operational_presence],
+    tags=max_runtime_tags(7200),
 )
 
 location_metadata_monthly_job = dg.define_asset_job(
     name="location_metadata_monthly",
     selection=[location_pcode_index, iom_dtm_displacement, acaps_seasonal_calendar],
+    tags=max_runtime_tags(7200),
 )
 
 # HAPI updates land throughout the day; 04:00 UTC catches the prior day's
@@ -617,6 +620,7 @@ location_metadata_monthly_schedule = dg.ScheduleDefinition(
 location_metadata_usgs_job = dg.define_asset_job(
     name="location_metadata_usgs",
     selection=[location_pcode_index, usgs_earthquakes],
+    tags=max_runtime_tags(1800),
 )
 
 location_metadata_usgs_schedule = dg.ScheduleDefinition(

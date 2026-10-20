@@ -28,6 +28,7 @@ import dagster as dg
 import redis
 from botocore.exceptions import ClientError
 
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.connectors import (
     CONNECTORS,
@@ -702,7 +703,9 @@ def _clear_translation_rows(entity_type: str, entity_id: str, locales: set[str])
 # sits on "queued" until it runs. Concurrent runs (this + the eager trigger)
 # are safe — translate_and_upsert's per-entity Redis lock returns LOCKED and
 # leaves the rows for the next tick.
-translate_job = dg.define_asset_job(name="translate_job", selection=[translate])
+translate_job = dg.define_asset_job(
+    name="translate_job", selection=[translate], tags=max_runtime_tags(1800)
+)
 translate_drain_sensor = build_poll_sensor(
     name="translate_drain_sensor",
     job=translate_job,
@@ -718,7 +721,9 @@ translate_drain_sensor = build_poll_sensor(
 # RUNNING (settings.signals_drain_sensor_running): stopped, those signals sit NEW
 # until some polled source happens to ingest. Concurrent runs are safe: the
 # per-signal Redis lock + NEW→PROCESSED status markers make the drain idempotent.
-classify_group_job = dg.define_asset_job(name="classify_group_job", selection=[classify_group])
+classify_group_job = dg.define_asset_job(
+    name="classify_group_job", selection=[classify_group], tags=max_runtime_tags(10800)
+)
 signals_drain_sensor = build_poll_sensor(
     name="signals_drain_sensor",
     job=classify_group_job,

@@ -25,6 +25,7 @@ from clear_pipeline.defs.ground.attempts import (
     parked_ids,
     record_failure,
 )
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ground_messages_for_classification,
@@ -207,7 +208,9 @@ def ground_transcribe(context: dg.AssetExecutionContext) -> dg.MaterializeResult
 # Same reasoning as ground_hotline_enrich_sensor: hotline messages arrive
 # via a webhook route, not a polled ingest asset, so this is sensor-only.
 ground_transcribe_job = dg.define_asset_job(
-    name="ground_transcribe_job", selection=[ground_transcribe]
+    name="ground_transcribe_job",
+    selection=[ground_transcribe],
+    tags=max_runtime_tags(900),
 )
 ground_transcribe_sensor = build_poll_sensor(
     name="ground_transcribe_sensor",
