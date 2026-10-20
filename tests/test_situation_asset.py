@@ -29,6 +29,7 @@ from clear_pipeline.defs.situation.schemas import (
     ContextRisks,
     AISummary,
     DisplacementNarrative,
+    HumanitarianAccess,
     Scenarios,
     Sectors,
 )
@@ -86,6 +87,11 @@ def _patch_narrative_generators(stub_source_ids: list[str] | None = None):
             patch(
                 "clear_pipeline.defs.situation.generate.generate_displacement_narrative",
                 return_value=DisplacementNarrative(),
+            ),
+        "generate_humanitarian_access":
+            patch(
+                "clear_pipeline.defs.situation.generate.generate_humanitarian_access",
+                return_value=HumanitarianAccess(),
             ),
         "generate_all_sectors":
             patch(
@@ -164,6 +170,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_context_risks"],
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
+            patches["generate_humanitarian_access"],
             patches["generate_all_sectors"],
             patches["generate_scenarios"],
             patches["get_analysis"],
@@ -212,6 +219,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_context_risks"],
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
+            patches["generate_humanitarian_access"],
             patches["generate_all_sectors"],
             patches["generate_scenarios"],
             patches["get_analysis"],
@@ -269,8 +277,16 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value=DisplacementNarrative(),
             ),
             patch(
+                "clear_pipeline.defs.situation.generate.generate_humanitarian_access",
+                return_value=HumanitarianAccess(),
+            ),
+            patch(
                 "clear_pipeline.defs.situation.generate.generate_all_sectors",
                 return_value=Sectors(),
+            ),
+            patch(
+                "clear_pipeline.defs.situation.generate.generate_scenarios",
+                return_value=Scenarios(),
             ),
             patch(
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
@@ -340,6 +356,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_context_risks"],
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
+            patches["generate_humanitarian_access"],
             patches["generate_all_sectors"],
             patches["generate_scenarios"],
             patches["get_analysis"],
@@ -404,7 +421,7 @@ class TestGenerateAndUpsertForCountryYear:
         assert payload["ai_summary"]["text"] == ""
         assert payload["hazards_and_vulnerabilities"]["hazards"] == []
 
-    def test_happy_path_ships_all_eight_components_with_dedupe_source_ids(self):
+    def test_happy_path_ships_all_components_with_dedupe_source_ids(self):
         # Full flow: datapoints from aggregated, narrative from stubs,
         # sources chronologically ordered, source_report_ids union'd
         # across everything without duplicates.
@@ -443,6 +460,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_context_risks"],
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
+            patches["generate_humanitarian_access"],
             patches["generate_all_sectors"],
             patches["generate_scenarios"],
             patches["get_analysis"],
@@ -456,14 +474,14 @@ class TestGenerateAndUpsertForCountryYear:
         mock_upsert.assert_called_once()
         kwargs = mock_upsert.call_args.kwargs
 
-        # 1. All 8 component keys present in payload. `changes` is always
+        # 1. All component keys present in payload. `changes` is always
         # present but stays empty here: clear_api is mocked out, so the
         # comparison lookup finds nothing to diff against.
         payload = kwargs["data"]
         assert set(payload.keys()) == {
             "datapoints", "ai_summary", "context_risks",
-            "hazards_and_vulnerabilities", "displacement", "sectors", "sources",
-            "changes", "scenarios",
+            "hazards_and_vulnerabilities", "displacement", "humanitarian_access",
+            "sectors", "sources", "changes", "scenarios",
         }
 
         # 2. Datapoints hoisted correctly.
@@ -516,6 +534,7 @@ class TestGenerateAndUpsertForCountryYear:
             patches["generate_context_risks"],
             patches["generate_hazards_and_vulnerabilities"],
             patches["generate_displacement_narrative"],
+            patches["generate_humanitarian_access"],
             patches["generate_all_sectors"],
             patches["generate_scenarios"],
             patches["get_analysis"],

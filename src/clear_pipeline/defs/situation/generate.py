@@ -17,7 +17,7 @@ calendar year. This asset:
   5. Upserts one row per country via `upsertSituationAnalysis`
      (bitemporal supersede + insert on the clear-api side).
 
-Cost: ~10 LLM calls per country-year (4 narrative + 6 sector). Runs
+Cost: ~15 LLM calls per country-year (5 narrative + 10 sector). Runs
 downstream of `reliefweb_weekly_datapoint_aggregations` so the numbers
 reflect this week's freshly-recomputed aggregates, and of
 `reliefweb_weekly_knowledgebase_upsert` so the narrative is grounded in
@@ -39,6 +39,7 @@ from clear_pipeline.defs.situation.narrative import (
     generate_context_risks,
     generate_displacement_narrative,
     generate_hazards_and_vulnerabilities,
+    generate_humanitarian_access,
     generate_scenarios,
 )
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
@@ -343,6 +344,7 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
 _CR_DOMAINS = (
     "demographics", "political", "economy", "socio_culture",
     "security", "legal_policy", "infrastructure", "environment",
+    "humanitarian_coordination",
 )
 _SECTOR_CONTENT_FIELDS = (
     "impact", "humanitarian_conditions", "vulnerable_sections",
@@ -352,7 +354,8 @@ _SECTOR_CONTENT_FIELDS = (
 
 def _log_component_summary(
     log, country_name: str, period_label: str, *,
-    ai_summary, context_risks, hazards, displacement, sectors,
+    ai_summary, context_risks, hazards, displacement, humanitarian_access,
+    sectors,
 ) -> bool:
     """Emit a single INFO line stating which narrative/sector components ended up
     populated vs empty — the fast signal for an all-null generation run (the exact
@@ -367,6 +370,10 @@ def _log_component_summary(
     ))
     hz = bool(hazards and (hazards.hazards or hazards.vulnerabilities))
     dp = bool(displacement and (displacement.push_factors or displacement.return_intention))
+    ha = bool(
+        humanitarian_access
+        and (humanitarian_access.barriers or humanitarian_access.constraints)
+    )
     sec_total = sec_pop = 0
     if sectors is not None:
         for name in type(sectors).model_fields:
@@ -376,15 +383,16 @@ def _log_component_summary(
             sec_total += 1
             if s.severity is not None or any(getattr(s, f, None) for f in _SECTOR_CONTENT_FIELDS):
                 sec_pop += 1
-    all_empty = not (ai or cr or hz or dp or sec_pop)
+    all_empty = not (ai or cr or hz or dp or ha or sec_pop)
     log.log(
         logging.WARNING if all_empty else logging.INFO,
         "[situation] %s (%s) component summary%s: ai_summary=%s context_risks=%s "
-        "hazards=%s displacement=%s sectors=%d/%d",
+        "hazards=%s displacement=%s humanitarian_access=%s sectors=%d/%d",
         country_name, period_label,
         " — ALL EMPTY (likely RAG returned no hits; check clear-api EMBEDDING_* + logs)" if all_empty else "",
         "ok" if ai else "empty", "ok" if cr else "empty",
-        "ok" if hz else "empty", "ok" if dp else "empty", sec_pop, sec_total,
+        "ok" if hz else "empty", "ok" if dp else "empty",
+        "ok" if ha else "empty", sec_pop, sec_total,
     )
     return all_empty
 
@@ -447,6 +455,7 @@ def generate_and_upsert_for_frame(
         context_risks_component = None
         hazards_component = None
         displacement_component = None
+        humanitarian_access_component = None
         sectors_component = None
         scenarios_component = None
         generated_by_model = f"deterministic:{SCHEMA_VERSION}"
@@ -472,6 +481,10 @@ def generate_and_upsert_for_frame(
             llm, country_name=scope_label, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
         )
+        humanitarian_access_component = generate_humanitarian_access(
+            llm, country_name=scope_label, period_label=period_label,
+            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
+        )
         sectors_component = generate_all_sectors(
             llm, country_name=scope_label, period_label=period_label,
             aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
@@ -490,6 +503,7 @@ def generate_and_upsert_for_frame(
             context_risks=context_risks_component,
             hazards=hazards_component,
             displacement=displacement_component,
+            humanitarian_access=humanitarian_access_component,
             sectors=sectors_component,
         )
 
@@ -519,6 +533,8 @@ def generate_and_upsert_for_frame(
         payload_kwargs["hazards_and_vulnerabilities"] = hazards_component
     if displacement_component is not None:
         payload_kwargs["displacement"] = displacement_component
+    if humanitarian_access_component is not None:
+        payload_kwargs["humanitarian_access"] = humanitarian_access_component
     if sectors_component is not None:
         payload_kwargs["sectors"] = sectors_component
     if scenarios_component is not None:
@@ -557,12 +573,20 @@ def generate_and_upsert_for_frame(
 
     sector_source_ids: list[str] = []
     if sectors_component is not None:
-        for sector_name in (
-            "education", "food_security", "health",
-            "shelter", "wash", "protection",
-        ):
+        for sector_name in type(sectors_component).model_fields:
             sector = getattr(sectors_component, sector_name)
             sector_source_ids.extend(sector.source_report_ids)
+
+    ha_source_ids: list[str] = []
+    if humanitarian_access_component is not None:
+        if humanitarian_access_component.barriers:
+            ha_source_ids.extend(
+                humanitarian_access_component.barriers[0].source_report_ids,
+            )
+        elif humanitarian_access_component.constraints:
+            ha_source_ids.extend(
+                humanitarian_access_component.constraints[0].source_report_ids,
+            )
 
     all_source_ids: list[str] = list(dict.fromkeys([
         *deterministic_source_ids,
@@ -570,6 +594,7 @@ def generate_and_upsert_for_frame(
         *(context_risks_component.demographics.source_report_ids if context_risks_component else []),
         *(hazards_component.hazards[0].source_report_ids if hazards_component and hazards_component.hazards else []),
         *(displacement_component.push_factors[0].source_report_ids if displacement_component and displacement_component.push_factors else []),
+        *ha_source_ids,
         *sector_source_ids,
         *(scenarios_component.source_report_ids if scenarios_component else []),
     ]))

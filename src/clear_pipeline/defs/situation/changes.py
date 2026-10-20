@@ -21,6 +21,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from clear_pipeline.defs.situation.questions import (
+    CONTEXT_DOMAIN_KEYS,
+    SECTOR_SCHEMA_KEYS,
+)
 from clear_pipeline.defs.situation.schemas import SituationChanges
 from clear_pipeline.providers.llm import LLMProvider
 
@@ -28,15 +32,10 @@ logger = logging.getLogger(__name__)
 
 # Section keys the dashboard renders change-strips under. The LLM is given
 # this exact set and may use only these; anything else is dropped.
-_CONTEXT_DOMAINS = (
-    "demographics", "political", "economy", "socio_culture",
-    "security", "legal_policy", "infrastructure", "environment",
-)
-_SECTORS = ("education", "food_security", "health", "shelter", "wash", "protection")
 _VALID_SECTIONS = frozenset(
-    {"summary", "hazards", "displacement"}
-    | {f"context_risks.{d}" for d in _CONTEXT_DOMAINS}
-    | {f"sectors.{s}" for s in _SECTORS}
+    {"summary", "hazards", "displacement", "humanitarian_access"}
+    | {f"context_risks.{d}" for d in CONTEXT_DOMAIN_KEYS}
+    | {f"sectors.{s}" for s in SECTOR_SCHEMA_KEYS}
 )
 
 
@@ -82,7 +81,7 @@ def _digest(payload: dict[str, Any]) -> dict[str, str]:
     out["summary"] = (json.dumps(figures) + " " + summary[:600]).strip()
 
     risks = payload.get("context_risks") or {}
-    for d in _CONTEXT_DOMAINS:
+    for d in CONTEXT_DOMAIN_KEYS:
         bullets = (risks.get(d) or {}).get("bullets") or []
         if bullets:
             out[f"context_risks.{d}"] = " | ".join(bullets)
@@ -99,8 +98,17 @@ def _digest(payload: dict[str, Any]) -> dict[str, str]:
     if push or ret:
         out["displacement"] = "PUSH: " + " | ".join(push) + " RETURN: " + " | ".join(ret)
 
+    access = payload.get("humanitarian_access") or {}
+    barriers = [b.get("description", "") for b in access.get("barriers") or []]
+    constraints = [b.get("description", "") for b in access.get("constraints") or []]
+    if barriers or constraints:
+        out["humanitarian_access"] = (
+            "BARRIERS: " + " | ".join(barriers)
+            + " CONSTRAINTS: " + " | ".join(constraints)
+        )
+
     sectors = payload.get("sectors") or {}
-    for s in _SECTORS:
+    for s in SECTOR_SCHEMA_KEYS:
         blk = sectors.get(s) or {}
         needs = blk.get("top_needs") or []
         sev = blk.get("severity")

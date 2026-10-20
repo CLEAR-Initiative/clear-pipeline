@@ -49,6 +49,8 @@ def _fake_sector_llm_output(severity: str = "high") -> _SectorLLM:
             _InformationCoverageAreaLLM(area="Coverage area A", rating_out_of_10=7),
             _InformationCoverageAreaLLM(area="Coverage area B", rating_out_of_10=4),
         ],
+        completeness=0.75,
+        questions_not_answered=["learning outcomes for displaced children"],
     )
 
 
@@ -77,15 +79,18 @@ class TestGenerateOneSector:
         assert result.severity == "high"
         assert result.top_needs == ["Need 1", "Need 2"]
         assert result.source_report_ids == ["r-a", "r-b"]
+        assert result.completeness == 0.75
+        assert result.questions_not_answered == ["learning outcomes for displaced children"]
         # `report_count` on every coverage area = length of the RAG
         # contribution list (2 in this test) — deterministic, not
         # emitted by the LLM.
         assert all(area.report_count == 2 for area in result.information_coverage)
 
-    def test_scoped_rag_uses_need_sectors_filter(self):
-        # First arg is the sector-scoped search: must pass the
-        # `needSectors` filter with the DISPLAY name (matches the
-        # extractor's taxonomy in knowledgebase.needSectors).
+    def test_scoped_rag_uses_need_sectors_filter_and_analysis_question(self):
+        # Sector-scoped search: `needSectors` filter with the DISPLAY name,
+        # and the CSV analysis question as the query text.
+        from clear_pipeline.defs.situation.questions import sector_question_for
+
         rag_call_kwargs = []
 
         def capture(**kwargs):
@@ -111,6 +116,12 @@ class TestGenerateOneSector:
         # hits > 0).
         assert len(rag_call_kwargs) == 1
         assert rag_call_kwargs[0]["filters"] == {"needSectors": ["Food Security"]}
+        q = sector_question_for("food_security")
+        assert q is not None
+        assert rag_call_kwargs[0]["query"] == f"Sudan {q.question}"
+        user = llm.complete_structured.call_args.kwargs["user"]
+        assert "QUESTION (Food Security)" in user
+        assert q.question in user
 
     def test_falls_back_to_unfiltered_when_sector_scoped_returns_nothing(self):
         # Sector-scoped search comes back empty → we retry with no
@@ -186,12 +197,12 @@ class TestGenerateOneSector:
 
 
 # ────────────────────────────────────────────────────────────────────
-# generate_all_sectors — 6-sector orchestrator
+# generate_all_sectors — first-level sector orchestrator
 # ────────────────────────────────────────────────────────────────────
 
 
 class TestGenerateAllSectors:
-    def test_ships_all_six_sectors_in_stable_order(self):
+    def test_ships_all_sectors_in_stable_order(self):
         # Every sector present in the output, keys match the fixed set.
         with patch(
             "clear_pipeline.defs.situation.sectors.fetch_rag_context",
@@ -204,28 +215,23 @@ class TestGenerateAllSectors:
                 aggregated={}, cache_key="k",
             )
         assert isinstance(result, Sectors)
-        # All six sectors accessible; dashboard tab layout stability.
+        # All sectors accessible; dashboard tab layout stability.
         for sector_key, _ in _SECTOR_KEYS:
             sector = getattr(result, sector_key)
             assert sector.severity == "high"
             assert sector.top_needs == ["Need 1", "Need 2"]
 
-    def test_one_bad_sector_isolates_from_the_other_five(self):
-        # Simulate the health sector failing. The other five should
-        # still ship populated. This is the per-sector isolation
-        # invariant the doc §5.4 promises for Phase D.
+    def test_one_bad_sector_isolates_from_the_others(self):
+        # Simulate the health sector failing. The others should still
+        # ship populated. This is the per-sector isolation invariant.
         def rag_side(**_kwargs):
-            # Health search returns hits (so we exercise the LLM
-            # path); other sectors also return hits.
             return _fake_rag_context(hits=2)
 
         def llm_side(**kwargs):
-            # Route by the schema class + the country prompt content
-            # can't easily inspect the sector name, so we key off
-            # attempts and fail the 3rd (Health, per _SECTOR_KEYS order).
+            # Key off attempts and fail Health (index 3 in _SECTOR_KEYS).
             attempt = llm_call_counter[0]
             llm_call_counter[0] += 1
-            if attempt == 2:  # 3rd sector (0-indexed) is Health
+            if attempt == 3:
                 raise RuntimeError("simulated Health LLM failure")
             return _fake_sector_llm_output()
 
@@ -240,26 +246,32 @@ class TestGenerateAllSectors:
                 llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
-        # Health is the empty default; the other five have the fake output.
+        # Health is the empty default; the other sectors have the fake output.
         assert result.health.severity is None
+        assert result.agriculture.severity == "high"
         assert result.education.severity == "high"
         assert result.food_security.severity == "high"
+        assert result.livelihoods.severity == "high"
+        assert result.logistics.severity == "high"
+        assert result.nutrition.severity == "high"
         assert result.shelter.severity == "high"
         assert result.wash.severity == "high"
         assert result.protection.severity == "high"
 
-    def test_sector_key_taxonomy_covers_the_six_saf_sectors(self):
+    def test_sector_key_taxonomy_covers_all_first_level_sectors(self):
         # Regression guard: adding a sector requires updating
         # _SECTOR_KEYS AND the Sectors pydantic model — this test
         # catches a mismatch between the two.
         keys = {k for k, _ in _SECTOR_KEYS}
         assert keys == {
-            "education", "food_security", "health",
-            "shelter", "wash", "protection",
+            "agriculture", "education", "food_security", "health",
+            "livelihoods", "logistics", "nutrition", "protection",
+            "shelter", "wash",
         }
         # Every key must be a valid Sectors field.
         for key in keys:
             assert hasattr(Sectors(), key)
+        assert set(Sectors.model_fields) == keys
 
 
 if __name__ == "__main__":

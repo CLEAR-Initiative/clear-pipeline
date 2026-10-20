@@ -28,13 +28,28 @@ from pydantic import BaseModel, Field
 # v4: adds the forward-looking `scenarios` component (ADR-0007 §4, unified
 # analysis) — folded in from the crisis path so a "crisis overview" analysis
 # carries the same outlook.
-SCHEMA_VERSION = "v4"
+# v5: question-guided generation — pillar/sector blocks carry `completeness`
+# (0–1) and `questions_not_answered` so the analysis answer stays in the
+# existing fields while exposing coverage against the evaluation framework.
+SCHEMA_VERSION = "v5"
 
 Severity = Literal["low", "medium", "high", "critical"]
 
-# NRC SAF sectors - same taxonomy the datapoint schema uses.
+# Situation-analysis sectors — extends the six NRC SAF tags used by the
+# datapoint extractor with additional first-level framework sectors from
+# the evaluation CSV. Off-taxonomy KB tags still fall back to unfiltered
+# RAG when sector-scoped search returns nothing.
 SafSector = Literal[
-    "education", "food_security", "health", "shelter", "wash", "protection",
+    "agriculture",
+    "education",
+    "food_security",
+    "health",
+    "livelihoods",
+    "logistics",
+    "nutrition",
+    "protection",
+    "shelter",
+    "wash",
 ]
 
 
@@ -49,6 +64,21 @@ class SourcedBullet(BaseModel):
     """One bulleted claim + the reports it came from."""
     description: str
     source_report_ids: list[str] = Field(default_factory=list)
+
+
+class QuestionCoverage(BaseModel):
+    """How completely a CSV analysis question was answered from evidence."""
+    completeness: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    questions_not_answered: list[str] = Field(default_factory=list)
+
+
+class CitationEnvelope(BaseModel):
+    """Component-level citation provenance (coarse union + per-line map)."""
+    source_report_ids: list[str] = Field(default_factory=list)
+    # report_id -> generated lines that report contributed to (v2). Empty when
+    # the model emitted no usable [Rn] markers — dashboard falls back to
+    # source_report_ids then.
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -156,7 +186,7 @@ class Datapoints(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
-class AISummary(BaseModel):
+class AISummary(CitationEnvelope):
     """Executive summary (3–4 sentences) plus key findings. Empty string means
     the generator failed or was skipped; the dashboard renders an empty state
     rather than a missing key."""
@@ -164,11 +194,6 @@ class AISummary(BaseModel):
     # "Subject: finding" bullets, each with its own resolved sources. Additive:
     # rows generated before this field simply lack it.
     key_findings: list[SourcedBullet] = Field(default_factory=list)
-    source_report_ids: list[str] = Field(default_factory=list)
-    # report_id -> the generated sentences that report contributed to, resolved
-    # from the LLM's inline [Rn] citations (v2). Empty when the model emitted no
-    # usable markers — the dashboard falls back to source_report_ids then.
-    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -176,15 +201,12 @@ class AISummary(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
-class RiskDomain(BaseModel):
+class RiskDomain(QuestionCoverage, CitationEnvelope):
     bullets: list[str] = Field(default_factory=list)
-    source_report_ids: list[str] = Field(default_factory=list)
-    # report_id -> the bullets that report contributed to (v2). See AISummary.
-    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ContextRisks(BaseModel):
-    """Eight fixed sub-domains, all populated by one generator call and
+    """Nine fixed sub-domains, all populated by one generator call and
     therefore sharing one `source_report_ids` set."""
     demographics: RiskDomain = Field(default_factory=RiskDomain)
     political: RiskDomain = Field(default_factory=RiskDomain)
@@ -194,6 +216,7 @@ class ContextRisks(BaseModel):
     legal_policy: RiskDomain = Field(default_factory=RiskDomain)
     infrastructure: RiskDomain = Field(default_factory=RiskDomain)
     environment: RiskDomain = Field(default_factory=RiskDomain)
+    humanitarian_coordination: RiskDomain = Field(default_factory=RiskDomain)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -201,7 +224,7 @@ class ContextRisks(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
-class HazardsAndVulnerabilities(BaseModel):
+class HazardsAndVulnerabilities(QuestionCoverage):
     hazards: list[SourcedBullet] = Field(default_factory=list)
     vulnerabilities: list[SourcedBullet] = Field(default_factory=list)
     # report_id -> the bullets (hazards + vulnerabilities) that report
@@ -214,7 +237,7 @@ class HazardsAndVulnerabilities(BaseModel):
 # ────────────────────────────────────────────────────────────────────
 
 
-class DisplacementNarrative(BaseModel):
+class DisplacementNarrative(QuestionCoverage):
     push_factors: list[SourcedBullet] = Field(default_factory=list)
     return_intention: list[SourcedBullet] = Field(default_factory=list)
     # report_id -> the bullets (push_factors + return_intention) that report
@@ -223,7 +246,20 @@ class DisplacementNarrative(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 6 - Sector analyses (LLM, one call per SAF sector)
+# Component 5b - Humanitarian access (LLM, RAG-grounded)
+# ────────────────────────────────────────────────────────────────────
+
+
+class HumanitarianAccess(QuestionCoverage):
+    """Situation-analysis pillar: barriers for responders and affected
+    people, plus physical / seasonal / operational constraints."""
+    barriers: list[SourcedBullet] = Field(default_factory=list)
+    constraints: list[SourcedBullet] = Field(default_factory=list)
+    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Component 6 - Sector analyses (LLM, one call per sector)
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -237,10 +273,10 @@ class InformationCoverageArea(BaseModel):
     report_count: int = 0
 
 
-class SectorAnalysis(BaseModel):
-    """Per-SAF-sector analysis block. Empty defaults keep the shape
-    stable when a sector's generator fails - failure is isolated per
-    sector, so one erroring leaves the other five intact."""
+class SectorAnalysis(QuestionCoverage, CitationEnvelope):
+    """Per-sector analysis block. Empty defaults keep the shape stable
+    when a sector's generator fails - failure is isolated per sector,
+    so one erroring leaves the others intact."""
     severity: Optional[Severity] = None
     impact: list[str] = Field(default_factory=list)
     humanitarian_conditions: list[str] = Field(default_factory=list)
@@ -248,10 +284,6 @@ class SectorAnalysis(BaseModel):
     top_needs: list[str] = Field(default_factory=list)
     priority_interventions: list[str] = Field(default_factory=list)
     information_coverage: list[InformationCoverageArea] = Field(default_factory=list)
-    source_report_ids: list[str] = Field(default_factory=list)
-    # report_id -> the lines (across impact / conditions / needs / interventions)
-    # that report contributed to (v2). See AISummary.
-    contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
     # Provenance of the analysis. 'sector' = built from sector-tagged
     # evidence; 'fallback' = the sector-scoped search was empty and an
     # unfiltered search supplied off-sector evidence, so the grade is an
@@ -260,15 +292,19 @@ class SectorAnalysis(BaseModel):
 
 
 class Sectors(BaseModel):
-    """Fixed set of six SAF sectors - order preserved for the dashboard
-    tab layout. Every sector's block is present even when empty so
-    the UI doesn't need null-guards."""
+    """Fixed set of first-level sectors - order preserved for the
+    dashboard tab layout. Every sector's block is present even when
+    empty so the UI doesn't need null-guards."""
+    agriculture: SectorAnalysis = Field(default_factory=SectorAnalysis)
     education: SectorAnalysis = Field(default_factory=SectorAnalysis)
     food_security: SectorAnalysis = Field(default_factory=SectorAnalysis)
     health: SectorAnalysis = Field(default_factory=SectorAnalysis)
+    livelihoods: SectorAnalysis = Field(default_factory=SectorAnalysis)
+    logistics: SectorAnalysis = Field(default_factory=SectorAnalysis)
+    nutrition: SectorAnalysis = Field(default_factory=SectorAnalysis)
+    protection: SectorAnalysis = Field(default_factory=SectorAnalysis)
     shelter: SectorAnalysis = Field(default_factory=SectorAnalysis)
     wash: SectorAnalysis = Field(default_factory=SectorAnalysis)
-    protection: SectorAnalysis = Field(default_factory=SectorAnalysis)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -314,7 +350,7 @@ class SituationChanges(BaseModel):
     nothing to compare against or nothing material changed. Keys are the
     section paths the dashboard renders strips under: "summary",
     "context_risks.<domain>", "hazards", "displacement",
-    "sectors.<sector>".
+    "humanitarian_access", "sectors.<sector>".
 
     `basis` says what the notes actually mean, and the dashboard should
     label them accordingly rather than assuming:
@@ -346,6 +382,7 @@ class SituationAnalysisPayload(BaseModel):
         default_factory=HazardsAndVulnerabilities,
     )
     displacement: DisplacementNarrative = Field(default_factory=DisplacementNarrative)
+    humanitarian_access: HumanitarianAccess = Field(default_factory=HumanitarianAccess)
     sectors: Sectors = Field(default_factory=Sectors)
     sources: Sources = Field(default_factory=Sources)
     changes: SituationChanges = Field(default_factory=SituationChanges)
