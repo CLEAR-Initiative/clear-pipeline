@@ -247,3 +247,35 @@ def test_older_success_does_not_replace_newer_failure():
     assert not observability_defs.is_latest_finished([newer], "old")
     assert observability_defs.is_latest_finished([newer], "new")
     assert observability_defs.is_latest_finished([], "any")
+
+
+def test_oldest_run_age_is_the_longest_in_progress_run_or_zero():
+    records = [_record("a", started_min_ago=5), _record("b", started_min_ago=90), _record("c", starting_min_ago=1)]
+    assert observability_defs.oldest_run_age_s(records, NOW) == 90 * 60
+    assert observability_defs.oldest_run_age_s([], NOW) == 0.0
+
+
+def test_heartbeat_registry_has_liveness_gauges():
+    reg = metrics.build_heartbeat_registry(2, 600.0, now=99.0)
+    labels = {"service": "clear-context-pipeline"}
+    assert reg.get_sample_value("dagster_heartbeat_timestamp_seconds", labels) == 99.0
+    assert reg.get_sample_value("dagster_running_runs", labels) == 2
+    assert reg.get_sample_value("dagster_oldest_running_run_age_seconds", labels) == 600.0
+
+
+def test_heartbeat_pushes_under_its_own_job(monkeypatch):
+    calls = []
+    monkeypatch.setattr("prometheus_client.push_to_gateway", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(metrics.settings, "pushgateway_url", "http://pg:9091")
+    metrics.push_heartbeat(0, 0.0)
+    (args, kwargs), = calls
+    assert kwargs["job"] == "dagster_heartbeat"
+
+
+def test_stuck_run_sensor_pushes_a_heartbeat_every_tick(monkeypatch):
+    beats = []
+    monkeypatch.setattr(observability_defs, "push_heartbeat", lambda running, age: beats.append((running, age)))
+    instance = dg.DagsterInstance.ephemeral()
+    ctx = dg.build_sensor_context(instance=instance)
+    observability_defs.stuck_run_monitor_sensor(ctx)
+    assert beats == [(0, 0.0)]  # idle: still reports, so a silent daemon is detectable

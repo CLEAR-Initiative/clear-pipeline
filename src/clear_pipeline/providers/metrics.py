@@ -60,6 +60,20 @@ def build_registry(
     return reg
 
 
+def _push(job: str, build) -> None:
+    """Push `build()`'s registry under `job`. No-op without a URL; errors are
+    logged, never raised."""
+    url = (settings.pushgateway_url or "").strip()
+    if not url:
+        return
+    try:
+        from prometheus_client import push_to_gateway
+
+        push_to_gateway(url, job=job, registry=build(), timeout=10)
+    except Exception:  # noqa: BLE001 — never let metrics fail a run
+        logger.warning("[metrics] Pushgateway push failed for job %s", job, exc_info=True)
+
+
 def push_run_metrics(
     job: str,
     success: bool,
@@ -67,12 +81,29 @@ def push_run_metrics(
     checks: Iterable[CheckOutcome] = (),
     finished_at: float | None = None,
 ) -> None:
-    url = (settings.pushgateway_url or "").strip()
-    if not url:
-        return
-    try:
-        from prometheus_client import push_to_gateway
+    _push(job, lambda: build_registry(job, success, duration_s, checks, finished_at))
 
-        push_to_gateway(url, job=job, registry=build_registry(job, success, duration_s, checks, finished_at), timeout=10)
-    except Exception:  # noqa: BLE001 — never let metrics fail a run
-        logger.warning("[metrics] Pushgateway push failed for job %s", job, exc_info=True)
+
+HEARTBEAT_JOB = "dagster_heartbeat"
+
+
+def build_heartbeat_registry(running: int, oldest_age_s: float, now: float | None = None):
+    """Liveness gauges for the Dagster daemon: when it last ticked, and how long
+    the oldest in-progress run has been going."""
+    from prometheus_client import CollectorRegistry, Gauge
+
+    reg = CollectorRegistry()
+    labels = ["service"]
+    base = {"service": settings.observability_service_name}
+    Gauge("dagster_heartbeat_timestamp_seconds", "Unix time of the last monitor tick", labels, registry=reg).labels(
+        **base
+    ).set(time.time() if now is None else now)
+    Gauge("dagster_running_runs", "Runs STARTED or STARTING", labels, registry=reg).labels(**base).set(running)
+    Gauge(
+        "dagster_oldest_running_run_age_seconds", "Age of the oldest in-progress run (0 if none)", labels, registry=reg
+    ).labels(**base).set(oldest_age_s)
+    return reg
+
+
+def push_heartbeat(running: int, oldest_age_s: float) -> None:
+    _push(HEARTBEAT_JOB, lambda: build_heartbeat_registry(running, oldest_age_s))

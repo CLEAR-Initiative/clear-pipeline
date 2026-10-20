@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 import dagster as dg
 
-from clear_pipeline.providers.metrics import CheckOutcome, push_run_metrics
+from clear_pipeline.providers.metrics import CheckOutcome, push_heartbeat, push_run_metrics
 from clear_pipeline.providers.observability import capture_message, init_sentry
 from clear_pipeline.signals.config import settings
 
@@ -79,6 +79,12 @@ def stuck_run_alerts(
     return alerts, still_stuck
 
 
+def oldest_run_age_s(records, now_ts: float) -> float:
+    """Age in seconds of the longest in-progress run, 0 when there is none."""
+    starts = [start for rec in records if (start := _run_age_start(rec)) is not None]
+    return max((now_ts - start for start in starts), default=0.0)
+
+
 def run_failure_alert(run, failure_message: str) -> dict:
     """Pure core of the run-failure sensor: the GlitchTip message + tags for a
     failed run. Separated so its wording and tags are unit-testable."""
@@ -120,6 +126,9 @@ def stuck_run_monitor_sensor(context: dg.SensorEvaluationContext) -> dg.SkipReas
     # Keep only currently-still-stuck ids so a resolved run can re-alert if it
     # ever gets stuck again.
     context.update_cursor(json.dumps(still_stuck))
+    # Heartbeat: this tick is the daemon's proof of life. A stale timestamp means
+    # the daemon (or its host) is down; a growing age means an orphaned run.
+    push_heartbeat(len(records), oldest_run_age_s(records, now))
     return dg.SkipReason(
         f"{len(records)} in-progress; {len(still_stuck)} stuck > "
         f"{settings.stuck_run_alert_minutes}m, {len(alerts)} newly alerted"
