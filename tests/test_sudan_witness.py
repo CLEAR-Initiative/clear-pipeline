@@ -383,6 +383,15 @@ def test_fetch_pulls_when_the_edit_date_or_row_count_moved(fake_redis):
         assert len(fetch_sudan_witness_records(since=since)) == 2
 
 
+def test_fetch_pulls_when_the_floor_moved_on_an_unchanged_layer(fake_redis):
+    layer = FakeLayer([_feature()])
+    with patch.object(sudan_witness.settings, "sudan_witness_min_incident_date", date(2026, 8, 1)):
+        since = _synced_layer(fake_redis, layer)
+    # Floor lowered back to the default: the unchanged layer must be pulled again.
+    with patch.object(sudan_witness, "_redis", fake_redis), patch.object(sudan_witness, "_get", layer):
+        assert len(fetch_sudan_witness_records(since=since)) == 1
+
+
 def test_fetch_forces_a_full_pull_once_the_last_one_is_too_old(fake_redis):
     layer = FakeLayer([_feature()])
     max_age = timedelta(hours=sudan_witness.settings.sudan_witness_full_pull_max_age_hours)

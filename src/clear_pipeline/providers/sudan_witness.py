@@ -14,7 +14,8 @@ Fetch semantics (why this looks like IDMC, not ACLED):
     `sudan_witness_min_incident_date` (in the query, then again client-side)
     and gx's content hash skips unchanged rows.
   - The full pull is gated on the layer fingerprint (`dataLastEditDate` +
-    row count, whole layer): unchanged since the last clean poll → nothing
+    row count, whole layer, + the floor so lowering it re-pulls): unchanged
+    since the last clean poll → nothing
     fetched, so bronze doesn't rewrite blobs for nothing. The fingerprint is committed
     by `set_last_synced`, which gx calls only after a clean bronze batch. A full
     pull is forced anyway once `since` is older than
@@ -125,9 +126,15 @@ def _count(where: str = "1=1") -> int:
     return _get(f"{settings.sudan_witness_layer_url}/query", where=where, returnCountOnly="true")["count"]
 
 
+def _fingerprint_of(edit: int, total: int) -> str:
+    """`edit:total:floor`. The floor is ours, not the layer's: without it, lowering
+    it would not re-pull an unchanged layer. The edit date is always first."""
+    return f"{edit}:{total}:{settings.sudan_witness_min_incident_date.isoformat()}"
+
+
 def _fingerprint() -> str:
     """Cheap layer version: 2 requests, no features. Whole layer, not floored."""
-    return f"{_data_last_edit()}:{_count()}"
+    return _fingerprint_of(_data_last_edit(), _count())
 
 
 def _edit_date(ms: int | str) -> str:
@@ -179,7 +186,7 @@ def _fetch_all() -> tuple[list[dict], str]:
     if len(features) != count:
         raise RuntimeError(f"Sudan Witness pull returned {len(features)} features, floored count says {count}")
     logger.info("[SUDAN_WITNESS] fetched %d features", len(features))
-    return features, f"{before}:{total}"
+    return features, _fingerprint_of(before, total)
 
 
 def _unchanged_fingerprint(since: datetime | None) -> str | None:
