@@ -57,7 +57,7 @@ class RAGContext:
 def fetch_rag_context(
     *,
     query: str,
-    limit: int = 10,
+    limit: int = 20,
     filters: dict[str, Any] | None = None,
     mode: str | None = None,
 ) -> RAGContext:

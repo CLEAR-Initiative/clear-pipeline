@@ -247,9 +247,9 @@ RECENT_DAYS = 30
 # Evidence breadth: the recent FRAME band, then one RAG search per
 # situation-analysis CSV question so the summary draws on the same
 # framework questions as the narrative components (not hand-rolled themes).
-RECENT_LIMIT = 20
-THEME_LIMIT = 8
-MAX_CHUNKS_PER_REPORT = 2
+RECENT_LIMIT = 40
+THEME_LIMIT = 16
+MAX_CHUNKS_PER_REPORT = 4
 # Deterministic guardrails on the output.
 SUMMARY_MAX_WORDS = 80
 SUMMARY_MAX_SENTENCES = 3
@@ -583,15 +583,15 @@ def generate_scenarios(
         *[
             fetch_rag_context(
                 query=rag_query_for(country_name, q),
-                limit=4,
+                limit=8,
                 filters=rag_filters,
             )
             for q in sit_qs
         ],
-        max_per_report=2,
+        max_per_report=4,
     ) if sit_qs else fetch_rag_context(
         query=f"{country_name} humanitarian outlook {period_label}",
-        limit=10,
+        limit=20,
         filters=rag_filters,
     )
     if rag.is_empty:

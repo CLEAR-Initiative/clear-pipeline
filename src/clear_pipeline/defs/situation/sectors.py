@@ -165,7 +165,7 @@ def _generate_one_sector(
     query = rag_query_for(country_name, question, fallback=sector_display_name)
     rag = fetch_rag_context(
         query=query,
-        limit=12,
+        limit=24,
         filters={**(rag_filters or {}), "needSectors": [sector_display_name]},
     )
 
@@ -184,7 +184,7 @@ def _generate_one_sector(
         # broader fallback must still not pull in another country's reports.
         rag = fetch_rag_context(
             query=query,
-            limit=8,
+            limit=16,
             filters=rag_filters,
         )
 

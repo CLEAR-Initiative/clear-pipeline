@@ -62,7 +62,7 @@ class BulletComponentSpec:
     result_cls: type[BaseModel]
     bullet_fields: tuple[str, ...]
     map_instruction: str
-    rag_limit: int = 10
+    rag_limit: int = 20
     max_tokens: int = 2000
     sourced: bool = True
     fallback_topic: str = ""
