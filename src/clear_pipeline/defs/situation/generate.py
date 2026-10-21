@@ -64,8 +64,7 @@ from clear_pipeline.defs.situation.schemas import (
     StockFlowEstimate,
 )
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
-from clear_pipeline.providers import clear_api
-from clear_pipeline.providers.llm import LLMProvider, OpenAICompatibleProvider
+from clear_pipeline.providers import clear_api, make_llm_provider
 from clear_pipeline.providers.translate import configured_target_locales
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
@@ -84,30 +83,9 @@ logger = logging.getLogger(__name__)
 # the dashboard still gets fresh Datapoints + Sources.
 _SKIP_NARRATIVE_ENV = "SITUATION_SKIP_NARRATIVE"
 
-# Situation narrative/sector calls are fixed to OpenRouter → DeepSeek Flash.
-# Only OPENROUTER_API_KEY is required (same key as Jev / evals).
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_SITUATION_MODEL = "deepseek/deepseek-v4.1-flash-1017"
-
 
 def _skip_narrative() -> bool:
     return os.environ.get(_SKIP_NARRATIVE_ENV, "0").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def make_situation_llm() -> LLMProvider:
-    """OpenRouter-hosted DeepSeek Flash for situation LLM components."""
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Missing OPENROUTER_API_KEY for situation analysis LLM calls.",
-        )
-    return OpenAICompatibleProvider(
-        role="narrative",
-        model=_SITUATION_MODEL,
-        base_url=_OPENROUTER_BASE_URL,
-        api_key=api_key.strip(),
-        require_parameters=True,
-    )
 
 # Field labels mirror the FIELD_RULES registry in
 # `clear-api/src/services/datapoint-aggregation.ts`. The aggregation
@@ -455,8 +433,8 @@ def generate_and_upsert_for_frame(
     report_meta = _fetch_report_meta(deterministic_source_ids)
     sources_component = _build_sources(deterministic_source_ids, report_meta)
 
-    # Stable frame key for prompt-cache-capable providers — byte-identical
-    # across a run's component calls so calls 2..N can reuse the cache.
+    # Stable frame key for the Anthropic prompt cache — byte-identical across a
+    # run's component calls so calls 2..N read from cache.
     frame_key = ":".join([
         "|".join(frame.location_ids), "|".join(frame.event_types),
         "|".join(frame.need_sectors), frame.window_start, frame.window_end or "",
@@ -482,7 +460,7 @@ def generate_and_upsert_for_frame(
         scenarios_component = None
         generated_by_model = f"deterministic:{SCHEMA_VERSION}"
     else:
-        llm = make_situation_llm()
+        llm = make_llm_provider("narrative")
         log.info(
             "[analysis] %s (%s): generating LLM components (provider=%s model=%s)",
             scope_label, period_label, llm.provider_name, llm.model,

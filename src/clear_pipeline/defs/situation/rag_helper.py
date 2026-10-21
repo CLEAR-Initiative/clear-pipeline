@@ -63,6 +63,11 @@ def fetch_rag_context(
 ) -> RAGContext:
     """Run one hybrid dense+BM25 search and package the hits.
 
+    ``mode`` is clear-api's ``KnowledgebaseSearchMode`` (ADR-0006). Situation
+    analysis passes ``"FRAME"`` only for the AI-summary recent window
+    (empty query); every question-driven search passes ``"TOPICAL"``.
+    ``None`` leaves the API on AUTO.
+
     ``filters`` is a ``KnowledgebaseFilters`` dict built by
     ``situation/frame.build_rag_filters`` — it already carries the frame's scope,
     including the ``countryLocationId`` subtree filter that keeps a country's

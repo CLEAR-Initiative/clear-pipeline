@@ -167,6 +167,7 @@ def _generate_one_sector(
         query=query,
         limit=24,
         filters={**(rag_filters or {}), "needSectors": [sector_display_name]},
+        mode="TOPICAL",
     )
 
     # If the sector-scoped search returned nothing, fall back to an
@@ -186,6 +187,7 @@ def _generate_one_sector(
             query=query,
             limit=16,
             filters=rag_filters,
+            mode="TOPICAL",
         )
 
     if rag.is_empty:

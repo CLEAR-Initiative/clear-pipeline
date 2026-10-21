@@ -130,6 +130,7 @@ def run_bullet_component(
         query=rag_query_for(country_name, question, fallback=fallback),
         limit=spec.rag_limit,
         filters=rag_filters,
+        mode="TOPICAL",
     )
     if rag.is_empty:
         logger.info(

@@ -301,6 +301,7 @@ def _summary_evidence(scope_label: str, rag_filters: dict[str, Any] | None) -> R
             query=rag_query_for(scope_label, q),
             limit=THEME_LIMIT,
             filters=rag_filters,
+            mode="TOPICAL",
         )
         for q in situation_questions()
     ]
@@ -585,6 +586,7 @@ def generate_scenarios(
                 query=rag_query_for(country_name, q),
                 limit=8,
                 filters=rag_filters,
+                mode="TOPICAL",
             )
             for q in sit_qs
         ],
@@ -593,6 +595,7 @@ def generate_scenarios(
         query=f"{country_name} humanitarian outlook {period_label}",
         limit=20,
         filters=rag_filters,
+        mode="TOPICAL",
     )
     if rag.is_empty:
         return Scenarios()

@@ -157,7 +157,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
@@ -213,7 +213,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ),
             patches["generate_ai_summary"],
             patches["generate_context_risks"],
@@ -258,7 +258,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
                 "clear_pipeline.defs.situation.generate.generate_ai_summary",
@@ -350,7 +350,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ),
             patches["generate_ai_summary"],
             patches["generate_context_risks"],
@@ -396,7 +396,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
@@ -447,7 +447,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value=report_meta,
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
@@ -524,7 +524,7 @@ class TestGenerateAndUpsertForCountryYear:
                 return_value={},
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.make_situation_llm",
+                "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
             patch(
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",

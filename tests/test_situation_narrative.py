@@ -173,7 +173,7 @@ class TestGenerateAISummary:
         sit_qs = situation_questions()
         assert len(themed) == len(sit_qs)
         assert all(c.kwargs["filters"] == {"countryLocationId": "sdn"} for c in themed)
-        assert all("mode" not in c.kwargs for c in themed)
+        assert all(c.kwargs["mode"] == "TOPICAL" for c in themed)
         # Each themed search uses the CSV analysis question as the query.
         for call, q in zip(themed, sit_qs):
             assert call.kwargs["query"].startswith("Sudan ")
