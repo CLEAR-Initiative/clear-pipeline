@@ -31,7 +31,7 @@ import os
 from pathlib import Path
 
 import dagster as dg
-from dagster import AssetExecutionContext
+from dagster import AssetExecutionContext, OpExecutionContext
 from dotenv import load_dotenv
 
 from clear_pipeline.defs.knowledgebase._pdf_extract import page_extracted_content
@@ -123,7 +123,7 @@ def _resolve_source_id(t: FigureTranscription, report: dict) -> str | None:
 
 
 def _capture_pdf(
-    context: AssetExecutionContext,
+    context: AssetExecutionContext | OpExecutionContext,
     pdf_bytes: bytes,
     *,
     report_id: str,
