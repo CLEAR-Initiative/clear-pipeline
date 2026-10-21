@@ -56,6 +56,24 @@ from clear_pipeline.providers import (
     make_llm_provider,
 )
 
+# Figure capture shares the weekly asset's helpers so the manual path captures
+# figures identically (detect → crop → vision → enrich → report_figures), and
+# shares upsert.py's figure→KB merge so a manual upload's infographics are
+# searchable in the SAME run rather than waiting for the weekly sync. (No
+# circular import: neither figures nor upsert imports manual_ingest.)
+from clear_pipeline.defs.knowledgebase.enrich import ExtractedParameters
+from clear_pipeline.defs.knowledgebase.figures import (
+    _CAPTURE_FIGURES,
+    _MAX_FIGURES_PER_REPORT,
+    _VISION_MODEL_TAG,
+    _capture_pdf,
+    _enrich_figure,
+    _resolve_source_id,
+    fig_kind_from_hint,
+)
+from clear_pipeline.defs.knowledgebase.upsert import merge_report_figures_to_kb
+from clear_pipeline.providers.vision import FigureTranscription
+
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
 # Voyage's public batch limit — matches upsert.py so the two flows
@@ -92,6 +110,14 @@ class ManualDocumentConfig(dg.Config):
     published_at: str
     """Publication date the citation should show. Accepts ISO date or
     datetime; clear-api's DateTime scalar parses either."""
+    team_id: str = ""
+    """Team the upload is attributed to (Cap 1, team-scoped upload). Empty for
+    a global-admin upload or a scripted launch. Persisted per KB row (and per
+    figure chunk) via `upsert_knowledgebase_chunks(team_id=...)`, so team-scoped
+    reads (`filters.teamId`) can filter by it."""
+    uploaded_by_user_id: str = ""
+    """clear-api user id of the uploader. Persisted per KB row alongside
+    `team_id` for provenance. Empty for a scripted launch."""
 
 
 def _s3_client():
@@ -130,6 +156,14 @@ def process_manual_document(
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
     guardrails = load_guardrails()
+
+    # Provenance for a team-scoped upload (Cap 1) — logged for the run record;
+    # also persisted per KB row via the upsert below so reads can filter by team.
+    if config.uploaded_by_user_id or config.team_id:
+        context.log.info(
+            "manual upload %s attributed to user=%s team=%s",
+            config.report_id, config.uploaded_by_user_id or "-", config.team_id or "-",
+        )
 
     # ── 1. Fetch the PDF and extract text per page ───────────────
     context.log.info("fetching %s from s3://%s", config.s3_key, bucket)
@@ -294,6 +328,8 @@ def process_manual_document(
             s3_key=config.s3_key,
             published_at=config.published_at,
             chunks=chunk_inputs,
+            team_id=config.team_id or None,
+            uploaded_by_user_id=config.uploaded_by_user_id or None,
         )
     except clear_api.ClearApiError as exc:
         # 4xx from clear-api — payload shape is wrong. Fail loud so the
@@ -314,6 +350,9 @@ def process_manual_document(
         "source_url": config.source_url,
         "published_at": config.published_at,
         "s3_key": config.s3_key,
+        # Attribution carried downstream so the figure merge can tag figures too.
+        "team_id": config.team_id,
+        "uploaded_by_user_id": config.uploaded_by_user_id,
         # `doc_text` travels through Dagster's IO manager to feed the
         # datapoint-extraction op downstream — the alternative (re-
         # download + re-extract from S3 in the next op) would double
@@ -326,6 +365,176 @@ def process_manual_document(
         "embedding_provider": provider_name,
         "embedding_model": model_name,
         "debug_s3_key": debug_key,
+    }
+
+
+@dg.op(
+    description=(
+        "Capture figures from one manually-uploaded PDF (opt-in via "
+        "KB_CAPTURE_FIGURES): detect + crop + transcribe + enrich, upsert to "
+        "report_figures, then merge the transcriptions into the knowledgebase "
+        "(figures_only) so the upload's infographics are searchable in the same "
+        "run. No-op when capture is disabled."
+    ),
+)
+def manual_document_capture_figures(
+    context: OpExecutionContext,
+    kb_result: dict,
+) -> dict:
+    """Figure capture for the manual path — the weekly ``reliefweb_weekly_figures``
+    asset's work for a single uploaded PDF, plus the inline KB merge.
+
+    Runs only when ``KB_CAPTURE_FIGURES`` is set (same gate as the weekly asset),
+    because rendering graphics-dense pages is memory-heavy. Best-effort: a capture
+    or merge failure is logged and the op still returns, so the KB text ingest
+    (already committed by the previous op) is never rolled back by a figure
+    problem."""
+    report_id = kb_result["report_id"]
+    if not _CAPTURE_FIGURES:
+        context.log.info(
+            "KB_CAPTURE_FIGURES not set — skipping figure capture for %s", report_id,
+        )
+        return {**kb_result, "figures_captured": False, "figure_chunks_merged": 0}
+
+    bucket = os.environ["S3_BUCKET"]
+    s3 = _s3_client()
+
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=kb_result["s3_key"])
+        pdf_bytes = obj["Body"].read()
+    except Exception as exc:  # noqa: BLE001 — don't fail the run over a figure fetch
+        context.log.warning(
+            "figure capture: S3 fetch failed for %s (%s) — skipping figures",
+            kb_result["s3_key"], exc,
+        )
+        return {**kb_result, "figures_captured": False, "figure_chunks_merged": 0}
+
+    # Detect + crop + transcribe. `iso3="manual"` just picks the S3 prefix
+    # (reliefweb/kb/figures/manual/…); manual uploads aren't country-partitioned.
+    raw_figures, _ = _capture_pdf(
+        context, pdf_bytes,
+        report_id=report_id, iso3="manual", page_offset=0,
+        seen_hashes=set(), remaining=_MAX_FIGURES_PER_REPORT,
+    )
+    if not raw_figures:
+        context.log.info("figure capture: no figures detected in %s", report_id)
+        return {**kb_result, "figures_captured": True, "figures_written": 0, "figure_chunks_merged": 0}
+
+    llm_extract = make_llm_provider("extraction")
+    figures_input: list[dict] = []
+    for fig in raw_figures:
+        # Per-figure best-effort: the text ingest is already committed, so a
+        # figure's enrichment / location / source resolution raising (e.g.
+        # `_resolve_location` re-raising ClearApiError) must NOT fail the run.
+        # Isolate each figure; a failing one is dropped, not fatal.
+        try:
+            t: FigureTranscription | None = fig["transcription"]
+            kind = (t.kind if t else fig.get("kind")) or fig_kind_from_hint(fig)
+            params = ExtractedParameters()
+            source_id = None
+            if t:
+                try:
+                    params = _enrich_figure(llm_extract, t)
+                except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+                    context.log.warning(
+                        "figure enrich failed for %s p%s: %s", report_id, fig["page_num"], exc,
+                    )
+                # No ReliefWeb publisher metadata on a manual upload — the figure's
+                # own printed source (if any) is the only attribution hint.
+                source_id = _resolve_source_id(t, {})
+
+            resolved_ids: list[str] = []
+            unresolved_pcodes: list[str] = []
+            for ref in params.locations:
+                loc_id = _resolve_location(ref)
+                if loc_id:
+                    resolved_ids.append(loc_id)
+                elif ref.pcode:
+                    unresolved_pcodes.append(ref.pcode)
+
+            figures_input.append({
+                "pageNumber": fig["page_num"],
+                "bbox": fig["bbox"],
+                "isFullPage": fig["is_full_page"],
+                "s3Key": fig["s3_key"],
+                "kind": kind,
+                "title": t.title if t else None,
+                "description": t.description if t else None,
+                "transcription": t.model_dump() if t else None,
+                "sourceId": source_id,
+                "locationIds": resolved_ids,
+                "locationPcodes": unresolved_pcodes,
+                "eventTypes": params.event_types,
+                "needSectors": list(params.need_sectors),
+                "timeRangeStart": params.time_range_start,
+                "timeRangeEnd": params.time_range_end,
+            })
+        except Exception as exc:  # noqa: BLE001 — one bad figure, not the run
+            context.log.warning(
+                "figure processing failed for %s p%s — dropping figure: %s",
+                report_id, fig.get("page_num"), exc,
+            )
+
+    # Write to report_figures (the asset store). upsert_report_figures deletes-
+    # then-inserts per report, so figures_input is non-empty here by construction.
+    try:
+        result = clear_api.upsert_report_figures(
+            report_id=report_id,
+            report_title=kb_result["report_title"],
+            source_url=kb_result["source_url"],
+            extracted_by_model=_VISION_MODEL_TAG,
+            figures=figures_input,
+        )
+        written = int(result.get("count", len(figures_input)))
+    except Exception as exc:  # noqa: BLE001 — don't roll back the text ingest
+        context.log.warning("upsert_report_figures failed for %s: %s", report_id, exc)
+        return {**kb_result, "figures_captured": False, "figure_chunks_merged": 0}
+
+    # Inline KB merge so the upload's infographics are searchable now. Normalize
+    # the report_figures input shape to the merge helper's shape.
+    normalized = [{
+        "s3_key": f["s3Key"],
+        "kind": f["kind"],
+        "page": f["pageNumber"],
+        "title": f["title"],
+        "transcription": f["transcription"],
+        "location_ids": f["locationIds"],
+        "location_pcodes": f["locationPcodes"],
+        "event_types": f["eventTypes"],
+        "need_sectors": f["needSectors"],
+        "time_range_start": f["timeRangeStart"],
+        "time_range_end": f["timeRangeEnd"],
+    } for f in figures_input]
+
+    merged = 0
+    try:
+        merged = merge_report_figures_to_kb(
+            report_id=report_id,
+            report_title=kb_result["report_title"],
+            source_url=kb_result["source_url"],
+            report_s3_key=kb_result["s3_key"],
+            published_at=kb_result["published_at"],
+            figures=normalized,
+            embedder=make_embedding_provider(),
+            team_id=kb_result.get("team_id") or None,
+            uploaded_by_user_id=kb_result.get("uploaded_by_user_id") or None,
+        )
+    except Exception as exc:  # noqa: BLE001 — figures are in report_figures regardless;
+        # the weekly figure→KB sync will merge them on its next run.
+        context.log.warning(
+            "figure→KB merge failed for %s (figures still in report_figures; "
+            "weekly sync will retry): %s", report_id, exc,
+        )
+
+    context.log.info(
+        "manual figure capture for %s: figures_written=%d figure_chunks_merged=%d",
+        report_id, written, merged,
+    )
+    return {
+        **kb_result,
+        "figures_captured": True,
+        "figures_written": written,
+        "figure_chunks_merged": merged,
     }
 
 
@@ -551,13 +760,18 @@ def _pad_window(start_iso: str, end_iso: str, *, pad_days: int) -> tuple[str, st
 @dg.job(
     description=(
         "One-off manual document ingest. Full chain per upload: "
-        "extract → chunk → embed → knowledgebase upsert → datapoint "
-        "extraction → aggregation refresh → situation-analysis regen. "
-        "Matches the weekly ReliefWeb flow, just single-report."
+        "extract → chunk → embed → knowledgebase upsert → figure capture "
+        "(opt-in) → datapoint extraction → aggregation refresh → "
+        "situation-analysis regen. Matches the weekly ReliefWeb flow, just "
+        "single-report."
     ),
 )
 def process_manual_document_job():
     kb = process_manual_document()
+    # Figure capture hangs off the KB result and runs independently of the
+    # datapoint/aggregation chain — a no-op unless KB_CAPTURE_FIGURES is set, and
+    # best-effort either way so it never blocks the dashboard pipeline below.
+    manual_document_capture_figures(kb)
     dp = manual_document_extract_datapoints(kb)
     agg = manual_document_refresh_aggregations(dp)
     manual_document_situation_analysis(agg)

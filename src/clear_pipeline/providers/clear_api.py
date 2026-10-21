@@ -91,6 +91,9 @@ mutation UpsertKnowledgebaseChunks(
   $s3Key: String!,
   $publishedAt: DateTime!,
   $chunks: [KnowledgebaseChunkInput!]!,
+  $figuresOnly: Boolean = false,
+  $teamId: ID,
+  $uploadedByUserId: ID,
 ) {
   upsertKnowledgebaseChunks(
     reportId: $reportId,
@@ -99,10 +102,38 @@ mutation UpsertKnowledgebaseChunks(
     s3Key: $s3Key,
     publishedAt: $publishedAt,
     chunks: $chunks,
+    figuresOnly: $figuresOnly,
+    teamId: $teamId,
+    uploadedByUserId: $uploadedByUserId,
   ) {
     reportId
     chunksDeleted
     chunksInserted
+  }
+}
+"""
+
+_REPORT_FIGURES_PENDING_KB_MERGE = """
+query ReportFiguresPendingKbMerge($limit: Int = 50) {
+  reportFiguresPendingKbMerge(limit: $limit) {
+    reportId
+    reportTitle
+    sourceUrl
+    reportS3Key
+    publishedAt
+    teamId
+    uploadedByUserId
+    figureS3Key
+    figureKind
+    pageNumber
+    title
+    transcription
+    locationIds
+    locationPcodes
+    eventTypes
+    needSectors
+    timeRangeStart
+    timeRangeEnd
   }
 }
 """
@@ -684,6 +715,9 @@ def upsert_knowledgebase_chunks(
     s3_key: str,
     published_at: str,
     chunks: list[dict[str, Any]],
+    figures_only: bool = False,
+    team_id: str | None = None,
+    uploaded_by_user_id: str | None = None,
 ) -> dict[str, int]:
     """Replace all knowledgebase rows for ``report_id`` with ``chunks``.
 
@@ -691,6 +725,18 @@ def upsert_knowledgebase_chunks(
     are passed as ISO-8601 strings so the caller doesn't have to
     remember Python-side datetime serialisation quirks. clear-api's
     DateTime scalar accepts either.
+
+    When ``figures_only`` is true, the server deletes only this report's FIGURE
+    rows (``figure_s3_key IS NOT NULL``) before inserting, leaving its text
+    chunks untouched — used by the figure→KB sync to attach figures to a report
+    whose text was ingested in an earlier run. Every chunk must then be a figure
+    chunk (``figureS3Key`` set) or clear-api rejects the call. Default false =
+    the original replace-all-for-report behaviour.
+
+    ``team_id`` / ``uploaded_by_user_id`` attribute a team-scoped manual upload
+    (Cap 1); stored on every chunk so a team-scoped read can filter by team.
+    Both None for the weekly ReliefWeb ingest. An empty string is normalised to
+    None so a blank config value doesn't persist as ``""``.
 
     Returns the summary counts the server logs.
     """
@@ -703,6 +749,9 @@ def upsert_knowledgebase_chunks(
             "s3Key": s3_key,
             "publishedAt": published_at,
             "chunks": chunks,
+            "figuresOnly": figures_only,
+            "teamId": team_id or None,
+            "uploadedByUserId": uploaded_by_user_id or None,
         },
     )
     result = data["upsertKnowledgebaseChunks"]
@@ -711,6 +760,20 @@ def upsert_knowledgebase_chunks(
         "chunksDeleted": int(result["chunksDeleted"]),
         "chunksInserted": int(result["chunksInserted"]),
     }
+
+
+def report_figures_pending_kb_merge(limit: int = 50) -> list[dict[str, Any]]:
+    """Figures captured into ``report_figures`` that belong in the KB but aren't
+    merged yet — the work queue the figure→KB sync drains.
+
+    Bounded by REPORTS (not figures): returns every figure for up to ``limit``
+    reports that have KB text but at least one unmerged figure. The sync groups
+    these by ``reportId`` and sends one ``figures_only`` upsert per report.
+    Each row carries the report-level fields (title/url/pdf-key/date, from the
+    report's existing KB rows) plus the figure fields and raw ``transcription``.
+    """
+    data = _execute(_REPORT_FIGURES_PENDING_KB_MERGE, {"limit": limit})
+    return data.get("reportFiguresPendingKbMerge") or []
 
 
 def sync_event_cards(event_ids: list[str]) -> dict[str, int]:
