@@ -498,6 +498,10 @@ def reliefweb_weekly_figure_kb_sync(context: AssetExecutionContext) -> dg.Materi
                 published_at=head["publishedAt"],
                 figures=figures,
                 embedder=embedder,
+                # Carry the report's team attribution onto the merged figures so
+                # they stay visible under the same team filter as the text.
+                team_id=head.get("teamId"),
+                uploaded_by_user_id=head.get("uploadedByUserId"),
             )
         except clear_api.ClearApiError as exc:
             context.log.error(
@@ -540,7 +544,10 @@ def reliefweb_weekly_figure_kb_sync(context: AssetExecutionContext) -> dg.Materi
 
 
 reliefweb_weekly_figure_kb_sync_job = dg.define_asset_job(
-    name="reliefweb_weekly_figure_kb_sync",
+    # Distinct from the asset key — a job sharing an asset's name collides with
+    # that asset's implicit __ASSET_JOB graph ("Op/Graph definition names must be
+    # unique within a repository").
+    name="reliefweb_weekly_figure_kb_sync_job",
     selection=[reliefweb_weekly_figure_kb_sync],
     tags=_FIGURE_SYNC_TAGS,
 )

@@ -112,11 +112,12 @@ class ManualDocumentConfig(dg.Config):
     datetime; clear-api's DateTime scalar parses either."""
     team_id: str = ""
     """Team the upload is attributed to (Cap 1, team-scoped upload). Empty for
-    a global-admin upload or a scripted launch. Carried for provenance/logging;
-    the KB write path doesn't persist it per-row (yet)."""
+    a global-admin upload or a scripted launch. Persisted per KB row (and per
+    figure chunk) via `upsert_knowledgebase_chunks(team_id=...)`, so team-scoped
+    reads (`filters.teamId`) can filter by it."""
     uploaded_by_user_id: str = ""
-    """clear-api user id of the uploader, for provenance/logging. Empty for a
-    scripted launch."""
+    """clear-api user id of the uploader. Persisted per KB row alongside
+    `team_id` for provenance. Empty for a scripted launch."""
 
 
 def _s3_client():
@@ -156,9 +157,8 @@ def process_manual_document(
     s3 = _s3_client()
     guardrails = load_guardrails()
 
-    # Provenance for a team-scoped upload (Cap 1) — logged so the ingest run
-    # records who uploaded on behalf of which team even though the KB rows don't
-    # carry it per-row.
+    # Provenance for a team-scoped upload (Cap 1) — logged for the run record;
+    # also persisted per KB row via the upsert below so reads can filter by team.
     if config.uploaded_by_user_id or config.team_id:
         context.log.info(
             "manual upload %s attributed to user=%s team=%s",
@@ -423,47 +423,57 @@ def manual_document_capture_figures(
     llm_extract = make_llm_provider("extraction")
     figures_input: list[dict] = []
     for fig in raw_figures:
-        t: FigureTranscription | None = fig["transcription"]
-        kind = (t.kind if t else fig.get("kind")) or fig_kind_from_hint(fig)
-        params = ExtractedParameters()
-        source_id = None
-        if t:
-            try:
-                params = _enrich_figure(llm_extract, t)
-            except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
-                context.log.warning(
-                    "figure enrich failed for %s p%s: %s", report_id, fig["page_num"], exc,
-                )
-            # No ReliefWeb publisher metadata on a manual upload — the figure's own
-            # printed source (if any) is the only attribution hint.
-            source_id = _resolve_source_id(t, {})
+        # Per-figure best-effort: the text ingest is already committed, so a
+        # figure's enrichment / location / source resolution raising (e.g.
+        # `_resolve_location` re-raising ClearApiError) must NOT fail the run.
+        # Isolate each figure; a failing one is dropped, not fatal.
+        try:
+            t: FigureTranscription | None = fig["transcription"]
+            kind = (t.kind if t else fig.get("kind")) or fig_kind_from_hint(fig)
+            params = ExtractedParameters()
+            source_id = None
+            if t:
+                try:
+                    params = _enrich_figure(llm_extract, t)
+                except Exception as exc:  # noqa: BLE001 — enrichment is best-effort
+                    context.log.warning(
+                        "figure enrich failed for %s p%s: %s", report_id, fig["page_num"], exc,
+                    )
+                # No ReliefWeb publisher metadata on a manual upload — the figure's
+                # own printed source (if any) is the only attribution hint.
+                source_id = _resolve_source_id(t, {})
 
-        resolved_ids: list[str] = []
-        unresolved_pcodes: list[str] = []
-        for ref in params.locations:
-            loc_id = _resolve_location(ref)
-            if loc_id:
-                resolved_ids.append(loc_id)
-            elif ref.pcode:
-                unresolved_pcodes.append(ref.pcode)
+            resolved_ids: list[str] = []
+            unresolved_pcodes: list[str] = []
+            for ref in params.locations:
+                loc_id = _resolve_location(ref)
+                if loc_id:
+                    resolved_ids.append(loc_id)
+                elif ref.pcode:
+                    unresolved_pcodes.append(ref.pcode)
 
-        figures_input.append({
-            "pageNumber": fig["page_num"],
-            "bbox": fig["bbox"],
-            "isFullPage": fig["is_full_page"],
-            "s3Key": fig["s3_key"],
-            "kind": kind,
-            "title": t.title if t else None,
-            "description": t.description if t else None,
-            "transcription": t.model_dump() if t else None,
-            "sourceId": source_id,
-            "locationIds": resolved_ids,
-            "locationPcodes": unresolved_pcodes,
-            "eventTypes": params.event_types,
-            "needSectors": list(params.need_sectors),
-            "timeRangeStart": params.time_range_start,
-            "timeRangeEnd": params.time_range_end,
-        })
+            figures_input.append({
+                "pageNumber": fig["page_num"],
+                "bbox": fig["bbox"],
+                "isFullPage": fig["is_full_page"],
+                "s3Key": fig["s3_key"],
+                "kind": kind,
+                "title": t.title if t else None,
+                "description": t.description if t else None,
+                "transcription": t.model_dump() if t else None,
+                "sourceId": source_id,
+                "locationIds": resolved_ids,
+                "locationPcodes": unresolved_pcodes,
+                "eventTypes": params.event_types,
+                "needSectors": list(params.need_sectors),
+                "timeRangeStart": params.time_range_start,
+                "timeRangeEnd": params.time_range_end,
+            })
+        except Exception as exc:  # noqa: BLE001 — one bad figure, not the run
+            context.log.warning(
+                "figure processing failed for %s p%s — dropping figure: %s",
+                report_id, fig.get("page_num"), exc,
+            )
 
     # Write to report_figures (the asset store). upsert_report_figures deletes-
     # then-inserts per report, so figures_input is non-empty here by construction.

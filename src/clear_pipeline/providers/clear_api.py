@@ -121,6 +121,8 @@ query ReportFiguresPendingKbMerge($limit: Int = 50) {
     sourceUrl
     reportS3Key
     publishedAt
+    teamId
+    uploadedByUserId
     figureS3Key
     figureKind
     pageNumber
