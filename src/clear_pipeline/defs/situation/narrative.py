@@ -442,18 +442,11 @@ def generate_ai_summary(
 # ────────────────────────────────────────────────────────────────────
 
 
-def _generate_one_context_domain(
-    llm: LLMProvider,
-    *,
-    domain_key: str,
-    country_name: str,
-    period_label: str,
-    aggregated_context: str,
-    cache_key: str,
-    rag_filters: dict[str, Any] | None = None,
-) -> RiskDomain:
-    """One RAG search + one LLM call for a single context pillar."""
-    spec = BulletComponentSpec(
+def context_domain_spec(domain_key: str) -> BulletComponentSpec:
+    """The BulletComponentSpec for one context pillar — one place so the
+    generator AND the selective-regen probe (#1067) build the identical spec
+    (same query, limit, schema) for a pillar."""
+    return BulletComponentSpec(
         schema_key=domain_key,
         log_label=f"context_risks:{domain_key}",
         llm_schema=_CONTEXT_DOMAIN_SPEC.llm_schema,
@@ -465,6 +458,20 @@ def _generate_one_context_domain(
         sourced=_CONTEXT_DOMAIN_SPEC.sourced,
         field_map=_CONTEXT_DOMAIN_SPEC.field_map,
     )
+
+
+def _generate_one_context_domain(
+    llm: LLMProvider,
+    *,
+    domain_key: str,
+    country_name: str,
+    period_label: str,
+    aggregated_context: str,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> RiskDomain:
+    """One RAG search + one LLM call for a single context pillar."""
+    spec = context_domain_spec(domain_key)
     return run_bullet_component(
         llm,
         spec,
@@ -564,23 +571,16 @@ def generate_humanitarian_access(
 # ────────────────────────────────────────────────────────────────────
 
 
-def generate_scenarios(
-    llm: LLMProvider,
+def scenarios_rag(
     *,
     country_name: str,
     period_label: str,
-    aggregated: dict[str, Any] | None,
-    cache_key: str,
     rag_filters: dict[str, Any] | None = None,
-) -> Scenarios:
-    """Forward-looking most-likely / best / worst trajectories for the frame.
-    Prose-only; coarse provenance (the RAG report union) since projections are
-    not per-line citations. Empty component when there's no evidence.
-
-    RAG is grounded in the situation-analysis CSV questions (no separate
-    scenario question in the first-level framework)."""
+) -> RAGContext:
+    """Retrieval half of scenarios — the same CSV-question merge the generator
+    uses. Split out for selective regeneration (#1067) probing."""
     sit_qs = situation_questions()
-    rag = merge_rag_contexts(
+    return merge_rag_contexts(
         *[
             fetch_rag_context(
                 query=rag_query_for(country_name, q),
@@ -597,6 +597,18 @@ def generate_scenarios(
         filters=rag_filters,
         mode="TOPICAL",
     )
+
+
+def scenarios_from_rag(
+    llm: LLMProvider,
+    rag: RAGContext,
+    *,
+    country_name: str,
+    period_label: str,
+    aggregated: dict[str, Any] | None,
+    cache_key: str,
+) -> Scenarios:
+    """Generation half of scenarios over an ALREADY-FETCHED ``rag``."""
     if rag.is_empty:
         return Scenarios()
 
@@ -625,4 +637,26 @@ def generate_scenarios(
         worst_case=result.worst_case,
         description=result.description,
         source_report_ids=rag.contributing_report_ids,
+    )
+
+
+def generate_scenarios(
+    llm: LLMProvider,
+    *,
+    country_name: str,
+    period_label: str,
+    aggregated: dict[str, Any] | None,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> Scenarios:
+    """Forward-looking most-likely / best / worst trajectories for the frame.
+    Prose-only; coarse provenance (the RAG report union). Thin retrieve-then-
+    generate over the split halves (behaviour unchanged)."""
+    rag = scenarios_rag(
+        country_name=country_name, period_label=period_label, rag_filters=rag_filters,
+    )
+    return scenarios_from_rag(
+        llm, rag,
+        country_name=country_name, period_label=period_label,
+        aggregated=aggregated, cache_key=cache_key,
     )

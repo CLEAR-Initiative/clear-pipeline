@@ -34,14 +34,6 @@ import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
-from clear_pipeline.defs.situation.narrative import (
-    generate_ai_summary,
-    generate_context_risks,
-    generate_displacement_narrative,
-    generate_hazards_and_vulnerabilities,
-    generate_humanitarian_access,
-    generate_scenarios,
-)
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
@@ -51,7 +43,10 @@ from clear_pipeline.defs.situation.frame import (
     build_rag_filters,
     country_frame,
 )
-from clear_pipeline.defs.situation.sectors import generate_all_sectors
+from clear_pipeline.defs.situation.selective import (
+    build_leaf_components,
+    generate_ai_summary_fanin,
+)
 from clear_pipeline.defs.situation.schemas import (
     SCHEMA_VERSION,
     Datapoints,
@@ -446,6 +441,9 @@ def generate_and_upsert_for_frame(
     # row and is allowed to supersede. Only a normal run that produces nothing sets
     # it True, which gates out the upsert below.
     all_empty = False
+    # Prior analysis row; set in the generation branch below and reused by the
+    # change-note diff. Stays None on the deterministic-only (skip) path.
+    prior: dict | None = None
     if skip:
         log.warning(
             "[analysis] %s: %s set - shipping deterministic-only row",
@@ -465,34 +463,52 @@ def generate_and_upsert_for_frame(
             "[analysis] %s (%s): generating LLM components (provider=%s model=%s)",
             scope_label, period_label, llm.provider_name, llm.model,
         )
-        ai_summary_component = generate_ai_summary(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
+        # Prior analysis for this frame — drives leaf-level selective regeneration
+        # (#1067): unchanged leaves are reused from it, only changed leaves re-run.
+        # `force` ignores the prior (full regen). Read ONCE here and reused by the
+        # change-note diff below (which used to re-fetch it).
+        prior = None
+        if not force:
+            try:
+                prior = clear_api.get_analysis(
+                    schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
+                )
+            except Exception as exc:  # noqa: BLE001 — a fetch hiccup → safe full regen
+                log.warning(
+                    "[analysis] %s: prior-analysis fetch failed (%s) — full regen",
+                    scope_label, exc,
+                )
+        prior_data = prior.get("data") if prior else None
+
+        leaf_result = build_leaf_components(
+            llm, prior_payload=prior_data, country_name=scope_label,
+            period_label=period_label, aggregated=aggregated, cache_key=cache_key,
+            rag_filters=rag_filters, log=log,
         )
-        context_risks_component = generate_context_risks(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        hazards_component = generate_hazards_and_vulnerabilities(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        displacement_component = generate_displacement_narrative(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        humanitarian_access_component = generate_humanitarian_access(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        sectors_component = generate_all_sectors(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        scenarios_component = generate_scenarios(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
+        context_risks_component = leaf_result.context_risks
+        hazards_component = leaf_result.hazards_and_vulnerabilities
+        displacement_component = leaf_result.displacement
+        humanitarian_access_component = leaf_result.humanitarian_access
+        sectors_component = leaf_result.sectors
+        scenarios_component = leaf_result.scenarios
+
+        # ai_summary is a FAN-IN over the leaves: regenerate it whenever any leaf
+        # changed (or there's no usable prior summary); otherwise keep the prior.
+        prior_summary = None
+        if prior_data:
+            try:
+                prior_summary = SituationAnalysisPayload.model_validate(prior_data).ai_summary
+            except Exception:  # noqa: BLE001 — unparseable prior → regenerate the summary
+                prior_summary = None
+        if leaf_result.any_regenerated or prior_summary is None:
+            ai_summary_component = generate_ai_summary_fanin(
+                llm, country_name=scope_label, period_label=period_label,
+                result=leaf_result, cache_key=cache_key,
+            )
+        else:
+            ai_summary_component = prior_summary
+            log.info("[analysis] %s: no leaf changed — reusing prior ai_summary", scope_label)
+
         generated_by_model = llm.model
         # Populated-vs-empty summary at INFO — makes an all-null run (e.g. RAG
         # returning nothing because clear-api's EMBEDDING_* is misconfigured)
@@ -539,32 +555,31 @@ def generate_and_upsert_for_frame(
         payload_kwargs["sectors"] = sectors_component
     if scenarios_component is not None:
         payload_kwargs["scenarios"] = scenarios_component
+    if not skip:
+        # Per-leaf retrieval fingerprint for the NEXT run's selective diff (#1067).
+        payload_kwargs["evidence_index"] = leaf_result.evidence_index
     payload = SituationAnalysisPayload(**payload_kwargs)
 
     # "What changed" vs the frame's PRIOR GENERATION (ADR-0007 §8): the current
-    # `analyses` row for this frame IS the prior generation — read here, before
-    # the upsert below supersedes it. Needs the LLM, so skipped on
-    # deterministic-only rows. Best-effort: change notes never block the upsert.
-    if not skip:
+    # `analyses` row for this frame IS the prior generation — reuse the `prior`
+    # already fetched above (before the upsert supersedes it). Needs the LLM, so
+    # skipped on deterministic-only rows. Best-effort: never blocks the upsert.
+    if not skip and prior and prior.get("data"):
         try:
-            prior = clear_api.get_analysis(
-                schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
+            payload.changes = generate_changes(
+                llm,
+                prior_payload=prior["data"],
+                new_payload=payload.model_dump(mode="json"),
+                basis="previous_generation",
+                prior_generated_at=prior.get("generatedAt") or "",
+                compared_to_window_start=frame.window_start,
+                compared_to_label=period_label,
+                cache_key=cache_key,
             )
-            if prior and prior.get("data"):
-                payload.changes = generate_changes(
-                    llm,
-                    prior_payload=prior["data"],
-                    new_payload=payload.model_dump(mode="json"),
-                    basis="previous_generation",
-                    prior_generated_at=prior.get("generatedAt") or "",
-                    compared_to_window_start=frame.window_start,
-                    compared_to_label=period_label,
-                    cache_key=cache_key,
-                )
-                log.info(
-                    "[analysis] %s: change notes vs prior generation, %d section(s)",
-                    scope_label, len(payload.changes.notes),
-                )
+            log.info(
+                "[analysis] %s: change notes vs prior generation, %d section(s)",
+                scope_label, len(payload.changes.notes),
+            )
         except Exception as exc:  # noqa: BLE001 - change notes never block the upsert
             log.warning(
                 "[analysis] %s: change-note generation failed (%s); shipping without",
