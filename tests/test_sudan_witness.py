@@ -24,6 +24,16 @@ LAYER = sudan_witness.settings.sudan_witness_layer_url
 EDIT_DATE = 1791790020939
 
 
+@pytest.fixture(autouse=True)
+def _mock_alert_severity_llm():
+    """Builders call the alert LLM; keep unit tests offline."""
+    with patch(
+        "clear_pipeline.providers.sudan_witness.llm_severity_or_none",
+        return_value=None,
+    ):
+        yield
+
+
 def _feature(**overrides) -> dict:
     attributes = {
         "Entry_Number": "SUW11503",
@@ -131,14 +141,18 @@ def test_description_says_when_the_date_basis_is_missing():
     assert "Date basis: not stated" in out["description"].splitlines()
 
 
-def test_severity_comes_from_recorded_harm_only():
-    sev = lambda **o: build_sudan_witness_signal_input(_record(**o), "s")["severity"]  # noqa: E731
-    assert sev(E_Harm_to_Persons="Displacement,Death") == 4
-    assert sev(E_Harm_to_Persons="Mass graves & Burial sites") == 4
-    assert sev(E_Harm_to_Persons="Arrest Detention & Abduction") == 3
-    assert sev(E_Reported_CivCas="true") == 3
-    # Unknown stays null (ADR-0010) — Map_category alone never sets it.
-    assert sev(Map_category="Harm to persons") is None
+def test_severity_comes_from_alert_llm():
+    with patch(
+        "clear_pipeline.providers.sudan_witness.llm_severity_or_none",
+        return_value=4,
+    ) as sev:
+        out = build_sudan_witness_signal_input(
+            _record(E_Harm_to_Persons="Displacement,Death"), "s"
+        )
+    assert out["severity"] == 4
+    sev.assert_called_once()
+    assert sev.call_args.kwargs["event_name"]
+    assert sev.call_args.kwargs["event_description"]
 
 
 def test_url_drops_links_analysts_cannot_open_and_repairs_malformed_ones():

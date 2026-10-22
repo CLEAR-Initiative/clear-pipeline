@@ -5,6 +5,9 @@ test_idmc_split.py's style.
 """
 
 import json
+from unittest.mock import patch
+
+import pytest
 
 from clear_pipeline.defs.signals.connectors import DTMFlashAlertConnector
 from clear_pipeline.providers.iom_dtm_flash_alerts import (
@@ -12,6 +15,15 @@ from clear_pipeline.providers.iom_dtm_flash_alerts import (
     build_iom_dtm_flash_alert_signal_input,
     parse_record,
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_alert_severity_llm():
+    with patch(
+        "clear_pipeline.providers.iom_dtm_flash_alerts.llm_severity_or_none",
+        return_value=None,
+    ):
+        yield
 
 
 def _raw(**overrides) -> dict:

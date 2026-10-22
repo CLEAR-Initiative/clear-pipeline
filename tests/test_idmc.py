@@ -24,6 +24,16 @@ from clear_pipeline.providers.idmc import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mock_alert_severity_llm():
+    """Builders call the alert LLM; keep unit tests offline."""
+    with patch(
+        "clear_pipeline.providers.idmc.llm_severity_or_none",
+        return_value=None,
+    ):
+        yield
+
+
 def _raw(**overrides) -> dict:
     row = {
         "id": 1,
@@ -278,14 +288,20 @@ def test_sets_url_from_source_url():
 
 def test_carries_title_description_severity_content_hash():
     parsed = _parsed(event_name="Clashes in Darfur", figure=15_000)
-    with patch("clear_pipeline.providers.idmc.enrich_with_geoparser"):
+    with (
+        patch("clear_pipeline.providers.idmc.enrich_with_geoparser"),
+        patch("clear_pipeline.providers.idmc.llm_severity_or_none", return_value=4) as sev,
+    ):
         input_data = build_idmc_signal_input(parsed, source_id="src-1")
 
     assert input_data["externalId"] == "idmc:1"
     assert input_data["title"] == "Clashes in Darfur"
     assert input_data["description"] == "Some description"
-    assert input_data["severity"] == 4  # figure >= 10_000
+    assert input_data["severity"] == 4
     assert input_data["contentHash"] == parsed["content_hash"]
+    sev.assert_called_once()
+    assert sev.call_args.kwargs["event_name"] == "Clashes in Darfur"
+    assert sev.call_args.kwargs["country"] == "Sudan"
 
 
 def test_partial_coordinate_skips_lat_lng_and_logs_warning(caplog):

@@ -37,6 +37,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 import redis
 
+from clear_pipeline.providers.alert_severity import llm_severity_or_none
 from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
@@ -250,11 +251,12 @@ def build_darfur24_signal_input(article: dict, source_id: str, location_id: str 
         "url": article["url"],
         "title": article["title"],
         "description": article.get("description"),
-        # News-source signals carry no assessable severity, so leave it null
-        # rather than invent a floor. (This used to be hardcoded to 1 because a
-        # null severity dropped the signal from the API's gte/lte severity filter
-        # — expo-385 — but that filter now keeps null rows, so null is honest and safe.)
-        "severity": None,
+        "severity": llm_severity_or_none(
+            country=settings.darfur24_default_country,
+            event_name=article.get("title"),
+            event_description=article.get("description"),
+            log_tag=f"darfur24:{article.get('darfur24_id')}",
+        ),
     }
     if location_id is not None:
         input_data["locationId"] = location_id

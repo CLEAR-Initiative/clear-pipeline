@@ -68,7 +68,10 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision"]
+LLMRole = Literal[
+    "context", "extraction", "datapoints", "narrative",
+    "signal", "alert", "translate", "vision",
+]
 
 # Per-request timeout (seconds). A flaky/hung model must fail FAST so it can be
 # retried or fall back — never block the pipeline. 600s (the old value) let a
@@ -123,6 +126,9 @@ _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     # role's creds unless a dedicated LLM_SIGNAL_* block is set — so the ported
     # pipeline runs with the env that's already configured.
     "signal": "extraction",
+    # Alert relevance+severity (DeepSeek via OpenRouter). Falls back to
+    # extraction when LLM_ALERT_* is unset so local/dev still loads.
+    "alert": "extraction",
     # Translation reuses extraction (haiku) unless LLM_TRANSLATE_* is set —
     # matching clear-pipeline's claude_model_translate = haiku.
     "translate": "extraction",
