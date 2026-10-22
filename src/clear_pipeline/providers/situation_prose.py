@@ -27,6 +27,7 @@ PROSE_COMPONENTS = (
     "context_risks",
     "hazards_and_vulnerabilities",
     "displacement",
+    "humanitarian_access",
     "sectors",
     "changes",
     "scenarios",
@@ -41,6 +42,11 @@ def _bullet_descriptions(items: Any) -> list[dict[str, str]]:
         if isinstance(b, dict):
             out.append({"description": b.get("description", "")})
     return out
+
+
+def _questions_not_answered(block: Any) -> list[str]:
+    """Coverage-gap strings are prose; completeness (float) stays canonical."""
+    return list((block or {}).get("questions_not_answered") or [])
 
 
 def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
@@ -58,7 +64,10 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     context_risks = {
-        domain: {"bullets": (block or {}).get("bullets", []) or []}
+        domain: {
+            "bullets": (block or {}).get("bullets", []) or [],
+            "questions_not_answered": _questions_not_answered(block),
+        }
         for domain, block in (data.get("context_risks") or {}).items()
     }
 
@@ -66,12 +75,21 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
     hazards_and_vulnerabilities = {
         "hazards": _bullet_descriptions(hv.get("hazards")),
         "vulnerabilities": _bullet_descriptions(hv.get("vulnerabilities")),
+        "questions_not_answered": _questions_not_answered(hv),
     }
 
     disp = data.get("displacement") or {}
     displacement = {
         "push_factors": _bullet_descriptions(disp.get("push_factors")),
         "return_intention": _bullet_descriptions(disp.get("return_intention")),
+        "questions_not_answered": _questions_not_answered(disp),
+    }
+
+    ha = data.get("humanitarian_access") or {}
+    humanitarian_access = {
+        "barriers": _bullet_descriptions(ha.get("barriers")),
+        "constraints": _bullet_descriptions(ha.get("constraints")),
+        "questions_not_answered": _questions_not_answered(ha),
     }
 
     sectors: dict[str, Any] = {}
@@ -89,6 +107,7 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
                 {"area": (ic or {}).get("area", "")}
                 for ic in (block.get("information_coverage") or [])
             ],
+            "questions_not_answered": _questions_not_answered(block),
         }
 
     # `changes.notes` values are prose; their keys are section paths (preserved
@@ -111,6 +130,7 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
         "context_risks": context_risks,
         "hazards_and_vulnerabilities": hazards_and_vulnerabilities,
         "displacement": displacement,
+        "humanitarian_access": humanitarian_access,
         "sectors": sectors,
         "changes": changes_out,
         "scenarios": scenarios,

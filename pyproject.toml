@@ -80,7 +80,10 @@ build-backend = "hatchling.build"
 # when Dagster's gRPC server tries `-m clear_pipeline.definitions`.
 [tool.hatch.build.targets.wheel]
 packages = ["src/clear_pipeline"]
-force-include = { "pyproject.toml" = "pyproject.toml" }
+
+[tool.hatch.build.targets.wheel.force-include]
+"pyproject.toml" = "pyproject.toml"
+"src/clear_pipeline/defs/situation/data/analysis_questions_first_level.csv" = "clear_pipeline/defs/situation/data/analysis_questions_first_level.csv"
 
 [tool.dg]
 directory_type = "project"

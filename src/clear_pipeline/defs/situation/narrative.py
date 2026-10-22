@@ -1,10 +1,11 @@
 """LLM-generated narrative components for the situation analysis.
 
-Four components:
+Components:
   2. AI summary                  (2–4 paragraph prose)
-  3. context_risks               (8 sub-domains × bullets)
+  3. context_risks               (9 sub-domains × bullets)
   4. hazards_and_vulnerabilities (bullets each)
   5. displacement                (push_factors + return_intention)
+  5b. humanitarian_access        (barriers + constraints)
 
 Component 6 (per-sector analysis) lives in `sectors.py` — it needs its
 own prompt discipline per sector.
@@ -26,7 +27,6 @@ Failure isolation: any generator that raises returns its component's
 empty default. One bad LLM call doesn't drop the other three.
 """
 
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -36,10 +36,24 @@ from pydantic import BaseModel, Field
 from clear_pipeline.defs.situation.citations import (
     _SENTENCE_RE,
     merge_contributing,
-    resolve_bullets,
     resolve_prose,
 )
-from clear_pipeline.defs.situation.prompts import BASE_INSTRUCTIONS
+from clear_pipeline.defs.situation.generate_component import (
+    BulletComponentSpec,
+    GuidedCoverageLLM,
+    run_bullet_component,
+    run_structured,
+    sourced_bullets,
+)
+from clear_pipeline.defs.situation.prompts import (
+    build_system_prompt,
+    format_aggregated_for_prompt,
+)
+from clear_pipeline.defs.situation.questions import (
+    CONTEXT_DOMAIN_KEYS,
+    rag_query_for,
+    situation_questions,
+)
 from clear_pipeline.defs.situation.rag_helper import (
     RAGContext,
     fetch_rag_context,
@@ -50,6 +64,7 @@ from clear_pipeline.defs.situation.schemas import (
     ContextRisks,
     DisplacementNarrative,
     HazardsAndVulnerabilities,
+    HumanitarianAccess,
     RiskDomain,
     Scenarios,
     SourcedBullet,
@@ -57,6 +72,10 @@ from clear_pipeline.defs.situation.schemas import (
 from clear_pipeline.providers.llm import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+# Re-exports for tests / callers that imported the old private names.
+_CONTEXT_DOMAIN_KEYS = CONTEXT_DOMAIN_KEYS
+_sourced_bullets = sourced_bullets
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -101,74 +120,54 @@ class _AISummaryLLM(BaseModel):
     )
 
 
-def _risk_domain_field() -> Any:
-    """Fresh Field for one context-risk domain — a flat list of bullets."""
-    return Field(
+class _GuidedAnswerLLM(GuidedCoverageLLM):
+    """Structured answer for one context-pillar analysis question.
+
+    ``answer`` integrates into ``RiskDomain.bullets``; completeness /
+    questions_not_answered are additive coverage metadata.
+    """
+
+    answer: list[str] = Field(
         default_factory=list,
         description=(
-            "Concise bulleted risks / observations for this domain. "
-            "Each bullet a terse fragment (max 15 words), figure or fact first. Prefer 3–6 bullets. Return "
-            "an empty list only when no evidence in the retrieved "
-            "sources supports any claim in this domain."
+            "Concise bulleted answer addressing the analysis question. "
+            "Each bullet a terse fragment (max 15 words), figure or fact "
+            "first. Prefer 3–6 bullets. Empty list only when no evidence "
+            "supports any claim."
         ),
     )
 
 
-class _ContextRisksLLM(BaseModel):
-    """Eight OCHA-style context-risk domains, each a FLAT list of bullet
-    strings. Fixed order so the dashboard's tab layout stays stable.
-
-    Flat on purpose: an earlier nested-object shape (one sub-model per
-    domain) made the model intermittently return a domain as a
-    JSON-encoded string instead of an object, which failed validation and
-    blanked the whole component. The narrative components that never
-    glitch — hazards, displacement — are all `list[str]`; this matches
-    them. `source_report_ids` is attached later from the RAG set, not
-    asked of the LLM."""
-    demographics: list[str] = _risk_domain_field()
-    political: list[str] = _risk_domain_field()
-    economy: list[str] = _risk_domain_field()
-    socio_culture: list[str] = _risk_domain_field()
-    security: list[str] = _risk_domain_field()
-    legal_policy: list[str] = _risk_domain_field()
-    infrastructure: list[str] = _risk_domain_field()
-    environment: list[str] = _risk_domain_field()
+class _HumanitarianAccessLLM(GuidedCoverageLLM):
+    barriers: list[str] = Field(
+        default_factory=list,
+        description="Access barriers for actors and affected populations. Terse bullets.",
+    )
+    constraints: list[str] = Field(
+        default_factory=list,
+        description="Physical, seasonal, and operational access constraints. Terse bullets.",
+    )
 
 
-class _HazardsVulnerabilitiesLLM(BaseModel):
+class _HazardsVulnerabilitiesLLM(GuidedCoverageLLM):
     hazards: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted list of natural / man-made hazards affecting the "
-            "country during the target period. Terse fragment per bullet."
-        ),
+        description="Natural / man-made shocks. Terse bullets.",
     )
     vulnerabilities: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted list of pre-crisis structural vulnerabilities "
-            "(economic, institutional, environmental, social). Terse "
-            "fragment per bullet."
-        ),
+        description="Pre-crisis structural vulnerabilities. Terse bullets.",
     )
 
 
-class _DisplacementLLM(BaseModel):
+class _DisplacementLLM(GuidedCoverageLLM):
     push_factors: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted drivers pushing populations to displace — "
-            "conflict, drought, insecurity, service collapse, etc. "
-            "Terse fragment per bullet, driver first."
-        ),
+        description="Drivers of displacement. Terse bullets.",
     )
     return_intention: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted signals about displaced populations' intent to "
-            "return - willingness, blockers, conditions. Terse fragment "
-            "per bullet."
-        ),
+        description="Return intent, blockers, and conditions. Terse bullets.",
     )
 
 
@@ -193,80 +192,50 @@ class _ScenariosLLM(BaseModel):
 
 
 # ────────────────────────────────────────────────────────────────────
-def _build_system_prompt(country_name: str, period_label: str, agg_context: str) -> str:
-    """One prompt reused across all four component calls in a run.
+# Bullet-component specs (hazards / displacement / access / context)
+# ────────────────────────────────────────────────────────────────────
 
-    Static prefix + country context: this is what Anthropic's prompt
-    cache keys on. Keeping it byte-identical across the four calls
-    means calls 2–4 read from cache at ~10% of the input cost.
-    """
-    return (
-        f"{BASE_INSTRUCTIONS}\n"
-        f"---\n"
-        f"AREA: {country_name}\n"
-        f"PERIOD: {period_label}\n"
-        f"---\n"
-        f"AGGREGATED HEADLINE FIGURES (cached; do not repeat back):\n"
-        f"{agg_context}\n"
-        f"---"
-    )
+_HAZARDS_SPEC = BulletComponentSpec(
+    schema_key="hazards_and_vulnerabilities",
+    log_label="hazards_and_vulnerabilities",
+    llm_schema=_HazardsVulnerabilitiesLLM,
+    result_cls=HazardsAndVulnerabilities,
+    bullet_fields=("hazards", "vulnerabilities"),
+    map_instruction="Map the answer into `hazards` and `vulnerabilities`.",
+    fallback_topic="Shock-Event",
+)
 
+_DISPLACEMENT_SPEC = BulletComponentSpec(
+    schema_key="displacement",
+    log_label="displacement",
+    llm_schema=_DisplacementLLM,
+    result_cls=DisplacementNarrative,
+    bullet_fields=("push_factors", "return_intention"),
+    map_instruction="Map the answer into `push_factors` and `return_intention`.",
+    fallback_topic="Displacement",
+)
 
-def _format_aggregated_for_prompt(aggregated: dict[str, Any] | None) -> str:
-    """Render the aggregated-datapoints blob in a compact form the
-    LLM can reason over. We serialise the whole `data` map because
-    the model may want to cross-reference sector PIN figures against
-    narrative claims about needs."""
-    if not aggregated:
-        return "(no aggregated figures available for this period)"
-    payload = {
-        "reportCount": aggregated.get("reportCount"),
-        "dataQualityScore": aggregated.get("dataQualityScore"),
-        "newestSourceAt": aggregated.get("newestSourceAt"),
-        "oldestSourceAt": aggregated.get("oldestSourceAt"),
-        "data": aggregated.get("data") or {},
-    }
-    return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+_ACCESS_SPEC = BulletComponentSpec(
+    schema_key="humanitarian_access",
+    log_label="humanitarian_access",
+    llm_schema=_HumanitarianAccessLLM,
+    result_cls=HumanitarianAccess,
+    bullet_fields=("barriers", "constraints"),
+    map_instruction="Map the answer into `barriers` and `constraints`.",
+    fallback_topic="Humanitarian Access",
+)
 
-
-def _run_component(
-    llm: LLMProvider,
-    *,
-    system_prompt: str,
-    user_prompt: str,
-    schema: type[BaseModel],
-    cache_key: str,
-    max_tokens: int,
-) -> BaseModel:
-    """Single component call — thin wrapper so all four narrative
-    generators go through the same code path (retry policy, cache-key
-    convention, max-tokens guard)."""
-    return llm.complete_structured(
-        system=system_prompt,
-        user=user_prompt,
-        schema=schema,
-        max_tokens=max_tokens,
-        cache_key=cache_key,
-    )
-
-
-def _sourced_bullets(
-    raw_bullets: list[str], rag: RAGContext,
-) -> tuple[list[SourcedBullet], dict[str, list[str]]]:
-    """Resolve inline [Rn] markers on a bullet list into SourcedBullets — each
-    carrying ONLY its own resolved report ids (empty when that bullet cited
-    nothing) — plus the report_id -> [bullets] map for `contributing_sources`.
-
-    Per-bullet ids are the honest signal. A coarse-RAG-union fallback HERE would
-    stamp an un-marked terse bullet with every report that fed the search, which
-    the dashboard renders literally. The union is still exposed once, at the
-    component level (`source_report_ids`), which is where the fallback belongs."""
-    clean, per_ids, contributing = resolve_bullets(raw_bullets, rag.hit_report_ids)
-    bullets = [
-        SourcedBullet(description=c, source_report_ids=ids)
-        for c, ids in zip(clean, per_ids)
-    ]
-    return bullets, contributing
+_CONTEXT_DOMAIN_SPEC = BulletComponentSpec(
+    schema_key="",  # set per domain call
+    log_label="context_risks",
+    llm_schema=_GuidedAnswerLLM,
+    result_cls=RiskDomain,
+    bullet_fields=("answer",),
+    map_instruction="Emit `answer` (3–6 bullets).",
+    sourced=False,
+    field_map={"answer": "bullets"},
+    max_tokens=1500,
+)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -275,18 +244,12 @@ def _sourced_bullets(
 
 # The window the summary leads with: developments this recent come first.
 RECENT_DAYS = 30
-# Evidence breadth: the recent FRAME band, then one topical search per theme so
-# a country summary draws on many reports, not the top hits of one query.
-RECENT_LIMIT = 20
-THEME_LIMIT = 8
-MAX_CHUNKS_PER_REPORT = 2
-SUMMARY_THEMES = (
-    "armed conflict attacks drone strikes clashes civilian casualties",
-    "displacement movement IDPs returns refugees",
-    "disease outbreak cholera health facilities",
-    "food insecurity famine markets prices livelihoods",
-    "humanitarian access aid delivery response funding",
-)
+# Evidence breadth: the recent FRAME band, then one RAG search per
+# situation-analysis CSV question so the summary draws on the same
+# framework questions as the narrative components (not hand-rolled themes).
+RECENT_LIMIT = 40
+THEME_LIMIT = 16
+MAX_CHUNKS_PER_REPORT = 4
 # Deterministic guardrails on the output.
 SUMMARY_MAX_WORDS = 80
 SUMMARY_MAX_SENTENCES = 3
@@ -334,8 +297,13 @@ def _summary_evidence(scope_label: str, rag_filters: dict[str, Any] | None) -> R
         mode="FRAME",
     )
     themed = [
-        fetch_rag_context(query=f"{scope_label} {terms}", limit=THEME_LIMIT, filters=rag_filters)
-        for terms in SUMMARY_THEMES
+        fetch_rag_context(
+            query=rag_query_for(scope_label, q),
+            limit=THEME_LIMIT,
+            filters=rag_filters,
+            mode="TOPICAL",
+        )
+        for q in situation_questions()
     ]
     return merge_rag_contexts(recent, *themed, max_per_report=MAX_CHUNKS_PER_REPORT)
 
@@ -404,37 +372,28 @@ def generate_ai_summary(
         logger.info("[situation:ai_summary] no RAG hits — returning empty summary")
         return AISummary()
 
-    system = _build_system_prompt(
-        country_name, period_label, "(not provided for this component: use only RETRIEVED EVIDENCE)",
+    system = build_system_prompt(
+        country_name, period_label,
+        "(not provided for this component: use only RETRIEVED EVIDENCE)",
     )
     user = (
-        f"Produce the AI Summary component for {country_name}, {period_label}. "
-        "Write an executive summary of 3 short sentences and 4 to 6 key "
-        "findings, as in an NRC flash report. A program manager should read "
-        "it in under a minute. No filler, no restating the task.\n"
-        "Describe patterns at the level of the analysed area and name places "
-        "only as evidence: for a country, group incidents across regions "
-        "(e.g. 'drone strikes on markets across Darfur and Kordofan'); for a "
-        "district or locality, single dated incidents are fine.\n"
-        f"Lead with developments from the {RECENT_DAYS} days up to "
-        f"{recent_end:%d %B %Y} and give dates. Use older evidence only as "
-        "background, and nothing dated after that day. Do not present "
-        "cumulative multi-year totals (e.g. counts since 2023) as findings.\n"
-        "Every key finding must come from RETRIEVED EVIDENCE and end with its "
-        "[Rn] marker(s); a finding you cannot cite will be discarded. Draw on "
-        "as many different sources as the evidence supports.\n"
+        f"AI Summary for {country_name}, {period_label}: 3 short sentences "
+        f"(≤70 words) plus 4–6 key findings ('Subject: finding', ≤30 words each).\n"
+        f"Lead with the {RECENT_DAYS} days up to {recent_end:%d %B %Y}; older "
+        "evidence is background only. No cumulative multi-year totals. "
+        "Every finding must end with [Rn] from RETRIEVED EVIDENCE.\n"
         "\n"
         "RETRIEVED EVIDENCE:\n"
         f"{rag.formatted_for_prompt}"
     )
 
     def run(prompt: str) -> tuple[str, dict[str, list[str]], list[SourcedBullet], dict[str, list[str]]]:
-        result = _run_component(
+        result = run_structured(
             llm, system_prompt=system, user_prompt=prompt,
             schema=_AISummaryLLM, cache_key=cache_key, max_tokens=1500,
         )
         text, contributing = resolve_prose(result.text, rag.hit_report_ids)
-        findings, findings_contributing = _sourced_bullets(result.key_findings, rag)
+        findings, findings_contributing = sourced_bullets(result.key_findings, rag)
         return text, contributing, findings, findings_contributing
 
     try:
@@ -479,8 +438,43 @@ def generate_ai_summary(
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 3 — Context Risks
+# Component 3 — Context Risks (one LLM call per context-pillar name)
 # ────────────────────────────────────────────────────────────────────
+
+
+def _generate_one_context_domain(
+    llm: LLMProvider,
+    *,
+    domain_key: str,
+    country_name: str,
+    period_label: str,
+    aggregated_context: str,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> RiskDomain:
+    """One RAG search + one LLM call for a single context pillar."""
+    spec = BulletComponentSpec(
+        schema_key=domain_key,
+        log_label=f"context_risks:{domain_key}",
+        llm_schema=_CONTEXT_DOMAIN_SPEC.llm_schema,
+        result_cls=_CONTEXT_DOMAIN_SPEC.result_cls,
+        bullet_fields=_CONTEXT_DOMAIN_SPEC.bullet_fields,
+        map_instruction=_CONTEXT_DOMAIN_SPEC.map_instruction,
+        rag_limit=_CONTEXT_DOMAIN_SPEC.rag_limit,
+        max_tokens=_CONTEXT_DOMAIN_SPEC.max_tokens,
+        sourced=_CONTEXT_DOMAIN_SPEC.sourced,
+        field_map=_CONTEXT_DOMAIN_SPEC.field_map,
+    )
+    return run_bullet_component(
+        llm,
+        spec,
+        country_name=country_name,
+        period_label=period_label,
+        aggregated=None,
+        cache_key=cache_key,
+        rag_filters=rag_filters,
+        aggregated_context=aggregated_context,
+    )
 
 
 def generate_context_risks(
@@ -492,67 +486,28 @@ def generate_context_risks(
     cache_key: str,
     rag_filters: dict[str, Any] | None = None,
 ) -> ContextRisks:
-    """Eight risk domains in one LLM call. Single broad RAG search
-    covers cross-domain context — separate per-domain searches would
-    ~8× the cost with marginal quality lift for the POC."""
-    rag = fetch_rag_context(
-        query=(
-            f"{country_name} context risks demographics political economy "
-            "society culture security legal policy infrastructure environment"
-        ),
-        limit=15,
-        filters=rag_filters,
-    )
-    if rag.is_empty:
-        return ContextRisks()
+    """Nine context pillars — one RAG + LLM call each, keyed by CSV name.
 
-    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
-    user = (
-        f"Produce the Context Risks component for {country_name}, {period_label}. "
-        "For each of the eight domains (demographics, political, economy, "
-        "socio_culture, security, legal_policy, infrastructure, "
-        "environment), emit 3–6 bulleted risks or observations. Skip a "
-        "domain (empty list) only if the evidence doesn't support any "
-        "claim in it.\n"
-        "\n"
-        "RETRIEVED EVIDENCE:\n"
-        f"{rag.formatted_for_prompt}"
-    )
-    try:
-        result = _run_component(
-            llm, system_prompt=system, user_prompt=user,
-            schema=_ContextRisksLLM, cache_key=cache_key, max_tokens=3000,
+    Sequential so Anthropic prompt caching can reuse the shared system
+    prefix across domains within the 5-minute TTL.
+    """
+    aggregated_context = format_aggregated_for_prompt(aggregated)
+    outputs: dict[str, RiskDomain] = {}
+    for domain_key in CONTEXT_DOMAIN_KEYS:
+        outputs[domain_key] = _generate_one_context_domain(
+            llm,
+            domain_key=domain_key,
+            country_name=country_name,
+            period_label=period_label,
+            aggregated_context=aggregated_context,
+            cache_key=cache_key,
+            rag_filters=rag_filters,
         )
-    except Exception:  # noqa: BLE001
-        logger.exception("[situation:context_risks] LLM call failed — returning empty component")
-        return ContextRisks()
-
-    # Resolve each domain's inline [Rn] citations independently — the eight
-    # domains share one RAG search, but each attributes only the bullets it
-    # actually emitted. A domain with no usable markers falls back to the coarse
-    # RAG union so its `source_report_ids` never regresses to empty.
-    def _domain(raw_bullets: list[str]) -> RiskDomain:
-        clean, _ids, contributing = resolve_bullets(raw_bullets, rag.hit_report_ids)
-        return RiskDomain(
-            bullets=clean,
-            source_report_ids=list(contributing) or rag.contributing_report_ids,
-            contributing_sources=contributing,
-        )
-
-    return ContextRisks(
-        demographics=_domain(result.demographics),
-        political=_domain(result.political),
-        economy=_domain(result.economy),
-        socio_culture=_domain(result.socio_culture),
-        security=_domain(result.security),
-        legal_policy=_domain(result.legal_policy),
-        infrastructure=_domain(result.infrastructure),
-        environment=_domain(result.environment),
-    )
+    return ContextRisks(**outputs)
 
 
 # ────────────────────────────────────────────────────────────────────
-# Component 4 — Hazards & Pre-Crisis Vulnerabilities
+# Components 4 / 5 / 5b — hazards, displacement, humanitarian access
 # ────────────────────────────────────────────────────────────────────
 
 
@@ -565,48 +520,11 @@ def generate_hazards_and_vulnerabilities(
     cache_key: str,
     rag_filters: dict[str, Any] | None = None,
 ) -> HazardsAndVulnerabilities:
-    rag = fetch_rag_context(
-        query=(
-            f"{country_name} hazards vulnerabilities natural disasters "
-            "conflict drought flood economic institutional structural"
-        ),
-        limit=10,
-        filters=rag_filters,
+    return run_bullet_component(
+        llm, _HAZARDS_SPEC,
+        country_name=country_name, period_label=period_label,
+        aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
     )
-    if rag.is_empty:
-        return HazardsAndVulnerabilities()
-
-    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
-    user = (
-        f"Produce the Hazards & Pre-Crisis Vulnerabilities component for "
-        f"{country_name}, {period_label}. Emit two lists: `hazards` (natural + "
-        "man-made shocks) and `vulnerabilities` (structural conditions "
-        "that make populations susceptible). One sentence per bullet.\n"
-        "\n"
-        "RETRIEVED EVIDENCE:\n"
-        f"{rag.formatted_for_prompt}"
-    )
-    try:
-        result = _run_component(
-            llm, system_prompt=system, user_prompt=user,
-            schema=_HazardsVulnerabilitiesLLM, cache_key=cache_key, max_tokens=2000,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("[situation:hazards_and_vulnerabilities] LLM call failed — returning empty component")
-        return HazardsAndVulnerabilities()
-
-    hazards, haz_contrib = _sourced_bullets(result.hazards, rag)
-    vulns, vuln_contrib = _sourced_bullets(result.vulnerabilities, rag)
-    return HazardsAndVulnerabilities(
-        hazards=hazards,
-        vulnerabilities=vulns,
-        contributing_sources=merge_contributing(haz_contrib, vuln_contrib),
-    )
-
-
-# ────────────────────────────────────────────────────────────────────
-# Component 5 — Displacement Narrative
-# ────────────────────────────────────────────────────────────────────
 
 
 def generate_displacement_narrative(
@@ -618,42 +536,26 @@ def generate_displacement_narrative(
     cache_key: str,
     rag_filters: dict[str, Any] | None = None,
 ) -> DisplacementNarrative:
-    rag = fetch_rag_context(
-        query=(
-            f"{country_name} displacement push factors return intention "
-            "IDPs refugees returnees drivers barriers conditions"
-        ),
-        limit=10,
-        filters=rag_filters,
+    return run_bullet_component(
+        llm, _DISPLACEMENT_SPEC,
+        country_name=country_name, period_label=period_label,
+        aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
     )
-    if rag.is_empty:
-        return DisplacementNarrative()
 
-    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
-    user = (
-        f"Produce the Displacement Narrative component for {country_name}, "
-        f"{period_label}. Emit two lists: `push_factors` (what's driving people to "
-        "displace) and `return_intention` (signals about their intent to "
-        "return, blockers, or conditions). One sentence per bullet.\n"
-        "\n"
-        "RETRIEVED EVIDENCE:\n"
-        f"{rag.formatted_for_prompt}"
-    )
-    try:
-        result = _run_component(
-            llm, system_prompt=system, user_prompt=user,
-            schema=_DisplacementLLM, cache_key=cache_key, max_tokens=2000,
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("[situation:displacement] LLM call failed — returning empty component")
-        return DisplacementNarrative()
 
-    push, push_contrib = _sourced_bullets(result.push_factors, rag)
-    ret, ret_contrib = _sourced_bullets(result.return_intention, rag)
-    return DisplacementNarrative(
-        push_factors=push,
-        return_intention=ret,
-        contributing_sources=merge_contributing(push_contrib, ret_contrib),
+def generate_humanitarian_access(
+    llm: LLMProvider,
+    *,
+    country_name: str,
+    period_label: str,
+    aggregated: dict[str, Any] | None,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> HumanitarianAccess:
+    return run_bullet_component(
+        llm, _ACCESS_SPEC,
+        country_name=country_name, period_label=period_label,
+        aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
     )
 
 
@@ -673,31 +575,44 @@ def generate_scenarios(
 ) -> Scenarios:
     """Forward-looking most-likely / best / worst trajectories for the frame.
     Prose-only; coarse provenance (the RAG report union) since projections are
-    not per-line citations. Empty component when there's no evidence."""
-    rag = fetch_rag_context(
-        query=(
-            f"{country_name} outlook trajectory scenario forecast risk escalation "
-            f"humanitarian access response capacity {period_label}"
-        ),
-        limit=10,
+    not per-line citations. Empty component when there's no evidence.
+
+    RAG is grounded in the situation-analysis CSV questions (no separate
+    scenario question in the first-level framework)."""
+    sit_qs = situation_questions()
+    rag = merge_rag_contexts(
+        *[
+            fetch_rag_context(
+                query=rag_query_for(country_name, q),
+                limit=8,
+                filters=rag_filters,
+                mode="TOPICAL",
+            )
+            for q in sit_qs
+        ],
+        max_per_report=4,
+    ) if sit_qs else fetch_rag_context(
+        query=f"{country_name} humanitarian outlook {period_label}",
+        limit=20,
         filters=rag_filters,
+        mode="TOPICAL",
     )
     if rag.is_empty:
         return Scenarios()
 
-    system = _build_system_prompt(country_name, period_label, _format_aggregated_for_prompt(aggregated))
+    system = build_system_prompt(
+        country_name, period_label, format_aggregated_for_prompt(aggregated),
+    )
     user = (
-        f"Produce the forward-looking Scenarios component for {country_name}, "
-        f"{period_label}. Emit four short prose fields: `most_likely`, `best_case`, "
-        "`worst_case` (each a 2–4 sentence trajectory over the coming weeks / "
-        "months) and `description` (the key variables the scenarios hinge on). "
-        "Ground every projection in the retrieved evidence; do not invent figures.\n"
+        f"Scenarios for {country_name}, {period_label}: "
+        "`most_likely`, `best_case`, `worst_case` (2–4 sentences each) and "
+        "`description` (key hinge variables). Ground in evidence only.\n"
         "\n"
         "RETRIEVED EVIDENCE:\n"
         f"{rag.formatted_for_prompt}"
     )
     try:
-        result = _run_component(
+        result = run_structured(
             llm, system_prompt=system, user_prompt=user,
             schema=_ScenariosLLM, cache_key=cache_key, max_tokens=2000,
         )
