@@ -524,6 +524,8 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
                 has_coords = True
 
     # LLM relevance+severity (replaces the old alertType.name ladder).
+    # Dataminr has no structured displacement / affected counts — do not
+    # invent them from free-text "affected" phrasing.
     severity = llm_severity_or_none(
         country=dataminr_location_name or scope_country,
         event_name=signal.headline,

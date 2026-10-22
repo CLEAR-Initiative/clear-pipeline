@@ -302,6 +302,7 @@ def test_carries_title_description_severity_content_hash():
     sev.assert_called_once()
     assert sev.call_args.kwargs["event_name"] == "Clashes in Darfur"
     assert sev.call_args.kwargs["country"] == "Sudan"
+    assert sev.call_args.kwargs["people_displaced"] == 15_000
 
 
 def test_partial_coordinate_skips_lat_lng_and_logs_warning(caplog):

@@ -22,9 +22,15 @@ def test_payload_empty_when_fields_absent():
 def test_payload_includes_only_present_casualty_fields():
     assert _payload(people_dead=12)["additional_data"] == {"people_dead": 12}
     assert _payload(people_injured=3)["additional_data"] == {"people_injured": 3}
-    assert _payload(people_dead=1, people_injured=2)["additional_data"] == {
+    assert _payload(people_displaced=500)["additional_data"] == {"people_displaced": 500}
+    assert _payload(people_affected=9000)["additional_data"] == {"people_affected": 9000}
+    assert _payload(
+        people_dead=1, people_injured=2, people_displaced=100, people_affected=50,
+    )["additional_data"] == {
         "people_dead": 1,
         "people_injured": 2,
+        "people_displaced": 100,
+        "people_affected": 50,
     }
 
 

@@ -113,6 +113,8 @@ def _payload(
     event_description: str | None = None,
     people_dead: int | None = None,
     people_injured: int | None = None,
+    people_displaced: int | None = None,
+    people_affected: int | None = None,
 ) -> dict[str, Any]:
     """Build the classifier input dict. Absent fields are empty (``""`` / ``{}``)."""
     additional: dict[str, int] = {}
@@ -120,6 +122,10 @@ def _payload(
         additional["people_dead"] = people_dead
     if people_injured is not None:
         additional["people_injured"] = people_injured
+    if people_displaced is not None:
+        additional["people_displaced"] = people_displaced
+    if people_affected is not None:
+        additional["people_affected"] = people_affected
     return {
         "country": country or "",
         "event_name": event_name or "",
@@ -135,6 +141,8 @@ def classify_alert_severity(
     event_description: str | None = None,
     people_dead: int | None = None,
     people_injured: int | None = None,
+    people_displaced: int | None = None,
+    people_affected: int | None = None,
 ) -> AlertSeverityClassification:
     """Run the DeepSeek (OpenRouter) classifier; raises on provider/parse failure."""
     user = json.dumps(
@@ -144,6 +152,8 @@ def classify_alert_severity(
             event_description=event_description,
             people_dead=people_dead,
             people_injured=people_injured,
+            people_displaced=people_displaced,
+            people_affected=people_affected,
         ),
         ensure_ascii=False,
     )
@@ -163,6 +173,8 @@ def llm_severity_or_none(
     event_description: str | None = None,
     people_dead: int | None = None,
     people_injured: int | None = None,
+    people_displaced: int | None = None,
+    people_affected: int | None = None,
     log_tag: str = "alert",
 ) -> int | None:
     """Best-effort severity for ingest builders. Returns None on LLM failure
@@ -175,6 +187,8 @@ def llm_severity_or_none(
             event_description=event_description,
             people_dead=people_dead,
             people_injured=people_injured,
+            people_displaced=people_displaced,
+            people_affected=people_affected,
         )
     except Exception:  # noqa: BLE001 — ingest must not die on a model blip
         logger.warning(

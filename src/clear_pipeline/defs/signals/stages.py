@@ -191,6 +191,11 @@ def _apply_llm_severity_at_drain(view: SignalView, created: dict) -> dict:
     if source_name not in _drain_time_severity_sources():
         return created
 
+    # Drain-only sources (manual / trusted / sudan-war-x) have no structured
+    # displacement or "people affected" fields — only optional casualties.
+    # Do not map CLEAR's event-level populationAffected / free-text "affected"
+    # counts into people_displaced (those are a different concept; the only
+    # structured people_affected today is GDACS, which skips this LLM path).
     people_dead = created.get("casualties")
     if isinstance(people_dead, int) and people_dead <= 0:
         people_dead = None

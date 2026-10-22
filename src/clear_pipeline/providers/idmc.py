@@ -321,17 +321,21 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
 
     # Prefer a human country name from locations_name ("…, Sudan"); fall back
-    # to the ISO3 code IDU ships. Displacement figure is not people_dead.
+    # to the ISO3 code IDU ships. IDU `figure` is a displacement flow count.
     country = None
     loc_name = (event.get("locations_name") or "").strip()
     if loc_name:
         country = loc_name.rsplit(",", 1)[-1].strip() or None
     country = country or (event.get("iso3") or None)
 
+    figure = event.get("figure")
+    people_displaced = figure if isinstance(figure, int) and figure > 0 else None
+
     severity = llm_severity_or_none(
         country=country,
         event_name=event.get("title"),
         event_description=event.get("description"),
+        people_displaced=people_displaced,
         log_tag=f"idmc:{event.get('idu_id')}",
     )
 

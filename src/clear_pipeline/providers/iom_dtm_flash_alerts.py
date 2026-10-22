@@ -195,6 +195,9 @@ def build_iom_dtm_flash_alert_signal_input(
         "url": record["field_report_file"],
         "title": record["title"],
         "description": record["field_summary"],
+        # No structured displacement count on Flash Alerts — field_summary is
+        # free text only. Do not map text "affected"/"IDP" guesses into
+        # people_displaced.
         "severity": llm_severity_or_none(
             country=record.get("field_country1"),
             event_name=record.get("title"),
