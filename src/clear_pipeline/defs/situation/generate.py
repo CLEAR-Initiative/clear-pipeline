@@ -463,25 +463,25 @@ def generate_and_upsert_for_frame(
             "[analysis] %s (%s): generating LLM components (provider=%s model=%s)",
             scope_label, period_label, llm.provider_name, llm.model,
         )
-        # Prior analysis for this frame — drives leaf-level selective regeneration
-        # (#1067): unchanged leaves are reused from it, only changed leaves re-run.
-        # `force` ignores the prior (full regen). Read ONCE here and reused by the
-        # change-note diff below (which used to re-fetch it).
+        # Prior analysis for this frame. Read ONCE here and reused by BOTH the
+        # leaf-level selective regeneration (#1067) and the change-note diff
+        # below. Always fetched — even when forcing — so a forced full regen
+        # still gets "what changed" notes; `force` only withholds the prior from
+        # the selective builder (so every leaf regenerates).
         prior = None
-        if not force:
-            try:
-                prior = clear_api.get_analysis(
-                    schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
-                )
-            except Exception as exc:  # noqa: BLE001 — a fetch hiccup → safe full regen
-                log.warning(
-                    "[analysis] %s: prior-analysis fetch failed (%s) — full regen",
-                    scope_label, exc,
-                )
+        try:
+            prior = clear_api.get_analysis(
+                schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
+            )
+        except Exception as exc:  # noqa: BLE001 — a fetch hiccup → safe full regen
+            log.warning(
+                "[analysis] %s: prior-analysis fetch failed (%s) — full regen",
+                scope_label, exc,
+            )
         prior_data = prior.get("data") if prior else None
 
         leaf_result = build_leaf_components(
-            llm, prior_payload=prior_data, country_name=scope_label,
+            llm, prior_payload=None if force else prior_data, country_name=scope_label,
             period_label=period_label, aggregated=aggregated, cache_key=cache_key,
             rag_filters=rag_filters, log=log,
         )
@@ -495,12 +495,15 @@ def generate_and_upsert_for_frame(
         # ai_summary is a FAN-IN over the leaves: regenerate it whenever any leaf
         # changed (or there's no usable prior summary); otherwise keep the prior.
         prior_summary = None
-        if prior_data:
+        if prior_data and not force:
             try:
                 prior_summary = SituationAnalysisPayload.model_validate(prior_data).ai_summary
             except Exception:  # noqa: BLE001 — unparseable prior → regenerate the summary
                 prior_summary = None
-        if leaf_result.any_regenerated or prior_summary is None:
+        # Regenerate the summary when a leaf changed, or there's no usable prior
+        # summary (missing, or empty text — don't reuse a blank from a prior
+        # failure; retry it).
+        if leaf_result.any_regenerated or prior_summary is None or not prior_summary.text:
             ai_summary_component = generate_ai_summary_fanin(
                 llm, country_name=scope_label, period_label=period_label,
                 result=leaf_result, cache_key=cache_key,

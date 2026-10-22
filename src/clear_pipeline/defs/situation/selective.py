@@ -49,7 +49,9 @@ from clear_pipeline.defs.situation.schemas import (
     DisplacementNarrative,
     HazardsAndVulnerabilities,
     HumanitarianAccess,
+    RiskDomain,
     Scenarios,
+    SectorAnalysis,
     Sectors,
     SituationAnalysisPayload,
     SourcedBullet,
@@ -175,13 +177,50 @@ def _leaf_generate(
     )
 
 
+def _rag_fingerprint(rag: RAGContext) -> list[str]:
+    """Chunk-level evidence fingerprint: the sorted set of hit (chunk) ids.
+
+    Finer than report ids — a figure re-merge or a re-embed that adds/replaces
+    chunks under an EXISTING report id changes the chunk-id set, so a stale
+    section is still detected even when its report-id set is unchanged (#1067
+    review). Falls back to report ids when hits carry no id (test doubles or
+    merged contexts built without raw hits)."""
+    ids = [str(h.get("id")) for h in rag.hits if h.get("id")]
+    return sorted(ids) if ids else sorted(rag.contributing_report_ids)
+
+
 def is_stale(leaf_key: str, current_ids: list[str], prior_index: dict[str, list[str]]) -> bool:
-    """A leaf is stale when its CURRENT retrieval id-set differs from the one
+    """A leaf is stale when its CURRENT evidence fingerprint differs from the one
     recorded last time — or when it has no recorded baseline (first selective
     pass, or a prior full/legacy generation that didn't seed the index)."""
     if leaf_key not in prior_index:
         return True
     return set(current_ids) != set(prior_index.get(leaf_key) or [])
+
+
+def _component_has_content(component: BaseModel) -> bool:
+    """Whether a generated leaf actually carries content. Used to tell a genuine
+    empty (no evidence) from a failed/empty generation that must be retried."""
+    if isinstance(component, RiskDomain):
+        return bool(component.bullets)
+    if isinstance(component, SectorAnalysis):
+        return bool(
+            component.severity is not None or component.impact
+            or component.humanitarian_conditions or component.vulnerable_sections
+            or component.top_needs or component.priority_interventions
+        )
+    if isinstance(component, HazardsAndVulnerabilities):
+        return bool(component.hazards or component.vulnerabilities)
+    if isinstance(component, DisplacementNarrative):
+        return bool(component.push_factors or component.return_intention)
+    if isinstance(component, HumanitarianAccess):
+        return bool(component.barriers or component.constraints)
+    if isinstance(component, Scenarios):
+        return bool(
+            component.most_likely or component.best_case
+            or component.worst_case or component.description
+        )
+    return True
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -256,7 +295,7 @@ def build_leaf_components(
         rag, extras = _leaf_rag(
             leaf, country_name=country_name, period_label=period_label, rag_filters=rag_filters,
         )
-        current_ids = sorted(rag.contributing_report_ids)
+        current_ids = _rag_fingerprint(rag)
         prior_component = _prior_component(prior, leaf)
 
         if prior_component is not None and not is_stale(leaf.key, current_ids, prior_index):
@@ -270,8 +309,21 @@ def build_leaf_components(
                 period_label=period_label, aggregated=aggregated,
                 aggregated_context=aggregated_context, cache_key=cache_key,
             )
-            evidence_index[leaf.key] = current_ids
-            regenerated.append(leaf.key)
+            if not rag.is_empty and not _component_has_content(component):
+                # Non-empty evidence but empty output → a failed generation. Don't
+                # regress to blank (keep the prior component if any) and DON'T
+                # record a fingerprint, so the next run retries this leaf instead
+                # of reusing the blank forever (#1067 review).
+                log.warning(
+                    "[analysis:selective] leaf %s produced no content over %d hit(s) — "
+                    "keeping prior, retrying next run", leaf.key, rag.hit_count,
+                )
+                if prior_component is not None:
+                    component = prior_component
+                regenerated.append(leaf.key)
+            else:
+                evidence_index[leaf.key] = current_ids
+                regenerated.append(leaf.key)
 
         if leaf.container == "context_risks":
             context_domains[leaf.field] = component
@@ -312,9 +364,12 @@ _SUMMARY_SECTIONS = (
 
 
 def _bullets_text(bullets: list[Any]) -> list[str]:
+    """Bullet text from either SourcedBullet objects (hazards/sectors/…) OR plain
+    strings (context pillars store `bullets: list[str]`). Reading only
+    `.description` dropped every context bullet from the summary (#1067 review)."""
     out: list[str] = []
     for b in bullets or []:
-        desc = getattr(b, "description", None)
+        desc = b if isinstance(b, str) else getattr(b, "description", None)
         if desc:
             out.append(desc)
     return out
