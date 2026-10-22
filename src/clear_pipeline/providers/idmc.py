@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 import httpx
 import redis
 
+from clear_pipeline.providers.alert_severity import llm_severity_or_none
 from clear_pipeline.providers.signal import enrich_with_geoparser
 from clear_pipeline.providers.translation_hash import _stable_stringify
 from clear_pipeline.signals.config import settings
@@ -75,20 +76,8 @@ def _parse_event(raw: dict) -> dict | None:
     except (ValueError, TypeError):
         return None
 
-    # Severity from displacement-magnitude, mirroring ACLED's fatality ladder
-    # (acled.py:_parse_event) — IDU gives an exact flow count, a better signal
-    # of severity than title/description text.
-    if figure >= 50_000:
-        severity = 5
-    elif figure >= 10_000:
-        severity = 4
-    elif figure >= 1_000:
-        severity = 3
-    elif figure >= 100:
-        severity = 2
-    else:
-        severity = 1
-
+    # Severity is set by the LLM classifier in build_idmc_signal_input —
+    # parse stays a pure transform (no network).
     return {
         "idu_id": str(idu_id),
         "event_id": raw.get("event_id"),
@@ -100,7 +89,6 @@ def _parse_event(raw: dict) -> dict | None:
         "description": _clean_description(
             raw.get("standard_popup_text") or raw.get("standard_info_text")
         ),
-        "severity": severity,
         "lat": lat,
         "lng": lng,
         "locations_name": raw.get("locations_name"),
@@ -332,6 +320,25 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
     threads through to `enrich_with_geoparser`, as in `acled.py::build_acled_signal_input`."""
     published_at = event.get("created_at") or datetime.now(UTC).isoformat()
 
+    # Prefer a human country name from locations_name ("…, Sudan"); fall back
+    # to the ISO3 code IDU ships. IDU `figure` is a displacement flow count.
+    country = None
+    loc_name = (event.get("locations_name") or "").strip()
+    if loc_name:
+        country = loc_name.rsplit(",", 1)[-1].strip() or None
+    country = country or (event.get("iso3") or None)
+
+    figure = event.get("figure")
+    people_displaced = figure if isinstance(figure, int) and figure > 0 else None
+
+    severity = llm_severity_or_none(
+        country=country,
+        event_name=event.get("title"),
+        event_description=event.get("description"),
+        people_displaced=people_displaced,
+        log_tag=f"idmc:{event.get('idu_id')}",
+    )
+
     input_data: dict = {
         "sourceId": source_id,
         # Dedup key — the row-level `id`, per the requirements doc's schema
@@ -343,7 +350,7 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
         "publishedAt": published_at,
         "title": event["title"],
         "description": event.get("description"),
-        "severity": event.get("severity"),
+        "severity": severity,
         "url": event.get("source_url"),
         "contentHash": event["content_hash"],
     }

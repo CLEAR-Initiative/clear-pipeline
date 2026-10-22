@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 
+from clear_pipeline.providers.alert_severity import llm_severity_or_none
 from clear_pipeline.providers.clear_api import (
     create_signal,
     find_or_create_landmark_l4,
@@ -22,22 +23,6 @@ from clear_pipeline.providers.location import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Map Dataminr alertType.name to severity 1-5
-DATAMINR_SEVERITY_MAP: dict[str, int] = {
-    "flash": 5,
-    "urgent": 4,
-    "alert": 3,
-    "watch": 2,
-}
-
-
-def _estimate_severity_from_dataminr(signal: DataminrSignal) -> int | None:
-    """Extract severity from Dataminr alertType, or return None if absent."""
-    if signal.alertType and signal.alertType.name:
-        name = signal.alertType.name.lower().strip()
-        return DATAMINR_SEVERITY_MAP.get(name)
-    return None
 
 
 # ─── Casualty extraction ─────────────────────────────────────────────────
@@ -510,29 +495,9 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
     # Full raw payload as JSON
     raw_data = signal.model_dump(mode="json")
 
-    # Estimate severity from Dataminr alertType (1-5 or None)
-    severity = _estimate_severity_from_dataminr(signal)
-
-    input_data: dict = {
-        "sourceId": source_id,
-        # Idempotent ingestion key — the clear-api upsert behaviour keys on
-        # (sourceId, externalId), so re-ingesting the same Dataminr alert
-        # returns the existing row instead of creating a duplicate.
-        "externalId": f"dataminr:{signal.alertId}",
-        "rawData": raw_data,
-        "publishedAt": signal.alertTimestamp,
-        "url": url,
-        "title": signal.headline,
-        "description": description,
-    }
-    if severity is not None:
-        input_data["severity"] = severity
-
     # Dataminr has no structured casualties field; parse it from the headline
     # and description text. Best-effort — only set when a match is found.
     casualties = extract_casualties_from_text(signal.headline, description)
-    if casualties is not None:
-        input_data["casualties"] = casualties
 
     # Check if Dataminr provides coordinates. We do this BEFORE the geoparser
     # so the L4-promotion step can run a same-A2 safety check between the
@@ -555,9 +520,40 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
             if country_location_id:
                 scope_country = country_from_coords(coords[0], coords[1])
             else:
-                input_data["lat"] = coords[0]
-                input_data["lng"] = coords[1]
+                # Will be set on input_data below once the dict exists.
                 has_coords = True
+
+    # LLM relevance+severity (replaces the old alertType.name ladder).
+    # Dataminr has no structured displacement / affected counts — do not
+    # invent them from free-text "affected" phrasing.
+    severity = llm_severity_or_none(
+        country=dataminr_location_name or scope_country,
+        event_name=signal.headline,
+        event_description=description,
+        people_dead=casualties,
+        log_tag=f"dataminr:{signal.alertId}",
+    )
+
+    input_data: dict = {
+        "sourceId": source_id,
+        # Idempotent ingestion key — the clear-api upsert behaviour keys on
+        # (sourceId, externalId), so re-ingesting the same Dataminr alert
+        # returns the existing row instead of creating a duplicate.
+        "externalId": f"dataminr:{signal.alertId}",
+        "rawData": raw_data,
+        "publishedAt": signal.alertTimestamp,
+        "url": url,
+        "title": signal.headline,
+        "description": description,
+    }
+    if severity is not None:
+        input_data["severity"] = severity
+    if casualties is not None:
+        input_data["casualties"] = casualties
+    if has_coords and signal.estimatedEventLocation and signal.estimatedEventLocation.coordinates:
+        coords = signal.estimatedEventLocation.coordinates
+        input_data["lat"] = coords[0]
+        input_data["lng"] = coords[1]
 
     # Text-based geoparser: additive enrichment + opportunistic L4 promotion.
     # Source coords stay on `rawData` (full Dataminr dump above), so the

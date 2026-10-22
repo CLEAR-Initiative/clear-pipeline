@@ -49,6 +49,7 @@ import httpx
 import redis
 
 # Generic over CreateSignalInput keys — the same adapter IDMC uses for revisions.
+from clear_pipeline.providers.alert_severity import llm_severity_or_none
 from clear_pipeline.providers.idmc import build_signal_content_update
 from clear_pipeline.signals.config import settings
 
@@ -85,9 +86,6 @@ _TITLE_PREFIX = re.compile(
 # Links an analyst can't open: Firebase Dynamic Links (shut down Aug 2025),
 # CIR's Drive (sign-in wall), signed Facebook CDN URLs (expire). Kept in rawData.
 _UNUSABLE_LINK_MARKERS = ("page.link/", "drive.google.com/", "fbcdn.net/")
-
-_SEVERITY_4_HARM = {"Death", "Mass graves & Burial sites"}
-_SEVERITY_3_HARM = {"Physical Harm & Injury", "SGBV", "Arrest Detention & Abduction"}
 
 # (label, attribute) pairs appended to the description — the classifier's context.
 _DESCRIPTION_FIELDS = (
@@ -314,17 +312,6 @@ def _clean_url(link: Any) -> str | None:
     return url if re.match(r"https?://", url) else f"https://{url}"
 
 
-def _severity(attributes: dict) -> int | None:
-    """From the recorded harm only — null when nothing qualifies (ADR-0010).
-    `Map_category` is not used: CIR derives it from these same fields."""
-    harm = set(_tokens(attributes.get("E_Harm_to_Persons")))
-    if harm & _SEVERITY_4_HARM:
-        return 4
-    if harm & _SEVERITY_3_HARM or attributes.get("E_Reported_CivCas") == "true":
-        return 3
-    return None
-
-
 def _place(attributes: dict) -> str | None:
     # D_States is "English (Arabic transliteration)", sometimes with U+200E marks.
     state = str(attributes.get("D_States") or "").replace("\u200e", "").split(" (")[0].strip()
@@ -357,14 +344,23 @@ def build_sudan_witness_signal_input(record: dict, source_id: str) -> dict:
     coordinates. No `casualties` and no `media` (see the module docstring)."""
     attributes = record["raw"]["attributes"]
     brief = str(attributes.get("C_Brief_Description") or "")
+    title = _clean_title(brief)
+    description = _description(attributes)
+    country = attributes.get("D_Country") or _place(attributes)
+    severity = llm_severity_or_none(
+        country=country if isinstance(country, str) else None,
+        event_name=title,
+        event_description=description,
+        log_tag=f"sudan_witness:{record.get('suw_id')}",
+    )
     input_data: dict = {
         "sourceId": source_id,
         "externalId": record["suw_id"],
         "rawData": attributes,
         "publishedAt": record["published_at"],
-        "title": _clean_title(brief),
-        "description": _description(attributes),
-        "severity": _severity(attributes),
+        "title": title,
+        "description": description,
+        "severity": severity,
         "url": _clean_url(attributes.get("Link")),
         "contentHash": record["content_hash"],
     }

@@ -48,6 +48,7 @@ def _build(alert, *, geo_result=None, promo=None, candidate=None):
         patch.object(signal, "extract_top_candidate", return_value=candidate),
         patch.object(signal, "find_or_create_landmark_l4", return_value=promo or {}) as l4,
         patch.object(signal, "resolve_signal_location") as llm_resolve,
+        patch.object(signal, "llm_severity_or_none", return_value=3),
     ):
         out = signal.build_signal_input(alert, "src-dataminr")
     return out, geoparse, l4, llm_resolve

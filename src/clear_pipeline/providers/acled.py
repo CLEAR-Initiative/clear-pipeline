@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import redis
 
+from clear_pipeline.providers.alert_severity import llm_severity_or_none
 from clear_pipeline.providers.signal import enrich_with_geoparser
 from clear_pipeline.signals.config import settings
 
@@ -147,21 +148,8 @@ def _parse_event(raw: dict) -> dict | None:
     except (ValueError, TypeError):
         pass
 
-    # Severity estimation from fatalities / event type. Null (not an invented
-    # floor of 2) when the event has no fatalities and no qualifying type — we
-    # don't fabricate a magnitude we can't infer.
-    severity: int | None = None
-    if fatalities >= 10:
-        severity = 5
-    elif fatalities >= 3:
-        severity = 4
-    elif fatalities >= 1:
-        severity = 3
-    elif event_type in ("Battles", "Explosions/Remote violence"):
-        severity = 3
-    elif disorder_type == "Violence against civilians":
-        severity = 3
-
+    # Severity is set by the LLM classifier in build_acled_signal_input —
+    # parse stays a pure transform (no network).
     location = raw.get("location") or raw.get("admin2") or raw.get("admin1") or ""
     admin1 = raw.get("admin1", "")
     admin2 = raw.get("admin2", "")
@@ -192,7 +180,6 @@ def _parse_event(raw: dict) -> dict | None:
         "acled_id": f"acled-{event_id}",
         "title": title,
         "description": description,
-        "severity": severity,
         "event_type": event_type,
         "sub_event_type": sub_event_type,
         "disorder_type": disorder_type,
@@ -394,6 +381,15 @@ def build_acled_signal_input(event: dict, source_id: str, *, promote: bool = Tru
     except (ValueError, TypeError):
         published_at = datetime.now(UTC).isoformat()
 
+    fatalities = event.get("fatalities") or None
+    severity = llm_severity_or_none(
+        country=event.get("country"),
+        event_name=event.get("title"),
+        event_description=event.get("description"),
+        people_dead=fatalities if fatalities else None,
+        log_tag=f"acled:{event.get('acled_id')}",
+    )
+
     input_data: dict = {
         "sourceId": source_id,
         # Dedup key — ACLED retroactively updates events across rounds and
@@ -404,11 +400,11 @@ def build_acled_signal_input(event: dict, source_id: str, *, promote: bool = Tru
         "publishedAt": published_at,
         "title": event["title"],
         "description": event.get("description"),
-        "severity": event.get("severity"),
+        "severity": severity,
         # ACLED ships `fatalities` directly; pass through as casualties.
         # Event-level casualties is derived from a per-sub_event_type lookup
         # in the grouping layer; this signal-level value is just the raw count.
-        "casualties": event.get("fatalities") or None,
+        "casualties": fatalities,
     }
 
     if event.get("source_url"):

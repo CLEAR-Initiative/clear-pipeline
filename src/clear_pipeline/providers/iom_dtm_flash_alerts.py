@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import redis
 
+from clear_pipeline.providers.alert_severity import llm_severity_or_none
 from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,15 @@ def build_iom_dtm_flash_alert_signal_input(
         "url": record["field_report_file"],
         "title": record["title"],
         "description": record["field_summary"],
+        # No structured displacement count on Flash Alerts — field_summary is
+        # free text only. Do not map text "affected"/"IDP" guesses into
+        # people_displaced.
+        "severity": llm_severity_or_none(
+            country=record.get("field_country1"),
+            event_name=record.get("title"),
+            event_description=record.get("field_summary"),
+            log_tag=f"dtm:{record.get('external_id')}",
+        ),
         # TODO: no "casualties" — Sudan's field_summary never states one. Revisit
         # if iom_dtm_flash_alerts_countries ever includes Nigeria or another
         # country whose reports carry real casualty figures (e.g. "three
