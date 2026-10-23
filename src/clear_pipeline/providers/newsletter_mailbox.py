@@ -19,6 +19,7 @@ it reads only the envelope headers, and every newsletter on the mailbox needs it
 
 import imaplib
 import re
+import ssl
 from dataclasses import dataclass
 from email import policy
 from email.parser import BytesHeaderParser
@@ -78,7 +79,9 @@ def fetch_after(folder: str, uidvalidity: int | None, last_uid: int) -> FolderBa
     if not (host and user and password):
         raise RuntimeError("Newsletter mailbox credentials are not configured (NEWSLETTER_MAILBOX_IMAP_*)")
 
-    with imaplib.IMAP4_SSL(host, settings.newsletter_mailbox_imap_port) as imap:
+    with imaplib.IMAP4_SSL(
+        host, settings.newsletter_mailbox_imap_port, ssl_context=ssl.create_default_context()
+    ) as imap:
         imap.login(user, password)
         _check(*imap.select(_quote(folder), readonly=True), what=f"EXAMINE {folder}")
         # The untagged `OK [UIDVALIDITY n]` EXAMINE answered with.
