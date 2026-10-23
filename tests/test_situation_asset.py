@@ -454,9 +454,12 @@ class TestGenerateAndUpsertForCountryYear:
         assert payload["datapoints"]["population_displaced"]["value"] == 6_500_000.0
         assert payload["datapoints"]["envelope"]["report_count"] == 10
 
-        # 3. Sources chronological (r-2 July → r-3 April → r-1 January).
+        # 3. Sources = the FULL union of every report any section cited, newest
+        # first — not just the aggregated bucket (#1067 fix). r-4 is cited only by
+        # the AI summary and now appears in Sources (previously it was dropped).
+        # Chronological: r-2 Jul → r-3 Apr → r-1 Jan → r-4 (no meta date, last).
         report_ids_in_order = [s["report_id"] for s in payload["sources"]["reports"]]
-        assert report_ids_in_order == ["r-2", "r-3", "r-1"]
+        assert report_ids_in_order == ["r-2", "r-3", "r-1", "r-4"]
 
         # 4. source_report_ids denormalised UNION, deduped first-seen.
         # aggregated contributes ["r-1", "r-2", "r-3"]; AI summary

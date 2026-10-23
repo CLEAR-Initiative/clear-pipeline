@@ -425,8 +425,11 @@ def generate_and_upsert_for_frame(
 
     datapoints_component = _build_datapoints(aggregated)
     deterministic_source_ids = (aggregated or {}).get("contributingReportIds") or []
-    report_meta = _fetch_report_meta(deterministic_source_ids)
-    sources_component = _build_sources(deterministic_source_ids, report_meta)
+    # The `sources` tab is rebuilt from the FULL union of every report/incident
+    # that fed ANY section once that union is known (see below). Built from the
+    # aggregated bucket alone it was empty for a frame/narrative analysis with no
+    # bucket — even though sections cited many reports. Start empty here.
+    sources_component = _build_sources([], {})
 
     # Stable frame key for the Anthropic prompt cache — byte-identical across a
     # run's component calls so calls 2..N read from cache.
@@ -632,6 +635,15 @@ def generate_and_upsert_for_frame(
         *sector_source_ids,
         *(scenarios_component.source_report_ids if scenarios_component else []),
     ]))
+
+    # Rebuild the Sources tab from that full union — every report/incident that
+    # fed any section, not just the datapoint bucket. Incidents (event: ids) are
+    # included with a graceful title fallback (no report_datapoints row to fetch),
+    # so meta is fetched only for report-tier ids. model_dump below picks it up.
+    payload.sources = _build_sources(
+        all_source_ids,
+        _fetch_report_meta([rid for rid in all_source_ids if not rid.startswith("event:")]),
+    )
 
     try:
         result = clear_api.upsert_analysis(

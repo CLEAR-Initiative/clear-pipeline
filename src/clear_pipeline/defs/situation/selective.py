@@ -54,7 +54,6 @@ from clear_pipeline.defs.situation.schemas import (
     SectorAnalysis,
     Sectors,
     SituationAnalysisPayload,
-    SourcedBullet,
 )
 from clear_pipeline.defs.situation.sectors import sector_from_rag, sector_rag
 from clear_pipeline.providers.llm import LLMProvider
@@ -356,80 +355,73 @@ def build_leaf_components(
 # ────────────────────────────────────────────────────────────────────
 
 _SUMMARY_MAX_WORDS = 80
-_SUMMARY_SECTIONS = (
-    ("Hazards & vulnerabilities", "hazards_and_vulnerabilities"),
-    ("Displacement", "displacement"),
-    ("Humanitarian access", "humanitarian_access"),
-)
+# Cap the fan-in evidence so the prompt stays bounded on a large analysis.
+_SUMMARY_MAX_EVIDENCE = 80
 
 
-def _bullets_text(bullets: list[Any]) -> list[str]:
-    """Bullet text from either SourcedBullet objects (hazards/sectors/…) OR plain
-    strings (context pillars store `bullets: list[str]`). Reading only
-    `.description` dropped every context bullet from the summary (#1067 review)."""
-    out: list[str] = []
-    for b in bullets or []:
-        desc = b if isinstance(b, str) else getattr(b, "description", None)
-        if desc:
-            out.append(desc)
-    return out
+def _summary_evidence(result: LeafBuildResult) -> tuple[str, list[str]]:
+    """Build a numbered ``[Rn]`` evidence list from the leaves' ALREADY-RESOLVED
+    per-line citations (each leaf's ``contributing_sources`` maps report_id →
+    [fact lines]). The fan-in summary cites ``[Rn]`` and we resolve the markers
+    back, so ``ai_summary.contributing_sources`` is populated again from the
+    reports its sections cite — no second retrieval (#1067 review: the fan-in had
+    dropped per-line citations). Returns ``(formatted_block, hit_report_ids)``
+    index-aligned to the ``[Rn]`` markers.
 
+    The budget is shared ROUND-ROBIN across populated sections, not consumed in
+    section order — otherwise the nine context pillars could exhaust it before a
+    single sector fact is reached, and the summary would never see the most
+    important health/food-security development (#133 review). Each distinct fact
+    appears once (deduped by text, carrying the first report that cited it), so a
+    fact cited by several reports doesn't waste the budget."""
+    # One ordered list of (fact, report_id) per populated section; facts deduped
+    # globally by text so the same fact never consumes two slots.
+    seen_facts: set[str] = set()
 
-def _sections_digest(result: LeafBuildResult) -> tuple[str, list[str]]:
-    """Render the generated leaves into a compact digest the summary LLM reads,
-    and collect the union of their source report ids (the summary's coarse
-    provenance — it summarises already-cited sections rather than re-retrieving)."""
-    lines: list[str] = []
-    source_ids: list[str] = []
+    def section_facts(cs: dict[str, list[str]] | None) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for rid, facts in (cs or {}).items():
+            for fact in facts or []:
+                if fact in seen_facts:
+                    continue
+                seen_facts.add(fact)
+                out.append((fact, rid))
+        return out
 
-    def add_bullets(label: str, bullets: list[Any]) -> None:
-        texts = _bullets_text(bullets)
-        if texts:
-            lines.append(f"## {label}")
-            lines.extend(f"- {t}" for t in texts)
-
-    for field_label, dom_key in (
-        ("Demographics", "demographics"), ("Political", "political"),
-        ("Economy", "economy"), ("Socio-cultural", "socio_culture"),
-        ("Security", "security"), ("Legal & policy", "legal_policy"),
-        ("Infrastructure", "infrastructure"), ("Environment", "environment"),
-        ("Humanitarian coordination", "humanitarian_coordination"),
-    ):
+    sections: list[list[tuple[str, str]]] = []
+    for dom_key in CONTEXT_DOMAIN_KEYS:
         domain = getattr(result.context_risks, dom_key, None)
         if domain is not None:
-            add_bullets(f"Context — {field_label}", getattr(domain, "bullets", []) or [])
-            source_ids.extend(getattr(domain, "source_report_ids", None) or [])
-
-    haz = result.hazards_and_vulnerabilities
-    add_bullets("Hazards", haz.hazards)
-    add_bullets("Vulnerabilities", haz.vulnerabilities)
-    dis = result.displacement
-    add_bullets("Displacement — push factors", dis.push_factors)
-    add_bullets("Displacement — return intention", dis.return_intention)
-    acc = result.humanitarian_access
-    add_bullets("Access — barriers", acc.barriers)
-    add_bullets("Access — constraints", acc.constraints)
-    for bset in (haz.hazards, haz.vulnerabilities, dis.push_factors,
-                 dis.return_intention, acc.barriers, acc.constraints):
-        for b in bset or []:
-            source_ids.extend(getattr(b, "source_report_ids", None) or [])
-
-    for sector_key, sector_display in SECTOR_KEYS:
+            sections.append(section_facts(getattr(domain, "contributing_sources", None)))
+    sections.append(section_facts(result.hazards_and_vulnerabilities.contributing_sources))
+    sections.append(section_facts(result.displacement.contributing_sources))
+    sections.append(section_facts(result.humanitarian_access.contributing_sources))
+    for sector_key, _ in SECTOR_KEYS:
         sector = getattr(result.sectors, sector_key, None)
-        if sector is None:
-            continue
-        sec_lines = (
-            (getattr(sector, "impact", None) or [])
-            + (getattr(sector, "humanitarian_conditions", None) or [])
-            + (getattr(sector, "top_needs", None) or [])
-        )
-        if sec_lines:
-            lines.append(f"## Sector — {sector_display}")
-            lines.extend(f"- {t}" for t in sec_lines)
-        source_ids.extend(getattr(sector, "source_report_ids", None) or [])
+        if sector is not None:
+            sections.append(section_facts(getattr(sector, "contributing_sources", None)))
 
-    # De-dupe, preserve order.
-    return "\n".join(lines), list(dict.fromkeys(source_ids))
+    # Round-robin: take one fact from each section in turn so every populated
+    # section is represented before any section contributes a second fact.
+    lines: list[str] = []
+    hit_report_ids: list[str] = []
+    cursors = [0] * len(sections)
+    while len(hit_report_ids) < _SUMMARY_MAX_EVIDENCE:
+        progressed = False
+        for i, sec in enumerate(sections):
+            if cursors[i] >= len(sec):
+                continue
+            fact, rid = sec[cursors[i]]
+            cursors[i] += 1
+            progressed = True
+            hit_report_ids.append(rid)
+            lines.append(f"[R{len(hit_report_ids)}] {fact}")
+            if len(hit_report_ids) >= _SUMMARY_MAX_EVIDENCE:
+                break
+        if not progressed:
+            break
+
+    return "\n".join(lines), hit_report_ids
 
 
 def generate_ai_summary_fanin(
@@ -442,33 +434,45 @@ def generate_ai_summary_fanin(
 ) -> AISummary:
     """Executive summary as a FAN-IN over the generated leaves (#1067).
 
-    Unlike the standalone generator, this does not re-retrieve — it summarises
-    the analysis's own already-evidence-grounded sections (the ``result``
-    leaves). Provenance is coarse: the union of the summarised sections'
-    ``source_report_ids`` (the summary cites sections, not per-line evidence).
-    Returns an empty summary when the leaves carry no content."""
-    from clear_pipeline.defs.situation.generate_component import run_structured
+    Does not re-retrieve — it summarises the analysis's own sections. The
+    evidence it reads is those sections' already-cited facts presented as a
+    numbered ``[Rn]`` list, so the summary carries real per-line citations
+    (``contributing_sources`` + per-finding source ids), resolved the same way
+    the other components resolve theirs. Returns an empty summary when the
+    sections carry no cited content."""
+    from clear_pipeline.defs.situation.citations import merge_contributing, resolve_prose
+    from clear_pipeline.defs.situation.generate_component import run_structured, sourced_bullets
     from clear_pipeline.defs.situation.narrative import _AISummaryLLM
     from clear_pipeline.defs.situation.prompts import build_system_prompt
 
-    digest, source_ids = _sections_digest(result)
-    if not digest.strip():
-        logger.info("[analysis:ai_summary] no section content — returning empty summary")
+    formatted, hit_report_ids = _summary_evidence(result)
+    if not formatted.strip():
+        logger.info("[analysis:ai_summary] no cited section content — returning empty summary")
         return AISummary()
+
+    # Synthetic RAGContext so the shared citation resolvers ([Rn] → report id)
+    # work unchanged over the section-derived evidence.
+    rag = RAGContext(
+        formatted_for_prompt=formatted,
+        contributing_report_ids=list(dict.fromkeys(hit_report_ids)),
+        hit_report_ids=hit_report_ids,
+        hit_count=len(hit_report_ids),
+    )
 
     system = build_system_prompt(
         country_name, period_label,
-        "(summarise ONLY the SECTION DIGEST below — it is this analysis's other "
-        "sections, already evidence-grounded)",
+        "(summarise ONLY the numbered EVIDENCE below — this analysis's own "
+        "sections, already evidence-grounded; cite the [Rn] markers)",
     )
     user = (
         f"Executive summary for {country_name}, {period_label}: 3 short sentences "
         f"(≤{_SUMMARY_MAX_WORDS} words) plus 4–6 key findings ('Subject: finding', "
-        "≤30 words each). Base it ONLY on the SECTION DIGEST — do not introduce new "
-        "facts and do not state cumulative multi-year totals.\n"
+        "≤30 words each). Base it ONLY on the EVIDENCE below; every key finding "
+        "must end with its [Rn] marker(s). Do not introduce new facts and do not "
+        "state cumulative multi-year totals.\n"
         "\n"
-        "SECTION DIGEST:\n"
-        f"{digest}"
+        "EVIDENCE:\n"
+        f"{formatted}"
     )
     try:
         res = run_structured(
@@ -479,10 +483,14 @@ def generate_ai_summary_fanin(
         logger.exception("[analysis:ai_summary] fan-in LLM call failed — returning empty summary")
         return AISummary()
 
-    text = (getattr(res, "text", "") or "").strip()
-    findings = [
-        SourcedBullet(description=f.strip(), source_report_ids=[])
-        for f in (getattr(res, "key_findings", None) or [])
-        if f and f.strip()
-    ]
-    return AISummary(text=text, key_findings=findings, source_report_ids=source_ids)
+    text, text_contributing = resolve_prose(getattr(res, "text", "") or "", rag.hit_report_ids)
+    findings, findings_contributing = sourced_bullets(
+        list(getattr(res, "key_findings", None) or []), rag,
+    )
+    contributing = merge_contributing(text_contributing, findings_contributing)
+    return AISummary(
+        text=text.strip(),
+        key_findings=findings,
+        source_report_ids=list(contributing) or rag.contributing_report_ids,
+        contributing_sources=contributing,
+    )
