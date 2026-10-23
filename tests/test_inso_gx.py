@@ -99,6 +99,7 @@ class Harness:
         self.llm = FakeLLM()
         self.created: list[dict] = []
         self.fail_s3_writes = False
+        self.fail_raw_for: bytes | None = None  # fail only this email's bronze write
         self.source = InsoGXSource()
         defs_list = build_gx_source_assets(self.source)
         self.assets = [d for d in defs_list if isinstance(d, dg.AssetsDefinition)]
@@ -110,6 +111,8 @@ class Harness:
 
     def _put(self, Bucket, Key, Body, **kw):
         if self.fail_s3_writes and Key.startswith("raw/"):
+            raise OSError("S3 down")
+        if self.fail_raw_for is not None and Body == self.fail_raw_for:
             raise OSError("S3 down")
         FakeS3.put_object(self.s3, Bucket, Key, Body, **kw)
 
@@ -416,6 +419,20 @@ def test_an_email_that_fails_after_bronze_is_fetched_again(h):
     assert h.run().success
     assert h.cursor == "7:1"
     assert set(h.gold) == {"inso:SDN/Khartoum/IR/20261410/R1:1"}
+
+
+def test_a_cursor_staged_by_a_failed_run_is_not_committed_by_a_later_one(h):
+    h.folder.add("01_multi_incident", "02_single_incident")
+    h.llm.classifications = {"": {"events": []}}  # every classify fails: 7:2 staged, never committed
+    assert not h.run().success
+    h.llm.classifications = {}
+    h.fail_raw_for = _eml("02_single_incident")  # UID 2 misses bronze; UID 1 reaches _push
+    h.run()
+    assert h.cursor is None
+    h.fail_raw_for = None
+    assert h.run().success
+    assert h.cursor == "7:2"
+    assert "inso:SDN/Khartoum/IR/20261410/R1:1" in h.gold
 
 
 def test_empty_credentials_refuse_to_poll(h):

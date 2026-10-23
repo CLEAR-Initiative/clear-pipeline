@@ -405,8 +405,12 @@ class InsoGXSource:
 
     def poll(self, since: datetime | None) -> list[Any]:
         """Every message after the stored cursor, as ``{uid, uidvalidity,
-        folder, fetched_at, raw}``. ``since`` is unused: the cursor is IMAP's."""
+        folder, fetched_at, raw}``. ``since`` is unused: the cursor is IMAP's.
+        Drops a cursor an earlier run staged but never committed: a bronze that
+        fails here won't restage, and `_push` would commit that stale one past
+        an email that never reached gold."""
         self._pending_cursor = None
+        newsletter_mailbox.stage_cursor(self.source, None)
         validity, last_uid = newsletter_mailbox.get_cursor(self.source)
         folder = settings.inso_imap_folder
         batch = newsletter_mailbox.fetch_after(folder, validity, last_uid)
