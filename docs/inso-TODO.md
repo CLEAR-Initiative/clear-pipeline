@@ -22,7 +22,7 @@ Companion to `docs/inso-spec.md`. Exponential isn't set up locally, so this file
 - [ ] Write the manual LLM eval (`evals/inso_extraction/`, following the figure-scope pattern) and run it first, before `_push` runs on anything real.
 - [ ] Set the S3 lifecycle and retention rule for `raw/inso/` and `quarantine/inso/`, according to the approval.
 - [ ] Create the INSO `DataSource` row in clear-api (staging, then prod).
-- [ ] Put the `NEWSLETTER_MAILBOX_IMAP_*` and `INSO_*` variables into the staging env, then the prod env. `INSO_REQUIRE_DKIM` must stay `true` there.
+- [ ] Put the `CLEAR_MAILBOX_IMAP_*` and `INSO_*` variables into the staging env, then the prod env. `INSO_REQUIRE_DKIM` must stay `true` there.
 - [ ] Switch `INSO_IMAP_FOLDER` from `INSO-TEST` to `INSO`.
 - [ ] Tune `INSO_POLL_INTERVAL_MINUTES` from the observed sending times. Daily means up to 24 h of lag.
 - [ ] Add a freshness warning (no INSO email in N days) once the frequency is known.
