@@ -13,11 +13,12 @@ from botocore.exceptions import ClientError
 
 from clear_pipeline.providers.s3 import s3_client  # re-exported for the assets
 
-__all__ = ["s3_client", "raw_key", "write_raw", "write_json", "read_json", "list_keys"]
+__all__ = ["s3_client", "raw_key", "sidecar_key", "write_raw", "write_json", "read_json", "list_keys"]
 
 
 def raw_key(
     source: str, published_at: str, external_id: str, *, layer: str = "raw", revision: str | None = None,
+    ext: str = "json",
 ) -> str:
     """Medallion blob key: ``<layer>/<source>/<YYYY-MM-DD>/<external_id>.json``.
     Default ``layer="raw"`` is bronze, unchanged from before. Medallion silver
@@ -30,17 +31,24 @@ def raw_key(
     ``revision`` (a content hash, for sources revised in place) gives each
     revision its own immutable ``…/<external_id>/<revision>.json``: a row's
     ``rawS3Key`` then always names the payload of the revision clear-api holds,
-    even while a newer poll is still on its way there."""
+    even while a newer poll is still on its way there.
+
+    ``ext`` is the blob's format (``eml`` for a raw email)."""
     day = (published_at or "")[:10] or "unknown"
     safe = external_id.replace("/", "_")
     if revision:
-        return f"{layer}/{source}/{day}/{safe}/{revision.replace('/', '_')}.json"
-    return f"{layer}/{source}/{day}/{safe}.json"
+        return f"{layer}/{source}/{day}/{safe}/{revision.replace('/', '_')}.{ext}"
+    return f"{layer}/{source}/{day}/{safe}.{ext}"
 
 
-def write_raw(s3, bucket: str, key: str, body: bytes) -> None:
+def sidecar_key(key: str) -> str:
+    """The provenance JSON stored next to a raw blob: ``…/<id>.meta.json``."""
+    return f"{key.rsplit('.', 1)[0]}.meta.json"
+
+
+def write_raw(s3, bucket: str, key: str, body: bytes, content_type: str = "application/json") -> None:
     """Write a raw blob to the lake (idempotent — same key overwrites)."""
-    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
 
 
 def write_json(s3, bucket: str, key: str, payload: object) -> None:
