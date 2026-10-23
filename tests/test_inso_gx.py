@@ -420,9 +420,9 @@ def test_an_email_that_fails_after_bronze_is_fetched_again(h):
 
 def test_empty_credentials_refuse_to_poll(h):
     with (
-        patch.object(newsletter_mailbox.settings, "newsletter_mailbox_imap_host", "imap.example"),
-        patch.object(newsletter_mailbox.settings, "newsletter_mailbox_imap_user", ""),
-        patch.object(newsletter_mailbox.settings, "newsletter_mailbox_imap_password", ""),
+        patch.object(newsletter_mailbox.settings, "clear_mailbox_imap_host", "imap.example"),
+        patch.object(newsletter_mailbox.settings, "clear_mailbox_imap_user", ""),
+        patch.object(newsletter_mailbox.settings, "clear_mailbox_imap_password", ""),
         pytest.raises(RuntimeError, match="credentials are not configured"),
     ):
         newsletter_mailbox.fetch_after("INSO-TEST", None, 0)
