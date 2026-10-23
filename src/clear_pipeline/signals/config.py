@@ -106,10 +106,10 @@ class Settings(BaseSettings):
     # the vendor, so other newsletters reuse it and a move to another host
     # renames nothing. Each newsletter source reads only its
     # own folder; empty credentials make those sources refuse to poll.
-    newsletter_mailbox_imap_host: str = "mail.infomaniak.com"
-    newsletter_mailbox_imap_port: int = 993
-    newsletter_mailbox_imap_user: str = ""
-    newsletter_mailbox_imap_password: str = ""
+    clear_mailbox_imap_host: str = "mail.infomaniak.com"
+    clear_mailbox_imap_port: int = 993
+    clear_mailbox_imap_user: str = ""
+    clear_mailbox_imap_password: str = ""
 
     # INSO security newsletters (gx-only, providers/inso.py).
     inso_source_name: str = "inso"
