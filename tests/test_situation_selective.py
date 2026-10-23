@@ -153,22 +153,32 @@ def test_selective_reuses_unchanged_and_regenerates_only_changed(monkeypatch):
     assert res.any_regenerated is True
 
 
-def test_summary_digest_includes_context_pillars():
-    # Context pillars store bullets as plain strings; the digest must pick them
-    # up (the #1067-review bug: _bullets_text only read .description).
+def test_summary_evidence_is_numbered_and_carries_report_ids():
+    # The fan-in evidence must be a numbered [Rn] list drawn from the sections'
+    # resolved contributing_sources, index-aligned to a report-id list, so the
+    # summary can cite [Rn] and we resolve per-line provenance back (#1067 review).
     from clear_pipeline.defs.situation.schemas import ContextRisks, Sectors
 
     res = LeafBuildResult(
-        context_risks=ContextRisks(security=RiskDomain(bullets=["armed clashes in Kassala"])),
+        context_risks=ContextRisks(
+            security=RiskDomain(
+                bullets=["armed clashes in Kassala"],
+                contributing_sources={"r-sec": ["armed clashes in Kassala"]},
+            ),
+        ),
         hazards_and_vulnerabilities=HazardsAndVulnerabilities(),
         displacement=DisplacementNarrative(),
         humanitarian_access=HumanitarianAccess(),
-        sectors=Sectors(),
+        sectors=Sectors(
+            health=SectorAnalysis(contributing_sources={"r-health": ["cholera cases rising"]}),
+        ),
         scenarios=Scenarios(),
         evidence_index={},
     )
-    digest, _ = selective._sections_digest(res)
-    assert "armed clashes in Kassala" in digest
+    formatted, hit_report_ids = selective._summary_evidence(res)
+    assert "[R1] armed clashes in Kassala" in formatted
+    assert "cholera cases rising" in formatted
+    assert hit_report_ids == ["r-sec", "r-health"]
 
 
 def test_failed_leaf_is_not_fingerprinted_and_keeps_prior(monkeypatch):
