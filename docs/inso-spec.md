@@ -15,7 +15,7 @@ A new GX-path source, `inso`, that:
 - reads a dedicated folder of a shared newsletter mailbox over IMAP, read-only, accepting only authenticated mail from allowlisted senders;
 - lands every email verbatim in bronze, so parsing and prompts can be replayed without the mailbox;
 - parses the report-level fields with code and splits INFORMATION into incidents with an LLM at silver, giving one signal per incident;
-- classifies each incident with the shared event-classification prompt (the pilot for replacing Jev), with an INSO-specific context block;
+- classifies each incident with the shared event-classification prompt, with an INSO-specific context block, in shadow mode: the result is stored in gold for comparison, while the shared drain still classifies with Jev and Jev's answer decides events (see "Shadow classification");
 - goes through the existing GX stages (geo, temporal, match, gold, push) unchanged, and is drained by a signals connector like Sudan Witness;
 - puts anything it cannot trust or parse into quarantine and turns the run red;
 - runs daily from a poll sensor. Before approval it runs only on a local instance, against a test folder holding synthetic emails.
@@ -47,7 +47,7 @@ A new GX-path source, `inso`, that:
 23. As an analyst, I want killed and injured counts to tell "none reported" (0) apart from "unspecified" (null), so that casualty totals stay honest.
 24. As an analyst, I want each incident to keep the sentence(s) it was extracted from, so that I can check any extracted field against the original text.
 25. As a data engineer, I want each incident's `externalId` built from the source prefix, the verbatim serial and the incident's ordinal, so that re-runs are idempotent in clear-api.
-26. As an analyst, I want each incident classified with the shared event-classification prompt (type level 3, relevance, severity), so that INSO is the pilot for replacing Jev.
+26. As an analyst, I want each incident classified with the shared event-classification prompt (type level 3, relevance, severity), so that INSO is the shadow-mode pilot for replacing Jev: its answers can be compared with Jev's on the same incidents before the shared drain uses them.
 27. As an analyst, I want incidents that affect humanitarian staff, assets, premises or access counted as relevant, including crime, so that INSO's core content isn't discarded as "ordinary crime".
 28. As an analyst, I want severity left null when the text gives no basis for it, so that ADR-0010 (unknown stays null) holds and no invented severity drives the bundle maximum.
 29. As a data engineer, I want a level-3 type that doesn't map to the taxonomy to fail loudly, so that unmapped labels never fall back to "other" unnoticed.
@@ -55,7 +55,7 @@ A new GX-path source, `inso`, that:
 31. As a data engineer, I want other GX sources to keep using Jev, so that the INSO pilot doesn't change their behaviour.
 32. As an analyst, I want each incident's place, locality, admin1 and country resolved through the existing geoparser, limited to the country from the report header, so that INSO signals are located like other GX sources.
 33. As a data engineer, I want an email whose country doesn't match a known country location sent to quarantine, so that incidents are never located in the wrong country.
-34. As a data engineer, I want INSO signals drained by the shared signals drain through a connector that reads the GX output, so that they aren't marked failed as an unknown source.
+34. As a data engineer, I want INSO signals drained by the shared signals drain through a connector that reads the GX output, so that they aren't marked failed as an unknown source. Until the drain rework, the drain classifies them with Jev like any other source.
 35. As a data engineer, I want every quarantined email kept with its reason, without stopping the rest of the batch, so that one malformed newsletter doesn't block the ones after it.
 36. As a data engineer, I want any quarantined email to turn the run red through a blocking GX check, so that a parser break is noticed even though the newsletter frequency is unknown.
 37. As a data engineer, I want the source polled daily by a sensor whose interval can be changed live, so that the cadence can be tuned once the real frequency is known.
@@ -87,6 +87,12 @@ A new GX-path source, `inso`, that:
   - INSO's implementation runs the colleague's shared event-classification prompt through the `signal` LLM role, one incident per call, with a single-object schema.
   - Before the shared prompt, it adds an INSO source context block: incidents affecting humanitarian staff, assets, premises or access are relevant, crime included; severity is null when the text gives no basis, and at least 2 for crime against humanitarian staff or assets.
   - Mapping: level-3 type → level 2 and GLIDE code through the existing taxonomy mirror (an unmapped label raises); RELEVANT/NOT_RELEVANT → relevance 1.0/0.0; severity passed through, nullable.
+- **Shadow classification (until the drain rework).**
+  - Only severity leaves gx: the hook's severity replaces the silver severity in the `signalInput` that `_push` sends, and the drain passes it to Jev as the source severity.
+  - Relevance, level-3 type and GLIDE code stay in gold (`relevanceScore`, `eventType`, `glideCode`). The shared drain's `_group` runs Jev on every signal, and Jev's relevance and type decide whether an event is created and which type it gets. The two can disagree: crime against aid workers, which the INSO context block marks relevant, is likely to get `none` from Jev and be dropped below `relevance_threshold`.
+  - `_push` sends every gold row, NOT_RELEVANT included, as for other sources. Gating the push on INSO relevance would add a second filter on top of Jev instead of replacing it.
+  - Gold INSO classification is therefore not what clear-api shows. Nothing should read it as the truth until the drain uses it.
+  - The shared drain isn't changed in this work, because it serves every source. The requirement for its rework: when a connector supplies a classification, the drain uses it and never calls Jev for that signal; a missing classification requeues the signal instead of falling back to Jev.
 - **Geo.** The geo input is a composed string of place, locality, admin1 and country. Resolution uses the existing geoparser, limited to that country, without promotion. The country comes from the first token of the header location, matched to an L0 location; no match means quarantine.
 - **Quarantine visibility.** A blocking GX check fails the run when any email in the batch was quarantined; the good emails in the batch still go through. A freshness check is postponed until the frequency is known.
 - **Trigger.** The poll sensor runs at a default interval of 1440 minutes, editable live from the sensor cursor. GX-only sensors start running by default, so before approval the only protection is the folder setting pointing at the synthetic test folder on a local instance.
@@ -126,6 +132,7 @@ A new GX-path source, `inso`, that:
 - Mapping the severity banner to a 1-5 scale.
 - A dedicated LLM role for incident extraction (it uses the extraction role for now).
 - Replacing Jev for any source other than INSO, and changing the shared prompt itself.
+- Changing the shared signals drain so that it uses the INSO classification instead of Jev (see "Shadow classification").
 - The manual LLM eval harness.
 - A freshness or staleness alert.
 - Deploying to the dev Dagster instance and merging into `dev`.
