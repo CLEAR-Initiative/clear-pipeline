@@ -25,7 +25,9 @@ create-only:
     ``Quarantined``, lands in ``quarantine/`` with its reason, and a 7th
     check, ``quarantine_empty``, turns the run red (INSO).
   - ``to_silver_inputs``: one record fans out into several signals (INSO).
-  - ``classify``: replaces Jev for this source (INSO).
+  - ``classify``: replaces Jev in this factory's classify stage (INSO). Only
+    its severity reaches clear-api; the shared drain still groups with Jev
+    (docs/inso-spec.md, "Shadow classification").
   - ``commit_watermark``: called once ``_push`` runs, for a source whose
     ``set_watermark`` only stages its cursor (INSO).
 
@@ -404,6 +406,8 @@ def build_gx_source_assets(source: GXSource) -> list:
     # Optional per-source classifier (INSO: the shared prompt). It
     # owns severity too: its answer replaces the silver severity, in the row
     # and in the signalInput `_push` sends. Without it, Jev classifies.
+    # Relevance and type stay in gold: the shared drain re-classifies every
+    # pushed signal with Jev, and Jev's answer decides the event.
     source_classify = getattr(source, "classify", None)
 
     @dg.asset(

@@ -395,7 +395,8 @@ def _title(source_text: str, limit: int = 200) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Classify: the shared event-classification prompt, in place of Jev
+# Classify: the shared event-classification prompt, in place of Jev at gx
+# classify (shadow mode: the shared drain still groups with Jev)
 # ──────────────────────────────────────────────────────────────────────────────
 class EventClassification(BaseModel):
     """The shared prompt's fields the mapping needs; its other fields are
