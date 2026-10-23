@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     # the vendor, so other newsletters reuse it and a move to another host
     # renames nothing. Each newsletter source reads only its
     # own folder; empty credentials make those sources refuse to poll.
-    newsletter_mailbox_imap_host: str = ""
+    newsletter_mailbox_imap_host: str = "mail.infomaniak.com"
     newsletter_mailbox_imap_port: int = 993
     newsletter_mailbox_imap_user: str = ""
     newsletter_mailbox_imap_password: str = ""
@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     # The mailbox folder this source reads; nothing else in the mailbox enters it.
     inso_imap_folder: str = "INSO-TEST"
     # Comma-separated From addresses accepted; anything else is quarantined.
-    inso_allowed_senders: str = ""
+    inso_allowed_senders: str = "reports@sdn.ngosafety.org"
     # Require a DKIM (aligned with From) or DMARC pass in the receiving server's
     # Authentication-Results. Turn off only in a local .env, for self-sent mail.
     inso_require_dkim: bool = True
