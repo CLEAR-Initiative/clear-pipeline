@@ -366,34 +366,60 @@ def _summary_evidence(result: LeafBuildResult) -> tuple[str, list[str]]:
     back, so ``ai_summary.contributing_sources`` is populated again from the
     reports its sections cite — no second retrieval (#1067 review: the fan-in had
     dropped per-line citations). Returns ``(formatted_block, hit_report_ids)``
-    index-aligned to the ``[Rn]`` markers."""
-    lines: list[str] = []
-    hit_report_ids: list[str] = []
-    seen: set[tuple[str, str]] = set()
+    index-aligned to the ``[Rn]`` markers.
 
-    def add(cs: dict[str, list[str]] | None) -> None:
+    The budget is shared ROUND-ROBIN across populated sections, not consumed in
+    section order — otherwise the nine context pillars could exhaust it before a
+    single sector fact is reached, and the summary would never see the most
+    important health/food-security development (#133 review). Each distinct fact
+    appears once (deduped by text, carrying the first report that cited it), so a
+    fact cited by several reports doesn't waste the budget."""
+    # One ordered list of (fact, report_id) per populated section; facts deduped
+    # globally by text so the same fact never consumes two slots.
+    seen_facts: set[str] = set()
+
+    def section_facts(cs: dict[str, list[str]] | None) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
         for rid, facts in (cs or {}).items():
             for fact in facts or []:
-                if len(hit_report_ids) >= _SUMMARY_MAX_EVIDENCE:
-                    return
-                key = (rid, fact)
-                if key in seen:
+                if fact in seen_facts:
                     continue
-                seen.add(key)
-                hit_report_ids.append(rid)
-                lines.append(f"[R{len(hit_report_ids)}] {fact}")
+                seen_facts.add(fact)
+                out.append((fact, rid))
+        return out
 
+    sections: list[list[tuple[str, str]]] = []
     for dom_key in CONTEXT_DOMAIN_KEYS:
         domain = getattr(result.context_risks, dom_key, None)
         if domain is not None:
-            add(getattr(domain, "contributing_sources", None))
-    add(result.hazards_and_vulnerabilities.contributing_sources)
-    add(result.displacement.contributing_sources)
-    add(result.humanitarian_access.contributing_sources)
+            sections.append(section_facts(getattr(domain, "contributing_sources", None)))
+    sections.append(section_facts(result.hazards_and_vulnerabilities.contributing_sources))
+    sections.append(section_facts(result.displacement.contributing_sources))
+    sections.append(section_facts(result.humanitarian_access.contributing_sources))
     for sector_key, _ in SECTOR_KEYS:
         sector = getattr(result.sectors, sector_key, None)
         if sector is not None:
-            add(getattr(sector, "contributing_sources", None))
+            sections.append(section_facts(getattr(sector, "contributing_sources", None)))
+
+    # Round-robin: take one fact from each section in turn so every populated
+    # section is represented before any section contributes a second fact.
+    lines: list[str] = []
+    hit_report_ids: list[str] = []
+    cursors = [0] * len(sections)
+    while len(hit_report_ids) < _SUMMARY_MAX_EVIDENCE:
+        progressed = False
+        for i, sec in enumerate(sections):
+            if cursors[i] >= len(sec):
+                continue
+            fact, rid = sec[cursors[i]]
+            cursors[i] += 1
+            progressed = True
+            hit_report_ids.append(rid)
+            lines.append(f"[R{len(hit_report_ids)}] {fact}")
+            if len(hit_report_ids) >= _SUMMARY_MAX_EVIDENCE:
+                break
+        if not progressed:
+            break
 
     return "\n".join(lines), hit_report_ids
 

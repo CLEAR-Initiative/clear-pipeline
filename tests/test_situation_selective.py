@@ -181,6 +181,34 @@ def test_summary_evidence_is_numbered_and_carries_report_ids():
     assert hit_report_ids == ["r-sec", "r-health"]
 
 
+def test_summary_evidence_shares_budget_across_sections():
+    # A verbose context pillar must NOT starve sectors of the fan-in budget
+    # (#133 review): round-robin means every populated section is represented
+    # before any section's second fact, so a later sector still appears even
+    # when context alone exceeds the 80-entry cap.
+    from clear_pipeline.defs.situation.schemas import ContextRisks, Sectors
+
+    big_cs = {f"r-ctx-{i}": [f"context fact {i}"] for i in range(200)}  # >80 entries
+    res = LeafBuildResult(
+        context_risks=ContextRisks(security=RiskDomain(contributing_sources=big_cs)),
+        hazards_and_vulnerabilities=HazardsAndVulnerabilities(),
+        displacement=DisplacementNarrative(),
+        humanitarian_access=HumanitarianAccess(),
+        sectors=Sectors(
+            food_security=SectorAnalysis(
+                contributing_sources={"r-fs": ["famine confirmed in Kadugli"]},
+            ),
+        ),
+        scenarios=Scenarios(),
+        evidence_index={},
+    )
+    formatted, hit_report_ids = selective._summary_evidence(res)
+    assert len(hit_report_ids) <= selective._SUMMARY_MAX_EVIDENCE
+    # The lone food-security fact survives despite 200 context facts ahead of it.
+    assert "famine confirmed in Kadugli" in formatted
+    assert "r-fs" in hit_report_ids
+
+
 def test_failed_leaf_is_not_fingerprinted_and_keeps_prior(monkeypatch):
     from clear_pipeline.defs.situation.schemas import Sectors
 
