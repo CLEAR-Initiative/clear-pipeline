@@ -73,14 +73,14 @@ def fetch_after(folder: str, uidvalidity: int | None, last_uid: int) -> FolderBa
 
     Raises when the mailbox credentials are empty, so an environment without
     them can't poll by accident, and on any IMAP failure."""
-    host = settings.newsletter_mailbox_imap_host
-    user = settings.newsletter_mailbox_imap_user
-    password = settings.newsletter_mailbox_imap_password
+    host = settings.clear_mailbox_imap_host
+    user = settings.clear_mailbox_imap_user
+    password = settings.clear_mailbox_imap_password
     if not (host and user and password):
-        raise RuntimeError("Newsletter mailbox credentials are not configured (NEWSLETTER_MAILBOX_IMAP_*)")
+        raise RuntimeError("Newsletter mailbox credentials are not configured (CLEAR_MAILBOX_IMAP_*)")
 
     with imaplib.IMAP4_SSL(
-        host, settings.newsletter_mailbox_imap_port, ssl_context=ssl.create_default_context()
+        host, settings.clear_mailbox_imap_port, ssl_context=ssl.create_default_context()
     ) as imap:
         imap.login(user, password)
         _check(*imap.select(_quote(folder), readonly=True), what=f"EXAMINE {folder}")
