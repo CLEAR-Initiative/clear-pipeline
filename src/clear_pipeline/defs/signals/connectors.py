@@ -18,6 +18,7 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
+  │ inso       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
@@ -30,7 +31,7 @@ capability flags:
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
-  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
+  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``, ``inso``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage
   (see ``DRAINED_SOURCES``). Every source is drained.
@@ -53,6 +54,7 @@ from clear_pipeline.providers import (
     darfur24,
     dataminr,
     gdacs,
+    inso,
 )
 from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
@@ -558,6 +560,36 @@ class SudanWitnessConnector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# INSO — security newsletters (downloaded by gx, drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class InsoConnector:
+    """Downloaded only by ``gx_pipeline`` (``InsoGXSource``). One email holds
+    several incidents, each its own signal, all pointing at the same raw
+    ``.eml``: ``project`` takes the incident's fields from the clear-api row
+    gx created, and only the report from the blob."""
+
+    source = settings.inso_source_name
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def parse(self, raw: bytes) -> inso.InsoReport:
+        return inso.parse(raw)
+
+    def project(self, record: inso.InsoReport | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"inso signal {created['id']} has no rawS3Key")
+        return SignalView(
+            external_id=created.get("externalId") or created["id"],
+            title=created.get("title") or "",
+            timestamp=created.get("publishedAt") or record.published_at,
+            description=created.get("description"),
+            location_name=_first_location_name(created),
+            url=created.get("url"),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
@@ -649,6 +681,7 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     SudanWitnessConnector(),
+    InsoConnector(),
     *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]

@@ -1,0 +1,10 @@
+{
+  "incidents": [
+    {"day": 30, "month": 12, "admin1": "Kassala", "locality": null, "place": "Kassala town",
+     "event_actors": ["UNKNOWN"], "killed": null, "injured": 1,
+     "source_text": "On 30 December, in Kassala town, Kassala State, unidentified gunmen robbed an NGO guesthouse and assaulted a guard, who was injured."},
+    {"day": 1, "month": 1, "admin1": null, "locality": "Kassala", "place": "Wad Sharifey camp",
+     "event_actors": ["UNKNOWN"], "killed": null, "injured": null,
+     "source_text": "On 1 January, near Wad Sharifey camp, Kassala locality, a local NGO staff member was briefly detained by armed men."}
+  ]
+}

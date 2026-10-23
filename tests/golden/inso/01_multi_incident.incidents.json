@@ -1,0 +1,13 @@
+{
+  "incidents": [
+    {"day": 18, "month": 10, "admin1": "North Darfur", "locality": "El Fasher", "place": "El Fasher city market",
+     "event_actors": ["RSF"], "killed": 4, "injured": 9,
+     "source_text": "On 18 October, in North Darfur, the RSF conducted artillery shelling on a market in El Fasher city, El Fasher locality. This resulted in four fatalities and nine injuries among civilians."},
+    {"day": 19, "month": 10, "admin1": "North Darfur", "locality": null, "place": "Tawila",
+     "event_actors": ["UNKNOWN"], "killed": null, "injured": null,
+     "source_text": "Similarly, on 19 October in Tawila, North Darfur, an unknown actor conducted a drone strike near an IDP gathering point, resulting in an unspecified number of civilian casualties."},
+    {"day": 19, "month": 10, "admin1": "South Darfur", "locality": "Nyala", "place": "Nyala town fuel depot",
+     "event_actors": ["SAF"], "killed": 0, "injured": 0,
+     "source_text": "Meanwhile, in South Darfur, on 19 October, SAF's drone strike hit a fuel depot in Nyala town, Nyala locality, damaging two trucks. No casualties were reported."}
+  ]
+}
