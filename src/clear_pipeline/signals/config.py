@@ -103,25 +103,24 @@ class Settings(BaseSettings):
     sudan_witness_full_pull_max_age_hours: int = 7 * 24
 
     # Shared newsletter mailbox (IMAP, implicit TLS). Named after its role, not
-    # the vendor (Infomaniak today), so other newsletters reuse it and a move
-    # to another host renames nothing. Each newsletter source reads only its
+    # the vendor, so other newsletters reuse it and a move to another host
+    # renames nothing. Each newsletter source reads only its
     # own folder; empty credentials make those sources refuse to poll.
     newsletter_mailbox_imap_host: str = ""
     newsletter_mailbox_imap_port: int = 993
     newsletter_mailbox_imap_user: str = ""
     newsletter_mailbox_imap_password: str = ""
 
-    # INSO security newsletters (gx-only, providers/inso.py). Covered by terms
-    # of use: until the written approval lands, the folder points at synthetic
-    # test mail on a local instance only (docs/inso-spec.md).
+    # INSO security newsletters (gx-only, providers/inso.py).
     inso_source_name: str = "inso"
+    # The mailbox folder this source reads; nothing else in the mailbox enters it.
     inso_imap_folder: str = "INSO-TEST"
     # Comma-separated From addresses accepted; anything else is quarantined.
     inso_allowed_senders: str = ""
     # Require a DKIM (aligned with From) or DMARC pass in the receiving server's
     # Authentication-Results. Turn off only in a local .env, for self-sent mail.
     inso_require_dkim: bool = True
-    # Daily; the real sending frequency is unknown.
+    # Default cadence; editable live from the poll sensor's cursor.
     inso_poll_interval_minutes: int = 24 * 60
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads

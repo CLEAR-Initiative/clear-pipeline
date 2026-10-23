@@ -1,8 +1,7 @@
 """Generate the SYNTHETIC INSO newsletter fixtures (``*.eml``).
 
-Mirrors the one real sample's structure (multipart/alternative, base64 utf-8
-parts, label/value HTML table) as rebuilt in datasource-analysis/inso. Every
-incident is invented; every file says SYNTHETIC in subject, banner and footer.
+Mirrors the INSO report email's structure (multipart/alternative, base64
+utf-8 parts, label/value HTML table). Every incident is invented; every file says SYNTHETIC in subject, banner and footer.
 The golden ``*.report.json`` / ``*.incidents.json`` are written by hand, not
 here: they are the independent expectation the tests compare against.
 
