@@ -389,3 +389,12 @@ class SituationAnalysisPayload(BaseModel):
     # Forward-looking scenarios (ADR-0007 §4) — folded in from the crisis path so
     # a "crisis overview" analysis carries the same outlook the crisis used to.
     scenarios: Scenarios = Field(default_factory=Scenarios)
+    # Selective-regeneration bookkeeping (#1067): per-leaf retrieval fingerprint —
+    # leaf key ("sectors.health", "context_risks.security", "displacement", …) →
+    # sorted report-id union its RAG retrieval returned at generation time. NOT
+    # rendered by the dashboard; the next run diffs each leaf's CURRENT retrieval
+    # against this to decide which leaves to regenerate (unchanged → reuse the
+    # stored component). Empty on a full/legacy generation, which makes the first
+    # selective pass treat every leaf as stale (a safe full regen that then seeds
+    # the index)."""
+    evidence_index: dict[str, list[str]] = Field(default_factory=dict)

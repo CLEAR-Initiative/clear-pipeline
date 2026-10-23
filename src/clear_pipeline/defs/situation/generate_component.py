@@ -107,31 +107,48 @@ def run_structured(
     )
 
 
-def run_bullet_component(
-    llm: LLMProvider,
-    spec: BulletComponentSpec,
-    *,
-    country_name: str,
-    period_label: str,
-    aggregated: dict[str, Any] | None,
-    cache_key: str,
-    rag_filters: dict[str, Any] | None = None,
-    aggregated_context: str | None = None,
-) -> BaseModel:
-    """RAG + structured LLM + citation resolve for one bullet component.
-
-    Returns ``spec.result_cls()`` on empty evidence or LLM failure.
-    """
+def _spec_question_fallback(spec: BulletComponentSpec):
     question = question_for_schema_key(spec.schema_key)
     fallback = spec.fallback_topic or (
         question.name if question is not None else spec.schema_key.replace("_", " ")
     )
-    rag = fetch_rag_context(
+    return question, fallback
+
+
+def bullet_component_rag(
+    spec: BulletComponentSpec,
+    *,
+    country_name: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> RAGContext:
+    """Retrieval half of a bullet component — the exact search
+    ``run_bullet_component`` runs, split out so selective regeneration (#1067)
+    can probe a section's current evidence id-set WITHOUT paying for the LLM
+    call. Deterministic given the KB state, so the probe and the regeneration
+    see the same hits."""
+    question, fallback = _spec_question_fallback(spec)
+    return fetch_rag_context(
         query=rag_query_for(country_name, question, fallback=fallback),
         limit=spec.rag_limit,
         filters=rag_filters,
         mode="TOPICAL",
     )
+
+
+def run_bullet_component_from_rag(
+    llm: LLMProvider,
+    spec: BulletComponentSpec,
+    rag: RAGContext,
+    *,
+    country_name: str,
+    period_label: str,
+    aggregated: dict[str, Any] | None,
+    cache_key: str,
+    aggregated_context: str | None = None,
+) -> BaseModel:
+    """Generation half — LLM + citation resolve over an ALREADY-FETCHED ``rag``.
+    Lets selective regen reuse the probe's retrieval instead of searching twice.
+    Returns ``spec.result_cls()`` on empty evidence or LLM failure."""
     if rag.is_empty:
         logger.info(
             "[situation:%s] no RAG hits — returning empty component",
@@ -139,6 +156,7 @@ def run_bullet_component(
         )
         return spec.result_cls()
 
+    question, fallback = _spec_question_fallback(spec)
     agg = (
         aggregated_context
         if aggregated_context is not None
@@ -167,6 +185,34 @@ def run_bullet_component(
         return spec.result_cls()
 
     return assemble_bullet_result(spec, result, rag)
+
+
+def run_bullet_component(
+    llm: LLMProvider,
+    spec: BulletComponentSpec,
+    *,
+    country_name: str,
+    period_label: str,
+    aggregated: dict[str, Any] | None,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+    aggregated_context: str | None = None,
+) -> BaseModel:
+    """RAG + structured LLM + citation resolve for one bullet component.
+
+    Returns ``spec.result_cls()`` on empty evidence or LLM failure. Now a thin
+    fetch-then-generate over the split halves above (behaviour unchanged)."""
+    rag = bullet_component_rag(spec, country_name=country_name, rag_filters=rag_filters)
+    return run_bullet_component_from_rag(
+        llm,
+        spec,
+        rag,
+        country_name=country_name,
+        period_label=period_label,
+        aggregated=aggregated,
+        cache_key=cache_key,
+        aggregated_context=aggregated_context,
+    )
 
 
 def assemble_bullet_result(

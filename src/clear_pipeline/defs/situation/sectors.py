@@ -41,7 +41,7 @@ from clear_pipeline.defs.situation.questions import (
     rag_query_for,
     sector_question_for,
 )
-from clear_pipeline.defs.situation.rag_helper import fetch_rag_context
+from clear_pipeline.defs.situation.rag_helper import RAGContext, fetch_rag_context
 from clear_pipeline.defs.situation.schemas import (
     InformationCoverageArea,
     SafSector,
@@ -145,22 +145,17 @@ _SECTOR_MAP_INSTRUCTION = (
 # ────────────────────────────────────────────────────────────────────
 
 
-def _generate_one_sector(
-    llm: LLMProvider,
+def sector_rag(
     *,
     sector_key: SafSector,
     sector_display_name: str,
     country_name: str,
-    period_label: str,
-    aggregated_context: str,
-    cache_key: str,
     rag_filters: dict[str, Any] | None = None,
-) -> SectorAnalysis:
-    """One LLM call, one sector. Returns the empty default on any
-    failure so a single bad sector never drops the others."""
-
-    # Sector-scoped RAG — filter to chunks tagged with this sector.
-    # Query text is the CSV analysis question (not a hand-rolled keyword bag).
+) -> tuple[RAGContext, bool]:
+    """Retrieval half of one sector — the sector-scoped search plus the
+    unfiltered fallback. Returns ``(rag, used_fallback)``. Split out so
+    selective regeneration (#1067) can probe a sector's current evidence id-set
+    without the LLM, then reuse the same retrieval to regenerate."""
     question = sector_question_for(sector_key)
     query = rag_query_for(country_name, question, fallback=sector_display_name)
     rag = fetch_rag_context(
@@ -169,11 +164,6 @@ def _generate_one_sector(
         filters={**(rag_filters or {}), "needSectors": [sector_display_name]},
         mode="TOPICAL",
     )
-
-    # If the sector-scoped search returned nothing, fall back to an
-    # unfiltered search — better a broad set of hits than no evidence
-    # at all. The LLM prompt says to prefer fewer claims over
-    # speculation, so it'll degrade gracefully.
     used_fallback = False
     if rag.is_empty:
         logger.info(
@@ -189,7 +179,24 @@ def _generate_one_sector(
             filters=rag_filters,
             mode="TOPICAL",
         )
+    return rag, used_fallback
 
+
+def sector_from_rag(
+    llm: LLMProvider,
+    *,
+    sector_key: SafSector,
+    sector_display_name: str,
+    country_name: str,
+    period_label: str,
+    aggregated_context: str,
+    cache_key: str,
+    rag: RAGContext,
+    used_fallback: bool,
+) -> SectorAnalysis:
+    """Generation half of one sector — LLM + citation resolve over an
+    ALREADY-FETCHED ``rag``. Returns the empty default on failure."""
+    question = sector_question_for(sector_key)
     if rag.is_empty:
         logger.info(
             "[situation:sector:%s] no evidence available — returning empty analysis",
@@ -261,6 +268,39 @@ def _generate_one_sector(
         source_report_ids=list(contributing) or rag.contributing_report_ids,
         contributing_sources=contributing,
         evidence_scope="fallback" if used_fallback else "sector",
+    )
+
+
+def _generate_one_sector(
+    llm: LLMProvider,
+    *,
+    sector_key: SafSector,
+    sector_display_name: str,
+    country_name: str,
+    period_label: str,
+    aggregated_context: str,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> SectorAnalysis:
+    """One LLM call, one sector — a thin retrieve-then-generate over the split
+    halves above (behaviour unchanged). Returns the empty default on any failure
+    so a single bad sector never drops the others."""
+    rag, used_fallback = sector_rag(
+        sector_key=sector_key,
+        sector_display_name=sector_display_name,
+        country_name=country_name,
+        rag_filters=rag_filters,
+    )
+    return sector_from_rag(
+        llm,
+        sector_key=sector_key,
+        sector_display_name=sector_display_name,
+        country_name=country_name,
+        period_label=period_label,
+        aggregated_context=aggregated_context,
+        cache_key=cache_key,
+        rag=rag,
+        used_fallback=used_fallback,
     )
 
 
