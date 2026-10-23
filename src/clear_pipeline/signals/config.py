@@ -102,6 +102,28 @@ class Settings(BaseSettings):
     # Forced full pull even when the layer fingerprint is unchanged (safety net).
     sudan_witness_full_pull_max_age_hours: int = 7 * 24
 
+    # Shared newsletter mailbox (IMAP, implicit TLS). Named after its role, not
+    # the vendor (Infomaniak today), so other newsletters reuse it and a move
+    # to another host renames nothing. Each newsletter source reads only its
+    # own folder; empty credentials make those sources refuse to poll.
+    newsletter_mailbox_imap_host: str = ""
+    newsletter_mailbox_imap_port: int = 993
+    newsletter_mailbox_imap_user: str = ""
+    newsletter_mailbox_imap_password: str = ""
+
+    # INSO security newsletters (gx-only, providers/inso.py). Covered by terms
+    # of use: until the written approval lands, the folder points at synthetic
+    # test mail on a local instance only (docs/inso-spec.md).
+    inso_source_name: str = "inso"
+    inso_imap_folder: str = "INSO-TEST"
+    # Comma-separated From addresses accepted; anything else is quarantined.
+    inso_allowed_senders: str = ""
+    # Require a DKIM (aligned with From) or DMARC pass in the receiving server's
+    # Authentication-Results. Turn off only in a local .env, for self-sent mail.
+    inso_require_dkim: bool = True
+    # Daily; the real sending frequency is unknown.
+    inso_poll_interval_minutes: int = 24 * 60
+
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
     # a drain sensor checks for pending manual signals every N minutes (low so
