@@ -25,7 +25,7 @@ create-only:
     ``Quarantined``, lands in ``quarantine/`` with its reason, and a 7th
     check, ``quarantine_empty``, turns the run red (INSO).
   - ``to_silver_inputs``: one record fans out into several signals (INSO).
-  - ``classify``: replaces Jev for this source (INSO's pilot).
+  - ``classify``: replaces Jev for this source (INSO).
   - ``commit_watermark``: called once ``_push`` runs, for a source whose
     ``set_watermark`` only stages its cursor (INSO).
 
@@ -401,7 +401,7 @@ def build_gx_source_assets(source: GXSource) -> list:
     # Silver -> Gold business logic. Pure transforms, source-agnostic from
     # here on — nothing below reads or writes clear-api except `_push`.
     # ══════════════════════════════════════════════════════════════════════
-    # Optional per-source classifier (INSO's pilot of the shared prompt). It
+    # Optional per-source classifier (INSO: the shared prompt). It
     # owns severity too: its answer replaces the silver severity, in the row
     # and in the signalInput `_push` sends. Without it, Jev classifies.
     source_classify = getattr(source, "classify", None)

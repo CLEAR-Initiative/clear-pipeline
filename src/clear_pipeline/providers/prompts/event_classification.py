@@ -1,7 +1,7 @@
 """The shared event-classification prompt (level-3 type, relevance, severity).
 
-Owned by its author, not by any one source: INSO pilots it as Jev's
-replacement and adds its own context block in front (providers/inso.py).
+Owned by its author, not by any one source: INSO uses it in place of Jev
+and adds its own context block in front (providers/inso.py).
 Change the text only with its author, and bump the version with it.
 """
 

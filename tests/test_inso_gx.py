@@ -197,7 +197,7 @@ def test_an_incident_signal_carries_its_own_place_date_and_casualties(h):
     assert (market["lat"], market["lng"]) == (13.63, 25.35)
     assert "locationId" not in market
     assert "Place: El Fasher city market, El Fasher, North Darfur, Sudan" in market["description"].splitlines()
-    # Report-level text stays on the report, for later context extraction.
+    # Report-level text stays on the report.
     assert market["rawData"]["report"]["analysis"].startswith("Mid-October confirmed")
     assert market["rawData"]["report"]["serial"] == "SDN/Darfur/IR/20262010/R1"
     # The ANALYSIS-only Kutum strike never becomes a signal.

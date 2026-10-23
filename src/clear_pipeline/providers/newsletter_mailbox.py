@@ -1,6 +1,6 @@
 """Shared newsletter mailbox — IMAP over implicit TLS, read-only.
 
-Newsletters that only reach us by email (INSO today) land in one shared
+Newsletters that only reach us by email land in one shared
 mailbox, one folder per source. This module is the transport only: it lists a
 folder's messages after a cursor and returns their raw bytes. Parsing lives in
 each source's provider and never imports this module.

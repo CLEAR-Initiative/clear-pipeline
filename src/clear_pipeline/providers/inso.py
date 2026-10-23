@@ -15,8 +15,7 @@ which this module never imports.
     past ones). The model returns day/month only; ``incident_date`` adds the
     year from ``published_at``.
 
-Every format decision rests on one real sample (docs/inso-spec.md). The
-serial is opaque: nothing is derived from its parts.
+The serial is opaque: nothing is derived from its parts.
 """
 
 import html
@@ -57,7 +56,7 @@ __all__ = [
 ]
 
 _LABELS = ("LOCATION", "INCIDENT TYPE", "DATE & TIME", "INFORMATION", "ANALYSIS", "ADVICE", "ISSUED BY", "SERIAL #")
-# The real sample prefixes the serial label with the issuer ("INSO SERIAL #").
+# The serial label may carry the issuer's name ("INSO SERIAL #").
 _LABEL_LINE = re.compile(
     r"^(" + "|".join(r"(?:[A-Z]+ )?SERIAL #" if lbl == "SERIAL #" else re.escape(lbl) for lbl in _LABELS) + r")$"
 )
@@ -80,7 +79,7 @@ class InsoReport:
     severity_raw: str | None  # the banner under "REPORT", unmapped
     location_raw: str
     country_raw: str  # first comma token of LOCATION
-    incident_type: str  # verbatim: the publisher's type list is unknown
+    incident_type: str  # verbatim, never split on commas
     report_datetime: str  # DATE & TIME, strict DD/MM/YYYY HH:MM, no timezone stated
     serial: str  # opaque
     issued_by: str
@@ -320,7 +319,7 @@ def incident_date(incident: Incident, published_at: str) -> date | None:
 
 
 def external_id(serial: str, ordinal: int) -> str:
-    """``inso:<serial verbatim>:<ordinal>``, 1-based. Revisions aren't handled."""
+    """``inso:<serial verbatim>:<ordinal>``, 1-based."""
     return f"inso:{serial}:{ordinal}"
 
 
@@ -396,7 +395,7 @@ def _title(source_text: str, limit: int = 200) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Classify: the shared event-classification prompt (pilot for replacing Jev)
+# Classify: the shared event-classification prompt, in place of Jev
 # ──────────────────────────────────────────────────────────────────────────────
 class EventClassification(BaseModel):
     """The shared prompt's fields the mapping needs; its other fields are
