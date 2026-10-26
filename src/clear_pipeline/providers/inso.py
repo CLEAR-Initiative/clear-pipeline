@@ -118,7 +118,10 @@ def _body_lines(msg) -> list[str]:
     part = msg.get_body(preferencelist=("html", "plain"))
     if part is None:
         raise InsoParseError("no text/html or text/plain part")
-    text = part.get_content()
+    try:
+        text = part.get_content()
+    except LookupError as e:  # unknown or non-text charset; bad bytes are already replaced
+        raise InsoParseError(f"undecodable body: {e}") from e
     if part.get_content_type() == "text/html":
         parser = _HtmlText()
         parser.feed(text)
