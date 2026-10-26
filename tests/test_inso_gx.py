@@ -246,6 +246,17 @@ def test_an_incident_with_no_stated_date_has_a_null_date_not_the_report_date(h):
     assert "Date: not stated" in signal["description"].splitlines()
 
 
+@pytest.mark.parametrize("field", ["killed", "injured"])
+def test_a_negative_casualty_count_fails_the_run_and_pushes_nothing(h, field):
+    information = inso.parse(_eml("02_single_incident")).information
+    h.llm.extractions[information]["incidents"][0][field] = -1
+    h.folder.add("02_single_incident")
+    result = h.run()
+    assert not result.success
+    assert [e.step_key for e in result.all_events if e.event_type_value == "STEP_FAILURE"] == ["inso_silver"]
+    assert h.created == []
+
+
 def test_html_only_email_goes_through(h):
     h.folder.add("04_html_only")
     assert h.run().success
