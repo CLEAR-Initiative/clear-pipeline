@@ -78,6 +78,12 @@ def test_missing_date_header_raises():
         inso.parse(raw)
 
 
+def test_unknown_charset_raises():
+    raw = _eml("02_single_incident").replace(b'charset="utf-8"', b'charset="x-bogus"')
+    with pytest.raises(InsoParseError, match="x-bogus"):
+        inso.parse(raw)
+
+
 def test_serial_is_kept_verbatim():
     raw = _replace(_eml("02_single_incident"), "SDN/Khartoum/IR/20261410/R1", "sdn / khartoum-IR 7")
     assert inso.parse(raw).serial == "sdn / khartoum-IR 7"
