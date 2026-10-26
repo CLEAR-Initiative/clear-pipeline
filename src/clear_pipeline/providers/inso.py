@@ -256,8 +256,8 @@ class Incident(BaseModel):
     place: str | None = Field(None, description="Most precise place (town, village, site), as written.")
     # Named as in the shared classification prompt, where the fields overlap.
     event_actors: list[str] = Field(default_factory=list, description="Perpetrators / parties, as written; UNKNOWN if unidentified.")
-    killed: int | None = Field(None, description="People killed. 0 if the text says none; null if unspecified.")
-    injured: int | None = Field(None, description="People injured. 0 if the text says none; null if unspecified.")
+    killed: int | None = Field(None, ge=0, description="People killed. 0 if the text says none; null if unspecified.")
+    injured: int | None = Field(None, ge=0, description="People injured. 0 if the text says none; null if unspecified.")
     source_text: str = Field(description="The exact sentence(s) of INFORMATION this incident was taken from.")
 
 
