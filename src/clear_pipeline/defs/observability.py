@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 
 import dagster as dg
 
+from clear_pipeline.providers.metrics import CheckOutcome, push_heartbeat, push_run_metrics
 from clear_pipeline.providers.observability import capture_message, init_sentry
 from clear_pipeline.signals.config import settings
 
@@ -78,6 +79,12 @@ def stuck_run_alerts(
     return alerts, still_stuck
 
 
+def oldest_run_age_s(records, now_ts: float) -> float:
+    """Age in seconds of the longest in-progress run, 0 when there is none."""
+    starts = [start for rec in records if (start := _run_age_start(rec)) is not None]
+    return max((now_ts - start for start in starts), default=0.0)
+
+
 def run_failure_alert(run, failure_message: str) -> dict:
     """Pure core of the run-failure sensor: the GlitchTip message + tags for a
     failed run. Separated so its wording and tags are unit-testable."""
@@ -119,6 +126,9 @@ def stuck_run_monitor_sensor(context: dg.SensorEvaluationContext) -> dg.SkipReas
     # Keep only currently-still-stuck ids so a resolved run can re-alert if it
     # ever gets stuck again.
     context.update_cursor(json.dumps(still_stuck))
+    # Heartbeat: this tick is the daemon's proof of life. A stale timestamp means
+    # the daemon (or its host) is down; a growing age means an orphaned run.
+    push_heartbeat(len(records), oldest_run_age_s(records, now))
     return dg.SkipReason(
         f"{len(records)} in-progress; {len(still_stuck)} stuck > "
         f"{settings.stuck_run_alert_minutes}m, {len(alerts)} newly alerted"
@@ -134,3 +144,76 @@ def run_failure_glitchtip_sensor(context: dg.RunFailureSensorContext) -> None:
     """Report every run failure to GlitchTip with run id + job + reason."""
     alert = run_failure_alert(context.dagster_run, context.failure_event.message)
     capture_message(alert["message"], level="error", **alert["tags"])
+
+
+def check_outcomes(events) -> list[CheckOutcome]:
+    """Asset-check (GX gate) results from a run's event-log entries."""
+    outcomes = []
+    for entry in events:
+        ev = entry.dagster_event
+        if ev is None or ev.event_type != dg.DagsterEventType.ASSET_CHECK_EVALUATION:
+            continue
+        data = ev.event_specific_data
+        outcomes.append(
+            CheckOutcome(
+                asset="/".join(data.asset_key.path),
+                check=data.check_name,
+                passed=bool(data.passed),
+                severity=data.severity.value,
+            )
+        )
+    return outcomes
+
+
+def is_latest_finished(latest_records, run_id: str) -> bool:
+    """True when `run_id` is the job's most recent finished run (or none is known).
+
+    The success and failure sensors have independent cursors, so an older
+    success can be evaluated after a newer failure was pushed. Pushing it would
+    replace the newer run's metrics; the newer run's own sensor tick covers it."""
+    return not latest_records or latest_records[0].dagster_run.run_id == run_id
+
+
+def _push_for_run(context: dg.RunStatusSensorContext, success: bool) -> None:
+    run = context.dagster_run
+    if run.job_name:
+        # SUCCESS/FAILURE only: a newer cancelled run has no sensor to push it,
+        # so it must not suppress an older success.
+        latest = context.instance.get_run_records(
+            filters=dg.RunsFilter(
+                job_name=run.job_name,
+                statuses=[dg.DagsterRunStatus.SUCCESS, dg.DagsterRunStatus.FAILURE],
+            ),
+            limit=1,
+            order_by="update_timestamp",
+        )
+        if not is_latest_finished(latest, run.run_id):
+            return
+    record = context.instance.get_run_record_by_id(run.run_id)
+    duration = finished_at = None
+    if record and record.end_time:
+        finished_at = record.end_time
+        if record.start_time:
+            duration = record.end_time - record.start_time
+    events = context.instance.all_logs(run.run_id, of_type=dg.DagsterEventType.ASSET_CHECK_EVALUATION)
+    push_run_metrics(run.job_name or "unknown", success, duration, check_outcomes(events), finished_at)
+
+
+@dg.run_status_sensor(
+    name="run_success_metrics_sensor",
+    run_status=dg.DagsterRunStatus.SUCCESS,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+def run_success_metrics_sensor(context: dg.RunStatusSensorContext) -> None:
+    """Push duration + GX gate outcomes of every successful run to the Pushgateway."""
+    _push_for_run(context, success=True)
+
+
+@dg.run_status_sensor(
+    name="run_failure_metrics_sensor",
+    run_status=dg.DagsterRunStatus.FAILURE,
+    default_status=dg.DefaultSensorStatus.RUNNING,
+)
+def run_failure_metrics_sensor(context: dg.RunStatusSensorContext) -> None:
+    """Same for failed runs (gates that ran before the failure are included)."""
+    _push_for_run(context, success=False)

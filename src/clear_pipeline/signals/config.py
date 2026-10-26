@@ -251,6 +251,9 @@ class Settings(BaseSettings):
     logtail_source_token: str = ""
     sentry_dsn: str = ""
     sentry_env: str = "development"
+    # Prometheus Pushgateway for run/GX-gate metrics; empty disables pushing.
+    pushgateway_url: str = ""
+    observability_service_name: str = "clear-context-pipeline"
     log_level: str = "INFO"
     # A run STARTED/STARTING longer than this is reported to GlitchTip by
     # stuck_run_monitor_sensor (catches OOM-orphaned runs / launch stalls that
