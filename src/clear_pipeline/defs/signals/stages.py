@@ -62,8 +62,10 @@ from clear_pipeline.providers.clear_api import (
     pending_translations,
     sync_event_cards,
     update_signal_location,
+    update_signal_severity,
 )
 from clear_pipeline.providers.event import EventRewriteFailed, group_signal, recompute_event
+from clear_pipeline.providers.event_extraction import extract_event
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import extract_population_affected_from_text
 from clear_pipeline.providers.translate import (
@@ -168,6 +170,54 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
             )
 
 
+# Sources with no ingest builder in this pipeline (manual / trusted / sudan-war-x)
+# are created directly in clear-api, so their severity is set here at drain time
+# using the SAME unified extractor the builders use. GDACS keeps its alert-level
+# map and is never overwritten.
+def _drain_time_severity_sources() -> frozenset[str]:
+    names = [settings.manual_source_name, settings.sudan_war_x_source_name]
+    names.extend(
+        n.strip()
+        for n in settings.manual_trusted_source_names.split(",")
+        if n.strip()
+    )
+    return frozenset(names)
+
+
+def _apply_llm_severity_at_drain(view: SignalView, created: dict) -> dict:
+    """For drain-only sources, set the signal severity via the unified LLM
+    extractor (same one the ingest builders use). Returns ``created`` updated
+    in-memory (and persisted via updateSignalSeverity) so grouping sees it.
+
+    Only severity is persisted here — the full structured field set comes from
+    the ingest builders for pipeline sources; drain-only sources getting the
+    full set is a follow-up (needs a dedicated update mutation)."""
+    source_name = (created.get("source") or {}).get("name") or ""
+    if source_name == settings.gdacs_source_name:
+        return created
+    if source_name not in _drain_time_severity_sources():
+        return created
+
+    extracted = extract_event(
+        title=view.title,
+        description=view.description,
+        country=view.location_name,
+        log_tag=f"drain:{source_name}:{created.get('id')}",
+    )
+    if extracted is None or extracted.severity is None:
+        return created
+    try:
+        updated = update_signal_severity(created["id"], extracted.severity)
+        return {**created, "severity": updated.get("severity", extracted.severity)}
+    except Exception:  # noqa: BLE001 — grouping can still proceed with the in-memory value
+        logger.warning(
+            "[classify_group] signal %s: updateSignalSeverity failed — using LLM severity in-memory",
+            created.get("id"),
+            exc_info=True,
+        )
+        return {**created, "severity": extracted.severity}
+
+
 def _group(view: SignalView, created: dict) -> dict | None:
     """Classify + group one signal into an event (create or add-to-existing).
     Returns the event dict, or None when below the relevance threshold.
@@ -175,6 +225,7 @@ def _group(view: SignalView, created: dict) -> dict | None:
     Classification goes through `classify_signal` (Jev only — raises JevError on a
     Jev/OpenRouter failure, which the caller turns into a requeue); the event
     reuses this result downstream (see providers/event.py)."""
+    created = _apply_llm_severity_at_drain(view, created)
     classification = classify_signal(view.title, view.description, created.get("severity"))
     if classification.relevance < settings.relevance_threshold:
         return None

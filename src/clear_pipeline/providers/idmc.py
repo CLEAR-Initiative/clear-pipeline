@@ -28,6 +28,7 @@ import httpx
 import redis
 
 from clear_pipeline.providers.signal import enrich_with_geoparser
+from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.providers.translation_hash import _stable_stringify
 from clear_pipeline.signals.config import settings
 
@@ -369,6 +370,17 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
         promote=promote,
         log_tag=f"idmc:{event.get('idu_id')}",
     )
+
+    # Unified LLM extraction: severity (LLM-primary — the displacement-threshold
+    # value above stays as a fallback if the model fails) plus the structured
+    # event fields. 1 signal -> 1 event (primary object).
+    extracted = extract_event(
+        title=event["title"],
+        description=event.get("description"),
+        log_tag=f"idmc:{event.get('idu_id')}",
+    )
+    if extracted is not None:
+        input_data.update(extracted_signal_fields(extracted))
 
     return input_data
 

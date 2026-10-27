@@ -533,6 +533,60 @@ def _rewrite_event(
         return None, signals
 
 
+def _aggregate_signal_event_fields(members: list[dict]) -> dict:
+    """Roll the per-signal extracted fields up to the event. Purely additive —
+    never touches startedAt / severity / text (those keep their own logic):
+    the precision of the earliest start, the latest known end + its precision,
+    the first stated magnitude + unit, and the de-duplicated union of conflict
+    actors and country ids across the members. Emits only present values."""
+    out: dict = {}
+
+    starts = [
+        (m["startDate"], m.get("startDateAccuracy"))
+        for m in members
+        if m.get("startDate")
+    ]
+    if starts:
+        _, acc = min(starts, key=lambda p: p[0])
+        if acc:
+            out["startedAtAccuracy"] = acc
+
+    ends = [
+        (m["endDate"], m.get("endDateAccuracy")) for m in members if m.get("endDate")
+    ]
+    if ends:
+        end, acc = max(ends, key=lambda p: p[0])
+        out["endedAt"] = end
+        if acc:
+            out["endedAtAccuracy"] = acc
+
+    for m in members:
+        if m.get("magnitude") is not None:
+            out["magnitude"] = m["magnitude"]
+            if m.get("magnitudeUnit"):
+                out["magnitudeUnit"] = m["magnitudeUnit"]
+            break
+
+    actors: list[str] = []
+    for m in members:
+        for a in m.get("actors") or []:
+            if a not in actors:
+                actors.append(a)
+    if actors:
+        out["actors"] = actors
+
+    country_ids: list[str] = []
+    for m in members:
+        for c in m.get("countries") or []:
+            cid = c.get("id")
+            if cid and cid not in country_ids:
+                country_ids.append(cid)
+    if country_ids:
+        out["countryIds"] = country_ids
+
+    return out
+
+
 def _rewrite_fields(
     members: list[dict],
     rewrite: EventRewrite | None,
@@ -555,6 +609,10 @@ def _rewrite_fields(
         displaced = _resolve_population_displaced(rewrite.population_displaced)
         if displaced is not None:
             out["populationDisplaced"] = str(displaced)
+    if members:
+        # Roll the per-signal extracted fields up to the event (end date +
+        # accuracy, start accuracy, magnitude, actors, country ids).
+        out.update(_aggregate_signal_event_fields(members))
     return out
 
 

@@ -37,6 +37,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 import redis
 
+from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
@@ -258,4 +259,16 @@ def build_darfur24_signal_input(article: dict, source_id: str, location_id: str 
     }
     if location_id is not None:
         input_data["locationId"] = location_id
+
+    # Unified LLM extraction: a news article carries no structured severity, so
+    # the model is the only source of severity + the structured event fields.
+    # 1 signal -> 1 event (primary object).
+    extracted = extract_event(
+        title=article["title"],
+        description=article.get("description"),
+        log_tag=f"darfur24:{article['darfur24_id']}",
+    )
+    if extracted is not None:
+        input_data.update(extracted_signal_fields(extracted))
+
     return input_data

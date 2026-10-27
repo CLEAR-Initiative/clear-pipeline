@@ -1752,6 +1752,14 @@ query EventMembers($eventId: String!, $first: Int) {
     description
     severity
     casualties
+    startDate
+    startDateAccuracy
+    endDate
+    endDateAccuracy
+    magnitude
+    magnitudeUnit
+    actors
+    countries { id }
     publishedAt
     url
     rawS3Key

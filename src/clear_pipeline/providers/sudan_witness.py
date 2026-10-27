@@ -49,6 +49,7 @@ import httpx
 import redis
 
 # Generic over CreateSignalInput keys — the same adapter IDMC uses for revisions.
+from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.providers.idmc import build_signal_content_update
 from clear_pipeline.signals.config import settings
 
@@ -373,4 +374,16 @@ def build_sudan_witness_signal_input(record: dict, source_id: str) -> dict:
         # Server-side PostGIS geo-resolution into a general locationId.
         input_data["lat"] = lat
         input_data["lng"] = lng
+
+    # Unified LLM extraction: severity (LLM-primary — the harm-category value
+    # above stays as a fallback if the model fails) plus the structured event
+    # fields. 1 signal -> 1 event (primary object).
+    extracted = extract_event(
+        title=input_data.get("title"),
+        description=input_data.get("description"),
+        log_tag=f"sudan_witness:{record['suw_id']}",
+    )
+    if extracted is not None:
+        input_data.update(extracted_signal_fields(extracted))
+
     return input_data
