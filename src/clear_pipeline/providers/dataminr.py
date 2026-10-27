@@ -317,6 +317,7 @@ def _convert_legacy_alert(alert: dict) -> DataminrSignal | None:
     Legacy format differences:
     - estimatedEventLocation is an array [name, lat, lng, radius, mgrs]
     - eventTime is milliseconds since epoch (not ISO string)
+    - publicPost carries the source link as `link`, not `href`
     - alertId field name is the same
     """
     alert_id = alert.get("alertId")
@@ -346,13 +347,18 @@ def _convert_legacy_alert(alert: dict) -> DataminrSignal | None:
         except (ValueError, IndexError):
             pass
 
+    # Without this the source link is dropped: PublicPost only knows `href`.
+    public_post = alert.get("publicPost")
+    if isinstance(public_post, dict) and not public_post.get("href") and public_post.get("link"):
+        public_post = {**public_post, "href": public_post["link"]}
+
     return DataminrSignal(
         alertId=alert_id,
         alertTimestamp=alert_timestamp,
         estimatedEventLocation=location,
         headline=alert.get("headline"),
         subHeadline=alert.get("subHeadline"),
-        publicPost=alert.get("publicPost"),
+        publicPost=public_post,
         alertType=alert.get("alertType"),
         dataminrAlertUrl=alert.get("firstAlertURL"),
         listsMatched=alert.get("alertLists"),
