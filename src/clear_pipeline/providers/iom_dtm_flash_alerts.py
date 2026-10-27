@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import redis
 
+from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
@@ -203,4 +204,16 @@ def build_iom_dtm_flash_alert_signal_input(
     # record["field_country1"]; None only when that lookup failed.
     if location_id is not None:
         input_data["locationId"] = location_id
+
+    # Unified LLM extraction: Flash Alerts carry no structured severity, so the
+    # model is the only source of severity + the structured event fields.
+    # 1 signal -> 1 event (primary object).
+    extracted = extract_event(
+        title=record["title"],
+        description=record["field_summary"],
+        log_tag=f"iom_dtm_flash_alert:{record['external_id']}",
+    )
+    if extracted is not None:
+        input_data.update(extracted_signal_fields(extracted))
+
     return input_data
