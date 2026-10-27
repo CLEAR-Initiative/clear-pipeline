@@ -533,12 +533,19 @@ def _rewrite_event(
         return None, signals
 
 
-def _aggregate_signal_event_fields(members: list[dict]) -> dict:
-    """Roll the per-signal extracted fields up to the event. Purely additive —
-    never touches startedAt / severity / text (those keep their own logic):
-    the precision of the earliest start, the latest known end + its precision,
-    the first stated magnitude + unit, and the de-duplicated union of conflict
-    actors and country ids across the members. Emits only present values."""
+def _aggregate_signal_event_fields(members: list[dict], *, absolute: bool = False) -> dict:
+    """Roll the per-signal extracted fields up to the event (never touches
+    startedAt / severity / text — those keep their own logic): the precision of
+    the earliest start, the latest known end + its precision, the first stated
+    magnitude + unit, and the de-duplicated union of conflict actors and country
+    ids across the members.
+
+    ``absolute=False`` (grouping): emit only fields a member supports — purely
+    additive, never writes a null. ``absolute=True`` (recompute): ALSO emit the
+    unsupported fields as explicit clears (null / []), so a recompute after a
+    retraction (or with no members left) drops facts the withdrawn signal had
+    rather than leaving them stale. Absolute clears rely on the clear-api write
+    accepting null/[]."""
     out: dict = {}
 
     starts = [
@@ -546,33 +553,35 @@ def _aggregate_signal_event_fields(members: list[dict]) -> dict:
         for m in members
         if m.get("startDate")
     ]
-    if starts:
-        _, acc = min(starts, key=lambda p: p[0])
-        if acc:
-            out["startedAtAccuracy"] = acc
+    start_acc = min(starts, key=lambda p: p[0])[1] if starts else None
+    if start_acc is not None or absolute:
+        out["startedAtAccuracy"] = start_acc
 
     ends = [
         (m["endDate"], m.get("endDateAccuracy")) for m in members if m.get("endDate")
     ]
-    if ends:
-        end, acc = max(ends, key=lambda p: p[0])
-        out["endedAt"] = end
-        if acc:
-            out["endedAtAccuracy"] = acc
+    end_date, end_acc = max(ends, key=lambda p: p[0]) if ends else (None, None)
+    if end_date is not None or absolute:
+        out["endedAt"] = end_date
+        out["endedAtAccuracy"] = end_acc
 
+    magnitude: float | None = None
+    magnitude_unit: str | None = None
     for m in members:
         if m.get("magnitude") is not None:
-            out["magnitude"] = m["magnitude"]
-            if m.get("magnitudeUnit"):
-                out["magnitudeUnit"] = m["magnitudeUnit"]
+            magnitude = m["magnitude"]
+            magnitude_unit = m.get("magnitudeUnit")
             break
+    if magnitude is not None or absolute:
+        out["magnitude"] = magnitude
+        out["magnitudeUnit"] = magnitude_unit
 
     actors: list[str] = []
     for m in members:
         for a in m.get("actors") or []:
             if a not in actors:
                 actors.append(a)
-    if actors:
+    if actors or absolute:
         out["actors"] = actors
 
     country_ids: list[str] = []
@@ -581,7 +590,7 @@ def _aggregate_signal_event_fields(members: list[dict]) -> dict:
             cid = c.get("id")
             if cid and cid not in country_ids:
                 country_ids.append(cid)
-    if country_ids:
+    if country_ids or absolute:
         out["countryIds"] = country_ids
 
     return out
@@ -591,6 +600,8 @@ def _rewrite_fields(
     members: list[dict],
     rewrite: EventRewrite | None,
     fallback_severity: int | None,
+    *,
+    absolute: bool = False,
 ) -> dict:
     """Event fields derived from ``members`` and an optional rewrite, shared by
     grouping and recompute. Severity/rank only when a severity resolves (the
@@ -609,10 +620,10 @@ def _rewrite_fields(
         displaced = _resolve_population_displaced(rewrite.population_displaced)
         if displaced is not None:
             out["populationDisplaced"] = str(displaced)
-    if members:
-        # Roll the per-signal extracted fields up to the event (end date +
-        # accuracy, start accuracy, magnitude, actors, country ids).
-        out.update(_aggregate_signal_event_fields(members))
+    # Roll the per-signal extracted fields up to the event (end date + accuracy,
+    # start accuracy, magnitude, actors, country ids). Additive for grouping;
+    # absolute (clears unsupported fields) on recompute.
+    out.update(_aggregate_signal_event_fields(members, absolute=absolute))
     return out
 
 
@@ -1009,7 +1020,7 @@ def recompute_event(
         "populationAffected": str(max(populations)) if populations else None,
         "severity": None,
         "rank": 0.0,
-        **_rewrite_fields(members, rewrite, state.get("severity")),
+        **_rewrite_fields(members, rewrite, state.get("severity"), absolute=True),
     }
     if rewrite or not members:
         aggregates["rewriteMembersHash"] = live_hash

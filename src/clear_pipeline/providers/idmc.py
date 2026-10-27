@@ -402,7 +402,21 @@ def build_signal_content_update(input_data: dict, *, retracted: bool | None = No
         "url": input_data.get("url"),
         **{
             k: input_data[k]
-            for k in ("lat", "lng", "geoparsedData")
+            for k in (
+                "lat",
+                "lng",
+                "geoparsedData",
+                # Structured extraction fields — carry them onto revisions too, or
+                # a corrected record would keep stale dates/magnitude/actors/countries.
+                "startDate",
+                "startDateAccuracy",
+                "endDate",
+                "endDateAccuracy",
+                "magnitude",
+                "magnitudeUnit",
+                "actors",
+                "countryIds",
+            )
             if k in input_data
         },
     }

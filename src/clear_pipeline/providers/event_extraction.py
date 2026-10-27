@@ -70,7 +70,17 @@ def extract_event(
     """Run the general-case extraction prompt and return the single extracted
     event, or ``None`` on any failure (best-effort — ingest must not die on a
     model blip)."""
-    body = description or title or ""
+    # Send BOTH title and description, labeled — some sources (e.g. ACLED) put
+    # facts in the title (event type, location, actors) that the description
+    # doesn't repeat, so `description or title` would drop them.
+    body = "\n\n".join(
+        text
+        for text in (
+            f"Title: {title}" if title else "",
+            f"Description: {description}" if description else "",
+        )
+        if text
+    )
     user = f"Country: {country}\n\n{body}" if country else body
     try:
         event = make_llm_provider("signal").complete_structured(
@@ -115,11 +125,17 @@ def extracted_signal_fields(event: ExtractedEvent) -> dict:
         out["magnitudeUnit"] = event.magnitude_unit
     if event.event_actors:
         out["actors"] = event.event_actors
-    country_ids = [
-        loc_id
-        for name in (event.countries or [])
-        if (loc_id := resolve_country_location_id(name)) is not None
-    ]
+    # Country resolution hits clear-api and can raise — keep it best-effort so
+    # one failed lookup doesn't discard the other extracted fields.
+    country_ids: list[str] = []
+    for name in event.countries or []:
+        try:
+            loc_id = resolve_country_location_id(name)
+        except Exception:  # noqa: BLE001 — country enrichment is best-effort
+            logger.warning("country lookup failed for %r", name, exc_info=True)
+            continue
+        if loc_id is not None:
+            country_ids.append(loc_id)
     if country_ids:
         out["countryIds"] = country_ids
     return out

@@ -120,4 +120,19 @@ def test_aggregate_event_fields_rolls_up_members():
 
 
 def test_aggregate_event_fields_empty_when_members_lack_fields():
+    # Additive (grouping): members with no extracted fields contribute nothing.
     assert _aggregate_signal_event_fields([{"severity": 3}, {}]) == {}
+
+
+def test_aggregate_absolute_clears_unsupported_fields():
+    # Recompute: unsupported fields are explicitly cleared so a retraction drops
+    # facts no live member still carries.
+    assert _aggregate_signal_event_fields([{"severity": 3}, {}], absolute=True) == {
+        "startedAtAccuracy": None,
+        "endedAt": None,
+        "endedAtAccuracy": None,
+        "magnitude": None,
+        "magnitudeUnit": None,
+        "actors": [],
+        "countryIds": [],
+    }

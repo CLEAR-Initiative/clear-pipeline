@@ -170,6 +170,10 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
             )
 
 
+# Retries for the drain-time severity write (see _apply_llm_severity_at_drain).
+_DRAIN_SEVERITY_WRITE_ATTEMPTS = 3
+
+
 # Sources with no ingest builder in this pipeline (manual / trusted / sudan-war-x)
 # are created directly in clear-api, so their severity is set here at drain time
 # using the SAME unified extractor the builders use. GDACS keeps its alert-level
@@ -206,16 +210,27 @@ def _apply_llm_severity_at_drain(view: SignalView, created: dict) -> dict:
     )
     if extracted is None or extracted.severity is None:
         return created
-    try:
-        updated = update_signal_severity(created["id"], extracted.severity)
-        return {**created, "severity": updated.get("severity", extracted.severity)}
-    except Exception:  # noqa: BLE001 — grouping can still proceed with the in-memory value
-        logger.warning(
-            "[classify_group] signal %s: updateSignalSeverity failed — using LLM severity in-memory",
-            created.get("id"),
-            exc_info=True,
-        )
-        return {**created, "severity": extracted.severity}
+
+    # Persist the severity, retrying a few times: the event-severity aggregation
+    # re-fetches members from clear-api and reads their STORED scores, so an
+    # unsaved score would be lost there even though it stays in-memory for the
+    # relevance classifier below. Retry rides out a transient clear-api blip.
+    last_err: Exception | None = None
+    for attempt in range(_DRAIN_SEVERITY_WRITE_ATTEMPTS):
+        try:
+            updated = update_signal_severity(created["id"], extracted.severity)
+            return {**created, "severity": updated.get("severity", extracted.severity)}
+        except Exception as err:  # noqa: BLE001 — grouping can still proceed
+            last_err = err
+    logger.warning(
+        "[classify_group] signal %s: updateSignalSeverity failed after %d attempts — "
+        "severity %s kept in-memory for classification only (not persisted)",
+        created.get("id"),
+        _DRAIN_SEVERITY_WRITE_ATTEMPTS,
+        extracted.severity,
+        exc_info=last_err,
+    )
+    return {**created, "severity": extracted.severity}
 
 
 def _group(view: SignalView, created: dict) -> dict | None:
