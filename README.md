@@ -30,7 +30,7 @@ Two rules hold across the system:
 - **The pipeline never writes a database directly.** Every read and write goes through clear-api's GraphQL API ([`providers/clear_api.py`](src/clear_pipeline/providers/clear_api.py)), authenticated with an API key.
 - **The work also flows the other way.** clear-api keeps durable queues (new signals, pending translations, analysis requests, Tasks, hotline messages). Sensors in this pipeline poll and drain them, so clear-api decides what needs doing and the pipeline does the expensive part.
 
-The countries the pipeline covers come from clear-api's `pipelineCountries` (Sudan, Afghanistan and Venezuela today). Onboarding a country there is enough to add it here.
+The knowledge-base and location-metadata jobs take their countries from clear-api's `pipelineCountries` (Sudan, Afghanistan and Venezuela today), so onboarding a country there adds it to them. Signal sources have their own country settings (`GDACS_COUNTRIES`, `ACLED_COUNTRIES`, `IDMC_COUNTRIES`, ...), which also need updating when a country is onboarded.
 
 ## What the pipeline does
 
@@ -53,7 +53,7 @@ How the knowledge-base chain works: ReliefWeb metadata and PDFs land in S3, then
 ### Things to know before changing code
 
 - **All LLM calls go through [`providers/llm.py`](src/clear_pipeline/providers/llm.py)** (`make_llm_provider(role)`). Each role (`context`, `extraction`, `datapoints`, `narrative`, `signal`, `translate`, `vision`) picks its provider and model from `LLM_<ROLE>_*` env vars, with an optional per-role fallback. Signal and event disaster-type classification uses Jev ([`providers/jev.py`](src/clear_pipeline/providers/jev.py)) through OpenRouter.
-- **Extraction schemas are versioned.** Bumping a `SCHEMA_VERSION` (for example in [`datapoints_schemas.py`](src/clear_pipeline/defs/knowledgebase/datapoints_schemas.py)) re-extracts the whole back-catalogue, so bundle schema changes into one bump.
+- **Extraction schemas are versioned.** Every extracted row carries its `SCHEMA_VERSION` (for example in [`datapoints_schemas.py`](src/clear_pipeline/defs/knowledgebase/datapoints_schemas.py)), and aggregation only combines rows of the same version. A bump applies to reports as they are next extracted. Routine weekly runs only pick up the last seven days, so older reports need an explicit backfill to move to the new version. Bundle schema changes into one bump. See [Schema versioning](docs/humanitarian-datapoint-extraction.md#7-schema-versioning).
 - **Adding a signal source** means adding a connector to `CONNECTORS` in [`defs/signals/connectors.py`](src/clear_pipeline/defs/signals/connectors.py). The factory builds its asset and sensor.
 - **Use the domain vocabulary.** [CONTEXT.md](CONTEXT.md) defines terms such as Population Affected vs People in Need, Report vs Incident, and why unknown severity stays null. Design decisions live in [docs/adr/](docs/adr/).
 
