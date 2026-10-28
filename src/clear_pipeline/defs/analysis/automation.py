@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 import dagster as dg
 
 from clear_pipeline.defs.analysis.stages import _run_frame_generation, evidence_gate, touch_synced
-from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.defs.situation.frame import Frame
 from clear_pipeline.providers import clear_api
@@ -139,10 +138,15 @@ def drain_analysis_automations(context: dg.AssetExecutionContext) -> dg.Material
 
 # Ships STOPPED; enabled at cutover. The interval only bounds how often we CHECK
 # for due frames — the per-automation nextRunAt is what actually paces each frame.
+# No per-job max_runtime kill: this run is dominated by legitimate, variable-
+# length LLM generation (~23 leaf calls per frame, many frames per drain), so a
+# tight cap would discard in-progress work and wedge a frame that needs longer.
+# It runs to completion, bounded only by the 6 h instance backstop; a long run is
+# surfaced (not killed) by `stuck_run_monitor_sensor`'s GlitchTip alert. See
+# docs/adr/0012-long-running-llm-runs-alert-not-kill.md.
 drain_analysis_automations_job = dg.define_asset_job(
     name="drain_analysis_automations_job",
     selection=[drain_analysis_automations],
-    tags=max_runtime_tags(900),
 )
 analysis_automation_sensor = build_poll_sensor(
     name="analysis_automation_sensor",
