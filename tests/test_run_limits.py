@@ -42,8 +42,6 @@ def test_rejects_non_positive_caps():
     [
         (translate_job, 1800),
         (classify_group_job, 10800),
-        (drain_analysis_requests_job, 900),
-        (drain_analysis_automations_job, 900),
         (ground_hotline_enrich_job, 900),
         (ground_transcribe_job, 900),
         (drain_tasks_job, 3600),
@@ -55,6 +53,19 @@ def test_rejects_non_positive_caps():
 )
 def test_every_sensor_or_schedule_driven_job_is_capped(job, cap):
     assert job.tags[MAX_RUNTIME_TAG] == str(cap)
+
+
+@pytest.mark.parametrize(
+    "job",
+    [drain_analysis_requests_job, drain_analysis_automations_job],
+    ids=lambda v: getattr(v, "name", v),
+)
+def test_analysis_generation_jobs_are_not_auto_killed(job):
+    # ADR-0012: these runs are dominated by legitimate, variable-length LLM
+    # generation, so they are NOT auto-terminated by a tight per-job cap — they
+    # run to the 6 h instance backstop and a long run is surfaced (not killed) by
+    # stuck_run_monitor_sensor. They carry no per-job max_runtime tag.
+    assert MAX_RUNTIME_TAG not in job.tags
 
 
 def test_task_drain_keeps_its_queue_priority():

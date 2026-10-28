@@ -17,7 +17,6 @@ from clear_pipeline.defs.analysis.gate import GateDecision, decide_generation
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
-from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.defs.situation.frame import FALLBACK_SCOPE_LABEL, Frame, build_rag_filters, scope_label
 from clear_pipeline.defs.situation.generate import generate_and_upsert_for_frame
@@ -304,10 +303,13 @@ def drain_analysis_requests(context: dg.AssetExecutionContext) -> dg.Materialize
 # On-demand requests have no upstream ingest asset, so eager automation never
 # fires. This sensor ticks the drain on an interval (ships STOPPED; enabled at
 # cutover). Concurrent runs are safe — see `_drain`.
+# No per-job max_runtime kill — same reasoning as drain_analysis_automations_job:
+# legitimate, variable-length LLM generation runs to completion (6 h instance
+# backstop only); a long run is surfaced, not killed, by stuck_run_monitor_sensor.
+# See docs/adr/0012-long-running-llm-runs-alert-not-kill.md.
 drain_analysis_requests_job = dg.define_asset_job(
     name="drain_analysis_requests_job",
     selection=[drain_analysis_requests],
-    tags=max_runtime_tags(900),
 )
 analysis_request_sensor = build_poll_sensor(
     name="analysis_request_sensor",
