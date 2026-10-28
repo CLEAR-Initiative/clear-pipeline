@@ -1,7 +1,9 @@
 {
   "incidents": [
-    {"day": 14, "month": 10, "admin1": "Khartoum", "locality": "Omdurman", "place": "informal checkpoint",
+    {"day": 14, "month": 10, "admin1": "Khartoum", "locality": null, "place": "Omdurman",
      "event_actors": ["UNKNOWN"], "killed": 0, "injured": 0,
-     "source_text": "On 14 October, in Omdurman, Khartoum State, armed men stopped an NGO vehicle at an informal checkpoint and stole two phones and cash. No injuries were reported."}
+     "source_text": "On 14 October, in Omdurman, Khartoum State, armed men stopped an NGO vehicle at an informal checkpoint and stole two phones and cash. No injuries were reported.",
+     "title": "Armed men rob NGO vehicle at checkpoint in Omdurman",
+     "description": "On 14 October, armed men stopped an NGO vehicle at an informal checkpoint in Omdurman, Khartoum State, and stole two phones and cash. No injuries were reported."}
   ]
 }

@@ -49,6 +49,7 @@ __all__ = [
     "InsoParseError",
     "InsoReport",
     "build_inso_signal_inputs",
+    "check_extraction",
     "classify_incident",
     "extract_incidents",
     "parse",
@@ -251,38 +252,74 @@ class Incident(BaseModel):
 
     day: int | None = Field(None, description="Day of month the incident happened; null if not stated.")
     month: int | None = Field(None, description="Month (1-12) the incident happened; null if not stated.")
-    admin1: str | None = Field(None, description="State / province, as written; null if not stated.")
-    locality: str | None = Field(None, description="Locality (district / admin-2), as written; null if not stated.")
-    place: str | None = Field(None, description="Most precise place (town, village, site), as written.")
-    # Named as in the shared classification prompt, where the fields overlap.
+    admin1: str | None = Field(None, description="State / province, bare name (no \"State\"); null if not stated.")
+    locality: str | None = Field(None, description="Locality (district / admin-2), bare name (no \"locality\"); null if not stated.")
+    place: str | None = Field(None, description="Most precise named place (town, village, camp), bare name; null if none is named.")
     event_actors: list[str] = Field(default_factory=list, description="Perpetrators / parties, as written; UNKNOWN if unidentified.")
     killed: int | None = Field(None, ge=0, description="People killed. 0 if the text says none; null if unspecified.")
     injured: int | None = Field(None, ge=0, description="People injured. 0 if the text says none; null if unspecified.")
     source_text: str = Field(description="The exact sentence(s) of INFORMATION this incident was taken from.")
+    title: str = Field(description="Headline: what happened, by whom, where. No date, no connective.")
+    description: str = Field(description="The incident restated so it reads on its own, from INFORMATION only.")
 
 
 class IncidentList(BaseModel):
     incidents: list[Incident]
 
 
-EXTRACTION_PROMPT_VERSION = "inso-incidents-v1"
+EXTRACTION_PROMPT_VERSION = "inso-incidents-v3"
 EXTRACTION_SYSTEM_PROMPT = """You split the INFORMATION section of an NGO security report into incidents.
+Each incident becomes its own record, read on its own, without the report around it.
 
+<splitting>
 An incident is one event at one place and time (an attack, strike, clash, robbery, detention, ...).
 Return one entry per incident described in the text, in the order they appear. Do not merge incidents
 that happen at different places or dates; do not split one event into several.
+</splitting>
 
-For each incident:
+<fields>
 - day, month: the date the incident happened, as stated. Never infer a date that isn't written;
   use null when the text gives none. Never return a year.
-- admin1, locality, place: copied as written in the text (state, locality, most precise place); null when absent.
+- admin1, locality, place: the state, the locality and the most precise named place (town, village, camp),
+  each as a bare proper name: drop "State", "locality", "town", "market" and any other descriptor
+  ("Khartoum", not "Khartoum State"; "Nyala", not "Nyala town"). An unnamed site ("IDP gathering point",
+  "city market") is not a place: leave it to the title and description, and put the named town it is
+  in or near in place. null when absent.
 - event_actors: the perpetrators or parties as written (e.g. "RSF", "SAF"); ["UNKNOWN"] when the text says the
   actor is unknown or unidentified; [] when no actor is mentioned.
 - killed, injured: numbers of people. 0 only when the text says there were none ("no casualties",
   "no injuries"); null when the number is not given ("an unspecified number of casualties").
 - source_text: the exact sentence(s) the incident was taken from, copied verbatim.
+- title, description: see <title> and <description>.
+</fields>
 
-Use only the text you are given."""
+<title>
+A headline an analyst scans in a list: actor (when named) + what happened + target + most precise place.
+- At most 90 characters, sentence case, no final period.
+- No date, no connective ("Meanwhile", "Similarly", "On 18 October, ..."), no admin hierarchy beyond
+  what locates the place ("Nyala", not "Nyala town, Nyala locality, South Darfur").
+- Omit an unknown actor rather than writing "unknown actor".
+Examples:
+- "RSF shelling of El Fasher city market"
+- "Drone strike near IDP gathering point in Tawila"
+- "Armed men rob NGO vehicle at checkpoint in Omdurman"
+</title>
+
+<description>
+One to three sentences that state the incident completely, so a reader who never saw the report
+understands it.
+- Include, when stated: the date as written, the place with its state, the actor, the target,
+  the people killed/injured and the damage.
+- Resolve references to the rest of INFORMATION: drop "Similarly", "Meanwhile", "the same group",
+  "the attack" and name what they point to.
+- Say "unspecified" for a number the text doesn't give; never write one it doesn't state.
+- No analysis, assessment, advice or context that isn't about this incident.
+</description>
+
+<rules>
+Use only the text inside <information>. title and description restate it; they never add a fact,
+a number or a cause it doesn't state.
+</rules>"""
 
 # Incidents dated more than this after the email are from the previous year
 # (a report sent on 2 January about "30 December").
@@ -294,7 +331,7 @@ def extract_incidents(report: InsoReport) -> list[Incident]:
     LLM failure; an empty list is a parse failure (a report always has one)."""
     result = make_llm_provider("extraction").complete_structured(
         system=EXTRACTION_SYSTEM_PROMPT,
-        user=f"INFORMATION:\n{report.information}",
+        user=f"<information>\n{report.information}\n</information>",
         schema=IncidentList,
         max_tokens=4096,
         cache_key=EXTRACTION_PROMPT_VERSION,
@@ -302,6 +339,27 @@ def extract_incidents(report: InsoReport) -> list[Incident]:
     if not result.incidents:
         raise InsoParseError("extraction found no incident in INFORMATION")
     return result.incidents
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def check_extraction(report: InsoReport, incidents: list[Incident]) -> str:
+    """Raise ``InsoParseError`` when an incident's ``source_text`` isn't a
+    verbatim span of INFORMATION (whitespace aside): the model invented or
+    rewrote it; or when its date is impossible. Runs before the answer is
+    stored, so a bad one is never replayed. Returns what no incident covers,
+    for review only: INFORMATION may hold context sentences that aren't
+    incidents, so it doesn't fail."""
+    uncovered = _squash(report.information)
+    for ordinal, incident in enumerate(incidents, start=1):
+        span = _squash(incident.source_text)
+        if not span or span not in _squash(report.information):
+            raise InsoParseError(f"incident {ordinal}: source_text is not verbatim from INFORMATION")
+        incident_date(incident, report.published_at)
+        uncovered = uncovered.replace(span, " ")
+    return _squash(uncovered)
 
 
 def incident_date(incident: Incident, published_at: str) -> date | None:
@@ -335,10 +393,6 @@ class Country:
     iso2: str
 
 
-def _count(value: int | None) -> str:
-    return "not specified" if value is None else str(value)
-
-
 def build_inso_signal_inputs(
     report: InsoReport, incidents: list[Incident], source_id: str, country: Country,
 ) -> list[dict]:
@@ -353,21 +407,14 @@ def build_inso_signal_inputs(
     for ordinal, incident in enumerate(incidents, start=1):
         when = incident_date(incident, report.published_at)
         where = ", ".join(p for p in (incident.place, incident.locality, incident.admin1, country.name) if p)
-        description = "\n".join([
-            incident.source_text,
-            f"Date: {when.isoformat() if when else 'not stated'}",
-            f"Place: {where}",
-            f"Actors: {', '.join(incident.event_actors) or 'not stated'}",
-            f"Killed: {_count(incident.killed)}",
-            f"Injured: {_count(incident.injured)}",
-            f"Report: {report.incident_type} ({report.serial})",
-        ])
         input_data: dict = {
             "sourceId": source_id,
             "externalId": external_id(report.serial, ordinal),
             "publishedAt": report.published_at,
-            "title": _title(incident.source_text),
-            "description": description,
+            # Written by the extraction model; the structured fields stay in
+            # rawData and the columns, not repeated in the text.
+            "title": incident.title,
+            "description": incident.description,
             "severity": None,
             "rawData": {
                 "ordinal": ordinal,
@@ -391,19 +438,13 @@ def build_inso_signal_inputs(
     return inputs
 
 
-def _title(source_text: str, limit: int = 200) -> str:
-    """First sentence of the incident's source text, capped."""
-    first = re.split(r"(?<=[.!?])\s", source_text.strip(), maxsplit=1)[0]
-    return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Classify: the shared event-classification prompt, in place of Jev at gx
 # classify (shadow mode: the shared drain still groups with Jev)
 # ──────────────────────────────────────────────────────────────────────────────
 class EventClassification(BaseModel):
-    """The shared prompt's fields the mapping needs; its other fields are
-    re-derived from the incident here, so they're not asked for."""
+    """The shared prompt's output: classification only. Place, date, actors
+    and casualties come from extraction, before the Signal is built."""
 
     event_type: str = Field(description="Exactly one type_level_3 label from the taxonomy.")
     relevance: Literal["RELEVANT", "NOT_RELEVANT"]
@@ -412,23 +453,41 @@ class EventClassification(BaseModel):
 
 
 class EventClassificationAnswer(BaseModel):
-    """The prompt answers a JSON array; tool-use and JSON modes need an object
-    root, so the array sits under `events`. Kept a list (not one object) so a
+    """Tool-use and JSON modes need an object root, so the classification
+    sits under `events`. Kept a list (not one object) so a
     split or an empty answer is visible and fails, instead of being forced into
     one object."""
 
     events: list[EventClassification]
 
 
-CLASSIFY_PROMPT_VERSION = f"inso-classify-v1+{SHARED_PROMPT_VERSION}"
+CLASSIFY_PROMPT_VERSION = f"inso-classify-v2+{SHARED_PROMPT_VERSION}"
 # Added before the shared prompt. INSO's core content is crime and harm to aid
 # workers, which a generic prompt may discard as "ordinary crime".
-INSO_CONTEXT_BLOCK = """SOURCE CONTEXT — INSO security newsletter.
-The text is one incident from an NGO security report written for humanitarian organisations.
+INSO_CONTEXT_BLOCK = """<source_context>
+INSO security newsletter. The incident comes from an NGO security report written for humanitarian organisations.
 - An incident that affects humanitarian staff, assets, premises or access is RELEVANT, crime included
   (robbery of an NGO vehicle, a looted warehouse, a detained aid worker).
-- Severity: null when the text gives no basis for one. Crime against humanitarian staff or assets is at least 2.
+- Crime against humanitarian staff or assets is at least severity 2.
+</source_context>
 """
+
+
+def _classify_input(signal_input: dict) -> str:
+    """The incident as the model reads it: the report's verbatim sentences and
+    the extracted fields, not the generated title/description (a paraphrase
+    of a paraphrase would drift)."""
+    incident = signal_input["rawData"]["incident"]
+    fields = {
+        "source_text": incident["source_text"],
+        "date": incident["date"],
+        "place": ", ".join(p for p in (incident["place"], incident["locality"], incident["admin1"]) if p) or None,
+        "actors": ", ".join(incident["event_actors"]) or None,
+        "killed": incident["killed"],
+        "injured": incident["injured"],
+    }
+    lines = [f"<{k}>{'not stated' if v is None else v}</{k}>" for k, v in fields.items()]
+    return "\n".join(["<incident>", *lines, "</incident>"])
 
 
 # "other" is the level-3 label of both `ot` (catch-all) and `po` (political
@@ -450,8 +509,7 @@ def classify_incident(signal_input: dict) -> SignalClassification:
     to "other" or fanning an incident out."""
     answer = make_llm_provider("signal").complete_structured(
         system=f"{INSO_CONTEXT_BLOCK}\n{SHARED_EVENT_CLASSIFICATION_PROMPT}",
-        # The "alert below" the prompt: the incident's text and its fields.
-        user=signal_input["description"],
+        user=_classify_input(signal_input),
         schema=EventClassificationAnswer,
         max_tokens=1024,
         cache_key=CLASSIFY_PROMPT_VERSION,

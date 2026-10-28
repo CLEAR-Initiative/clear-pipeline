@@ -1,6 +1,6 @@
 """Generic GX-gated bronze -> silver -> gold asset factory.
 ``build_gx_source_assets(source)`` produces one source's full pipeline: 9
-assets + 6 GX checks (7 with quarantine) + 1 job. Nothing writes to clear-api until
+assets (10 with extract) + 6 GX checks (7 with quarantine) + 1 job. Nothing writes to clear-api until
 ``<source>_push``. Bronze/silver stay S3 JSON; gold signals are Iceberg,
 Type-1 (`iceberg_signals.py`). Gold events persistence is STUBBED for now
 (`iceberg_events.py`) pending a decision on keeping it synchronous with
@@ -25,6 +25,11 @@ create-only:
     ``Quarantined``, lands in ``quarantine/`` with its reason, and a 7th
     check, ``quarantine_empty``, turns the run red (INSO).
   - ``to_silver_inputs``: one record fans out into several signals (INSO).
+  - ``extract``/``extraction_version``: an LLM stage between bronze and
+    silver, ``<source>_extract`` (INSO). Its JSON answer is stored under
+    ``extracted/`` per version, so silver and any rerun read it back instead
+    of calling the model again; silver then gets it as
+    ``to_silver_inputs(record, source_id, extraction)``.
   - ``classify``: replaces Jev in this factory's classify stage (INSO). Only
     its severity reaches clear-api; the shared drain still groups with Jev
     (docs/inso-spec.md, "Shadow classification").
@@ -111,7 +116,7 @@ def _already_synced(polled_hash: str | None, gold_hash: str | None, pushed_state
 
 
 def build_gx_source_assets(source: GXSource) -> list:
-    """Return one source's full GX-gated defs: [9 assets, 6 checks, 1 job,
+    """Return one source's full GX-gated defs: [9 assets (10 with ``extract``), 6 checks, 1 job,
     + a poll sensor when the source sets ``poll_interval_minutes``]."""
     src = source.source
     group = f"{src}_gx"
@@ -131,6 +136,10 @@ def build_gx_source_assets(source: GXSource) -> list:
     quarantine_reason = getattr(source, "quarantine_reason", None)
     # Optional fan-out: one record -> several signals (INSO: one email, N incidents).
     to_silver_inputs = getattr(source, "to_silver_inputs", None)
+    # Optional LLM stage between bronze and silver (INSO), see the docstring.
+    extract = getattr(source, "extract", None)
+    if extract is not None and to_silver_inputs is None:
+        raise TypeError(f"{src}: `extract` needs `to_silver_inputs` to receive its answer")
 
     def _quarantine(s3, bucket: str, key: str, body: bytes, meta: dict, reason: str, stage: str) -> str:
         """Same layout as bronze under `quarantine/`, the reason in the sidecar."""
@@ -138,6 +147,13 @@ def build_gx_source_assets(source: GXSource) -> list:
         lake.write_raw(s3, bucket, q_key, body, raw_content_type)
         lake.write_json(s3, bucket, lake.sidecar_key(q_key), {**meta, "reason": reason, "stage": stage})
         return q_key
+
+    def _quarantine_record(context, s3, bucket: str, bronze_row: dict, raw: bytes, e: Quarantined, stage: str) -> None:
+        if quarantine_reason is None:
+            raise e
+        meta = lake.read_json(s3, bucket, lake.sidecar_key(bronze_row["s3Key"])) or {}
+        q_key = _quarantine(s3, bucket, bronze_row["s3Key"], raw, meta, str(e), stage)
+        context.log.warning("[%s %s] quarantined %s: %s", src, stage, q_key, e)
 
     @dg.asset(
         name=f"{src}_bronze",
@@ -211,12 +227,54 @@ def build_gx_source_assets(source: GXSource) -> list:
         return pd.DataFrame(rows, columns=_BRONZE_COLUMNS)
 
     # ══════════════════════════════════════════════════════════════════════
+    # Extract (optional): the LLM answer per record, stored once per version.
+    # ══════════════════════════════════════════════════════════════════════
+    extract_assets: list = []
+    if extract is not None:
+        @dg.asset(
+            name=f"{src}_extract",
+            group_name=group,
+            ins={"bronze_df": dg.AssetIn(key=f"{src}_bronze")},
+            description=f"LLM extraction of {src} bronze records, stored per prompt version under S3 extracted/.",
+        )
+        def _extract(context: dg.AssetExecutionContext, bronze_df: pd.DataFrame) -> pd.DataFrame:
+            columns = [*_BRONZE_COLUMNS, "extractionKey"]
+            if bronze_df.empty:
+                context.add_output_metadata({"extracted": 0, "reused": 0, "quarantined": 0})
+                return pd.DataFrame(columns=columns)
+            s3, bucket = _s3()
+            rows: list[dict] = []
+            extracted = reused = quarantined = 0
+            for bronze_row in bronze_df.to_dict("records"):
+                key = lake.raw_key(
+                    src, bronze_row["publishedAt"], bronze_row["externalId"],
+                    layer="extracted", revision=source.extraction_version,
+                )
+                if lake.read_json(s3, bucket, key) is not None:
+                    reused += 1
+                else:
+                    raw = s3.get_object(Bucket=bucket, Key=bronze_row["s3Key"])["Body"].read()
+                    try:
+                        answer = extract(source.parse(raw))
+                    except Quarantined as e:
+                        _quarantine_record(context, s3, bucket, bronze_row, raw, e, "extract")
+                        quarantined += 1
+                        continue
+                    lake.write_json(s3, bucket, key, answer)
+                    extracted += 1
+                rows.append({**bronze_row, "extractionKey": key})
+            context.add_output_metadata({"extracted": extracted, "reused": reused, "quarantined": quarantined})
+            return pd.DataFrame(rows, columns=columns)
+
+        extract_assets.append(_extract)
+
+    # ══════════════════════════════════════════════════════════════════════
     # Silver: cleansed, normalized, ONE row per record. No clear-api write.
     # ══════════════════════════════════════════════════════════════════════
     @dg.asset(
         name=f"{src}_silver",
         group_name=group,
-        ins={"bronze_df": dg.AssetIn(key=f"{src}_bronze")},
+        ins={"bronze_df": dg.AssetIn(key=f"{src}_extract" if extract is not None else f"{src}_bronze")},
         description=f"Normalize + geo-enrich {src} bronze rows (no clear-api write); write cleansed records to S3 silver.",
     )
     def _silver(context: dg.AssetExecutionContext, bronze_df: pd.DataFrame) -> pd.DataFrame:
@@ -238,16 +296,13 @@ def build_gx_source_assets(source: GXSource) -> list:
                 if to_silver_inputs is None:
                     batch = [(source.to_silver_input(record, source_id), bronze_row["externalId"])]
                 else:
-                    batch = [(si, si["externalId"]) for si in to_silver_inputs(record, source_id)]
+                    args = (lake.read_json(s3, bucket, bronze_row["extractionKey"]),) if extract is not None else ()
+                    batch = [(si, si["externalId"]) for si in to_silver_inputs(record, source_id, *args)]
                     duplicates = sorted({ext_id for _, ext_id in batch} & seen)
                     if duplicates:
                         raise Quarantined(f"externalId(s) {duplicates} already produced in this batch")
             except Quarantined as e:
-                if quarantine_reason is None:
-                    raise
-                meta = lake.read_json(s3, bucket, lake.sidecar_key(bronze_row["s3Key"])) or {}
-                q_key = _quarantine(s3, bucket, bronze_row["s3Key"], raw, meta, str(e), "silver")
-                context.log.warning("[%s silver] quarantined %s: %s", src, q_key, e)
+                _quarantine_record(context, s3, bucket, bronze_row, raw, e, "silver")
                 quarantined += 1
                 continue
             seen.update(ext_id for _, ext_id in batch)
@@ -878,7 +933,7 @@ def build_gx_source_assets(source: GXSource) -> list:
             """Red run when this run quarantined anything. On `_push`, the last
             asset, so the batch's good records still went all the way through:
             blocking here fails the run without holding anything back."""
-            counts = {f"{src}_bronze": 0, f"{src}_silver": 0}
+            counts = {f"{src}_{stage}": 0 for stage in ("bronze", *(["extract"] if extract else []), "silver")}
             for entry in context.instance.all_logs(
                 context.run.run_id, of_type=dg.DagsterEventType.ASSET_MATERIALIZATION,
             ):
@@ -896,11 +951,11 @@ def build_gx_source_assets(source: GXSource) -> list:
 
     job = dg.define_asset_job(
         name=f"{src}_gx",
-        selection=[_bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push],
+        selection=[_bronze, *extract_assets, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push],
         tags=max_runtime_tags(3600),
     )
 
-    defs = [_bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push, *checks, job]
+    defs = [_bronze, *extract_assets, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push, *checks, job]
     # Only a source whose sole ingestion path is this job gets a trigger (see
     # IDMCGXSource). RUNNING: a fresh sensor name inherits no UI toggle state.
     poll_interval_minutes = getattr(source, "poll_interval_minutes", None)
