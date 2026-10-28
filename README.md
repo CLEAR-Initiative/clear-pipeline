@@ -127,14 +127,13 @@ scripts/                One-off scripts
 Dockerfile              Production image (Python 3.12, CPU-only torch)
 ```
 
-## Deployment and git flow
+## Deployment
 
-- **Branching:** trunk-based on `dev`. Branch from `dev` and open a PR back into `dev`. `master` is legacy; do not target it. See [docs/agents/git-flow.md](docs/agents/git-flow.md).
-- **CI:** every PR into `dev` runs pytest and ruff (`Check`). A Greptile auto-merge workflow squash-merges a PR once Greptile has reviewed its latest commit with no unresolved P0/P1 findings and the required checks pass. Add the `no-automerge` label to keep a PR for a human.
+Branching, CI, review and ticket tracking are in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 - **Dev release:** each push to `dev` tags a new minor version and pushes `ghcr.io/clear-initiative/clear-pipeline:dev` (and `:dev-<version>`) to GHCR ([`release-dev.yml`](.github/workflows/release-dev.yml)).
 - **Prod release:** a merge into `prod` tags a new major version and pushes the `:prod` image ([`release-prod.yml`](.github/workflows/release-prod.yml)). Merges into `prod` are made by a person.
 - **Running it:** deployment happens outside this repo. Infrastructure lives in clear-infra, which runs the Dagster webserver, daemon and code server from the image. Dagster's own run storage is a dedicated Postgres database (`DAGSTER_POSTGRES_URL`, see [`deploy/dagster.yaml`](deploy/dagster.yaml)), separate from clear-api's.
-- **Tickets:** work is tracked in Exponential, not GitHub Issues. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
 
 ### Operational guards
 
