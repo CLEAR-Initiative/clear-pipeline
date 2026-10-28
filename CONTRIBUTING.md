@@ -121,3 +121,8 @@ To add a variable:
 ## Reporting a security issue
 
 Don't open a public issue. Use GitHub's private vulnerability reporting: open the [Security tab](https://github.com/CLEAR-Initiative/clear-pipeline/security) and choose "Report a vulnerability", or go straight to https://github.com/CLEAR-Initiative/clear-pipeline/security/advisories/new.
+
+## Licence
+
+clear-pipeline is licensed under the [GNU Affero General Public License v3.0 or later](./LICENSE).
+By contributing, you agree your contribution is licensed the same way.
