@@ -29,7 +29,7 @@ L0 = [
     {"id": "loc-af", "name": "Afghanistan", "level": 0, "pCode": "AF"},
 ]
 # The geoparser resolves these places; anything else stays unresolved.
-GAZETTEER = {"El Fasher city market": (13.63, 25.35), "Omdurman": (15.65, 32.48), "Kassala town": (15.45, 36.4)}
+GAZETTEER = {"El Fasher": (13.63, 25.35), "Omdurman": (15.65, 32.48), "Kassala": (15.45, 36.4)}
 
 
 def _eml(name: str) -> bytes:
@@ -60,22 +60,24 @@ class FakeFolder:
 
 class FakeLLM:
     """Answers by schema: extraction from the `*.incidents.json` matching the
-    INFORMATION it's given, classify from `classifications` (by title
-    prefix) or a default RELEVANT attack."""
+    INFORMATION it's given, classify from `classifications` (by a fragment
+    of the incident's source text) or a default RELEVANT attack."""
 
     def __init__(self):
         self.extractions = {inso.parse(_eml(n)).information: _incidents(n) for n in
                             ("01_multi_incident", "02_single_incident", "03_new_year", "04_html_only")}
         self.classifications: dict[str, dict] = {}
         self.calls: list[str] = []
+        self.classify_inputs: list[str] = []
 
     def complete_structured(self, *, system, user, schema, **_):
         if schema is inso.IncidentList:
             self.calls.append("extract")
-            return schema.model_validate(self.extractions[user.removeprefix("INFORMATION:\n")])
+            return schema.model_validate(self.extractions[user.removeprefix("<information>\n").removesuffix("\n</information>")])
         self.calls.append("classify")
-        for prefix, answer in self.classifications.items():
-            if user.startswith(prefix):
+        self.classify_inputs.append(user)
+        for fragment, answer in self.classifications.items():
+            if fragment in user:
                 return schema.model_validate(answer)
         return schema.model_validate({"events": [{"event_type": "attack", "relevance": "RELEVANT", "severity": 3}]})
 
@@ -190,16 +192,13 @@ def test_an_incident_signal_carries_its_own_place_date_and_casualties(h):
 
     market = _signal(h, "inso:SDN/Darfur/IR/20262010/R1:1")
     assert market["publishedAt"] == "2026-10-20T09:30:00+00:00"
-    assert market["title"] == (
-        "On 18 October, in North Darfur, the RSF conducted artillery shelling on a market in El Fasher city, "
-        "El Fasher locality."
-    )
+    assert market["title"] == "RSF shelling of El Fasher city market"
+    assert market["description"].startswith("On 18 October, the RSF shelled a market in El Fasher city")
     assert market["rawData"]["incident"]["date"] == "2026-10-18"
     assert market["rawData"]["incident"]["source_text"].endswith("nine injuries among civilians.")
     assert market["casualties"] == 4
     assert (market["lat"], market["lng"]) == (13.63, 25.35)
     assert "locationId" not in market
-    assert "Place: El Fasher city market, El Fasher, North Darfur, Sudan" in market["description"].splitlines()
     # Report-level text stays on the report.
     assert market["rawData"]["report"]["analysis"].startswith("Mid-October confirmed")
     assert market["rawData"]["report"]["serial"] == "SDN/Darfur/IR/20262010/R1"
@@ -222,7 +221,6 @@ def test_none_reported_is_zero_and_unspecified_is_null(h):
     nyala = _signal(h, "inso:SDN/Darfur/IR/20262010/R1:3")
     assert (tawila["rawData"]["incident"]["killed"], tawila["rawData"]["incident"]["injured"]) == (None, None)
     assert "casualties" not in tawila
-    assert {"Killed: not specified", "Injured: not specified"} <= set(tawila["description"].splitlines())
     assert (nyala["rawData"]["incident"]["killed"], nyala["rawData"]["incident"]["injured"]) == (0, 0)
     assert nyala["casualties"] == 0
     assert h.gold["inso:SDN/Darfur/IR/20262010/R1:3"]["casualtiesContribution"] == 0
@@ -243,7 +241,6 @@ def test_an_incident_with_no_stated_date_has_a_null_date_not_the_report_date(h):
     h.run()
     signal = _signal(h, "inso:SDN/Khartoum/IR/20261410/R1:1")
     assert signal["rawData"]["incident"]["date"] is None
-    assert "Date: not stated" in signal["description"].splitlines()
 
 
 @pytest.mark.parametrize("field", ["killed", "injured"])
@@ -253,8 +250,61 @@ def test_a_negative_casualty_count_fails_the_run_and_pushes_nothing(h, field):
     h.folder.add("02_single_incident")
     result = h.run()
     assert not result.success
-    assert [e.step_key for e in result.all_events if e.event_type_value == "STEP_FAILURE"] == ["inso_silver"]
+    assert [e.step_key for e in result.all_events if e.event_type_value == "STEP_FAILURE"] == ["inso_extract"]
     assert h.created == []
+
+
+# ── extract stage ────────────────────────────────────────────────────────────
+
+
+def _extracted(h) -> dict[str, dict]:
+    return {k: json.loads(v) for k, v in h.s3.objects.items() if k.startswith("extracted/inso/")}
+
+
+def test_the_extraction_is_stored_per_prompt_version_with_what_it_left_uncovered(h):
+    h.folder.add("01_multi_incident")
+    assert h.run().success
+    ((key, stored),) = _extracted(h).items()
+    assert key.endswith(f"/{inso.EXTRACTION_PROMPT_VERSION}.json")
+    assert [i["title"] for i in stored["incidents"]][0] == "RSF shelling of El Fasher city market"
+    assert stored["uncovered"] == ""
+
+
+def test_a_rerun_reads_the_stored_extraction_instead_of_calling_the_model(h):
+    h.folder.add("02_single_incident")
+    h.llm.classifications = {"On 14 October": {"events": []}}  # classify fails: the email is fetched again
+    assert not h.run().success
+    h.llm.classifications = {}
+    h.llm.calls.clear()
+    assert h.run().success
+    assert h.llm.calls == ["classify"]
+
+
+def test_a_new_prompt_version_extracts_again(h):
+    h.folder.add("02_single_incident")
+    h.llm.classifications = {"On 14 October": {"events": []}}
+    h.run()
+    h.llm.classifications = {}
+    h.llm.calls.clear()
+    with patch.object(h.source, "extraction_version", "inso-incidents-vNext"):
+        assert h.run().success
+    assert h.llm.calls.count("extract") == 1
+    assert len(_extracted(h)) == 2
+
+
+@pytest.mark.parametrize("change, reason", [
+    pytest.param({"source_text": "Armed men stole an NGO vehicle in Omdurman."}, "not verbatim", id="invented-source-text"),
+    pytest.param({"day": 31, "month": 2}, "impossible incident date", id="impossible-date"),
+])
+def test_a_bad_extraction_is_quarantined_and_never_stored(h, change, reason):
+    information = inso.parse(_eml("02_single_incident")).information
+    h.llm.extractions[information]["incidents"][0].update(change)
+    h.folder.add("02_single_incident")
+    result = h.run()
+    assert not result.success
+    (sidecar,) = h.quarantine().values()
+    assert (sidecar["stage"], reason in sidecar["reason"]) == ("extract", True)
+    assert _extracted(h) == {} and h.created == []
 
 
 def test_html_only_email_goes_through(h):
@@ -291,6 +341,15 @@ def test_classification_maps_level3_to_level2_glide_relevance_and_severity(h):
     assert row["relevanceScore"] == 1.0
     assert row["severity"] == 2
     assert row["signalInput"]["severity"] == 2
+
+
+def test_classify_reads_the_verbatim_source_text_and_fields_not_the_generated_description(h):
+    h.folder.add("02_single_incident")
+    assert h.run().success
+    (sent,) = h.llm.classify_inputs
+    assert "<source_text>On 14 October, in Omdurman, Khartoum State, armed men stopped" in sent
+    assert "<date>2026-10-14</date>" in sent and "<killed>0</killed>" in sent
+    assert _signal(h, "inso:SDN/Khartoum/IR/20261410/R1:1")["description"] not in sent
 
 
 def test_other_maps_to_the_catch_all_not_political_violence(h):
@@ -332,8 +391,8 @@ def test_an_unusable_classification_fails_the_run_and_pushes_nothing(h, answer):
 
 @pytest.mark.parametrize("name, stage, reason", [
     pytest.param("07_forged_sender", "bronze", "no Authentication-Results header", id="forged-sender"),
-    pytest.param("05_missing_serial", "silver", "missing label(s): SERIAL #", id="missing-serial"),
-    pytest.param("06_unknown_country", "silver", "'Republic of Chad' matches no country location", id="unknown-country"),
+    pytest.param("05_missing_serial", "extract", "missing label(s): SERIAL #", id="missing-serial"),
+    pytest.param("06_unknown_country", "extract", "'Republic of Chad' matches no country location", id="unknown-country"),
 ])
 def test_a_quarantined_email_turns_the_run_red_but_the_good_ones_go_through(h, name, stage, reason):
     h.folder.add("02_single_incident", name)

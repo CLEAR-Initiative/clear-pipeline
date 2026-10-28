@@ -14,7 +14,7 @@ A new GX-path source, `inso`, that:
 
 - reads a dedicated folder of a shared newsletter mailbox over IMAP, read-only, accepting only authenticated mail from allowlisted senders;
 - lands every email verbatim in bronze, so parsing and prompts can be replayed without the mailbox;
-- parses the report-level fields with code and splits INFORMATION into incidents with an LLM at silver, giving one signal per incident;
+- parses the report-level fields with code and splits INFORMATION into incidents with an LLM at an extract stage between bronze and silver, giving one signal per incident;
 - classifies each incident with the shared event-classification prompt, with an INSO-specific context block, in shadow mode: the result is stored in gold for comparison, while the shared drain still classifies with Jev and Jev's answer decides events (see "Shadow classification");
 - goes through the existing GX stages (geo, temporal, match, gold, push) unchanged, and is drained by a signals connector like Sudan Witness;
 - puts anything it cannot trust or parse into quarantine and turns the run red;
@@ -76,16 +76,18 @@ A new GX-path source, `inso`, that:
 - **INSO provider module.**
   - A pure `parse(raw_bytes)` that returns the parsed report. It finds fields by label text, reads HTML first and falls back to plain text, and raises a typed parse error on a missing label, a malformed date or a missing serial.
   - Report fields: message id, sender address, subject, `published_at`, `severity_raw`, `location_raw`, `country_raw`, `incident_type`, report datetime, serial, issued by, information, analysis, advice list.
-- **Silver extraction (LLM).**
+- **Extraction (LLM), the `inso_extract` stage.**
   - INFORMATION goes to the extraction role through the existing structured-output helper, with a Pydantic schema whose root is an object holding a list of incidents.
-  - Incident fields: day, month, admin1, locality, place, actors, killed, injured, source text. Field names follow the shared classification prompt where they overlap.
-  - Code assigns the ordinals and adds the year: the previous year when the date would fall more than about 7 days after `published_at`.
-  - Silver has one row per incident.
+  - Incident fields: day, month, admin1, locality, place, actors, killed, injured, source text, and the signal's title and description. The model writes title and description from the whole INFORMATION, so references such as "Similarly" are resolved; it adds no fact the text doesn't state.
+  - Checked before it is stored: every source text must be a verbatim span of INFORMATION (whitespace aside), and every date possible. A failure quarantines the email at `extract`. What no incident covers is stored next to the answer for review, without failing: INFORMATION may hold context sentences.
+  - The answer is stored under `extracted/inso/<day>/<sha256>/<prompt version>.json`. A rerun reads it back; only a new prompt version calls the model again.
+- **Silver.** Pure code over the stored answer: code assigns the ordinals and adds the year (the previous year when the date would fall more than about 7 days after `published_at`), and the structured fields go to the signal's columns and `rawData`, not into the description. Silver has one row per incident.
 - **Incident identity.** `inso:<serial verbatim>:<ordinal>`. Revisions aren't handled.
 - **Classify hook.**
   - The GX source protocol gets an optional `classify(row)` hook, found with `getattr` in the same way as the existing optional hooks. When it's present, the classify stage calls it instead of the Jev classifier; other sources are unchanged.
-  - INSO's implementation runs the colleague's shared event-classification prompt through the `signal` LLM role, one incident per call, with a single-object schema.
-  - Before the shared prompt, it adds an INSO source context block: incidents affecting humanitarian staff, assets, premises or access are relevant, crime included; severity is null when the text gives no basis, and at least 2 for crime against humanitarian staff or assets.
+  - INSO's implementation runs the shared event-classification prompt (v2: one incident in, one classification out) through the `signal` LLM role, one incident per call, with a single-object schema.
+  - Before the shared prompt, it adds an INSO source context block: incidents affecting humanitarian staff, assets, premises or access are relevant, crime included; severity at least 2 for crime against humanitarian staff or assets. Null severity when the text gives no basis is a rule of the shared prompt (v2), not of the INSO block.
+  - The model reads the incident's verbatim source text and extracted fields, not the generated title and description.
   - Mapping: level-3 type → level 2 and GLIDE code through the existing taxonomy mirror (an unmapped label raises); RELEVANT/NOT_RELEVANT → relevance 1.0/0.0; severity passed through, nullable.
 - **Shadow classification (until the drain rework).**
   - Only severity leaves gx: the hook's severity replaces the silver severity in the `signalInput` that `_push` sends, and the drain passes it to Jev as the source severity.
@@ -104,7 +106,7 @@ A new GX-path source, `inso`, that:
 - **A good test** feeds fixture `.eml` bytes in at the edge and asserts only on outputs: parsed report fields, silver and gold rows, `externalId`s, quarantine entries and their reasons, check results, and how the cursor moved. No assertions on private helpers or on intermediate call order.
 - **Seam 1, the main one: materializing the GX job.**
   - The INSO assets are materialized end to end, using the existing GX test pattern: a fake S3, a SQLite Iceberg catalog with a file warehouse in a temp dir, and the shared fake Redis.
-  - Only three outside boundaries are replaced: the mailbox fetch (returns fixture bytes), the silver extraction call (returns the fixture incidents), and the per-incident classify call (returns canned classifications).
+  - Only three outside boundaries are replaced: the mailbox fetch (returns fixture bytes), the extraction call (returns the fixture incidents), and the per-incident classify call (returns canned classifications).
   - Cases to cover:
     - multi-incident and single-incident emails;
     - year filled in across New Year;
@@ -131,7 +133,7 @@ A new GX-path source, `inso`, that:
 - Turning ANALYSIS into incidents, or extracting context from it.
 - Mapping the severity banner to a 1-5 scale.
 - A dedicated LLM role for incident extraction (it uses the extraction role for now).
-- Replacing Jev for any source other than INSO, and changing the shared prompt itself.
+- Replacing Jev for any source other than INSO.
 - Changing the shared signals drain so that it uses the INSO classification instead of Jev (see "Shadow classification").
 - The manual LLM eval harness.
 - A freshness or staleness alert.

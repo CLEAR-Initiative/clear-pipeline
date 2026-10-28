@@ -387,7 +387,7 @@ class InsoGXSource:
     + provenance sidecar) and fans out into one signal per incident at silver.
 
     Quarantine (the hook): an untrusted sender at bronze; a parse failure, an
-    unknown country or an unusable extraction at silver. The IMAP cursor
+    unknown country or an unusable extraction at extract. The IMAP cursor
     (`UIDVALIDITY:UID`) replaces the date watermark: `set_watermark` (a clean
     bronze batch) stages it, `commit_watermark` (`_push` reached) advances it,
     so an email whose silver/classify step fails is fetched again next poll.
@@ -396,6 +396,8 @@ class InsoGXSource:
 
     poll_interval_minutes: int = settings.inso_poll_interval_minutes
     raw_format: tuple[str, str] = ("eml", "message/rfc822")
+    # A new prompt version re-extracts; any other rerun reads the stored answer.
+    extraction_version: str = inso.EXTRACTION_PROMPT_VERSION
     _pending_cursor: tuple[int, int] | None = None
     _countries: list[dict] | None = field(default=None, repr=False)
 
@@ -491,12 +493,22 @@ class InsoGXSource:
     def to_silver_input(self, record: Any, source_id: str) -> dict:
         raise NotImplementedError("INSO fans out: the factory calls to_silver_inputs")
 
-    def to_silver_inputs(self, record: Any, source_id: str) -> list[dict]:
-        """One signal input per incident in INFORMATION (LLM split)."""
-        country = self._country(record)
+    def extract(self, record: Any) -> dict:
+        """INFORMATION → incidents (LLM split + fields), checked verbatim. The
+        country is resolved first, so an unknown one never costs a call."""
+        self._country(record)
         try:
             incidents = inso.extract_incidents(record)
-            return inso.build_inso_signal_inputs(record, incidents, source_id, country)
+            uncovered = inso.check_extraction(record, incidents)
+        except inso.InsoParseError as e:
+            raise Quarantined(f"extraction: {e}") from e
+        return {"incidents": [i.model_dump() for i in incidents], "uncovered": uncovered}
+
+    def to_silver_inputs(self, record: Any, source_id: str, extraction: dict) -> list[dict]:
+        """One signal input per stored incident: pure code, no LLM call."""
+        incidents = [inso.Incident.model_validate(i) for i in extraction["incidents"]]
+        try:
+            return inso.build_inso_signal_inputs(record, incidents, source_id, self._country(record))
         except inso.InsoParseError as e:
             raise Quarantined(f"extraction: {e}") from e
 
