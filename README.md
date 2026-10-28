@@ -157,4 +157,8 @@ This repo was consolidated from the former `clear-context-pipeline` (the knowled
 
 ## License
 
-This repository does not include a license file yet. Ask the CLEAR Initiative maintainers before reusing the code.
+Copyright (C) 2026 Norwegian Refugee Council.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU
+Affero General Public License as published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version. See [`LICENSE`](./LICENSE) for the full text.
