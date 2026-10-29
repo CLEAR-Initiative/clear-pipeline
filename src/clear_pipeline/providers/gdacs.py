@@ -14,6 +14,7 @@ import httpx
 import redis
 
 from clear_pipeline.signals.config import settings
+from clear_pipeline.providers import http_retry
 from clear_pipeline.providers.signal import enrich_with_geoparser
 
 logger = logging.getLogger(__name__)
@@ -134,11 +135,15 @@ def _fetch_for_country(country: str, since: datetime, now: datetime) -> list[dic
     url = f"{settings.gdacs_base_url}/api/Events/geteventlist/search"
     logger.info("[GDACS] Fetching events for country=%s url=%s", country, url)
 
+    # GDACS is intermittently slow; a bare 30s GET that read-timed out used to
+    # drop the whole country for this poll window. http_retry.get retries read
+    # timeouts / 5xx / 429 with exponential backoff before giving up. A country
+    # that still fails after all retries returns [] (per-country isolation) so
+    # one slow country can't fail the ingest for the rest.
     try:
-        resp = httpx.get(url, params=params, headers={"Accept": "application/json"}, timeout=30)
-        resp.raise_for_status()
+        resp = http_retry.get(url, params=params, headers={"Accept": "application/json"}, timeout=60)
     except httpx.HTTPError as e:
-        logger.error("[GDACS] API request failed for %s: %s", country, e)
+        logger.error("[GDACS] API request failed for %s after retries: %s", country, e)
         return []
 
     # GDACS may return empty body, XML, or HTML instead of JSON
