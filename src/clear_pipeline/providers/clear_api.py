@@ -2328,19 +2328,35 @@ query ResolveGazetteerLocation($name: String!, $countryCode: String, $minSimilar
 }
 """
 
+RESOLVE_GAZETTEER_LOCATION_WITHIN = RESOLVE_GAZETTEER_LOCATION.replace(
+    "$minSimilarity: Float)", "$minSimilarity: Float, $withinLocationId: String)"
+).replace(
+    "minSimilarity: $minSimilarity)", "minSimilarity: $minSimilarity, withinLocationId: $withinLocationId)"
+)
+
+# Flipped off for the process when clear-api rejects `withinLocationId` (a
+# clear-api without #1207), so each lookup isn't paid for twice.
+_gazetteer_within_supported = True
+
 
 def resolve_gazetteer_location(
     name: str,
     *,
     country_code: str | None = None,
     min_similarity: float | None = None,
+    within_location_id: str | None = None,
 ) -> dict | None:
     """Resolve a place name against clear-api's offline GeoNames gazetteer.
 
     Returns the GazetteerHit dict (latitude/longitude, featureClass, score,
     exact, …) or None when nothing matches. The hybrid geoparser's first,
     offline tier; LocationIQ is the fallback for landmarks/POIs it lacks.
+
+    `within_location_id` keeps only matches inside that location. Against a
+    clear-api that doesn't know the argument yet, it's dropped (logged once)
+    and the caller's own area check is what remains.
     """
+    global _gazetteer_within_supported
     variables: dict = {"name": name}
     if country_code is not None:
         variables["countryCode"] = country_code
@@ -2349,6 +2365,22 @@ def resolve_gazetteer_location(
     # retries=1 (single attempt, no backoff): this tier is best-effort with a
     # LocationIQ fallback, so a transient clear-api error must not stall the
     # Celery worker through ~6s of retry sleeps before the fallback runs.
+    if within_location_id and _gazetteer_within_supported:
+        try:
+            data = _execute(
+                RESOLVE_GAZETTEER_LOCATION_WITHIN,
+                {**variables, "withinLocationId": within_location_id},
+                retries=1,
+            )
+            return data.get("resolveGazetteerLocation")
+        except ClearApiError as exc:
+            if "withinLocationId" not in str(exc):
+                raise
+            _gazetteer_within_supported = False
+            logger.warning(
+                "clear-api rejects resolveGazetteerLocation(withinLocationId) — "
+                "deploy clear-api #1207; querying without it for this process"
+            )
     data = _execute(RESOLVE_GAZETTEER_LOCATION, variables, retries=1)
     return data.get("resolveGazetteerLocation")
 

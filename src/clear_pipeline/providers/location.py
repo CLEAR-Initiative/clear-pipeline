@@ -404,6 +404,7 @@ def _geocode_within(
             expected_country_codes={country_code.lower()},
             accept=lambda lat, lng: area.contains(Point(lng, lat)),
             arabic_name=arabic_name,
+            within_location_id=area_id,
         )
         if geo is None:
             logger.info("[locate] %r has no match inside area %s — keeping the area",

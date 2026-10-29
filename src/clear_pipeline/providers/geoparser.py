@@ -584,7 +584,9 @@ def country_from_coords(lat: float | None, lng: float | None) -> str | None:
     return None
 
 
-def _resolve_via_gazetteer(top: Candidate, expected: set[str]) -> GeoparseResult | None:
+def _resolve_via_gazetteer(
+    top: Candidate, expected: set[str], within_location_id: str | None = None
+) -> GeoparseResult | None:
     """Hybrid tier 1: look the top candidate up in clear-api's offline
     GeoNames gazetteer. Returns a GeoparseResult on a confident hit, else
     None so the caller falls back to LocationIQ.
@@ -599,6 +601,7 @@ def _resolve_via_gazetteer(top: Candidate, expected: set[str]) -> GeoparseResult
             top.name,
             country_code=cc,
             min_similarity=settings.geoparser_gazetteer_min_similarity,
+            within_location_id=within_location_id,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort, fall back to LocationIQ
         logger.warning(
@@ -734,7 +737,11 @@ def _spellings_agree(a: str, b: str) -> bool:
 
 
 def _resolve_arabic(
-    arabic_name: str, latin_name: str, expected: set[str], accept: AcceptPoint | None
+    arabic_name: str,
+    latin_name: str,
+    expected: set[str],
+    accept: AcceptPoint | None,
+    within_location_id: str | None = None,
 ) -> GeoparseResult | None:
     """Exact gazetteer match on a place's Arabic spelling (GeoNames' Arabic
     alternate names), tried before the Latin tiers: it skips transliteration,
@@ -748,7 +755,9 @@ def _resolve_arabic(
         queries.append(arabic_name[2:])
     for query in queries:
         try:
-            hit = graphql.resolve_gazetteer_location(query, country_code=cc)
+            hit = graphql.resolve_gazetteer_location(
+                query, country_code=cc, within_location_id=within_location_id
+            )
         except Exception as exc:  # noqa: BLE001 — best-effort, the Latin tiers follow
             logger.warning("[geoparser] Arabic gazetteer lookup failed for %r (%s)", query, exc)
             return None
@@ -808,6 +817,7 @@ def geocode_place_name(
     expected_country_codes: set[str] | None = None,
     accept: AcceptPoint | None = None,
     arabic_name: str | None = None,
+    within_location_id: str | None = None,
 ) -> GeoparseResult | None:
     """Geocode a place name that was already extracted elsewhere — e.g. by
     Claude reading an Arabic X post, which the regex extraction stages above
@@ -820,7 +830,11 @@ def geocode_place_name(
     it accepts rather than the most important one.
 
     `arabic_name`, the same place as the text writes it in Arabic, is tried
-    first as an exact gazetteer match (see `_resolve_arabic`)."""
+    first as an exact gazetteer match (see `_resolve_arabic`).
+
+    `within_location_id` (a CLEAR location id, usually the area `accept`
+    tests) lets the gazetteer itself choose among same-named places by area,
+    instead of returning the most populous one; `accept` stays as the check."""
     if not name or not name.strip():
         return None
     name = name.strip()
@@ -833,14 +847,17 @@ def geocode_place_name(
     )
     expected = expected_country_codes or _configured_country_codes()
     if arabic_name and arabic_name.strip() and arabic_lookup_applies(name):
-        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept)
+        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept, within_location_id)
         if hit is not None:
             return hit
-    return _resolve_candidate(top, expected, accept)
+    return _resolve_candidate(top, expected, accept, within_location_id)
 
 
 def _resolve_candidate(
-    top: Candidate, expected: set[str], accept: AcceptPoint | None = None
+    top: Candidate,
+    expected: set[str],
+    accept: AcceptPoint | None = None,
+    within_location_id: str | None = None,
 ) -> GeoparseResult | None:
     """Resolve one ranked candidate to coordinates: the offline gazetteer
     first, then LocationIQ with transliteration variants. `accept` (see
@@ -856,7 +873,7 @@ def _resolve_candidate(
     # a permanently wrong landmark L4. Landmarks go straight to LocationIQ
     # tier 2, which does resolve aerodromes / hospitals / camps.
     if settings.geoparser_use_gazetteer and top.kind != "landmark":
-        gaz = _resolve_via_gazetteer(top, expected)
+        gaz = _resolve_via_gazetteer(top, expected, within_location_id)
         if gaz is not None:
             if accept is None or accept(gaz.lat, gaz.lng):
                 return gaz
