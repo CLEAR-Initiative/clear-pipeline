@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     # country, and falls back to the country itself. Must match a level-0
     # location `name` in the CLEAR API.
     sudan_war_x_default_country: str = "Sudan"
+    # ISO2 of that country. The place Claude names in a post is geocoded within
+    # it (gazetteer, then LocationIQ) to reach district level; empty disables.
+    sudan_war_x_country_code: str = "sd"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

@@ -672,9 +672,13 @@ class SudanWarXConnector:
     def locate(self, view: SignalView) -> str | None:
         """Every post on this feed is about Sudan, but the poller sends no
         location: resolve the most specific Sudanese state/district Claude can
-        match in the (mostly Arabic) text, else Sudan itself."""
+        match in the (mostly Arabic) text, geocode the place it names down to
+        a point inside that area, else Sudan itself."""
         return locate_in_country(
-            view.title, view.description, settings.sudan_war_x_default_country
+            view.title,
+            view.description,
+            settings.sudan_war_x_default_country,
+            country_code=settings.sudan_war_x_country_code or None,
         )
 
     def project(self, record: Any, created: dict) -> SignalView:

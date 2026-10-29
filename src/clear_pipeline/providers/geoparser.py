@@ -32,8 +32,14 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
+
+#: Caller's test on a candidate point (lat, lng) — e.g. "inside the admin area
+#: the text was matched to". A rejected hit counts as a miss, so the next tier
+#: (or the next result) is tried instead.
+AcceptPoint = Callable[[float, float], bool]
 
 from clear_pipeline.providers import clear_api as graphql, nominatim
 from clear_pipeline.signals.config import settings
@@ -390,6 +396,7 @@ _REJECTED_FEATURE_CLASSES: frozenset[str] = frozenset({"R", "H", "V"})
 def _pick_best_nominatim_result(
     results: list[dict],
     expected_country_codes: set[str],
+    accept: AcceptPoint | None = None,
 ) -> dict | None:
     """Pick the highest-importance Nominatim result for a candidate, after
     filtering for country and class.
@@ -401,6 +408,10 @@ def _pick_best_nominatim_result(
     even though they were already cached. Nominatim returns results in
     relevance order, so picking the highest-importance after class+country
     filtering is sufficient on its own.
+
+    `accept`, when given, drops results the caller rejects (e.g. outside its
+    admin area) before ranking — Sudanese importance scores are near zero, so
+    a same-named place elsewhere can outrank the right one.
     """
     if not results:
         return None
@@ -418,6 +429,13 @@ def _pick_best_nominatim_result(
         country = _extract_country_code(r)
         if expected_country_codes and country and country not in expected_country_codes:
             continue
+        if accept is not None:
+            try:
+                inside = accept(float(r["lat"]), float(r["lon"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not inside:
+                continue
         if importance > best_importance:
             best_importance = importance
             best = r
@@ -693,6 +711,45 @@ def geoparse_signal(
         logger.info("[geoparser] top candidate %r is disqualified — bailing", top.name)
         return None
 
+    return _resolve_candidate(top, expected)
+
+
+def geocode_place_name(
+    name: str,
+    *,
+    expected_country_codes: set[str] | None = None,
+    accept: AcceptPoint | None = None,
+) -> GeoparseResult | None:
+    """Geocode a place name that was already extracted elsewhere — e.g. by
+    Claude reading an Arabic X post, which the regex extraction stages above
+    can't parse. Skips extraction/ranking and runs the same two resolution
+    tiers as `geoparse_signal` (gazetteer, then LocationIQ). None on a miss,
+    an empty name, or a geocoder outage.
+
+    `accept` filters candidate points in both tiers: a gazetteer hit it
+    rejects falls through to LocationIQ, and LocationIQ picks the best result
+    it accepts rather than the most important one."""
+    if not name or not name.strip():
+        return None
+    name = name.strip()
+    top = Candidate(
+        name=name,
+        field="body",
+        position=0,
+        kind="landmark" if _is_landmark(name) else "admin",
+        extraction_reason="given",
+    )
+    return _resolve_candidate(
+        top, expected_country_codes or _configured_country_codes(), accept
+    )
+
+
+def _resolve_candidate(
+    top: Candidate, expected: set[str], accept: AcceptPoint | None = None
+) -> GeoparseResult | None:
+    """Resolve one ranked candidate to coordinates: the offline gazetteer
+    first, then LocationIQ with transliteration variants. `accept` (see
+    `geocode_place_name`) applies to both tiers."""
     # ── Hybrid tier 1: offline GeoNames gazetteer (clear-api) ─────────
     # Transliteration-tolerant and quota-free; resolves the bulk of place
     # names. LocationIQ below only handles what the gazetteer misses.
@@ -706,7 +763,14 @@ def geoparse_signal(
     if settings.geoparser_use_gazetteer and top.kind != "landmark":
         gaz = _resolve_via_gazetteer(top, expected)
         if gaz is not None:
-            return gaz
+            if accept is None or accept(gaz.lat, gaz.lng):
+                return gaz
+            # The gazetteer returns one row (best score / most populous), so a
+            # same-named place elsewhere hides the right one: ask LocationIQ.
+            logger.info(
+                "[geoparser] gazetteer hit %r for %r rejected by caller — trying LocationIQ",
+                gaz.display_name, top.name,
+            )
 
     # ── Hybrid tier 2: LocationIQ / Nominatim (landmarks & POIs) ──────
     # Resolve the top candidate via Nominatim, trying transliteration
@@ -728,7 +792,7 @@ def geoparse_signal(
         if not results:
             per_variant_counts.append((variant, 0, 0))
             continue
-        candidate_best = _pick_best_nominatim_result(results, expected)
+        candidate_best = _pick_best_nominatim_result(results, expected, accept)
         # kept ≈ 1 if the picker returned anything post-filter, else 0.
         # (`raw - kept` is the count filtered out — usually class-rejected.)
         kept = 1 if candidate_best else 0
