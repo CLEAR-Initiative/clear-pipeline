@@ -521,12 +521,30 @@ def test_locate_passes_the_posts_arabic_spelling_to_the_geocoder():
     patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
     with (
         patcher,
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
         patch.object(location, "arabic_spelling", return_value="الدبيب") as spelling,
         _geocoding(hit=_hit(11.5, 28.5)) as m,
     ):
         location.locate_in_country(POST, POST, "Sudan", country_code="sd")
     spelling.assert_called_once_with(POST, "Al Dibab")
     assert m["geocode"].call_args.kwargs["arabic_name"] == "الدبيب"
+
+
+@pytest.mark.parametrize("gazetteer, place, shape", [
+    (False, "Al Dibab", WK_SHAPE),       # gazetteer off: the Arabic lookup never runs
+    (True, "Al Dibab Airport", WK_SHAPE),  # landmarks skip the gazetteer
+    (True, "Al Dibab", None),            # area without geometry: no geocoding at all
+])
+def test_the_arabic_spelling_is_not_bought_when_it_cannot_be_used(gazetteer, place, shape):
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name=place)
+    with (
+        patcher,
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", gazetteer),
+        patch.object(location, "arabic_spelling") as spelling,
+        _geocoding(hit=_hit(11.5, 28.5), shape=shape),
+    ):
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    spelling.assert_not_called()
 
 
 def test_an_arabic_match_wins_over_a_wrong_latin_fuzzy_match():
@@ -568,6 +586,20 @@ def test_an_arabic_match_outside_the_area_is_skipped():
         assert geoparser.geocode_place_name(
             "Al Dibab", expected_country_codes={"sd"}, arabic_name="الدبيب",
             accept=lambda lat, lng: WK_SHAPE.contains(Point(lng, lat)),
+        ) is None
+
+
+def test_an_arabic_match_on_a_river_is_skipped():
+    # النيل الأبيض is the White Nile river as well as the state.
+    river = {**_gaz("White Nile", 13.0, 32.4), "featureClass": "H", "featureCode": "STM"}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location",
+                     side_effect=_arabic_lookup({"النيل الأبيض": river})),
+        patch.object(geoparser.nominatim, "search", return_value=None),
+    ):
+        assert geoparser.geocode_place_name(
+            "White Nile", expected_country_codes={"sd"}, arabic_name="النيل الأبيض",
         ) is None
 
 

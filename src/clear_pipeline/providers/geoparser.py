@@ -757,6 +757,14 @@ def _resolve_arabic(
         country = (hit.get("countryCode") or "").lower()
         if expected and country not in expected:
             continue
+        # Same guard as the Latin gazetteer tier: a river or road ("النيل
+        # الأبيض") would become a point at an arbitrary spot along it.
+        if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+            logger.info(
+                "[geoparser] Arabic %r matched %r, feature class %s (linear/zonal) — skipping",
+                query, hit.get("name"), hit.get("featureClass"),
+            )
+            continue
         if not _spellings_agree(hit.get("name") or "", latin_name):
             logger.info(
                 "[geoparser] Arabic %r matched %r, which disagrees with %r — skipping",
@@ -785,6 +793,13 @@ def _resolve_arabic(
             raw=hit,
         )
     return None
+
+
+def arabic_lookup_applies(name: str) -> bool:
+    """Whether `geocode_place_name` would try an Arabic spelling of `name`:
+    only with the gazetteer on, and not for landmarks (it holds few POIs).
+    Callers check this before paying to obtain the spelling."""
+    return settings.geoparser_use_gazetteer and not _is_landmark(name.strip())
 
 
 def geocode_place_name(
@@ -817,8 +832,7 @@ def geocode_place_name(
         extraction_reason="given",
     )
     expected = expected_country_codes or _configured_country_codes()
-    # Landmarks skip it for the same reason they skip the gazetteer below.
-    if arabic_name and arabic_name.strip() and settings.geoparser_use_gazetteer and top.kind != "landmark":
+    if arabic_name and arabic_name.strip() and arabic_lookup_applies(name):
         hit = _resolve_arabic(arabic_name.strip(), name, expected, accept)
         if hit is not None:
             return hit

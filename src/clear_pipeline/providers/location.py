@@ -12,7 +12,11 @@ from clear_pipeline.providers.clear_api import (
     get_locations,
     get_locations_by_level,
 )
-from clear_pipeline.providers.geoparser import geocode_place_name, latin_name_key
+from clear_pipeline.providers.geoparser import (
+    arabic_lookup_applies,
+    geocode_place_name,
+    latin_name_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -298,8 +302,7 @@ def locate_in_country(
         and not _names_country_or_state(place_name, country)
     ):
         point_id = _geocode_within(
-            place_name, area_id, country_code,
-            arabic_name=arabic_spelling(description or title or "", place_name),
+            place_name, area_id, country_code, text=description or title or ""
         )
         if point_id:
             return point_id
@@ -373,7 +376,7 @@ def _area_shape(location_id: str):
 
 
 def _geocode_within(
-    place_name: str, area_id: str, country_code: str, *, arabic_name: str | None = None
+    place_name: str, area_id: str, country_code: str, *, text: str = ""
 ) -> str | None:
     """Geocode ``place_name`` inside ``country_code`` and promote it to an L4
     point, but only when the point lies inside ``area_id`` — the admin area
@@ -389,6 +392,9 @@ def _geocode_within(
 
         from shapely.geometry import Point
 
+        # The post's Arabic spelling costs a model call, so ask only once the
+        # area is usable and the Arabic lookup would actually run.
+        arabic_name = arabic_spelling(text, place_name) if arabic_lookup_applies(place_name) else None
         # Strictly inside (`contains`, not `covers`): a point on or over the
         # line can be parented to the neighbouring area's district. Passed
         # into the lookups, so a same-named place elsewhere is a miss and the
