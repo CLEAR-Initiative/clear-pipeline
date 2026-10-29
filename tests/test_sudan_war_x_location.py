@@ -44,8 +44,12 @@ def _locations():
 
 
 def _llm_returning(**fields):
+    """Fake LLM: the location call answers `fields`; any other call (the
+    Arabic spelling) answers its schema's defaults."""
     provider = MagicMock()
-    provider.complete_structured.return_value = location._LocationResolution(**fields)
+    provider.complete_structured.side_effect = lambda *, system, user, schema: (
+        schema(**fields) if schema is location._LocationResolution else schema()
+    )
     return patch.object(location, "make_llm_provider", return_value=provider), provider
 
 
@@ -247,7 +251,7 @@ def _hit(lat: float, lng: float, *, kind: str = "admin") -> GeoparseResult:
 @contextmanager
 def _geocoding(*, hit=None, shape=WK_SHAPE, promo=None, geocode_error=None):
     # Like the real lookups: a hit the caller's area test rejects is a miss.
-    def fake_geocode(name, *, expected_country_codes=None, accept=None):
+    def fake_geocode(name, *, expected_country_codes=None, accept=None, arabic_name=None):
         if geocode_error:
             raise geocode_error
         return hit if hit and (accept is None or accept(hit.lat, hit.lng)) else None
@@ -462,3 +466,159 @@ def test_no_point_inside_the_area_in_either_tier_is_a_miss():
         patch.object(geoparser.nominatim, "search", return_value=None),
     ):
         assert geoparser.geocode_place_name("X", accept=lambda lat, lng: False) is None
+
+
+# ── Arabic spelling first (GeoNames' Arabic alternate names) ────────────────
+
+WHITE_NILE = box(31.0, 12.0, 33.5, 14.5)
+
+
+def _gaz(name, lat, lng, *, cc="SD"):
+    return {"name": name, "latitude": lat, "longitude": lng, "countryCode": cc,
+            "featureClass": "P", "featureCode": "PPL", "score": 1, "exact": True}
+
+
+def _arabic_lookup(table):
+    """Fake resolveGazetteerLocation: Arabic names from `table`, Latin misses."""
+    return lambda name, *, country_code=None, min_similarity=None: table.get(name)
+
+
+def _spelling_llm(answer):
+    provider = MagicMock()
+    provider.complete_structured.return_value = location._ArabicSpelling(place_name_ar=answer)
+    return patch.object(location, "make_llm_provider", return_value=provider), provider
+
+
+def test_arabic_spelling_is_copied_from_the_post():
+    patcher, provider = _spelling_llm("الدبيب")
+    with patcher:
+        assert location.arabic_spelling(POST, "Al Dibab") == "الدبيب"
+    assert "Al Dibab" in provider.complete_structured.call_args.kwargs["user"]
+
+
+def test_arabic_spelling_not_in_the_post_is_discarded():
+    # A spelling the model made up must not reach the gazetteer.
+    patcher, _ = _spelling_llm("الدبب")
+    with patcher:
+        assert location.arabic_spelling(POST, "Al Dibab") is None
+
+
+def test_arabic_spelling_skips_posts_without_arabic():
+    patcher, provider = _spelling_llm("نيالا")
+    with patcher:
+        assert location.arabic_spelling("Airstrikes on Nyala overnight", "Nyala") is None
+    provider.complete_structured.assert_not_called()
+
+
+def test_arabic_spelling_failure_is_none():
+    provider = MagicMock()
+    provider.complete_structured.side_effect = RuntimeError("model down")
+    with patch.object(location, "make_llm_provider", return_value=provider):
+        assert location.arabic_spelling(POST, "Al Dibab") is None
+
+
+def test_locate_passes_the_posts_arabic_spelling_to_the_geocoder():
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+    with (
+        patcher,
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(location, "arabic_spelling", return_value="الدبيب") as spelling,
+        _geocoding(hit=_hit(11.5, 28.5)) as m,
+    ):
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    spelling.assert_called_once_with(POST, "Al Dibab")
+    assert m["geocode"].call_args.kwargs["arabic_name"] == "الدبيب"
+
+
+@pytest.mark.parametrize("gazetteer, place, shape", [
+    (False, "Al Dibab", WK_SHAPE),       # gazetteer off: the Arabic lookup never runs
+    (True, "Al Dibab Airport", WK_SHAPE),  # landmarks skip the gazetteer
+    (True, "Al Dibab", None),            # area without geometry: no geocoding at all
+])
+def test_the_arabic_spelling_is_not_bought_when_it_cannot_be_used(gazetteer, place, shape):
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name=place)
+    with (
+        patcher,
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", gazetteer),
+        patch.object(location, "arabic_spelling") as spelling,
+        _geocoding(hit=_hit(11.5, 28.5), shape=shape),
+    ):
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    spelling.assert_not_called()
+
+
+def test_an_arabic_match_wins_over_a_wrong_latin_fuzzy_match():
+    # "Tendalti" fuzzy-matches El Fasher in the gazetteer; تندلتي matches exactly.
+    table = {"تندلتي": _gaz("Tendalti", 13.12, 32.06)}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)),
+        patch.object(geoparser.nominatim, "search") as search,
+    ):
+        result = geoparser.geocode_place_name(
+            "Tendalti", expected_country_codes={"sd"}, arabic_name="تندلتي",
+            accept=lambda lat, lng: WHITE_NILE.contains(Point(lng, lat)),
+        )
+    assert (result.lat, result.lng, result.candidate) == (13.12, 32.06, "Tendalti")
+    search.assert_not_called()
+
+
+def test_an_arabic_match_whose_latin_name_disagrees_is_skipped():
+    # GeoNames gives Kosti Rabak's Arabic name (ربك).
+    table = {"ربك": _gaz("Kosti", 13.16, 32.66)}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)),
+        patch.object(geoparser.nominatim, "search", return_value=None),
+    ):
+        assert geoparser.geocode_place_name(
+            "Rabak", expected_country_codes={"sd"}, arabic_name="ربك",
+        ) is None
+
+
+def test_an_arabic_match_outside_the_area_is_skipped():
+    table = {"الدبيب": _gaz("Ad Dibab", 15.6, 32.5)}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)),
+        patch.object(geoparser.nominatim, "search", return_value=None),
+    ):
+        assert geoparser.geocode_place_name(
+            "Al Dibab", expected_country_codes={"sd"}, arabic_name="الدبيب",
+            accept=lambda lat, lng: WK_SHAPE.contains(Point(lng, lat)),
+        ) is None
+
+
+def test_an_arabic_match_on_a_river_is_skipped():
+    # النيل الأبيض is the White Nile river as well as the state.
+    river = {**_gaz("White Nile", 13.0, 32.4), "featureClass": "H", "featureCode": "STM"}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location",
+                     side_effect=_arabic_lookup({"النيل الأبيض": river})),
+        patch.object(geoparser.nominatim, "search", return_value=None),
+    ):
+        assert geoparser.geocode_place_name(
+            "White Nile", expected_country_codes={"sd"}, arabic_name="النيل الأبيض",
+        ) is None
+
+
+def test_the_arabic_name_is_retried_without_its_article():
+    table = {"فاشر": _gaz("El Fasher", 13.63, 25.35)}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)) as gaz,
+    ):
+        result = geoparser.geocode_place_name(
+            "Al Fasher", expected_country_codes={"sd"}, arabic_name="الفاشر",
+        )
+    assert result.display_name == "El Fasher"
+    assert [c.args[0] for c in gaz.call_args_list][:2] == ["الفاشر", "فاشر"]
+
+
+def test_spellings_agree_across_transliterations_only():
+    agree = geoparser._spellings_agree
+    assert agree("Ad-Damazin", "Ed Damazine") and agree("El Obeid", "Al Abiad")
+    assert agree("Umm Ruwaba", "Um Rawaba") and agree("Tendalti", "Tandilti")
+    assert not agree("Kosti", "Rabak") and not agree("El Fasher", "Tendalti")
+
