@@ -12,7 +12,7 @@ from clear_pipeline.providers.clear_api import (
     get_locations,
     get_locations_by_level,
 )
-from clear_pipeline.providers.geoparser import geocode_place_name
+from clear_pipeline.providers.geoparser import geocode_place_name, latin_name_key
 
 logger = logging.getLogger(__name__)
 
@@ -297,20 +297,52 @@ def locate_in_country(
         and not (matched_id and matched_id == country_id)
         and not _names_country_or_state(place_name, country)
     ):
-        point_id = _geocode_within(place_name, area_id, country_code)
+        point_id = _geocode_within(
+            place_name, area_id, country_code,
+            arabic_name=arabic_spelling(description or title or "", place_name),
+        )
         if point_id:
             return point_id
     return area_id
 
 
-def _name_key(name: str) -> str:
-    """Spelling-tolerant key for comparing an English place name with an admin
-    area's name: drop a leading article and a trailing "state", fold q/g
-    ("Qadarif"/"Gedaref"), then keep consonants only ("Sinnar"/"Sennar")."""
-    key = re.sub(r"^(al|el|ad|ed|an|as|at|ar|az|ash)[\s-]+", "", name.casefold().strip())
-    key = re.sub(r"\s+state$", "", key).replace("q", "g")
-    key = re.sub(r"[^a-z]", "", key)
-    return re.sub(r"(.)\1+", r"\1", re.sub(r"[aeiouy]", "", key))
+class _ArabicSpelling(BaseModel):
+    place_name_ar: str | None = None
+
+
+# Bump whenever ARABIC_SPELLING_SYSTEM changes (see LOCATION_PROMPT_VERSION).
+ARABIC_SPELLING_PROMPT_VERSION = "arabic-spelling-v1"
+
+# A separate, small call rather than another field on the location prompt:
+# adding "place_name_ar" there made Haiku return all-null answers for about
+# half of the Arabic posts in the 20–27 Oct dry run.
+ARABIC_SPELLING_SYSTEM = """You copy place names out of Arabic text. Given a post and the English name of a place it mentions, return that place's name exactly as the post writes it in Arabic script, without attached prefixes (ب، و، ل، ف، ك). Return null if the post does not write it in Arabic.
+
+Respond with valid JSON only: {"place_name_ar": "<name or null>"}"""
+
+_ARABIC_LETTER = re.compile(r"[\u0621-\u064A]")
+
+
+def arabic_spelling(text: str, place_name: str) -> str | None:
+    """The post's own Arabic spelling of ``place_name``, for an exact match on
+    GeoNames' Arabic names, which skips transliteration. None for posts
+    without Arabic, on any failure, or when the answer isn't in the text — a
+    spelling the model made up must not reach the gazetteer."""
+    if not text or not _ARABIC_LETTER.search(text):
+        return None
+    try:
+        result = make_llm_provider("signal").complete_structured(
+            system=ARABIC_SPELLING_SYSTEM,
+            user=f"POST:\n{text}\n\nENGLISH PLACE NAME: {place_name}",
+            schema=_ArabicSpelling,
+        )
+        name = (result.place_name_ar or "").strip()
+    except Exception as exc:  # noqa: BLE001 — an enrichment; the Latin path follows
+        logger.warning("[locate] Arabic spelling of %r failed: %s", place_name, exc)
+        return None
+    if not name or not _ARABIC_LETTER.search(name) or name not in text:
+        return None
+    return name
 
 
 def _names_country_or_state(place_name: str, country: str) -> bool:
@@ -319,9 +351,9 @@ def _names_country_or_state(place_name: str, country: str) -> bool:
     Kassala, Sennar), so geocoding a state name pins a state-wide post to the
     capital's district — or, for "North Kordofan", to whatever village fuzzily
     matches. A post that names only a state stays at the state."""
-    key = _name_key(place_name)
+    key = latin_name_key(place_name)
     return bool(key) and any(
-        _name_key(loc["name"]) == key
+        latin_name_key(loc["name"]) == key
         for loc in _country_scoped_locations(country)
         if (loc.get("level") or 0) <= 1
     )
@@ -340,7 +372,9 @@ def _area_shape(location_id: str):
     return _area_shapes_cache[location_id]
 
 
-def _geocode_within(place_name: str, area_id: str, country_code: str) -> str | None:
+def _geocode_within(
+    place_name: str, area_id: str, country_code: str, *, arabic_name: str | None = None
+) -> str | None:
     """Geocode ``place_name`` inside ``country_code`` and promote it to an L4
     point, but only when the point lies inside ``area_id`` — the admin area
     Claude matched. Village names repeat across Sudan; a hit outside the
@@ -363,6 +397,7 @@ def _geocode_within(place_name: str, area_id: str, country_code: str) -> str | N
             place_name,
             expected_country_codes={country_code.lower()},
             accept=lambda lat, lng: area.contains(Point(lng, lat)),
+            arabic_name=arabic_name,
         )
         if geo is None:
             logger.info("[locate] %r has no match inside area %s — keeping the area",

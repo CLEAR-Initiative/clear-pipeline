@@ -30,6 +30,7 @@ What this is NOT:
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from collections.abc import Callable
@@ -714,11 +715,84 @@ def geoparse_signal(
     return _resolve_candidate(top, expected)
 
 
+def latin_name_key(name: str) -> str:
+    """Spelling-tolerant key for comparing two Latin spellings of one place:
+    drop a leading article and a trailing "state", fold q/g ("Qadarif" /
+    "Gedaref"), then keep consonants only ("Sinnar" / "Sennar")."""
+    key = re.sub(r"^(al|el|ad|ed|an|as|at|ar|az|ash)[\s-]+", "", name.casefold().strip())
+    key = re.sub(r"\s+state$", "", key).replace("q", "g")
+    key = re.sub(r"[^a-z]", "", key)
+    return re.sub(r"(.)\1+", r"\1", re.sub(r"[aeiouy]", "", key))
+
+
+def _spellings_agree(a: str, b: str) -> bool:
+    """True when two Latin spellings plausibly name the same place."""
+    ka, kb = latin_name_key(a), latin_name_key(b)
+    return bool(ka and kb) and (
+        ka == kb or difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.8
+    )
+
+
+def _resolve_arabic(
+    arabic_name: str, latin_name: str, expected: set[str], accept: AcceptPoint | None
+) -> GeoparseResult | None:
+    """Exact gazetteer match on a place's Arabic spelling (GeoNames' Arabic
+    alternate names), tried before the Latin tiers: it skips transliteration,
+    where "Tendalti" fuzzy-matched El Fasher. A hit counts only when its Latin
+    name agrees with `latin_name` — GeoNames is volunteer-edited, and Kosti
+    carries Rabak's Arabic name (ربك) — and `accept` takes it. Also tries the
+    name without a leading ال, which posts and GeoNames attach inconsistently."""
+    cc = next(iter(expected)).upper() if len(expected) == 1 else None
+    queries = [arabic_name]
+    if arabic_name.startswith("ال") and len(arabic_name) > 4:
+        queries.append(arabic_name[2:])
+    for query in queries:
+        try:
+            hit = graphql.resolve_gazetteer_location(query, country_code=cc)
+        except Exception as exc:  # noqa: BLE001 — best-effort, the Latin tiers follow
+            logger.warning("[geoparser] Arabic gazetteer lookup failed for %r (%s)", query, exc)
+            return None
+        if not hit:
+            continue
+        country = (hit.get("countryCode") or "").lower()
+        if expected and country not in expected:
+            continue
+        if not _spellings_agree(hit.get("name") or "", latin_name):
+            logger.info(
+                "[geoparser] Arabic %r matched %r, which disagrees with %r — skipping",
+                query, hit.get("name"), latin_name,
+            )
+            continue
+        try:
+            lat, lng = float(hit["latitude"]), float(hit["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if accept is not None and not accept(lat, lng):
+            logger.info("[geoparser] Arabic %r matched %r outside the caller's area", query, hit.get("name"))
+            continue
+        logger.info("[geoparser] Arabic %r resolved to %r (%s)", query, hit.get("name"), country)
+        return GeoparseResult(
+            candidate=latin_name,
+            kind="admin",
+            field="body",
+            lat=lat,
+            lng=lng,
+            country_code=country or None,
+            osm_class=None,
+            osm_type=f"geonames:{hit.get('featureCode') or ''}",
+            importance=float(hit.get("score") or 0.0),
+            display_name=hit.get("name") or latin_name,
+            raw=hit,
+        )
+    return None
+
+
 def geocode_place_name(
     name: str,
     *,
     expected_country_codes: set[str] | None = None,
     accept: AcceptPoint | None = None,
+    arabic_name: str | None = None,
 ) -> GeoparseResult | None:
     """Geocode a place name that was already extracted elsewhere — e.g. by
     Claude reading an Arabic X post, which the regex extraction stages above
@@ -728,7 +802,10 @@ def geocode_place_name(
 
     `accept` filters candidate points in both tiers: a gazetteer hit it
     rejects falls through to LocationIQ, and LocationIQ picks the best result
-    it accepts rather than the most important one."""
+    it accepts rather than the most important one.
+
+    `arabic_name`, the same place as the text writes it in Arabic, is tried
+    first as an exact gazetteer match (see `_resolve_arabic`)."""
     if not name or not name.strip():
         return None
     name = name.strip()
@@ -739,9 +816,13 @@ def geocode_place_name(
         kind="landmark" if _is_landmark(name) else "admin",
         extraction_reason="given",
     )
-    return _resolve_candidate(
-        top, expected_country_codes or _configured_country_codes(), accept
-    )
+    expected = expected_country_codes or _configured_country_codes()
+    # Landmarks skip it for the same reason they skip the gazetteer below.
+    if arabic_name and arabic_name.strip() and settings.geoparser_use_gazetteer and top.kind != "landmark":
+        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept)
+        if hit is not None:
+            return hit
+    return _resolve_candidate(top, expected, accept)
 
 
 def _resolve_candidate(
