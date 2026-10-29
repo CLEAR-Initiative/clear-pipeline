@@ -145,7 +145,7 @@ IMPORTANT RULES:
    - Use a state only when no place inside it is named
    - If no specific location in Sudan is mentioned, or the places named span several states, use the country-level Sudan entry
 
-4. Set "place_name" to the most specific named place your answer is based on (for displacement, the origin's): a town, village, neighbourhood or named facility, in its usual English spelling (e.g. "Tendalti", "El Fasher", "Um Sufaifa"). Use null when the text names only a state or the country, or when you return the country because the places named span several states.
+4. Set "place_name" to the most specific named place your answer is based on (for displacement, the origin's): a town, village, neighbourhood or named facility, in its usual English spelling (e.g. "Tendalti", "El Fasher", "Um Sufaifa"). Use null when the text names only a state or the country.
 
 5. If the signal is NOT about Sudan at all (e.g., about Chad, Ethiopia with no Sudan connection), return all fields as null.
 
