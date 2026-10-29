@@ -347,6 +347,23 @@ def test_without_a_country_code_the_place_is_not_geocoded():
     m["geocode"].assert_not_called()
 
 
+def test_a_point_exactly_on_the_area_boundary_is_rejected():
+    # A rounded coordinate on a shared border doesn't say which side owns it.
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+    with patcher, _geocoding(hit=_hit(11.5, 30.0)) as m:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-wk"
+    m["promote"].assert_not_called()
+
+
+def test_an_explicit_country_answer_is_not_geocoded():
+    # Claude returned Sudan itself (places span several states): one town's
+    # point would pull a multi-state report into that town's district.
+    patcher, _ = _llm_returning(location_type="general", location_id="sd", place_name="Al Dibab")
+    with patcher, _geocoding(hit=_hit(11.5, 28.5)) as m:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd"
+    m["geocode"].assert_not_called()
+
+
 def test_a_country_fallback_is_still_refined_by_a_geocoded_place():
     # Claude named a town but matched no admin area: check against Sudan itself.
     patcher, _ = _llm_returning(location_type="general", place_name="Al Dibab")

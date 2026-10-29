@@ -145,7 +145,7 @@ IMPORTANT RULES:
    - Use a state only when no place inside it is named
    - If no specific location in Sudan is mentioned, or the places named span several states, use the country-level Sudan entry
 
-4. Set "place_name" to the most specific named place your answer is based on (for displacement, the origin's): a town, village, neighbourhood or named facility, in its usual English spelling (e.g. "Tendalti", "El Fasher", "Um Sufaifa"). Use null when the text names only a state or the country.
+4. Set "place_name" to the most specific named place your answer is based on (for displacement, the origin's): a town, village, neighbourhood or named facility, in its usual English spelling (e.g. "Tendalti", "El Fasher", "Um Sufaifa"). Use null when the text names only a state or the country, or when you return the country because the places named span several states.
 
 5. If the signal is NOT about Sudan at all (e.g., about Chad, Ethiopia with no Sudan connection), return all fields as null.
 
@@ -281,14 +281,20 @@ def locate_in_country(
     reaches district level.
     """
     resolved = resolve_signal_location(title, description, None, country=country)
-    area_id = (
+    matched_id = (
         resolved["location_id"] or resolved["origin_id"] or resolved["destination_id"]
-    ) or resolve_country_only_location(country)
+    )
+    country_id = resolve_country_only_location(country)
+    area_id = matched_id or country_id
     place_name = resolved.get("place_name")
     if (
         country_code
         and place_name
         and area_id
+        # Claude chose the country itself: the places span several states, so
+        # one town's point would pull the whole report into that district.
+        # (No match at all still falls back to the country and is geocoded.)
+        and not (matched_id and matched_id == country_id)
         and not _names_country_or_state(place_name, country)
     ):
         point_id = _geocode_within(place_name, area_id, country_code)
@@ -349,13 +355,14 @@ def _geocode_within(place_name: str, area_id: str, country_code: str) -> str | N
 
         from shapely.geometry import Point
 
-        # Strictly inside: a point just over the line gets parented to the
-        # neighbouring area's district. Passed into the lookups, so a
-        # same-named place elsewhere is a miss and the next tier is tried.
+        # Strictly inside (`contains`, not `covers`): a point on or over the
+        # line can be parented to the neighbouring area's district. Passed
+        # into the lookups, so a same-named place elsewhere is a miss and the
+        # next tier is tried.
         geo = geocode_place_name(
             place_name,
             expected_country_codes={country_code.lower()},
-            accept=lambda lat, lng: area.covers(Point(lng, lat)),
+            accept=lambda lat, lng: area.contains(Point(lng, lat)),
         )
         if geo is None:
             logger.info("[locate] %r has no match inside area %s — keeping the area",
