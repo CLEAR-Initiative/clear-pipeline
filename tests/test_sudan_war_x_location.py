@@ -251,7 +251,8 @@ def _hit(lat: float, lng: float, *, kind: str = "admin") -> GeoparseResult:
 @contextmanager
 def _geocoding(*, hit=None, shape=WK_SHAPE, promo=None, geocode_error=None):
     # Like the real lookups: a hit the caller's area test rejects is a miss.
-    def fake_geocode(name, *, expected_country_codes=None, accept=None, arabic_name=None):
+    def fake_geocode(name, *, expected_country_codes=None, accept=None, arabic_name=None,
+                     within_location_id=None):
         if geocode_error:
             raise geocode_error
         return hit if hit and (accept is None or accept(hit.lat, hit.lng)) else None
@@ -480,7 +481,7 @@ def _gaz(name, lat, lng, *, cc="SD"):
 
 def _arabic_lookup(table):
     """Fake resolveGazetteerLocation: Arabic names from `table`, Latin misses."""
-    return lambda name, *, country_code=None, min_similarity=None: table.get(name)
+    return lambda name, *, country_code=None, min_similarity=None, within_location_id=None: table.get(name)
 
 
 def _spelling_llm(answer):
@@ -621,4 +622,62 @@ def test_spellings_agree_across_transliterations_only():
     assert agree("Ad-Damazin", "Ed Damazine") and agree("El Obeid", "Al Abiad")
     assert agree("Umm Ruwaba", "Um Rawaba") and agree("Tendalti", "Tandilti")
     assert not agree("Kosti", "Rabak") and not agree("El Fasher", "Tendalti")
+
+
+# ── the gazetteer chooses by area (resolveGazetteerLocation withinLocationId) ─
+
+def test_locate_asks_the_gazetteer_for_matches_inside_claudes_area():
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+    with patcher, _geocoding(hit=_hit(11.5, 28.5)) as m:
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    assert m["geocode"].call_args.kwargs["within_location_id"] == "sd-wk"
+
+
+@pytest.mark.parametrize("arabic", [None, "الدبيب"])
+def test_both_gazetteer_lookups_pass_the_area(arabic):
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", return_value=None) as gaz,
+        patch.object(geoparser.nominatim, "search", return_value=None),
+    ):
+        geoparser.geocode_place_name("Al Dibab", expected_country_codes={"sd"},
+                                     arabic_name=arabic, within_location_id="sd-wk")
+    assert gaz.call_args_list and all(
+        c.kwargs["within_location_id"] == "sd-wk" for c in gaz.call_args_list
+    )
+
+
+def test_the_gazetteer_client_sends_within_location_id():
+    from clear_pipeline.providers import clear_api
+
+    with (
+        patch.object(clear_api, "_gazetteer_within_supported", True),
+        patch.object(clear_api, "_execute", return_value={"resolveGazetteerLocation": None}) as ex,
+    ):
+        clear_api.resolve_gazetteer_location("Al Dibab", country_code="SD", within_location_id="sd-wk")
+    query, variables = ex.call_args.args
+    assert "withinLocationId: $withinLocationId" in query
+    assert variables["withinLocationId"] == "sd-wk"
+
+
+def test_the_gazetteer_client_drops_the_argument_on_an_older_clear_api():
+    from clear_pipeline.providers import clear_api
+
+    hit = {"name": "Ad Dibab"}
+    calls = []
+
+    def fake_execute(query, variables, retries=1):
+        calls.append(variables)
+        if "withinLocationId" in variables:
+            raise clear_api.ClearApiError('Unknown argument "withinLocationId" on field "resolveGazetteerLocation"')
+        return {"resolveGazetteerLocation": hit}
+
+    with (
+        patch.object(clear_api, "_gazetteer_within_supported", True),
+        patch.object(clear_api, "_execute", side_effect=fake_execute),
+    ):
+        assert clear_api.resolve_gazetteer_location("Al Dibab", within_location_id="sd-wk") == hit
+        assert clear_api.resolve_gazetteer_location("Al Dibab", within_location_id="sd-wk") == hit
+    # One rejected attempt, then the argument isn't sent again in this process.
+    assert ["withinLocationId" in v for v in calls] == [True, False, False]
 
