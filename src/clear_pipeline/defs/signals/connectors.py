@@ -18,7 +18,6 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
-  │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
@@ -33,9 +32,8 @@ capability flags:
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
   ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
-- **drained** — its NEW signals are processed by the classify/group stage.
-  ``dtm`` is the exception: a bulletin can span many districts, so its signals
-  are ingested but not grouped into events (see ``DRAINED_SOURCES``).
+- **drained** — its NEW signals are processed by the classify/group stage
+  (see ``DRAINED_SOURCES``). Every source is drained.
 
 Connectors reuse the consolidated ``clear_pipeline.providers`` modules
 (dataminr, acled, gdacs, darfur24, signal, …) so every source shares one
