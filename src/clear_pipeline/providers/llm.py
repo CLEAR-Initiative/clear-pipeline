@@ -511,9 +511,15 @@ class OpenAICompatibleProvider:
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         # Non-standard request-body fields sent via the OpenAI `extra_body`:
-        #  - think:false — Ollama Cloud models default to THINKING, whose reasoning
-        #    tokens count against max_tokens, so a short-output role (context,
-        #    max_tokens=200) comes back with empty `content`.
+        #  - think:false / reasoning.enabled:false — reasoning ("thinking") models
+        #    default to emitting reasoning tokens, which count against max_tokens, so
+        #    a short-output role (context, max_tokens=200) comes back with empty
+        #    `content`. The two providers name the switch differently: Ollama Cloud
+        #    reads `think`, OpenRouter reads `reasoning.enabled`. We send BOTH — each
+        #    is a no-op on the provider that doesn't recognise it — so disabling
+        #    thinking works whether the role is wired to Ollama or OpenRouter. (Note
+        #    `reasoning.exclude:true` would NOT help: the model still reasons and
+        #    still spends the tokens; only `enabled:false` frees them for content.)
         #  - provider.require_parameters — OpenRouter routes a model across several
         #    backends; only some honour `response_format`. This forces routing to a
         #    backend that supports every requested param, so structured output is
@@ -522,6 +528,7 @@ class OpenAICompatibleProvider:
         extra_body: dict[str, Any] = {}
         if disable_thinking:
             extra_body["think"] = False
+            extra_body["reasoning"] = {"enabled": False}
         if require_parameters:
             extra_body["provider"] = {"require_parameters": True}
         self._extra_kwargs: dict[str, Any] = {"extra_body": extra_body} if extra_body else {}
@@ -820,9 +827,13 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     api_key = _env("API_KEY", required=True)
     assert model is not None and api_key is not None  # narrow for type-checkers
 
-    # Disable a thinking model's reasoning for this role (Ollama Cloud models
-    # default to thinking, which empties `content` on a short-output role). Only
-    # the primary honours it — the reliable fallback is typically Claude.
+    # Disable a reasoning model's thinking for this role (reasoning models emit
+    # reasoning tokens that count against max_tokens, emptying `content` on a
+    # short-output role like context/enrich). Applied to BOTH the primary and the
+    # fallback: when the fallback is also a reasoning OSS model (e.g. an OpenRouter
+    # nemotron), leaving it on reasons it into an empty response. Harmless on a
+    # Claude fallback (AnthropicProvider ignores the flag) and on a non-reasoning
+    # model (the switch is a no-op).
     no_think = (_env("NO_THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
     # Force OpenRouter to route to a backend that honours `response_format`;
     # without it a "supports structured outputs" model can still land on a
@@ -878,6 +889,7 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         fb_provider = (_env("FALLBACK_PROVIDER", required=False) or "anthropic").strip().lower()
         fallback = _construct(
             fb_provider, fb_model, fb_key, _env("FALLBACK_BASE_URL", required=False),
+            disable_thinking=no_think,
         )
         logger.info(
             "[LLM] role=%s primary=%s with fallback=%s", role, model, fb_model,
