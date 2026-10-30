@@ -100,7 +100,6 @@ EXPECTED_FLAGS = {
     "darfur24": (True, True),
     "idmc": (False, True),
     "sudan_witness": (False, True),
-    "dtm": (True, False),
     "manual": (False, True),
     "field_officer": (False, True),
     "partner": (False, True),
@@ -264,12 +263,6 @@ def test_idmc_has_no_ingest_defs():
     # polled sources still build their ingest asset + sensor
     for c in (DataminrConnector(), ACLEDConnector(), GDACSConnector(), Darfur24Connector()):
         assert len(factory.build_source_assets(c)) == 2
-
-
-def test_dtm_unchanged():
-    dtm = CONNECTORS_BY_SOURCE["dtm"]
-    assert dtm.polled and not dtm.drained
-    assert len(factory.build_source_assets(dtm)) == 2
 
 
 def test_loaded_definitions_have_no_raw_idmc_but_keep_the_gx_idmc_assets():
