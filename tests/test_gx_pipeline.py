@@ -30,22 +30,25 @@ from clear_pipeline.providers.classify import SignalClassification
 
 def test_registered_sources_conform_to_protocol():
     sources = {s.source: s for s in GX_SOURCES}
-    assert sources.keys() == {"dataminr", "acled", "darfur24", "idmc", "sudan_witness"}
+    assert sources.keys() == {
+        "dataminr", "acled", "darfur24", "idmc", "sudan_witness", "iom_dtm_flash_alerts",
+    }
     assert all(isinstance(s, GXSource) for s in sources.values())
 
 
 def test_only_gx_only_jobs_are_polled():
-    """gx is IDMC's and Sudan Witness's only ingestion path, so their jobs need
-    a trigger. The other sources share watermarks with the production poll and
-    must not get one."""
+    """gx is IDMC's, Sudan Witness's and DTM Flash Alerts' only
+    ingestion path, so their jobs need a trigger. The other sources share
+    watermarks with the production poll and must not get one."""
     sensors = {
         s.source: [d for d in build_gx_source_assets(s) if isinstance(d, dg.SensorDefinition)]
         for s in GX_SOURCES
     }
     assert {src: len(v) for src, v in sensors.items()} == {
         "dataminr": 0, "acled": 0, "darfur24": 0, "idmc": 1, "sudan_witness": 1,
+        "iom_dtm_flash_alerts": 1,
     }
-    for src in ("idmc", "sudan_witness"):
+    for src in ("idmc", "sudan_witness", "iom_dtm_flash_alerts"):
         (sensor,) = sensors[src]
         assert sensor.job_name == f"{src}_gx"
         assert sensor.default_status == dg.DefaultSensorStatus.RUNNING

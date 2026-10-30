@@ -18,6 +18,7 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
+  │ iom_dtm_f.‡│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
@@ -26,11 +27,13 @@ capability flags:
     (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
     ``createManualSignal`` accepts.
   † ``sudan_witness`` (``SudanWitnessConnector``).
+  ‡ ``iom_dtm_flash_alerts`` (``IOMDTMFlashAlertsConnector``).
 
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
-  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
+  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``,
+  ``iom_dtm_flash_alerts``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage
   (see ``DRAINED_SOURCES``). Every source is drained.
@@ -52,6 +55,7 @@ from clear_pipeline.providers import (
     darfur24,
     dataminr,
     gdacs,
+    iom_dtm_flash_alerts,
 )
 from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
@@ -523,6 +527,40 @@ class SudanWitnessConnector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# IOM DTM Flash Alerts — Sudan displacement bulletins (downloaded by gx, drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class IOMDTMFlashAlertsConnector:
+    """Downloaded only by ``gx_pipeline`` (``IOMDTMFlashAlertsGXSource``), like
+    IDMC. A bulletin spans many districts, so it sits at country level and
+    the district + type heuristic gives it an event of its own. ``project``
+    reads the pristine export record from the S3 blob."""
+
+    source = settings.iom_dtm_flash_alerts_source_name
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def parse(self, raw: bytes) -> dict:
+        return json.loads(raw)
+
+    def project(self, record: dict | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"{self.source} signal {created['id']} has no rawS3Key")
+        # `record` is the pristine S3 blob — re-derive decoded fields + external_id.
+        parsed = iom_dtm_flash_alerts.parse_record(record) or record
+        return SignalView(
+            external_id=parsed.get("external_id") or created.get("externalId") or created["id"],
+            title=parsed.get("title") or "",
+            timestamp=created.get("publishedAt")
+            or parsed.get("field_published_date")
+            or "",
+            description=parsed.get("field_summary"),
+            location_name=parsed.get("field_country1") or _first_location_name(created),
+            url=parsed.get("field_report_file"),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
@@ -614,6 +652,7 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     SudanWitnessConnector(),
+    IOMDTMFlashAlertsConnector(),
     *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]
