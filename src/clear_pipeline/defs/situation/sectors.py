@@ -1,6 +1,6 @@
 """Per-sector analysis generator — component 6.
 
-Six SAF sectors, one LLM call each. Every call:
+One LLM call per first-level sector. Every call:
   1. Sector-scoped RAG search (filters knowledgebase hits by
      `needSectors = [<sector display name>]`)
   2. Prompt with retrieved chunks + aggregated headline figures
@@ -9,12 +9,12 @@ Six SAF sectors, one LLM call each. Every call:
      coverage areas
 
 Per-sector isolation: a failure in one sector returns that sector's
-empty default; the other five still ship.
+empty default; the others still ship. Sectors outside the six KB SAF
+tags fall back to an unfiltered search when scoped hits are empty.
 
 Prompt caching: the shared `BASE_INSTRUCTIONS` in `prompts.py` plus
 aggregated figures keep the system-prompt prefix byte-identical across
-the 4 narrative calls + 6 sector calls. All 10 calls in a country-year
-run share one `cache_key`.
+narrative + sector calls in a country-year run (one shared `cache_key`).
 """
 
 import logging
@@ -26,8 +26,22 @@ from clear_pipeline.defs.situation.citations import (
     merge_contributing,
     resolve_bullets,
 )
-from clear_pipeline.defs.situation.prompts import BASE_INSTRUCTIONS
-from clear_pipeline.defs.situation.rag_helper import fetch_rag_context
+from clear_pipeline.defs.situation.generate_component import (
+    GuidedCoverageLLM,
+    run_structured,
+)
+from clear_pipeline.defs.situation.prompts import (
+    build_evidence_user_prompt,
+    build_system_prompt,
+    format_aggregated_for_prompt,
+)
+from clear_pipeline.defs.situation.questions import (
+    SECTOR_KEYS,
+    format_question_block,
+    rag_query_for,
+    sector_question_for,
+)
+from clear_pipeline.defs.situation.rag_helper import RAGContext, fetch_rag_context
 from clear_pipeline.defs.situation.schemas import (
     InformationCoverageArea,
     SafSector,
@@ -39,27 +53,8 @@ from clear_pipeline.providers.llm import LLMProvider
 
 logger = logging.getLogger(__name__)
 
-
-# ────────────────────────────────────────────────────────────────────
-# Sector taxonomy mapping
-#
-# Two representations for the same concept:
-#   - Python / dashboard key: `food_security` (snake_case)
-#   - Extractor / knowledgebase tag: `Food Security` (TitleCase, matches
-#     the SafSector Literal used by the datapoint extractor)
-# Keep both here so the RAG filter and the payload assembly stay in
-# sync. Adding a new sector = one entry in this tuple.
-# ────────────────────────────────────────────────────────────────────
-
-
-_SECTOR_KEYS: tuple[tuple[SafSector, str], ...] = (
-    ("education", "Education"),
-    ("food_security", "Food Security"),
-    ("health", "Health"),
-    ("shelter", "Shelter"),
-    ("wash", "WASH"),
-    ("protection", "Protection"),
-)
+# Re-export for tests that imported the old private name.
+_SECTOR_KEYS = SECTOR_KEYS
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -90,89 +85,59 @@ class _InformationCoverageAreaLLM(BaseModel):
     )
 
 
-class _SectorLLM(BaseModel):
-    """LLM output shape for one sector call. Every list has explicit
-    prompt guidance in its description so tool_use output stays
-    consistent across sectors."""
+class _SectorLLM(GuidedCoverageLLM):
+    """LLM output shape for one sector call.
+
+    Field descriptions stay short — the CSV analysis question in the
+    user prompt is the content brief, not these labels.
+    """
     severity: Optional[Severity] = Field(
         default=None,
         description=(
-            "Overall severity of this sector's humanitarian situation. "
-            "Use `critical` only when the evidence documents mortality, "
-            "irreversible harm, or full-service collapse. Return null "
-            "when the evidence is too thin to judge — do not default to "
-            "medium as a hedge."
+            "Overall severity. Use `critical` only for mortality, "
+            "irreversible harm, or full-service collapse. Null when "
+            "evidence is too thin — do not default to medium."
         ),
     )
     impact: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted list of concrete impacts on affected populations. "
-            "Terse fragment per bullet (max 15 words). 3–6 bullets ideal."
-        ),
+        description="Shock impacts on people, assets, and services. Terse bullets (≤15 words).",
     )
     humanitarian_conditions: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted description of current humanitarian conditions "
-            "(access to services, coverage rates, service quality). "
-            "Terse fragment per bullet."
-        ),
+        description="Access, availability, quality, wellbeing, and coping. Terse bullets (≤15 words).",
     )
     vulnerable_sections: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted population groups whose vulnerability the "
-            "evidence highlights (e.g. children under 5, pregnant "
-            "women, IDPs, elderly). Terse fragment per bullet."
-        ),
+        description="Population groups highlighted as vulnerable. Terse bullets.",
     )
     top_needs: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted top unmet needs the evidence identifies. Ordered "
-            "roughly by scale / urgency. Terse fragment per bullet."
-        ),
+        description="Priority unmet needs (affected population and actors). Terse bullets (≤15 words).",
     )
     priority_interventions: list[str] = Field(
         default_factory=list,
-        description=(
-            "Bulleted interventions the evidence prioritises "
-            "(what programs / activities should scale up). Terse "
-            "fragment per bullet."
-        ),
+        description="Preferred / recommended assistance types. Terse bullets (≤15 words).",
     )
     information_coverage: list[_InformationCoverageAreaLLM] = Field(
         default_factory=list,
-        description=(
-            "3–8 areas where sector information matters, each rated "
-            "0–10 on how well the retrieved evidence covers it. Use "
-            "this to flag gaps a follow-up assessment should target."
-        ),
+        description="3–8 coverage areas rated 0–10 against the retrieved evidence.",
     )
 
 
-def _build_system_prompt(
-    country_name: str,
-    period_label: str,
-    sector_display_name: str,
-    aggregated_context: str,
-) -> str:
-    """The system prompt is nearly identical across all 6 sector calls
-    for one country-year — only the sector name changes. Anthropic's
-    prompt cache tolerates this small variation; the country context
-    block (which is the largest cached section) stays byte-identical."""
-    return (
-        f"{BASE_INSTRUCTIONS}\n"
-        f"---\n"
-        f"AREA: {country_name}\n"
-        f"PERIOD: {period_label}\n"
-        f"SECTOR: {sector_display_name}\n"
-        f"---\n"
-        f"AGGREGATED HEADLINE FIGURES (cached; do not repeat back):\n"
-        f"{aggregated_context}\n"
-        f"---"
-    )
+_SECTOR_BULLET_FIELDS = (
+    "impact",
+    "humanitarian_conditions",
+    "vulnerable_sections",
+    "top_needs",
+    "priority_interventions",
+)
+
+_SECTOR_MAP_INSTRUCTION = (
+    "Map the answer into severity, impact, humanitarian_conditions, "
+    "vulnerable_sections, top_needs, priority_interventions, and "
+    "information_coverage. Empty list when evidence is thin."
+)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -180,37 +145,25 @@ def _build_system_prompt(
 # ────────────────────────────────────────────────────────────────────
 
 
-def _generate_one_sector(
-    llm: LLMProvider,
+def sector_rag(
     *,
     sector_key: SafSector,
     sector_display_name: str,
     country_name: str,
-    period_label: str,
-    aggregated_context: str,
-    cache_key: str,
     rag_filters: dict[str, Any] | None = None,
-) -> SectorAnalysis:
-    """One LLM call, one sector. Returns the empty default on any
-    failure so a single bad sector never drops the other five."""
-
-    # Sector-scoped RAG — filter knowledgebase hits to chunks the
-    # extractor tagged with this sector. Query text still uses the
-    # display name so the semantic ranker also biases towards
-    # sector-relevant content.
+) -> tuple[RAGContext, bool]:
+    """Retrieval half of one sector — the sector-scoped search plus the
+    unfiltered fallback. Returns ``(rag, used_fallback)``. Split out so
+    selective regeneration (#1067) can probe a sector's current evidence id-set
+    without the LLM, then reuse the same retrieval to regenerate."""
+    question = sector_question_for(sector_key)
+    query = rag_query_for(country_name, question, fallback=sector_display_name)
     rag = fetch_rag_context(
-        query=(
-            f"{country_name} {sector_display_name} needs response impact "
-            "affected populations vulnerable groups interventions"
-        ),
-        limit=12,
+        query=query,
+        limit=24,
         filters={**(rag_filters or {}), "needSectors": [sector_display_name]},
+        mode="TOPICAL",
     )
-
-    # If the sector-scoped search returned nothing, fall back to an
-    # unfiltered search — better a broad set of hits than no evidence
-    # at all. The LLM prompt says to prefer fewer claims over
-    # speculation, so it'll degrade gracefully.
     used_fallback = False
     if rag.is_empty:
         logger.info(
@@ -221,11 +174,29 @@ def _generate_one_sector(
         # Drop the SECTOR filter to broaden, but keep the country scope — a
         # broader fallback must still not pull in another country's reports.
         rag = fetch_rag_context(
-            query=f"{country_name} {sector_display_name} humanitarian needs",
-            limit=8,
+            query=query,
+            limit=16,
             filters=rag_filters,
+            mode="TOPICAL",
         )
+    return rag, used_fallback
 
+
+def sector_from_rag(
+    llm: LLMProvider,
+    *,
+    sector_key: SafSector,
+    sector_display_name: str,
+    country_name: str,
+    period_label: str,
+    aggregated_context: str,
+    cache_key: str,
+    rag: RAGContext,
+    used_fallback: bool,
+) -> SectorAnalysis:
+    """Generation half of one sector — LLM + citation resolve over an
+    ALREADY-FETCHED ``rag``. Returns the empty default on failure."""
+    question = sector_question_for(sector_key)
     if rag.is_empty:
         logger.info(
             "[situation:sector:%s] no evidence available — returning empty analysis",
@@ -233,21 +204,20 @@ def _generate_one_sector(
         )
         return SectorAnalysis()
 
-    system = _build_system_prompt(country_name, period_label, sector_display_name, aggregated_context)
-    user = (
-        f"Produce the {sector_display_name} sector analysis for "
-        f"{country_name}, {period_label}. Populate every field the evidence "
-        "supports; skip fields (empty list) when the evidence is too "
-        "thin to make a claim.\n"
-        "\n"
-        "RETRIEVED EVIDENCE:\n"
-        f"{rag.formatted_for_prompt}"
+    system = build_system_prompt(
+        country_name, period_label, aggregated_context, sector=sector_display_name,
+    )
+    user = build_evidence_user_prompt(
+        format_question_block(question, fallback_topic=sector_display_name),
+        _SECTOR_MAP_INSTRUCTION,
+        rag.formatted_for_prompt,
     )
 
     try:
-        result = llm.complete_structured(
-            system=system,
-            user=user,
+        result = run_structured(
+            llm,
+            system_prompt=system,
+            user_prompt=user,
             schema=_SectorLLM,
             max_tokens=3000,
             cache_key=cache_key,
@@ -275,24 +245,62 @@ def _generate_one_sector(
     # Resolve inline [Rn] citations on every bulleted field; merge into one
     # report_id -> [lines] map for the sector. Each field's markers are stripped
     # from the rendered bullets.
-    impact, _, c_impact = resolve_bullets(result.impact, rag.hit_report_ids)
-    conditions, _, c_cond = resolve_bullets(result.humanitarian_conditions, rag.hit_report_ids)
-    vulnerable, _, c_vuln = resolve_bullets(result.vulnerable_sections, rag.hit_report_ids)
-    needs, _, c_needs = resolve_bullets(result.top_needs, rag.hit_report_ids)
-    interventions, _, c_interv = resolve_bullets(result.priority_interventions, rag.hit_report_ids)
-    contributing = merge_contributing(c_impact, c_cond, c_vuln, c_needs, c_interv)
+    resolved: dict[str, list[str]] = {}
+    contribs = []
+    for field in _SECTOR_BULLET_FIELDS:
+        clean, _, contributing = resolve_bullets(
+            getattr(result, field), rag.hit_report_ids,
+        )
+        resolved[field] = clean
+        contribs.append(contributing)
+    contributing = merge_contributing(*contribs)
 
     return SectorAnalysis(
         severity=result.severity,
-        impact=impact,
-        humanitarian_conditions=conditions,
-        vulnerable_sections=vulnerable,
-        top_needs=needs,
-        priority_interventions=interventions,
+        impact=resolved["impact"],
+        humanitarian_conditions=resolved["humanitarian_conditions"],
+        vulnerable_sections=resolved["vulnerable_sections"],
+        top_needs=resolved["top_needs"],
+        priority_interventions=resolved["priority_interventions"],
         information_coverage=info_coverage,
+        completeness=result.completeness,
+        questions_not_answered=list(result.questions_not_answered),
         source_report_ids=list(contributing) or rag.contributing_report_ids,
         contributing_sources=contributing,
         evidence_scope="fallback" if used_fallback else "sector",
+    )
+
+
+def _generate_one_sector(
+    llm: LLMProvider,
+    *,
+    sector_key: SafSector,
+    sector_display_name: str,
+    country_name: str,
+    period_label: str,
+    aggregated_context: str,
+    cache_key: str,
+    rag_filters: dict[str, Any] | None = None,
+) -> SectorAnalysis:
+    """One LLM call, one sector — a thin retrieve-then-generate over the split
+    halves above (behaviour unchanged). Returns the empty default on any failure
+    so a single bad sector never drops the others."""
+    rag, used_fallback = sector_rag(
+        sector_key=sector_key,
+        sector_display_name=sector_display_name,
+        country_name=country_name,
+        rag_filters=rag_filters,
+    )
+    return sector_from_rag(
+        llm,
+        sector_key=sector_key,
+        sector_display_name=sector_display_name,
+        country_name=country_name,
+        period_label=period_label,
+        aggregated_context=aggregated_context,
+        cache_key=cache_key,
+        rag=rag,
+        used_fallback=used_fallback,
     )
 
 
@@ -311,29 +319,25 @@ def generate_all_sectors(
     rag_filters: dict[str, Any] | None = None,
 ) -> Sectors:
     """Fan out one LLM call per sector; assemble into the `Sectors`
-    payload. Order preserved from _SECTOR_KEYS so the dashboard's tab
+    payload. Order preserved from SECTOR_KEYS so the dashboard's tab
     layout stays stable across regenerations.
 
     Sequential (not parallel) because Anthropic prompt caching
     benefits most from back-to-back calls sharing a stable system
-    prefix — the 5-minute cache TTL comfortably covers 6 sequential
+    prefix — the 5-minute cache TTL comfortably covers sequential
     Sonnet calls of typical size."""
-    # Same aggregated-context format helper the narrative module uses.
-    # Duplicated inline to avoid the circular import — a shared
-    # `_format_aggregated_for_prompt` in a future `common.py` module
-    # would be the cleanup path if we grow more narrative modules.
-    aggregated_context = _format_aggregated(aggregated)
+    aggregated_context = format_aggregated_for_prompt(aggregated)
 
     logger.info(
         "[situation:sectors] generating %d sectors for %s (%s)",
-        len(_SECTOR_KEYS), country_name, period_label,
+        len(SECTOR_KEYS), country_name, period_label,
     )
     outputs: dict[str, SectorAnalysis] = {}
-    for sector_key, sector_display in _SECTOR_KEYS:
+    for sector_key, sector_display in SECTOR_KEYS:
         logger.debug("[situation:sector:%s] generating", sector_key)
         sector = _generate_one_sector(
             llm,
-            sector_key=sector_key,
+            sector_key=sector_key,  # type: ignore[arg-type]
             sector_display_name=sector_display,
             country_name=country_name,
             period_label=period_label,
@@ -365,20 +369,3 @@ def _sector_has_content(s: SectorAnalysis) -> bool:
         or s.impact or s.humanitarian_conditions or s.vulnerable_sections
         or s.top_needs or s.priority_interventions
     )
-
-
-def _format_aggregated(aggregated: dict[str, Any] | None) -> str:
-    """Render the aggregated-datapoints blob in a compact form for
-    prompts. Kept here (duplicated with narrative.py's version) to
-    avoid a circular import between the two modules."""
-    import json
-    if not aggregated:
-        return "(no aggregated figures available for this period)"
-    payload = {
-        "reportCount": aggregated.get("reportCount"),
-        "dataQualityScore": aggregated.get("dataQualityScore"),
-        "newestSourceAt": aggregated.get("newestSourceAt"),
-        "oldestSourceAt": aggregated.get("oldestSourceAt"),
-        "data": aggregated.get("data") or {},
-    }
-    return json.dumps(payload, indent=2, ensure_ascii=False, default=str)

@@ -20,6 +20,8 @@ from clear_pipeline.defs.knowledgebase.datapoints_extract import (
     _match_chunk_index,
     _norm_source_name,
     _num_or_none,
+    _identify_publisher,
+    _PublisherGuess,
     _resolve_all_locations,
     _resolve_figure_scopes,
     _resolve_figure_sources,
@@ -498,6 +500,66 @@ class TestResolveFigureSources:
         assert len(calls) == de._MAX_SOURCES_PER_REPORT
         unattributed = [v["source_id"] for v in blob["d"].values() if v["source_id"] is None]
         assert len(unattributed) == 5  # figures past the cap stay unattributed
+
+
+class _FakeLLM:
+    """Minimal stand-in for an LLMProvider: records the user turn it was handed
+    and returns a canned guess (or raises)."""
+
+    def __init__(self, guess=None, exc=None):
+        self.guess = guess
+        self.exc = exc
+        self.calls: list[str] = []
+
+    def complete_structured(self, *, system, user, schema, max_tokens=1024, **_kw):
+        self.calls.append(user)
+        if self.exc is not None:
+            raise self.exc
+        return self.guess
+
+
+class _CapturingLog:
+    def __init__(self):
+        self.warnings: list[str] = []
+
+    def warning(self, msg, *args):
+        self.warnings.append(msg % args if args else msg)
+
+
+class TestIdentifyPublisher:
+    """`_identify_publisher` gives a human-uploaded PDF (no ReliefWeb
+    `report.source`) a publisher to attribute + trust. It must never raise —
+    a hiccup leaves the publisher unresolved, exactly like a ReliefWeb report
+    that arrives without a source."""
+
+    def test_returns_name_and_homepage_stripped(self):
+        llm = _FakeLLM(_PublisherGuess(name="  UNHCR ", homepage=" https://unhcr.org "))
+        name, homepage = _identify_publisher("Report body text", llm, _CapturingLog())
+        assert (name, homepage) == ("UNHCR", "https://unhcr.org")
+
+    def test_only_opening_slice_sent_to_model(self):
+        llm = _FakeLLM(_PublisherGuess(name="OCHA"))
+        _identify_publisher("X" * (de._PUBLISHER_TEXT_CHARS + 500), llm, _CapturingLog())
+        assert len(llm.calls[0]) == de._PUBLISHER_TEXT_CHARS
+
+    def test_empty_doc_skips_the_model(self):
+        llm = _FakeLLM(_PublisherGuess(name="UNHCR"))
+        assert _identify_publisher("   ", llm, _CapturingLog()) == (None, None)
+        assert llm.calls == []  # no spend on an empty document
+
+    def test_null_name_from_model_is_none(self):
+        llm = _FakeLLM(_PublisherGuess(name=None, homepage=None))
+        assert _identify_publisher("body", llm, _CapturingLog()) == (None, None)
+
+    def test_blank_name_from_model_is_none(self):
+        llm = _FakeLLM(_PublisherGuess(name="   ", homepage="  "))
+        assert _identify_publisher("body", llm, _CapturingLog()) == (None, None)
+
+    def test_llm_hiccup_never_raises_and_logs(self):
+        log = _CapturingLog()
+        llm = _FakeLLM(exc=RuntimeError("provider down"))
+        assert _identify_publisher("body", llm, log) == (None, None)
+        assert any("publisher identification hiccup" in w for w in log.warnings)
 
 
 class TestDocumentCredibilityPartial:

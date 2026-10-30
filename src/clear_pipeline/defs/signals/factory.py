@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 import dagster as dg
 
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.connectors import SignalSource
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
@@ -108,7 +109,9 @@ def build_source_assets(connector: SignalSource) -> list:
         context.log.info("[%s] created %d signals (failed %d)", src, created, failed)
         return dg.MaterializeResult(metadata={"signals_created": created, "failed": failed})
 
-    ingest_job = dg.define_asset_job(name=f"{src}_ingest", selection=[_ingest])
+    ingest_job = dg.define_asset_job(
+        name=f"{src}_ingest", selection=[_ingest], tags=max_runtime_tags(1800)
+    )
     poll_sensor = build_poll_sensor(
         name=f"{src}_poll_sensor",
         job=ingest_job,

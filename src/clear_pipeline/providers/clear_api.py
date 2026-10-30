@@ -78,8 +78,8 @@ query ResolveKnowledgebaseLocation($pcode: String, $name: String, $adminLevel: I
 """
 
 _RESOLVE_DATA_SOURCE = """
-mutation ResolveDataSource($name: String!, $homepage: String) {
-  resolveDataSource(name: $name, homepage: $homepage)
+mutation ResolveDataSource($name: String!, $homepage: String, $markTrusted: Boolean) {
+  resolveDataSource(name: $name, homepage: $homepage, markTrusted: $markTrusted)
 }
 """
 
@@ -91,6 +91,9 @@ mutation UpsertKnowledgebaseChunks(
   $s3Key: String!,
   $publishedAt: DateTime!,
   $chunks: [KnowledgebaseChunkInput!]!,
+  $figuresOnly: Boolean = false,
+  $teamId: ID,
+  $uploadedByUserId: ID,
 ) {
   upsertKnowledgebaseChunks(
     reportId: $reportId,
@@ -99,10 +102,38 @@ mutation UpsertKnowledgebaseChunks(
     s3Key: $s3Key,
     publishedAt: $publishedAt,
     chunks: $chunks,
+    figuresOnly: $figuresOnly,
+    teamId: $teamId,
+    uploadedByUserId: $uploadedByUserId,
   ) {
     reportId
     chunksDeleted
     chunksInserted
+  }
+}
+"""
+
+_REPORT_FIGURES_PENDING_KB_MERGE = """
+query ReportFiguresPendingKbMerge($limit: Int = 50) {
+  reportFiguresPendingKbMerge(limit: $limit) {
+    reportId
+    reportTitle
+    sourceUrl
+    reportS3Key
+    publishedAt
+    teamId
+    uploadedByUserId
+    figureS3Key
+    figureKind
+    pageNumber
+    title
+    transcription
+    locationIds
+    locationPcodes
+    eventTypes
+    needSectors
+    timeRangeStart
+    timeRangeEnd
   }
 }
 """
@@ -467,7 +498,9 @@ def resolve_location(
     return data.get("resolveKnowledgebaseLocation")
 
 
-def resolve_data_source(*, name: str, homepage: str | None = None) -> str | None:
+def resolve_data_source(
+    *, name: str, homepage: str | None = None, mark_trusted: bool = False,
+) -> str | None:
     """Resolve an organisation/source name to a ``data_sources`` id via
     clear-api's ``resolveDataSource`` mutation, creating an ungraded
     ``organisation`` row on miss.
@@ -475,12 +508,18 @@ def resolve_data_source(*, name: str, homepage: str | None = None) -> str | None
     Used for both a figure's cited source (``source_name`` -> ``source_id``)
     and a report's publisher (ReliefWeb ``report.source`` -> the report's
     ``sourceId``). Returns the id, or ``None`` on empty input. See ADR-0004.
+
+    ``mark_trusted`` grades the resolved source at the maximum reliability (4),
+    overwriting any existing grade. Reserved for the publisher of a
+    human-uploaded document — a team member deliberately uploaded it, so the
+    source is trusted. Leave it False for every automated feed (ReliefWeb
+    publishers and LLM-cited sources keep their expert-maintained grades).
     """
     if not name or not name.strip():
         return None
     data = _execute(
         _RESOLVE_DATA_SOURCE,
-        {"name": name.strip(), "homepage": homepage},
+        {"name": name.strip(), "homepage": homepage, "markTrusted": mark_trusted},
     )
     return data.get("resolveDataSource")
 
@@ -684,6 +723,9 @@ def upsert_knowledgebase_chunks(
     s3_key: str,
     published_at: str,
     chunks: list[dict[str, Any]],
+    figures_only: bool = False,
+    team_id: str | None = None,
+    uploaded_by_user_id: str | None = None,
 ) -> dict[str, int]:
     """Replace all knowledgebase rows for ``report_id`` with ``chunks``.
 
@@ -691,6 +733,18 @@ def upsert_knowledgebase_chunks(
     are passed as ISO-8601 strings so the caller doesn't have to
     remember Python-side datetime serialisation quirks. clear-api's
     DateTime scalar accepts either.
+
+    When ``figures_only`` is true, the server deletes only this report's FIGURE
+    rows (``figure_s3_key IS NOT NULL``) before inserting, leaving its text
+    chunks untouched — used by the figure→KB sync to attach figures to a report
+    whose text was ingested in an earlier run. Every chunk must then be a figure
+    chunk (``figureS3Key`` set) or clear-api rejects the call. Default false =
+    the original replace-all-for-report behaviour.
+
+    ``team_id`` / ``uploaded_by_user_id`` attribute a team-scoped manual upload
+    (Cap 1); stored on every chunk so a team-scoped read can filter by team.
+    Both None for the weekly ReliefWeb ingest. An empty string is normalised to
+    None so a blank config value doesn't persist as ``""``.
 
     Returns the summary counts the server logs.
     """
@@ -703,6 +757,9 @@ def upsert_knowledgebase_chunks(
             "s3Key": s3_key,
             "publishedAt": published_at,
             "chunks": chunks,
+            "figuresOnly": figures_only,
+            "teamId": team_id or None,
+            "uploadedByUserId": uploaded_by_user_id or None,
         },
     )
     result = data["upsertKnowledgebaseChunks"]
@@ -711,6 +768,20 @@ def upsert_knowledgebase_chunks(
         "chunksDeleted": int(result["chunksDeleted"]),
         "chunksInserted": int(result["chunksInserted"]),
     }
+
+
+def report_figures_pending_kb_merge(limit: int = 50) -> list[dict[str, Any]]:
+    """Figures captured into ``report_figures`` that belong in the KB but aren't
+    merged yet — the work queue the figure→KB sync drains.
+
+    Bounded by REPORTS (not figures): returns every figure for up to ``limit``
+    reports that have KB text but at least one unmerged figure. The sync groups
+    these by ``reportId`` and sends one ``figures_only`` upsert per report.
+    Each row carries the report-level fields (title/url/pdf-key/date, from the
+    report's existing KB rows) plus the figure fields and raw ``transcription``.
+    """
+    data = _execute(_REPORT_FIGURES_PENDING_KB_MERGE, {"limit": limit})
+    return data.get("reportFiguresPendingKbMerge") or []
 
 
 def sync_event_cards(event_ids: list[str]) -> dict[str, int]:
@@ -1287,6 +1358,7 @@ UPDATE_SIGNAL_LOCATION = """
 mutation UpdateSignalLocation($id: String!, $locationId: String!) {
   updateSignalLocation(id: $id, locationId: $locationId) {
     id
+    generalLocation { id name level ancestorIds }
   }
 }
 """
@@ -1571,8 +1643,8 @@ query LatestSignal {
 """
 
 GET_EVENTS = """
-query Events {
-  events {
+query Events($lastSignalSince: DateTime) {
+  events(lastSignalSince: $lastSignalSince) {
     id
     title
     description
@@ -1688,6 +1760,14 @@ query EventMembers($eventId: String!, $first: Int) {
     description
     severity
     casualties
+    startDate
+    startDateAccuracy
+    endDate
+    endDateAccuracy
+    magnitude
+    magnitudeUnit
+    actors
+    countries { id }
     publishedAt
     url
     rawS3Key
@@ -1846,11 +1926,11 @@ def update_signal_geoparsed_data(signal_id: str, geoparsed_data: dict) -> dict:
 
 
 def update_signal_location(signal_id: str, location_id: str) -> dict:
-    """Set an existing signal's `generalLocation`. Used by the manual-signal
-    pipeline path when the user didn't pick a location and the geoparser
-    resolved a landmark — we promote the landmark to an L4 and wire the
-    signal to it so downstream event grouping can key on the correct
-    admin-2 district."""
+    """Set an existing signal's `generalLocation`; returns ``{id,
+    generalLocation}`` with the location in the same shape ``pendingSignals``
+    selects, so the drain can patch its row and group on the new district.
+    Used by the drain for push feeds that arrive without a location
+    (``LocatingSource``)."""
     result = _execute(
         UPDATE_SIGNAL_LOCATION,
         {"id": signal_id, "locationId": location_id},
@@ -1914,8 +1994,12 @@ def get_latest_signal_timestamp() -> str | None:
     return max(signals, key=lambda s: s["publishedAt"])["publishedAt"]
 
 
-def get_events() -> list[dict]:
-    result = _execute(GET_EVENTS)
+def get_events(last_signal_since: str | None = None) -> list[dict]:
+    """Active events. Pass ``last_signal_since`` (ISO-8601) to have clear-api
+    return ONLY events whose newest signal is at/after that instant — bounding
+    the fetch server-side instead of pulling the whole (growing) events table.
+    Omitted → the full feed (back-compat)."""
+    result = _execute(GET_EVENTS, {"lastSignalSince": last_signal_since})
     return result.get("events", [])
 
 
@@ -2252,19 +2336,35 @@ query ResolveGazetteerLocation($name: String!, $countryCode: String, $minSimilar
 }
 """
 
+RESOLVE_GAZETTEER_LOCATION_WITHIN = RESOLVE_GAZETTEER_LOCATION.replace(
+    "$minSimilarity: Float)", "$minSimilarity: Float, $withinLocationId: String)"
+).replace(
+    "minSimilarity: $minSimilarity)", "minSimilarity: $minSimilarity, withinLocationId: $withinLocationId)"
+)
+
+# Flipped off for the process when clear-api rejects `withinLocationId` (a
+# clear-api without #1207), so each lookup isn't paid for twice.
+_gazetteer_within_supported = True
+
 
 def resolve_gazetteer_location(
     name: str,
     *,
     country_code: str | None = None,
     min_similarity: float | None = None,
+    within_location_id: str | None = None,
 ) -> dict | None:
     """Resolve a place name against clear-api's offline GeoNames gazetteer.
 
     Returns the GazetteerHit dict (latitude/longitude, featureClass, score,
     exact, …) or None when nothing matches. The hybrid geoparser's first,
     offline tier; LocationIQ is the fallback for landmarks/POIs it lacks.
+
+    `within_location_id` keeps only matches inside that location. Against a
+    clear-api that doesn't know the argument yet, it's dropped (logged once)
+    and the caller's own area check is what remains.
     """
+    global _gazetteer_within_supported
     variables: dict = {"name": name}
     if country_code is not None:
         variables["countryCode"] = country_code
@@ -2273,6 +2373,22 @@ def resolve_gazetteer_location(
     # retries=1 (single attempt, no backoff): this tier is best-effort with a
     # LocationIQ fallback, so a transient clear-api error must not stall the
     # Celery worker through ~6s of retry sleeps before the fallback runs.
+    if within_location_id and _gazetteer_within_supported:
+        try:
+            data = _execute(
+                RESOLVE_GAZETTEER_LOCATION_WITHIN,
+                {**variables, "withinLocationId": within_location_id},
+                retries=1,
+            )
+            return data.get("resolveGazetteerLocation")
+        except ClearApiError as exc:
+            if "withinLocationId" not in str(exc):
+                raise
+            _gazetteer_within_supported = False
+            logger.warning(
+                "clear-api rejects resolveGazetteerLocation(withinLocationId) — "
+                "deploy clear-api #1207; querying without it for this process"
+            )
     data = _execute(RESOLVE_GAZETTEER_LOCATION, variables, retries=1)
     return data.get("resolveGazetteerLocation")
 

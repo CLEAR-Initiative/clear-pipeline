@@ -8,7 +8,66 @@ import json
 
 import pytest
 
-from clear_pipeline.providers.llm import _strip_code_fence
+from clear_pipeline.providers.llm import (
+    FallbackProvider,
+    OpenAICompatibleProvider,
+    _strip_code_fence,
+    make_llm_provider,
+)
+
+
+class TestDisableThinkingWiring:
+    """`disable_thinking` must suppress reasoning on BOTH wire providers: Ollama
+    (`think: false`) and OpenRouter (`reasoning.enabled: false`). Sending only
+    one leaves a reasoning model emitting reasoning tokens on the other, which
+    empties `content` on a short-output role (the enrich/context bug)."""
+
+    def _provider(self, **kw):
+        return OpenAICompatibleProvider(
+            role="context", model="nvidia/nemotron-3-nano-30b-a3b",
+            base_url="https://openrouter.ai/api/v1", api_key="sk-test", **kw,
+        )
+
+    def test_disable_thinking_sets_both_provider_switches(self):
+        p = self._provider(disable_thinking=True)
+        body = p._extra_kwargs["extra_body"]
+        assert body["think"] is False                    # Ollama
+        assert body["reasoning"] == {"enabled": False}   # OpenRouter
+
+    def test_no_extra_body_when_thinking_left_on(self):
+        p = self._provider(disable_thinking=False)
+        assert p._extra_kwargs == {}
+
+    def test_require_parameters_is_independent_of_thinking(self):
+        p = self._provider(disable_thinking=False, require_parameters=True)
+        body = p._extra_kwargs["extra_body"]
+        assert body == {"provider": {"require_parameters": True}}
+        assert "think" not in body and "reasoning" not in body
+
+    def test_no_think_reaches_an_openrouter_fallback(self, monkeypatch):
+        # Regression: the enrich error was an empty response from the FALLBACK
+        # (nvidia/nemotron-3-nano-30b-a3b). When the fallback is itself a
+        # reasoning model, the role's NO_THINK must disable reasoning on it too,
+        # not just the primary.
+        env = {
+            "LLM_CONTEXT_PROVIDER": "openai_compat",
+            "LLM_CONTEXT_MODEL": "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "LLM_CONTEXT_API_KEY": "sk-primary",
+            "LLM_CONTEXT_BASE_URL": "https://openrouter.ai/api/v1",
+            "LLM_CONTEXT_NO_THINK": "true",
+            "LLM_CONTEXT_FALLBACK_PROVIDER": "openai_compat",
+            "LLM_CONTEXT_FALLBACK_MODEL": "nvidia/nemotron-3-nano-30b-a3b",
+            "LLM_CONTEXT_FALLBACK_API_KEY": "sk-fallback",
+            "LLM_CONTEXT_FALLBACK_BASE_URL": "https://openrouter.ai/api/v1",
+        }
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+
+        provider = make_llm_provider("context")
+        assert isinstance(provider, FallbackProvider)
+        for p in (provider._primary, provider._fallback):
+            assert p._extra_kwargs["extra_body"]["reasoning"] == {"enabled": False}
+            assert p._extra_kwargs["extra_body"]["think"] is False
 
 
 class TestStripCodeFence:
@@ -52,10 +111,7 @@ class TestStripCodeFence:
 
 # ── FallbackProvider + circuit breaker ────────────────────────────────
 
-from clear_pipeline.providers.llm import (
-    EmptyResponseError,
-    FallbackProvider,
-)
+from clear_pipeline.providers.llm import EmptyResponseError
 
 
 class _FakeProvider:

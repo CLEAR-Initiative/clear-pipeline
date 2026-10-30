@@ -10,6 +10,7 @@ from clear_pipeline.providers.clear_api import (
     find_or_create_landmark_l4,
 )
 from clear_pipeline.providers.dataminr import DataminrSignal
+from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.providers.geoparser import (
     GeoparseResult,
     country_from_coords,
@@ -22,22 +23,6 @@ from clear_pipeline.providers.location import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Map Dataminr alertType.name to severity 1-5
-DATAMINR_SEVERITY_MAP: dict[str, int] = {
-    "flash": 5,
-    "urgent": 4,
-    "alert": 3,
-    "watch": 2,
-}
-
-
-def _estimate_severity_from_dataminr(signal: DataminrSignal) -> int | None:
-    """Extract severity from Dataminr alertType, or return None if absent."""
-    if signal.alertType and signal.alertType.name:
-        name = signal.alertType.name.lower().strip()
-        return DATAMINR_SEVERITY_MAP.get(name)
-    return None
 
 
 # ─── Casualty extraction ─────────────────────────────────────────────────
@@ -510,9 +495,6 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
     # Full raw payload as JSON
     raw_data = signal.model_dump(mode="json")
 
-    # Estimate severity from Dataminr alertType (1-5 or None)
-    severity = _estimate_severity_from_dataminr(signal)
-
     input_data: dict = {
         "sourceId": source_id,
         # Idempotent ingestion key — the clear-api upsert behaviour keys on
@@ -525,8 +507,6 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
         "title": signal.headline,
         "description": description,
     }
-    if severity is not None:
-        input_data["severity"] = severity
 
     # Dataminr has no structured casualties field; parse it from the headline
     # and description text. Best-effort — only set when a match is found.
@@ -558,6 +538,20 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
                 input_data["lat"] = coords[0]
                 input_data["lng"] = coords[1]
                 has_coords = True
+
+    # Unified LLM extraction: severity + relevance + the structured event field
+    # set (dates+accuracy, type, countries, magnitude, actors), in place of the
+    # old alertType->severity ladder. Best-effort — on a model failure nothing
+    # is set (severity stays null rather than inventing a floor). 1 signal -> 1
+    # event: we take the primary extracted object.
+    extracted = extract_event(
+        title=signal.headline,
+        description=description,
+        country=dataminr_location_name or scope_country,
+        log_tag=f"dataminr:{signal.alertId}",
+    )
+    if extracted is not None:
+        input_data.update(extracted_signal_fields(extracted))
 
     # Text-based geoparser: additive enrichment + opportunistic L4 promotion.
     # Source coords stay on `rawData` (full Dataminr dump above), so the

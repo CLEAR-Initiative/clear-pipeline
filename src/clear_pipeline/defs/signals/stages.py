@@ -28,11 +28,13 @@ import dagster as dg
 import redis
 from botocore.exceptions import ClientError
 
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.connectors import (
     CONNECTORS,
     CONNECTORS_BY_SOURCE,
     DRAINED_SOURCES,
+    LocatingSource,
     SignalView,
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
@@ -59,8 +61,11 @@ from clear_pipeline.providers.clear_api import (
     pending_signals,
     pending_translations,
     sync_event_cards,
+    update_signal_location,
+    update_signal_severity,
 )
 from clear_pipeline.providers.event import EventRewriteFailed, group_signal, recompute_event
+from clear_pipeline.providers.event_extraction import extract_event
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import extract_population_affected_from_text
 from clear_pipeline.providers.translate import (
@@ -128,6 +133,29 @@ def _event_location_id(created: dict) -> str | None:
     return None
 
 
+def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
+    """For a connector that can locate its own signals (``LocatingSource`` —
+    push feeds that arrive with no location), resolve and persist a location
+    before grouping, and return the row with ``generalLocation`` filled in so
+    ``group_signal`` keys the event on the right district. Rows that already
+    have a location, and every other source, pass through untouched.
+
+    A clear-api failure while persisting propagates: the drain's per-signal
+    retry leaves the signal NEW rather than grouping it location-less."""
+    if _event_location_id(created) or not isinstance(connector, LocatingSource):
+        return created
+    location_id = connector.locate(view)
+    if not location_id:
+        logger.info("[classify_group] signal %s: no location resolved", created["id"])
+        return created
+    updated = update_signal_location(created["id"], location_id)
+    logger.info(
+        "[classify_group] signal %s: located → %s",
+        created["id"], (updated.get("generalLocation") or {}).get("name") or location_id,
+    )
+    return {**created, "generalLocation": updated.get("generalLocation")}
+
+
 def _enqueue_translations(entity_type: str, entity_id: str) -> None:
     """Enqueue an entity for (re)translation at every configured target locale.
     Idempotent per (entity, locale); the translate stage's staleness check skips
@@ -142,6 +170,69 @@ def _enqueue_translations(entity_type: str, entity_id: str) -> None:
             )
 
 
+# Retries for the drain-time severity write (see _apply_llm_severity_at_drain).
+_DRAIN_SEVERITY_WRITE_ATTEMPTS = 3
+
+
+# Sources with no ingest builder in this pipeline (manual / trusted / sudan-war-x)
+# are created directly in clear-api, so their severity is set here at drain time
+# using the SAME unified extractor the builders use. GDACS keeps its alert-level
+# map and is never overwritten.
+def _drain_time_severity_sources() -> frozenset[str]:
+    names = [settings.manual_source_name, settings.sudan_war_x_source_name]
+    names.extend(
+        n.strip()
+        for n in settings.manual_trusted_source_names.split(",")
+        if n.strip()
+    )
+    return frozenset(names)
+
+
+def _apply_llm_severity_at_drain(view: SignalView, created: dict) -> dict:
+    """For drain-only sources, set the signal severity via the unified LLM
+    extractor (same one the ingest builders use). Returns ``created`` updated
+    in-memory (and persisted via updateSignalSeverity) so grouping sees it.
+
+    Only severity is persisted here — the full structured field set comes from
+    the ingest builders for pipeline sources; drain-only sources getting the
+    full set is a follow-up (needs a dedicated update mutation)."""
+    source_name = (created.get("source") or {}).get("name") or ""
+    if source_name == settings.gdacs_source_name:
+        return created
+    if source_name not in _drain_time_severity_sources():
+        return created
+
+    extracted = extract_event(
+        title=view.title,
+        description=view.description,
+        country=view.location_name,
+        log_tag=f"drain:{source_name}:{created.get('id')}",
+    )
+    if extracted is None or extracted.severity is None:
+        return created
+
+    # Persist the severity, retrying a few times: the event-severity aggregation
+    # re-fetches members from clear-api and reads their STORED scores, so an
+    # unsaved score would be lost there even though it stays in-memory for the
+    # relevance classifier below. Retry rides out a transient clear-api blip.
+    last_err: Exception | None = None
+    for attempt in range(_DRAIN_SEVERITY_WRITE_ATTEMPTS):
+        try:
+            updated = update_signal_severity(created["id"], extracted.severity)
+            return {**created, "severity": updated.get("severity", extracted.severity)}
+        except Exception as err:  # noqa: BLE001 — grouping can still proceed
+            last_err = err
+    logger.warning(
+        "[classify_group] signal %s: updateSignalSeverity failed after %d attempts — "
+        "severity %s kept in-memory for classification only (not persisted)",
+        created.get("id"),
+        _DRAIN_SEVERITY_WRITE_ATTEMPTS,
+        extracted.severity,
+        exc_info=last_err,
+    )
+    return {**created, "severity": extracted.severity}
+
+
 def _group(view: SignalView, created: dict) -> dict | None:
     """Classify + group one signal into an event (create or add-to-existing).
     Returns the event dict, or None when below the relevance threshold.
@@ -149,6 +240,7 @@ def _group(view: SignalView, created: dict) -> dict | None:
     Classification goes through `classify_signal` (Jev only — raises JevError on a
     Jev/OpenRouter failure, which the caller turns into a requeue); the event
     reuses this result downstream (see providers/event.py)."""
+    created = _apply_llm_severity_at_drain(view, created)
     classification = classify_signal(view.title, view.description, created.get("severity"))
     if classification.relevance < settings.relevance_threshold:
         return None
@@ -190,6 +282,7 @@ def _process_one_signal(created: dict, touched_events: set[str]) -> str:
     with redis_lock(lock_key, ttl_seconds=_SIGNAL_LOCK_TTL_SECONDS, wait_seconds=0) as acquired:
         if not acquired:
             return _REQUEUE  # a peer holds it (or is processing it) — leave NEW
+        created = _locate_if_unplaced(connector, view, created)
         try:
             event = _group(view, created)
         except JevError as exc:
@@ -676,7 +769,9 @@ def _clear_translation_rows(entity_type: str, entity_id: str, locales: set[str])
 # sits on "queued" until it runs. Concurrent runs (this + the eager trigger)
 # are safe — translate_and_upsert's per-entity Redis lock returns LOCKED and
 # leaves the rows for the next tick.
-translate_job = dg.define_asset_job(name="translate_job", selection=[translate])
+translate_job = dg.define_asset_job(
+    name="translate_job", selection=[translate], tags=max_runtime_tags(1800)
+)
 translate_drain_sensor = build_poll_sensor(
     name="translate_drain_sensor",
     job=translate_job,
@@ -686,13 +781,22 @@ translate_drain_sensor = build_poll_sensor(
 
 
 # ── manual-signal trigger ─────────────────────────────────────────────────────
-# Manual signals materialise no ingest asset, so eager automation never fires for
-# them. This sensor ticks classify_group on an interval to drain them (and acts as
-# a safety net for any source). Concurrent runs are safe: the per-signal Redis lock
-# + NEW→PROCESSED status markers make the drain idempotent.
-classify_group_job = dg.define_asset_job(name="classify_group_job", selection=[classify_group])
+# Manual signals and push feeds (sudan-war-x) materialise no ingest asset, so
+# eager automation never fires for them. This sensor ticks classify_group on an
+# interval to drain them (and acts as a safety net for any source). Ships
+# RUNNING (settings.signals_drain_sensor_running): stopped, those signals sit NEW
+# until some polled source happens to ingest. Concurrent runs are safe: the
+# per-signal Redis lock + NEW→PROCESSED status markers make the drain idempotent.
+classify_group_job = dg.define_asset_job(
+    name="classify_group_job", selection=[classify_group], tags=max_runtime_tags(10800)
+)
 signals_drain_sensor = build_poll_sensor(
     name="signals_drain_sensor",
     job=classify_group_job,
     default_interval_minutes=settings.manual_poll_interval_minutes,
+    default_status=(
+        dg.DefaultSensorStatus.RUNNING
+        if settings.signals_drain_sensor_running
+        else dg.DefaultSensorStatus.STOPPED
+    ),
 )

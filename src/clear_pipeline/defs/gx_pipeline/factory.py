@@ -46,6 +46,7 @@ import pandas as pd
 from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
 from clear_pipeline.defs.gx_pipeline.sources import GXSource
+from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
@@ -209,7 +210,11 @@ def build_gx_source_assets(source: GXSource) -> list:
             })
 
         context.add_output_metadata({"rows": len(rows)})
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        # Mixed int/None would infer float64, turning unknown severity into NaN:
+        # classify_signal rejects it and `_match` counts it as a known value.
+        df["severity"] = pd.Series([r["severity"] for r in rows], dtype=object)
+        return df
 
     # ══════════════════════════════════════════════════════════════════════
     # Reconcile: decide which rows in each supersession group survive, across
@@ -783,6 +788,7 @@ def build_gx_source_assets(source: GXSource) -> list:
     job = dg.define_asset_job(
         name=f"{src}_gx",
         selection=[_bronze, _silver, _reconcile, _classify, _geo, _temporal, _match, _gold, _push],
+        tags=max_runtime_tags(3600),
     )
 
     defs = [

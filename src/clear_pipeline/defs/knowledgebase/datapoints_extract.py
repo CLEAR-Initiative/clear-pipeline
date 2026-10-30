@@ -785,6 +785,62 @@ class _NothingExtracted(RuntimeError):
     the failure (weekly asset skips the row, manual op raises `dg.Failure`)."""
 
 
+# ── Publisher identification (human-uploaded documents) ──────────────────────
+# ReliefWeb reports arrive with a structured publisher (`report.source`); a
+# human-uploaded PDF does not. When asked, identify the publishing organisation
+# from the document's own text so a manual upload gets the same report-level
+# source attribution a ReliefWeb report does — and so that source can be graded
+# trusted (ADR-0004).
+_PUBLISHER_SYSTEM = (
+    "You identify the ORGANISATION THAT PUBLISHED a humanitarian report, from "
+    "the report's own text. Return only the publisher: the agency, cluster, "
+    "NGO, UN body, or government office that authored/issued THIS document "
+    "(usually named on the cover, masthead, header/footer, or an 'about' note). "
+    "Do NOT return organisations the report merely cites, quotes figures from, "
+    "or lists as partners. If no publisher can be determined with confidence, "
+    "return null for both fields.\n"
+    "- name: the publisher's common canonical name (e.g. 'UNHCR', 'IOM DTM', "
+    "'OCHA'). Keep well-known acronyms; expand an obscure one only when the "
+    "document spells it out.\n"
+    "- homepage: the publisher's own website if the document states one, else null."
+)
+
+
+class _PublisherGuess(BaseModel):
+    name: str | None = None
+    homepage: str | None = None
+
+
+# Only the opening slice of the document is needed — a report's publisher lives
+# on the cover / masthead. Keeps the extra call cheap and avoids re-sending the
+# whole doc the six domain calls already paid for.
+_PUBLISHER_TEXT_CHARS = 6000
+
+
+def _identify_publisher(doc_text: str, llm, log) -> tuple[str | None, str | None]:
+    """Best-effort: identify a human-uploaded document's publisher from its text.
+
+    Returns ``(name, homepage)`` with name None when undeterminable. Never
+    raises — a hiccup just leaves the publisher unresolved, exactly as a
+    ReliefWeb report that arrives without a ``report.source`` would."""
+    head = (doc_text or "").strip()[:_PUBLISHER_TEXT_CHARS]
+    if not head:
+        return None, None
+    try:
+        guess = llm.complete_structured(
+            system=_PUBLISHER_SYSTEM,
+            user=head,
+            schema=_PublisherGuess,
+            max_tokens=200,
+        )
+    except Exception as exc:  # noqa: BLE001 — publisher stays null on any hiccup
+        log.warning("publisher identification hiccup: %s", exc)
+        return None, None
+    name = (guess.name or "").strip() or None
+    homepage = (guess.homepage or "").strip() or None
+    return name, homepage
+
+
 def extract_datapoints_for_one_report(
     *,
     report_id: str,
@@ -800,6 +856,8 @@ def extract_datapoints_for_one_report(
     publisher_homepage: str | None = None,
     country_iso3: str | None = None,
     storage_iso3: str = "sdn",
+    identify_missing_publisher: bool = False,
+    trust_publisher: bool = False,
 ) -> dict:
     """Run the six domain LLM extractions for one report, resolve
     locations, hoist hot totals, snapshot a debug artefact to S3, and
@@ -828,7 +886,18 @@ def extract_datapoints_for_one_report(
       publisher_name / publisher_homepage: the report's publisher
         (ReliefWeb `report.source`, first entry). Resolved to the
         report-level `sourceId` — the source fallback for any figure
-        that cites no distinct origin. None for manual documents.
+        that cites no distinct origin. None for manual documents (see
+        `identify_missing_publisher`).
+      identify_missing_publisher: when True AND no `publisher_name` was
+        supplied, identify the publisher from the document text via the
+        LLM. Lets a human-uploaded PDF (which has no ReliefWeb
+        `report.source`) get the same report-level source attribution a
+        ReliefWeb report does.
+      trust_publisher: when True, grade the resolved publisher source at
+        the maximum reliability (overwriting any existing grade). Set ONLY
+        on the manual-upload path — a team member deliberately uploaded the
+        document, so its publisher is trusted. ReliefWeb keeps False so
+        publisher grades stay expert-maintained.
       storage_iso3: the COUNTRY partition whose S3 namespace holds this
         report's chunk artifact + debug snapshot (`reliefweb/kb/{chunks,
         datapoints}/<iso3>/…`). The weekly asset passes its partition key;
@@ -920,20 +989,26 @@ def extract_datapoints_for_one_report(
     # fallback for any figure that cites no distinct source). See ADR-0004.
     src_named, src_resolved = _resolve_figure_sources(merged)
     publisher_source_id: str | None = None
-    if publisher_name:
+    pub_name, pub_home = publisher_name, publisher_homepage
+    # A human-uploaded document has no ReliefWeb `report.source`; identify its
+    # publisher from the text so it gets the same report-level attribution.
+    if not pub_name and identify_missing_publisher:
+        pub_name, pub_home = _identify_publisher(doc_text, llm, log)
+    if pub_name:
         try:
             publisher_source_id = clear_api.resolve_data_source(
-                name=publisher_name, homepage=publisher_homepage,
+                name=pub_name, homepage=pub_home, mark_trusted=trust_publisher,
             )
         except Exception as exc:  # noqa: BLE001 — publisher stays null on hiccup
             log.warning(
                 "[%s] publisher resolve hiccup name=%s: %s",
-                report_id, publisher_name, exc,
+                report_id, pub_name, exc,
             )
     log.info(
         "[%s] source attribution: %d/%d figures cite a source resolved; "
-        "publisher=%s -> %s",
-        report_id, src_resolved, src_named, publisher_name, publisher_source_id,
+        "publisher=%s -> %s%s",
+        report_id, src_resolved, src_named, pub_name, publisher_source_id,
+        " (trusted)" if (trust_publisher and publisher_source_id) else "",
     )
 
     # Breakdown scope (ADR-0008 SADD + ADR-0009 categorical): after scope + source

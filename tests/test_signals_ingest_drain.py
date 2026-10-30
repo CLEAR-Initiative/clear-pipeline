@@ -28,6 +28,7 @@ from clear_pipeline.defs.signals.connectors import (
     ManualConnector,
     SignalSource,
     SudanWarXConnector,
+    SudanWitnessConnector,
 )
 from clear_pipeline.providers.translation_hash import (
     HASH_FIELDS,
@@ -98,7 +99,7 @@ EXPECTED_FLAGS = {
     "gdacs": (True, True),
     "darfur24": (True, True),
     "idmc": (False, True),
-    "dtm": (True, False),
+    "sudan_witness": (False, True),
     "manual": (False, True),
     "field_officer": (False, True),
     "partner": (False, True),
@@ -125,6 +126,7 @@ def test_connectors_by_source_map():
         assert isinstance(CONNECTORS_BY_SOURCE[name], ManualConnector)
         assert CONNECTORS_BY_SOURCE[name].source == name
     assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
+    assert isinstance(CONNECTORS_BY_SOURCE["sudan_witness"], SudanWitnessConnector)
 
 
 def test_manual_source_names_keep_legacy_setting_and_dedupe():
@@ -261,12 +263,6 @@ def test_idmc_has_no_ingest_defs():
     # polled sources still build their ingest asset + sensor
     for c in (DataminrConnector(), ACLEDConnector(), GDACSConnector(), Darfur24Connector()):
         assert len(factory.build_source_assets(c)) == 2
-
-
-def test_dtm_unchanged():
-    dtm = CONNECTORS_BY_SOURCE["dtm"]
-    assert dtm.polled and not dtm.drained
-    assert len(factory.build_source_assets(dtm)) == 2
 
 
 def test_loaded_definitions_have_no_raw_idmc_but_keep_the_gx_idmc_assets():

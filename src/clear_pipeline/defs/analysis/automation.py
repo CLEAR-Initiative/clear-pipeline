@@ -57,7 +57,14 @@ def _mark_automations_ran(context, frame: Frame, automation_ids: list[str]) -> N
         )
 
 
-def _process_frame(context, frame: Frame, automation_ids: list[str], now_iso: str) -> bool:
+def _process_frame(
+    context,
+    frame: Frame,
+    automation_ids: list[str],
+    now_iso: str,
+    *,
+    boost_team_uploads_id: str | None = None,
+) -> bool:
     """Regenerate one frame over [window_start, now] and mark its automations
     ran. Returns True on a successful generation. Best-effort — one frame's
     failure doesn't stop the others.
@@ -80,7 +87,10 @@ def _process_frame(context, frame: Frame, automation_ids: list[str], now_iso: st
     try:
         # Rolling frame: materialise "now" as the window end for retrieval +
         # datapoint aggregation (the frame's stored window_end is None).
-        result = _run_frame_generation(context, frame, effective_end=now_iso)
+        result = _run_frame_generation(
+            context, frame, effective_end=now_iso,
+            boost_team_uploads_id=boost_team_uploads_id,
+        )
     except Exception:  # noqa: BLE001 — isolate one frame's failure
         context.log.exception("[drain_automations] frame %s generation raised", frame.location_ids)
         return False
@@ -113,7 +123,12 @@ def _drain(context) -> dg.MaterializeResult:
         generated = empty = 0
         for frame, autos in by_frame.items():
             ids = [a["id"] for a in autos]
-            if _process_frame(context, frame, ids, now_iso):
+            # Boost a team's own uploads only when a single team owns this frame.
+            # Automations are grouped by frame, so two teams subscribing to the
+            # identical frame would make "whose uploads" ambiguous — boost neither.
+            team_ids = {a.get("teamId") for a in autos if a.get("teamId")}
+            boost_team = next(iter(team_ids)) if len(team_ids) == 1 else None
+            if _process_frame(context, frame, ids, now_iso, boost_team_uploads_id=boost_team):
                 generated += 1
             else:
                 empty += 1
@@ -138,8 +153,15 @@ def drain_analysis_automations(context: dg.AssetExecutionContext) -> dg.Material
 
 # Ships STOPPED; enabled at cutover. The interval only bounds how often we CHECK
 # for due frames — the per-automation nextRunAt is what actually paces each frame.
+# No per-job max_runtime kill: this run is dominated by legitimate, variable-
+# length LLM generation (~23 leaf calls per frame, many frames per drain), so a
+# tight cap would discard in-progress work and wedge a frame that needs longer.
+# It runs to completion, bounded only by the 6 h instance backstop; a long run is
+# surfaced (not killed) by `stuck_run_monitor_sensor`'s GlitchTip alert. See
+# docs/adr/0012-long-running-llm-runs-alert-not-kill.md.
 drain_analysis_automations_job = dg.define_asset_job(
-    name="drain_analysis_automations_job", selection=[drain_analysis_automations]
+    name="drain_analysis_automations_job",
+    selection=[drain_analysis_automations],
 )
 analysis_automation_sensor = build_poll_sensor(
     name="analysis_automation_sensor",

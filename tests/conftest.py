@@ -1,6 +1,22 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _disable_event_extraction_llm(monkeypatch):
+    """Neutralize the unified event extractor's LLM call by default so no test
+    accidentally hits a real model / the network (the ingest builders and the
+    drain now call `extract_event`). With the provider unavailable,
+    `extract_event` returns None — the pre-feature behaviour — keeping existing
+    builder/drain tests deterministic. Tests that exercise the extractor patch
+    `make_llm_provider` themselves, which overrides this within their scope."""
+    import clear_pipeline.providers.event_extraction as _ee
+
+    def _unavailable(_role):
+        raise RuntimeError("LLM disabled in tests (see conftest._disable_event_extraction_llm)")
+
+    monkeypatch.setattr(_ee, "make_llm_provider", _unavailable)
+
+
 class FakeRedis:
     """In-memory stand-in for the Redis commands the ground drains' attempt
     counters use (defs/ground/attempts.py). TTLs are recorded, not enforced."""

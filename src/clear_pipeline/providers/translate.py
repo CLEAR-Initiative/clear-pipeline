@@ -146,8 +146,40 @@ def _build_user_prompt(
     )
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Return the first top-level ``{...}`` object in ``text`` (brace-matched,
+    respecting string literals/escapes), or None. Lets us recover the JSON when a
+    model wraps it in prose or emits a reasoning preamble before it."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _parse_json(text: str) -> dict[str, Any] | None:
-    """Parse the model's JSON body, tolerating a ```json code fence."""
+    """Parse the model's JSON body. Tolerates a ```json code fence and — for
+    models that wrap the JSON in prose or a reasoning preamble — falls back to the
+    first balanced ``{...}`` object found anywhere in the text."""
     s = text.strip()
     if s.startswith("```"):
         s = s[3:]
@@ -156,11 +188,17 @@ def _parse_json(text: str) -> dict[str, Any] | None:
         if s.endswith("```"):
             s = s[:-3]
         s = s.strip()
-    try:
-        parsed = json.loads(s)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    # Try the whole (fence-stripped) body first, then the extracted object.
+    for candidate in (s, _extract_json_object(s)):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def translate_entity(

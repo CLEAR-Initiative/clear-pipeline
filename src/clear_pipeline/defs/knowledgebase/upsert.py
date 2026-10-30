@@ -168,6 +168,21 @@ def reliefweb_weekly_knowledgebase_upsert(
         if r.get("report_id")
     }
 
+    # DIAGNOSTIC (figure-merge handoff): figure_chunks_written has been 0 in dev
+    # despite report_figures being populated. Log where the handoff drops so one
+    # re-materialize pinpoints it. The overlap is the tell: 0 → the figures-asset
+    # and enriched-chunks report_id sets don't line up; >0 → the per-report record
+    # read/parse is yielding nothing (caught below).
+    _enriched_ids = [r.get("report_id") for r in reliefweb_weekly_enriched_chunks]
+    _keys_present = [rid for rid, k in figure_record_by_report.items() if k]
+    _overlap = set(_enriched_ids) & set(figure_record_by_report)
+    context.log.info(
+        "[FIGURE-MERGE] figure_summaries=%d with_record_key=%d enriched_reports=%d "
+        "overlap=%d | sample figure_ids=%s | sample enriched_ids=%s",
+        len(reliefweb_weekly_figures), len(_keys_present), len(_enriched_ids),
+        len(_overlap), list(figure_record_by_report)[:3], _enriched_ids[:3],
+    )
+
     total_upserted = 0
     total_figure_chunks = 0
     total_reports = 0
@@ -178,6 +193,12 @@ def reliefweb_weekly_knowledgebase_upsert(
         # Merge in this report's transcribed figures as extra KB rows (same shape
         # as a text chunk + figure_s3_key/kind). No-op when capture is disabled.
         figure_rows = _figure_kb_rows(s3, bucket, figure_record_by_report.get(report_id))
+        if figure_record_by_report.get(report_id) and not figure_rows:
+            context.log.warning(
+                "[FIGURE-MERGE] report %s: record_key present but 0 figure rows — "
+                "S3 record missing/unreadable or all transcriptions empty/unparseable",
+                report_id,
+            )
         rows_to_embed = enriched + figure_rows
         if not rows_to_embed:
             continue
@@ -269,3 +290,275 @@ def reliefweb_weekly_knowledgebase_upsert(
         "embedding_model": dg.MetadataValue.text(embedder.model),
         "embedding_dimensions": dg.MetadataValue.int(embedder.dimensions),
     })
+
+
+# ── Figure → KB sync (decoupled merge) ──────────────────────────────────────
+#
+# The weekly text upsert above only merges a report's figures when the SAME run
+# also (re)ingested that report's text — figures captured in a reused or earlier
+# run never get merged (`figure_chunks_written` stayed 0 in dev despite
+# `report_figures` filling up, because the per-country reports were reused, not
+# re-enriched). This asset closes that gap independently of the text run:
+#
+#   1. Ask clear-api which captured figures belong in the KB but aren't merged
+#      yet — reports already in the KB that have `report_figures` rows whose crop
+#      isn't present as a `figure_s3_key` in the KB.
+#   2. Embed each report's figure transcriptions and upsert them with
+#      `figures_only=True`, so attaching figures deletes only the report's
+#      existing figure rows, never its text chunks.
+#
+# Unpartitioned and global on purpose: the pending set spans all countries, so
+# one pass drains it regardless of which country partitions ran this week. That
+# also makes a one-off materialize the BACKFILL for every figure captured before
+# this asset existed.
+_FIGURE_SYNC_TAGS = {"clear/weight": "heavy"}
+# Bounded by REPORTS (the resolver clamps to 500). A single fetch avoids an
+# offset-less paging loop: reports that merge successfully drop out of the
+# pending set, but a report whose figures are all empty/unparseable stays
+# pending forever — paging would spin on it. At current scale (low tens of
+# figure-reports) one page covers everything; if a run ever hits the cap it logs
+# a warning and the next run picks up the remainder.
+_FIGURE_SYNC_MAX_REPORTS = 500
+
+
+# A "normalized figure" dict is the shared input shape for the figure→KB merge,
+# so the merge logic serves BOTH the weekly sync (figures from clear-api's
+# pending query) and the manual-upload path (figures captured in-process). Keys:
+#   s3_key, kind, page, title, transcription (dict|None),
+#   location_ids, location_pcodes, event_types, need_sectors,
+#   time_range_start, time_range_end
+
+
+def _figure_chunk_rows(figures: list[dict]) -> list[dict]:
+    """Turn normalized figure dicts into embeddable chunk rows — flattened
+    transcription text plus a ``[<kind> figure] <title>`` label that prefixes the
+    embedded text (so lexical search matches on kind/title and a rendered hit
+    reads sensibly). Skips figures whose transcription is empty or unparseable:
+    the image stays in ``report_figures`` regardless, there's just nothing to
+    embed."""
+    rows: list[dict] = []
+    for fig in figures:
+        tdict = fig.get("transcription")
+        if not tdict:
+            continue
+        try:
+            text = flatten_transcription(FigureTranscription(**tdict))
+        except Exception:  # noqa: BLE001 — malformed transcription → skip this figure
+            continue
+        if not text:
+            continue
+        kind = fig.get("kind") or "infographic"
+        label = f"[{kind} figure] {fig.get('title') or ''}".strip()
+        rows.append({
+            "page": fig.get("page"),
+            "kind": kind,
+            "label": label,
+            "chunk_text": text,
+            "embedded_text": f"{label}\n{text}" if label else text,
+            "fig": fig,
+        })
+    return rows
+
+
+def merge_report_figures_to_kb(
+    *,
+    report_id: str,
+    report_title: str,
+    source_url: str,
+    report_s3_key: str,
+    published_at: str,
+    figures: list[dict],
+    embedder,
+    team_id: str | None = None,
+    uploaded_by_user_id: str | None = None,
+) -> int:
+    """Embed a report's figure transcriptions and upsert them into the KB with
+    ``figures_only=True`` — so attaching figures deletes only the report's
+    existing figure rows, never its text chunks.
+
+    ``figures`` are normalized figure dicts (see the key list above).
+    ``team_id`` / ``uploaded_by_user_id`` attribute a team-scoped manual upload
+    (Cap 1) onto the figure chunks too, so they filter alongside the text; both
+    None for the weekly sync. Returns the number of figure chunks inserted (0
+    when nothing was embeddable, i.e. no upsert ran). Propagates
+    ``clear_api.ClearApiError`` and embedding errors to the caller, which decides
+    how to log/skip."""
+    chunk_rows = _figure_chunk_rows(figures)
+    if not chunk_rows:
+        return 0
+
+    embeddings: list[list[float]] = []
+    for batch in _embedding_batches(chunk_rows, embedder):
+        results = embedder.embed(
+            [e["embedded_text"] for e in batch],
+            input_type="document",
+        )
+        embeddings.extend(r.embedding for r in results)
+    if len(embeddings) != len(chunk_rows):
+        raise RuntimeError(
+            f"figure embedding count mismatch for {report_id}: "
+            f"{len(embeddings)} for {len(chunk_rows)}",
+        )
+
+    chunk_inputs: list[dict] = []
+    for i, (row, vec) in enumerate(zip(chunk_rows, embeddings, strict=True)):
+        fig = row["fig"]
+        chunk_inputs.append({
+            "chunkIndex": FIGURE_CHUNK_INDEX_BASE + i,
+            "pageStart": row["page"],
+            "pageEnd": row["page"],
+            "chunkText": row["chunk_text"],
+            "contextPrefix": row["label"],
+            "embeddedText": row["embedded_text"],
+            "embeddingProvider": embedder.provider_name,
+            "embeddingModel": embedder.model,
+            "embedding": vec,
+            "locationIds": fig.get("location_ids") or [],
+            "locationPcodes": fig.get("location_pcodes") or [],
+            "timeRangeStart": fig.get("time_range_start"),
+            "timeRangeEnd": fig.get("time_range_end"),
+            "eventTypes": fig.get("event_types") or [],
+            "needSectors": fig.get("need_sectors") or [],
+            "figureS3Key": fig.get("s3_key"),
+            "figureKind": row["kind"],
+        })
+
+    result = clear_api.upsert_knowledgebase_chunks(
+        report_id=report_id,
+        report_title=report_title,
+        source_url=source_url,
+        s3_key=report_s3_key,
+        published_at=published_at,
+        chunks=chunk_inputs,
+        figures_only=True,
+        team_id=team_id,
+        uploaded_by_user_id=uploaded_by_user_id,
+    )
+    return result["chunksInserted"]
+
+
+def _normalize_pending_figure(fig: dict) -> dict:
+    """clear-api ``ReportFigureForMerge`` row → the normalized figure dict
+    ``merge_report_figures_to_kb`` consumes."""
+    return {
+        "s3_key": fig.get("figureS3Key"),
+        "kind": fig.get("figureKind") or "infographic",
+        "page": fig.get("pageNumber"),
+        "title": fig.get("title"),
+        "transcription": fig.get("transcription"),
+        "location_ids": fig.get("locationIds") or [],
+        "location_pcodes": fig.get("locationPcodes") or [],
+        "event_types": fig.get("eventTypes") or [],
+        "need_sectors": fig.get("needSectors") or [],
+        "time_range_start": fig.get("timeRangeStart"),
+        "time_range_end": fig.get("timeRangeEnd"),
+    }
+
+
+@dg.asset(group_name="reliefweb_kb_figures")
+def reliefweb_weekly_figure_kb_sync(context: AssetExecutionContext) -> dg.MaterializeResult:
+    """Merge captured figures into the KB independently of the weekly text run.
+
+    Drains clear-api's ``reportFiguresPendingKbMerge`` queue: for each pending
+    report, embed its figure transcriptions and upsert them ``figures_only=True``
+    (deletes only that report's figure rows, never its text). Idempotent — a
+    merged figure drops out of the queue, so re-running only advances. Doubles as
+    the one-shot backfill for figures captured before this asset existed."""
+    embedder = make_embedding_provider()
+
+    pending = clear_api.report_figures_pending_kb_merge(limit=_FIGURE_SYNC_MAX_REPORTS)
+
+    # Group the flat figure rows by report, preserving first-seen order. Keep the
+    # first raw row per report for its report-level fields (title/url/pdf/date).
+    by_report: dict[str, list[dict]] = {}
+    head_by_report: dict[str, dict] = {}
+    for fig in pending:
+        rid = fig["reportId"]
+        by_report.setdefault(rid, []).append(_normalize_pending_figure(fig))
+        head_by_report.setdefault(rid, fig)
+
+    if len(by_report) >= _FIGURE_SYNC_MAX_REPORTS:
+        context.log.warning(
+            "[FIGURE-SYNC] hit the %d-report cap — more may be pending; re-run to "
+            "drain the remainder",
+            _FIGURE_SYNC_MAX_REPORTS,
+        )
+
+    total_reports = 0
+    total_figure_chunks = 0
+    total_skipped_reports = 0
+    for report_id, figures in by_report.items():
+        head = head_by_report[report_id]
+        try:
+            inserted = merge_report_figures_to_kb(
+                report_id=report_id,
+                report_title=head["reportTitle"],
+                source_url=head["sourceUrl"],
+                report_s3_key=head["reportS3Key"],
+                published_at=head["publishedAt"],
+                figures=figures,
+                embedder=embedder,
+                # Carry the report's team attribution onto the merged figures so
+                # they stay visible under the same team filter as the text.
+                team_id=head.get("teamId"),
+                uploaded_by_user_id=head.get("uploadedByUserId"),
+            )
+        except clear_api.ClearApiError as exc:
+            context.log.error(
+                "[FIGURE-SYNC] clear-api rejected figure upsert for %s (non-retryable): %s",
+                report_id, exc,
+            )
+            total_skipped_reports += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 — isolate one report, finish the rest
+            context.log.error(
+                "[FIGURE-SYNC] figure merge failed for %s: %s", report_id, exc,
+            )
+            total_skipped_reports += 1
+            continue
+
+        if inserted == 0:
+            total_skipped_reports += 1
+            context.log.info(
+                "[FIGURE-SYNC] report %s: no embeddable figure transcriptions "
+                "(%d figure(s), all empty/unparseable) — skipping",
+                report_id, len(figures),
+            )
+            continue
+
+        total_reports += 1
+        total_figure_chunks += inserted
+        context.log.info(
+            "[FIGURE-SYNC] report %s: merged %d figure chunk(s) (%s/%s)",
+            report_id, inserted, embedder.provider_name, embedder.model,
+        )
+
+    return dg.MaterializeResult(metadata={
+        "reports_pending": dg.MetadataValue.int(len(by_report)),
+        "reports_merged": dg.MetadataValue.int(total_reports),
+        "reports_skipped": dg.MetadataValue.int(total_skipped_reports),
+        "figure_chunks_written": dg.MetadataValue.int(total_figure_chunks),
+        "embedding_provider": dg.MetadataValue.text(embedder.provider_name),
+        "embedding_model": dg.MetadataValue.text(embedder.model),
+    })
+
+
+reliefweb_weekly_figure_kb_sync_job = dg.define_asset_job(
+    # Distinct from the asset key — a job sharing an asset's name collides with
+    # that asset's implicit __ASSET_JOB graph ("Op/Graph definition names must be
+    # unique within a repository").
+    name="reliefweb_weekly_figure_kb_sync_job",
+    selection=[reliefweb_weekly_figure_kb_sync],
+    tags=_FIGURE_SYNC_TAGS,
+)
+
+# Tuesday 12:00 UTC — six hours after the per-country KB run (06:00) so this
+# week's text is in the KB before the sync looks for unmerged figures. It is
+# idempotent and only ever ADDS figure rows to reports already in the KB, so the
+# exact offset isn't load-bearing: anything it misses this week it catches next.
+reliefweb_weekly_figure_kb_sync_schedule = dg.ScheduleDefinition(
+    name="reliefweb_weekly_figure_kb_sync_schedule",
+    job=reliefweb_weekly_figure_kb_sync_job,
+    cron_schedule="0 12 * * TUE",
+    execution_timezone="UTC",
+)

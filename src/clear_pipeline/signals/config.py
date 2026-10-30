@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic_settings import BaseSettings
 
 
@@ -76,6 +78,30 @@ class Settings(BaseSettings):
     idmc_source_name: str = "idmc"
     idmc_poll_interval_minutes: int = 24 * 60  # daily, per the requirements doc
 
+    # Sudan Witness (Centre for Information Resilience) — verified open-source
+    # evidence on a public ArcGIS feature layer, no auth. CIR republishes the
+    # whole layer (cadence unknown) and rows arrive weeks after their event
+    # date, so a poll fetches every row since the floor — only when the layer
+    # fingerprint (dataLastEditDate + row count) moved — and gx's content hash
+    # skips unchanged rows. No date watermark.
+    sudan_witness_source_name: str = "sudan_witness"
+    sudan_witness_layer_url: str = (
+        "https://services-eu1.arcgis.com/06WOSMGHsCnaFyMp/arcgis/rest/services/"
+        "SUW_Incidents/FeatureServer/0"
+    )
+    sudan_witness_page_size: int = 1000  # the layer's maxRecordCount
+    # D_Country values to keep. Rows with no country are always kept (they sit
+    # inside Sudan); the ~1% elsewhere (Chad, Ethiopia…) is RSF diplomacy and
+    # foreign logistics, which CIR's own public map hides too.
+    sudan_witness_countries: str = "Sudan"
+    # Min incident date (D_Verified_Date) ingested — in the query and client-side.
+    # Fixed floor, not a rolling window: lower it to backfill.
+    sudan_witness_min_incident_date: date = date(2026, 1, 1)
+    # Daily. CIR reloads seen Mon 2026-10-12 and 2026-10-19, both ~07:26 UTC; cadence unconfirmed.
+    sudan_witness_poll_interval_minutes: int = 24 * 60
+    # Forced full pull even when the layer fingerprint is unchanged (safety net).
+    sudan_witness_full_pull_max_age_hours: int = 7 * 24
+
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
     # a drain sensor checks for pending manual signals every N minutes (low so
@@ -88,6 +114,14 @@ class Settings(BaseSettings):
     # source instead of being grouped. Comma-separated.
     manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
+    # Whether `signals_drain_sensor` ships RUNNING. Non-polled sources (manual
+    # signals, the sudan-war-x push feed) materialise no ingest asset, so this
+    # sensor is the only thing that drains them; STOPPED, they wait until a
+    # polled source happens to ingest. Set false (SIGNALS_DRAIN_SENSOR_RUNNING)
+    # for an environment that hasn't cut over to the Dagster drain yet. Like
+    # every default_status, it only applies until the sensor is toggled in the
+    # Dagster UI.
+    signals_drain_sensor_running: bool = True
     # Task Worker drain (clear-api ADR-0010): how often the sensor claims and
     # works Tasks. Tasks are user-requested and slow to produce; 5 minutes
     # keeps the Event page's "requested" state short without hammering the queue.
@@ -103,6 +137,14 @@ class Settings(BaseSettings):
     # sensor picks NEW rows up at `manual_poll_interval_minutes`. Must match
     # the feed's data_sources row name.
     sudan_war_x_source_name: str = "sudan-war-x"
+    # Every post on the feed is about Sudan, but it arrives with no location —
+    # the drain resolves one from the (mostly Arabic) text, scoped to this
+    # country, and falls back to the country itself. Must match a level-0
+    # location `name` in the CLEAR API.
+    sudan_war_x_default_country: str = "Sudan"
+    # ISO2 of that country. The place Claude names in a post is geocoded within
+    # it (gazetteer, then LocationIQ) to reach district level; empty disables.
+    sudan_war_x_country_code: str = "sd"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -212,6 +254,9 @@ class Settings(BaseSettings):
     logtail_source_token: str = ""
     sentry_dsn: str = ""
     sentry_env: str = "development"
+    # Prometheus Pushgateway for run/GX-gate metrics; empty disables pushing.
+    pushgateway_url: str = ""
+    observability_service_name: str = "clear-context-pipeline"
     log_level: str = "INFO"
     # A run STARTED/STARTING longer than this is reported to GlitchTip by
     # stuck_run_monitor_sensor (catches OOM-orphaned runs / launch stalls that
@@ -267,19 +312,6 @@ class Settings(BaseSettings):
     # disable filtering and pool all types — only safe when the data has no
     # BA/FM overlap.
     iom_dtm_assessment_type: str = "BA,FM"
-
-    # DTM Flash Alert bulletins (Sudan narrative reports) — a different product
-    # from IOM DTM API (admin-level displacement figures)
-    iom_dtm_flash_alerts_source_name: str = "dtm"
-    # Plain GET on a static JSON export, no Accept header. Returns every
-    # country in one export — no server-side filter/pagination, so
-    # `iom_dtm_flash_alerts_countries` below filters client-side
-    iom_dtm_flash_alerts_export_url: str = "https://dtm.iom.int/flash-reports-export"
-    iom_dtm_flash_alerts_countries: str = "Sudan"
-    # Export updates whenever new bulletins publish — irregular (~monthly for
-    # Sudan, more frequent elsewhere during active crises). IOM recommends
-    # polling once or twice daily to avoid unnecessary server load
-    iom_dtm_flash_alerts_poll_interval_minutes: int = 60 * 24
 
     # ─── Nominatim geocoder (currently LocationIQ as the backend) ────────────
     # The Nominatim-compatible geocoder client uses these. We talk to

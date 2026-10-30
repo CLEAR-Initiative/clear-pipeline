@@ -404,8 +404,15 @@ def _get_active_events() -> list[dict]:
     if cached:
         return json.loads(cached)
 
-    events = get_events()
     cutoff = datetime.now(UTC) - timedelta(days=ACTIVE_EVENTS_WINDOW_DAYS)
+    # Bound the fetch SERVER-SIDE: ask clear-api for only the window, instead of
+    # pulling the whole events table and filtering here. The full-table fetch (+
+    # translation includes), re-run on every cache-miss as the drain grows the
+    # table, once ran clear-api to 6.2 GB and OOM-killed dev-app (2026-10-20).
+    events = get_events(last_signal_since=cutoff.isoformat())
+    # Belt-and-suspenders: re-apply the window client-side (handles any row the
+    # server filter can't bound, e.g. a null lastSignalCreatedAt falling back to
+    # validFrom) and keep the total/kept log line.
     recent: list[dict] = []
     for e in events:
         try:
@@ -526,10 +533,75 @@ def _rewrite_event(
         return None, signals
 
 
+def _aggregate_signal_event_fields(members: list[dict], *, absolute: bool = False) -> dict:
+    """Roll the per-signal extracted fields up to the event (never touches
+    startedAt / severity / text — those keep their own logic): the precision of
+    the earliest start, the latest known end + its precision, the first stated
+    magnitude + unit, and the de-duplicated union of conflict actors and country
+    ids across the members.
+
+    ``absolute=False`` (grouping): emit only fields a member supports — purely
+    additive, never writes a null. ``absolute=True`` (recompute): ALSO emit the
+    unsupported fields as explicit clears (null / []), so a recompute after a
+    retraction (or with no members left) drops facts the withdrawn signal had
+    rather than leaving them stale. Absolute clears rely on the clear-api write
+    accepting null/[]."""
+    out: dict = {}
+
+    starts = [
+        (m["startDate"], m.get("startDateAccuracy"))
+        for m in members
+        if m.get("startDate")
+    ]
+    start_acc = min(starts, key=lambda p: p[0])[1] if starts else None
+    if start_acc is not None or absolute:
+        out["startedAtAccuracy"] = start_acc
+
+    ends = [
+        (m["endDate"], m.get("endDateAccuracy")) for m in members if m.get("endDate")
+    ]
+    end_date, end_acc = max(ends, key=lambda p: p[0]) if ends else (None, None)
+    if end_date is not None or absolute:
+        out["endedAt"] = end_date
+        out["endedAtAccuracy"] = end_acc
+
+    magnitude: float | None = None
+    magnitude_unit: str | None = None
+    for m in members:
+        if m.get("magnitude") is not None:
+            magnitude = m["magnitude"]
+            magnitude_unit = m.get("magnitudeUnit")
+            break
+    if magnitude is not None or absolute:
+        out["magnitude"] = magnitude
+        out["magnitudeUnit"] = magnitude_unit
+
+    actors: list[str] = []
+    for m in members:
+        for a in m.get("actors") or []:
+            if a not in actors:
+                actors.append(a)
+    if actors or absolute:
+        out["actors"] = actors
+
+    country_ids: list[str] = []
+    for m in members:
+        for c in m.get("countries") or []:
+            cid = c.get("id")
+            if cid and cid not in country_ids:
+                country_ids.append(cid)
+    if country_ids or absolute:
+        out["countryIds"] = country_ids
+
+    return out
+
+
 def _rewrite_fields(
     members: list[dict],
     rewrite: EventRewrite | None,
     fallback_severity: int | None,
+    *,
+    absolute: bool = False,
 ) -> dict:
     """Event fields derived from ``members`` and an optional rewrite, shared by
     grouping and recompute. Severity/rank only when a severity resolves (the
@@ -548,6 +620,10 @@ def _rewrite_fields(
         displaced = _resolve_population_displaced(rewrite.population_displaced)
         if displaced is not None:
             out["populationDisplaced"] = str(displaced)
+    # Roll the per-signal extracted fields up to the event (end date + accuracy,
+    # start accuracy, magnitude, actors, country ids). Additive for grouping;
+    # absolute (clears unsupported fields) on recompute.
+    out.update(_aggregate_signal_event_fields(members, absolute=absolute))
     return out
 
 
@@ -944,7 +1020,7 @@ def recompute_event(
         "populationAffected": str(max(populations)) if populations else None,
         "severity": None,
         "rank": 0.0,
-        **_rewrite_fields(members, rewrite, state.get("severity")),
+        **_rewrite_fields(members, rewrite, state.get("severity"), absolute=True),
     }
     if rewrite or not members:
         aggregates["rewriteMembersHash"] = live_hash

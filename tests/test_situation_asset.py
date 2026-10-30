@@ -24,11 +24,13 @@ from clear_pipeline.defs.situation.generate import (
     generate_and_upsert_for_country_year,
     weekly_situation_analyses,
 )
+from clear_pipeline.defs.situation.selective import LeafBuildResult
 from clear_pipeline.defs.situation.schemas import (
     HazardsAndVulnerabilities,
     ContextRisks,
     AISummary,
     DisplacementNarrative,
+    HumanitarianAccess,
     Scenarios,
     Sectors,
 )
@@ -61,41 +63,35 @@ def _clean_env():
 
 
 def _patch_narrative_generators(stub_source_ids: list[str] | None = None):
-    """Common setup: stub every LLM-driven generator to return its
-    empty default so tests focus on orchestration, not narrative
-    quality. Individual generator tests live in test_situation_narrative
-    and test_situation_sectors."""
+    """Common setup: stub the leaf-build fan-out and the ai_summary fan-in
+    (#1067) to return empty defaults so tests focus on orchestration, not
+    narrative quality. Individual generator tests live in
+    test_situation_narrative / test_situation_sectors; the selective planner's
+    own logic is tested in test_situation_selective."""
     src_ids = stub_source_ids or []
+    leaf_result = LeafBuildResult(
+        context_risks=ContextRisks(),
+        hazards_and_vulnerabilities=HazardsAndVulnerabilities(),
+        displacement=DisplacementNarrative(),
+        humanitarian_access=HumanitarianAccess(),
+        sectors=Sectors(),
+        scenarios=Scenarios(),
+        evidence_index={},
+        regenerated_keys=["stub"],  # non-empty → orchestrator runs the fan-in
+        reused_keys=[],
+    )
     return {
-        "generate_ai_summary":
+        # The whole leaf fan-out (full or selective) in one stub.
+        "build_leaf_components":
             patch(
-                "clear_pipeline.defs.situation.generate.generate_ai_summary",
+                "clear_pipeline.defs.situation.generate.build_leaf_components",
+                return_value=leaf_result,
+            ),
+        # The ai_summary fan-in over the leaves.
+        "ai_summary_fanin":
+            patch(
+                "clear_pipeline.defs.situation.generate.generate_ai_summary_fanin",
                 return_value=AISummary(text="Sample summary", source_report_ids=src_ids),
-            ),
-        "generate_context_risks":
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_context_risks",
-                return_value=ContextRisks(),
-            ),
-        "generate_hazards_and_vulnerabilities":
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
-                return_value=HazardsAndVulnerabilities(),
-            ),
-        "generate_displacement_narrative":
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_displacement_narrative",
-                return_value=DisplacementNarrative(),
-            ),
-        "generate_all_sectors":
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_all_sectors",
-                return_value=Sectors(),
-            ),
-        "generate_scenarios":
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_scenarios",
-                return_value=Scenarios(),
             ),
         # No prior generation to diff "what changed" against (ADR-0007 §8).
         # Mocked so the changes-step lookup doesn't make a real network call.
@@ -160,12 +156,8 @@ class TestGenerateAndUpsertForCountryYear:
                     "supersededPrevious": False,
                 },
             ) as mock_upsert,
-            patches["generate_ai_summary"],
-            patches["generate_context_risks"],
-            patches["generate_hazards_and_vulnerabilities"],
-            patches["generate_displacement_narrative"],
-            patches["generate_all_sectors"],
-            patches["generate_scenarios"],
+            patches["build_leaf_components"],
+            patches["ai_summary_fanin"],
             patches["get_analysis"],
             patches["enqueue_translation"],
         ):
@@ -208,12 +200,8 @@ class TestGenerateAndUpsertForCountryYear:
             patch(
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ),
-            patches["generate_ai_summary"],
-            patches["generate_context_risks"],
-            patches["generate_hazards_and_vulnerabilities"],
-            patches["generate_displacement_narrative"],
-            patches["generate_all_sectors"],
-            patches["generate_scenarios"],
+            patches["build_leaf_components"],
+            patches["ai_summary_fanin"],
             patches["get_analysis"],
             patches["enqueue_translation"],
             patch(
@@ -252,25 +240,29 @@ class TestGenerateAndUpsertForCountryYear:
             patch(
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ) as mock_make_llm,
+            # Leaf fan-out returns all-empty components (a real regen that
+            # produced nothing) → the all-empty gate must skip the upsert.
             patch(
-                "clear_pipeline.defs.situation.generate.generate_ai_summary",
+                "clear_pipeline.defs.situation.generate.build_leaf_components",
+                return_value=LeafBuildResult(
+                    context_risks=ContextRisks(),
+                    hazards_and_vulnerabilities=HazardsAndVulnerabilities(),
+                    displacement=DisplacementNarrative(),
+                    humanitarian_access=HumanitarianAccess(),
+                    sectors=Sectors(),
+                    scenarios=Scenarios(),
+                    evidence_index={},
+                    regenerated_keys=["stub"],
+                    reused_keys=[],
+                ),
+            ),
+            patch(
+                "clear_pipeline.defs.situation.generate.generate_ai_summary_fanin",
                 return_value=AISummary(),  # empty — no text
             ),
             patch(
-                "clear_pipeline.defs.situation.generate.generate_context_risks",
-                return_value=ContextRisks(),
-            ),
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_hazards_and_vulnerabilities",
-                return_value=HazardsAndVulnerabilities(),
-            ),
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_displacement_narrative",
-                return_value=DisplacementNarrative(),
-            ),
-            patch(
-                "clear_pipeline.defs.situation.generate.generate_all_sectors",
-                return_value=Sectors(),
+                "clear_pipeline.defs.situation.generate.clear_api.get_analysis",
+                return_value=None,
             ),
             patch(
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
@@ -336,12 +328,8 @@ class TestGenerateAndUpsertForCountryYear:
             patch(
                 "clear_pipeline.defs.situation.generate.make_llm_provider",
             ),
-            patches["generate_ai_summary"],
-            patches["generate_context_risks"],
-            patches["generate_hazards_and_vulnerabilities"],
-            patches["generate_displacement_narrative"],
-            patches["generate_all_sectors"],
-            patches["generate_scenarios"],
+            patches["build_leaf_components"],
+            patches["ai_summary_fanin"],
             patches["get_analysis"],
             patches["enqueue_translation"],
             patch(
@@ -404,7 +392,7 @@ class TestGenerateAndUpsertForCountryYear:
         assert payload["ai_summary"]["text"] == ""
         assert payload["hazards_and_vulnerabilities"]["hazards"] == []
 
-    def test_happy_path_ships_all_eight_components_with_dedupe_source_ids(self):
+    def test_happy_path_ships_all_components_with_dedupe_source_ids(self):
         # Full flow: datapoints from aggregated, narrative from stubs,
         # sources chronologically ordered, source_report_ids union'd
         # across everything without duplicates.
@@ -439,12 +427,8 @@ class TestGenerateAndUpsertForCountryYear:
                     "supersededPrevious": False,
                 },
             ) as mock_upsert,
-            patches["generate_ai_summary"],
-            patches["generate_context_risks"],
-            patches["generate_hazards_and_vulnerabilities"],
-            patches["generate_displacement_narrative"],
-            patches["generate_all_sectors"],
-            patches["generate_scenarios"],
+            patches["build_leaf_components"],
+            patches["ai_summary_fanin"],
             patches["get_analysis"],
             patches["enqueue_translation"],
         ):
@@ -456,23 +440,26 @@ class TestGenerateAndUpsertForCountryYear:
         mock_upsert.assert_called_once()
         kwargs = mock_upsert.call_args.kwargs
 
-        # 1. All 8 component keys present in payload. `changes` is always
+        # 1. All component keys present in payload. `changes` is always
         # present but stays empty here: clear_api is mocked out, so the
         # comparison lookup finds nothing to diff against.
         payload = kwargs["data"]
         assert set(payload.keys()) == {
             "datapoints", "ai_summary", "context_risks",
-            "hazards_and_vulnerabilities", "displacement", "sectors", "sources",
-            "changes", "scenarios",
+            "hazards_and_vulnerabilities", "displacement", "humanitarian_access",
+            "sectors", "sources", "changes", "scenarios", "evidence_index",
         }
 
         # 2. Datapoints hoisted correctly.
         assert payload["datapoints"]["population_displaced"]["value"] == 6_500_000.0
         assert payload["datapoints"]["envelope"]["report_count"] == 10
 
-        # 3. Sources chronological (r-2 July → r-3 April → r-1 January).
+        # 3. Sources = the FULL union of every report any section cited, newest
+        # first — not just the aggregated bucket (#1067 fix). r-4 is cited only by
+        # the AI summary and now appears in Sources (previously it was dropped).
+        # Chronological: r-2 Jul → r-3 Apr → r-1 Jan → r-4 (no meta date, last).
         report_ids_in_order = [s["report_id"] for s in payload["sources"]["reports"]]
-        assert report_ids_in_order == ["r-2", "r-3", "r-1"]
+        assert report_ids_in_order == ["r-2", "r-3", "r-1", "r-4"]
 
         # 4. source_report_ids denormalised UNION, deduped first-seen.
         # aggregated contributes ["r-1", "r-2", "r-3"]; AI summary
@@ -512,12 +499,8 @@ class TestGenerateAndUpsertForCountryYear:
                 "clear_pipeline.defs.situation.generate.clear_api.upsert_analysis",
                 side_effect=ClearApiError("400 bad request"),
             ),
-            patches["generate_ai_summary"],
-            patches["generate_context_risks"],
-            patches["generate_hazards_and_vulnerabilities"],
-            patches["generate_displacement_narrative"],
-            patches["generate_all_sectors"],
-            patches["generate_scenarios"],
+            patches["build_leaf_components"],
+            patches["ai_summary_fanin"],
             patches["get_analysis"],
             patches["enqueue_translation"],
         ):

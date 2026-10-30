@@ -57,11 +57,16 @@ class RAGContext:
 def fetch_rag_context(
     *,
     query: str,
-    limit: int = 10,
+    limit: int = 20,
     filters: dict[str, Any] | None = None,
     mode: str | None = None,
 ) -> RAGContext:
     """Run one hybrid dense+BM25 search and package the hits.
+
+    ``mode`` is clear-api's ``KnowledgebaseSearchMode`` (ADR-0006). Situation
+    analysis passes ``"FRAME"`` only for the AI-summary recent window
+    (empty query); every question-driven search passes ``"TOPICAL"``.
+    ``None`` leaves the API on AUTO.
 
     ``filters`` is a ``KnowledgebaseFilters`` dict built by
     ``situation/frame.build_rag_filters`` — it already carries the frame's scope,

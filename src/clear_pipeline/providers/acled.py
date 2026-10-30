@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import redis
 
+from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.providers.signal import enrich_with_geoparser
 from clear_pipeline.signals.config import settings
 
@@ -220,6 +221,12 @@ def _fetch_for_country(
     url = f"{settings.acled_base_url}/api/acled/read"
     all_events: list[dict] = []
     page = 0
+    # Cursor pagination: ACLED retired the `page` parameter on 2026-10 ("The page
+    # parameter is no longer supported … pass the next_cursor value from the
+    # previous response"). We omit `cursor` on the first request and send the
+    # previous response's next_cursor after that.
+    cursor: str | None = None
+    MAX_PAGES = 100  # Safety cap: 100 × 5000 = 500k events per country per fetch.
 
     logger.info(
         "[ACLED] Fetching events for country=%s date_range=%s|%s url=%s",
@@ -227,7 +234,7 @@ def _fetch_for_country(
     )
 
     with httpx.Client(cookies=cookies, timeout=60) as client:
-        while page < 20:  # Safety cap: 20 pages × 5000 = 100k events
+        while page < MAX_PAGES:
             page += 1
             params = {
                 "country": country,
@@ -235,10 +242,11 @@ def _fetch_for_country(
                 "event_date_where": "BETWEEN",
                 "_format": "json",
                 "limit": 5000,
-                "page": page,
             }
+            if cursor:
+                params["cursor"] = cursor
 
-            logger.info("[ACLED] GET page=%d params=%s", page, params)
+            logger.info("[ACLED] GET page=%d cursor=%s params=%s", page, cursor or "<none>", params)
 
             try:
                 resp = client.get(url, params=params)
@@ -289,8 +297,19 @@ def _fetch_for_country(
 
             all_events.extend(events)
 
-            if len(events) < 5000:
+            # Advance by cursor: next_cursor is in the JSON body for _format=json
+            # (and the X-Next-Cursor header for CSV). Its absence means the last page.
+            next_cursor = data.get("next_cursor") if isinstance(data, dict) else None
+            next_cursor = next_cursor or resp.headers.get("X-Next-Cursor")
+            if not next_cursor:
                 break
+            cursor = next_cursor
+        else:
+            # Loop exited on the safety cap rather than a break — more pages remain.
+            logger.warning(
+                "[ACLED] hit MAX_PAGES=%d for %s with a next_cursor still present — "
+                "results may be truncated for this window", MAX_PAGES, country,
+            )
 
     logger.info("[ACLED] Total fetched %d events for %s across %d pages", len(all_events), country, page)
     return all_events
@@ -431,5 +450,16 @@ def build_acled_signal_input(event: dict, source_id: str, *, promote: bool = Tru
         promote=promote,
         log_tag=f"acled:{event.get('acled_id')}",
     )
+
+    # Unified LLM extraction: severity (LLM-primary — the fatalities-threshold
+    # value above stays as a fallback if the model fails) plus the structured
+    # event fields. 1 signal -> 1 event (primary object).
+    extracted = extract_event(
+        title=event.get("title"),
+        description=event.get("description"),
+        log_tag=f"acled:{event.get('acled_id')}",
+    )
+    if extracted is not None:
+        input_data.update(extracted_signal_fields(extracted))
 
     return input_data

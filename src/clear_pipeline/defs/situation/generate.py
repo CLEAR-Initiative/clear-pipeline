@@ -17,7 +17,7 @@ calendar year. This asset:
   5. Upserts one row per country via `upsertSituationAnalysis`
      (bitemporal supersede + insert on the clear-api side).
 
-Cost: ~10 LLM calls per country-year (4 narrative + 6 sector). Runs
+Cost: ~15 LLM calls per country-year (5 narrative + 10 sector). Runs
 downstream of `reliefweb_weekly_datapoint_aggregations` so the numbers
 reflect this week's freshly-recomputed aggregates, and of
 `reliefweb_weekly_knowledgebase_upsert` so the narrative is grounded in
@@ -34,13 +34,6 @@ import dagster as dg
 from dagster import AssetExecutionContext
 from dotenv import load_dotenv
 
-from clear_pipeline.defs.situation.narrative import (
-    generate_ai_summary,
-    generate_context_risks,
-    generate_displacement_narrative,
-    generate_hazards_and_vulnerabilities,
-    generate_scenarios,
-)
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
@@ -50,7 +43,10 @@ from clear_pipeline.defs.situation.frame import (
     build_rag_filters,
     country_frame,
 )
-from clear_pipeline.defs.situation.sectors import generate_all_sectors
+from clear_pipeline.defs.situation.selective import (
+    build_leaf_components,
+    generate_ai_summary_fanin,
+)
 from clear_pipeline.defs.situation.schemas import (
     SCHEMA_VERSION,
     Datapoints,
@@ -343,6 +339,7 @@ def _fetch_report_meta(report_ids: list[str]) -> dict[str, dict[str, Any]]:
 _CR_DOMAINS = (
     "demographics", "political", "economy", "socio_culture",
     "security", "legal_policy", "infrastructure", "environment",
+    "humanitarian_coordination",
 )
 _SECTOR_CONTENT_FIELDS = (
     "impact", "humanitarian_conditions", "vulnerable_sections",
@@ -352,7 +349,8 @@ _SECTOR_CONTENT_FIELDS = (
 
 def _log_component_summary(
     log, country_name: str, period_label: str, *,
-    ai_summary, context_risks, hazards, displacement, sectors,
+    ai_summary, context_risks, hazards, displacement, humanitarian_access,
+    sectors,
 ) -> bool:
     """Emit a single INFO line stating which narrative/sector components ended up
     populated vs empty — the fast signal for an all-null generation run (the exact
@@ -367,6 +365,10 @@ def _log_component_summary(
     ))
     hz = bool(hazards and (hazards.hazards or hazards.vulnerabilities))
     dp = bool(displacement and (displacement.push_factors or displacement.return_intention))
+    ha = bool(
+        humanitarian_access
+        and (humanitarian_access.barriers or humanitarian_access.constraints)
+    )
     sec_total = sec_pop = 0
     if sectors is not None:
         for name in type(sectors).model_fields:
@@ -376,15 +378,16 @@ def _log_component_summary(
             sec_total += 1
             if s.severity is not None or any(getattr(s, f, None) for f in _SECTOR_CONTENT_FIELDS):
                 sec_pop += 1
-    all_empty = not (ai or cr or hz or dp or sec_pop)
+    all_empty = not (ai or cr or hz or dp or ha or sec_pop)
     log.log(
         logging.WARNING if all_empty else logging.INFO,
         "[situation] %s (%s) component summary%s: ai_summary=%s context_risks=%s "
-        "hazards=%s displacement=%s sectors=%d/%d",
+        "hazards=%s displacement=%s humanitarian_access=%s sectors=%d/%d",
         country_name, period_label,
         " — ALL EMPTY (likely RAG returned no hits; check clear-api EMBEDDING_* + logs)" if all_empty else "",
         "ok" if ai else "empty", "ok" if cr else "empty",
-        "ok" if hz else "empty", "ok" if dp else "empty", sec_pop, sec_total,
+        "ok" if hz else "empty", "ok" if dp else "empty",
+        "ok" if ha else "empty", sec_pop, sec_total,
     )
     return all_empty
 
@@ -422,8 +425,11 @@ def generate_and_upsert_for_frame(
 
     datapoints_component = _build_datapoints(aggregated)
     deterministic_source_ids = (aggregated or {}).get("contributingReportIds") or []
-    report_meta = _fetch_report_meta(deterministic_source_ids)
-    sources_component = _build_sources(deterministic_source_ids, report_meta)
+    # The `sources` tab is rebuilt from the FULL union of every report/incident
+    # that fed ANY section once that union is known (see below). Built from the
+    # aggregated bucket alone it was empty for a frame/narrative analysis with no
+    # bucket — even though sections cited many reports. Start empty here.
+    sources_component = _build_sources([], {})
 
     # Stable frame key for the Anthropic prompt cache — byte-identical across a
     # run's component calls so calls 2..N read from cache.
@@ -438,6 +444,9 @@ def generate_and_upsert_for_frame(
     # row and is allowed to supersede. Only a normal run that produces nothing sets
     # it True, which gates out the upsert below.
     all_empty = False
+    # Prior analysis row; set in the generation branch below and reused by the
+    # change-note diff. Stays None on the deterministic-only (skip) path.
+    prior: dict | None = None
     if skip:
         log.warning(
             "[analysis] %s: %s set - shipping deterministic-only row",
@@ -447,6 +456,7 @@ def generate_and_upsert_for_frame(
         context_risks_component = None
         hazards_component = None
         displacement_component = None
+        humanitarian_access_component = None
         sectors_component = None
         scenarios_component = None
         generated_by_model = f"deterministic:{SCHEMA_VERSION}"
@@ -456,30 +466,55 @@ def generate_and_upsert_for_frame(
             "[analysis] %s (%s): generating LLM components (provider=%s model=%s)",
             scope_label, period_label, llm.provider_name, llm.model,
         )
-        ai_summary_component = generate_ai_summary(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
+        # Prior analysis for this frame. Read ONCE here and reused by BOTH the
+        # leaf-level selective regeneration (#1067) and the change-note diff
+        # below. Always fetched — even when forcing — so a forced full regen
+        # still gets "what changed" notes; `force` only withholds the prior from
+        # the selective builder (so every leaf regenerates).
+        prior = None
+        try:
+            prior = clear_api.get_analysis(
+                schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
+            )
+        except Exception as exc:  # noqa: BLE001 — a fetch hiccup → safe full regen
+            log.warning(
+                "[analysis] %s: prior-analysis fetch failed (%s) — full regen",
+                scope_label, exc,
+            )
+        prior_data = prior.get("data") if prior else None
+
+        leaf_result = build_leaf_components(
+            llm, prior_payload=None if force else prior_data, country_name=scope_label,
+            period_label=period_label, aggregated=aggregated, cache_key=cache_key,
+            rag_filters=rag_filters, log=log,
         )
-        context_risks_component = generate_context_risks(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        hazards_component = generate_hazards_and_vulnerabilities(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        displacement_component = generate_displacement_narrative(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        sectors_component = generate_all_sectors(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
-        scenarios_component = generate_scenarios(
-            llm, country_name=scope_label, period_label=period_label,
-            aggregated=aggregated, cache_key=cache_key, rag_filters=rag_filters,
-        )
+        context_risks_component = leaf_result.context_risks
+        hazards_component = leaf_result.hazards_and_vulnerabilities
+        displacement_component = leaf_result.displacement
+        humanitarian_access_component = leaf_result.humanitarian_access
+        sectors_component = leaf_result.sectors
+        scenarios_component = leaf_result.scenarios
+
+        # ai_summary is a FAN-IN over the leaves: regenerate it whenever any leaf
+        # changed (or there's no usable prior summary); otherwise keep the prior.
+        prior_summary = None
+        if prior_data and not force:
+            try:
+                prior_summary = SituationAnalysisPayload.model_validate(prior_data).ai_summary
+            except Exception:  # noqa: BLE001 — unparseable prior → regenerate the summary
+                prior_summary = None
+        # Regenerate the summary when a leaf changed, or there's no usable prior
+        # summary (missing, or empty text — don't reuse a blank from a prior
+        # failure; retry it).
+        if leaf_result.any_regenerated or prior_summary is None or not prior_summary.text:
+            ai_summary_component = generate_ai_summary_fanin(
+                llm, country_name=scope_label, period_label=period_label,
+                result=leaf_result, cache_key=cache_key,
+            )
+        else:
+            ai_summary_component = prior_summary
+            log.info("[analysis] %s: no leaf changed — reusing prior ai_summary", scope_label)
+
         generated_by_model = llm.model
         # Populated-vs-empty summary at INFO — makes an all-null run (e.g. RAG
         # returning nothing because clear-api's EMBEDDING_* is misconfigured)
@@ -490,6 +525,7 @@ def generate_and_upsert_for_frame(
             context_risks=context_risks_component,
             hazards=hazards_component,
             displacement=displacement_component,
+            humanitarian_access=humanitarian_access_component,
             sectors=sectors_component,
         )
 
@@ -519,60 +555,95 @@ def generate_and_upsert_for_frame(
         payload_kwargs["hazards_and_vulnerabilities"] = hazards_component
     if displacement_component is not None:
         payload_kwargs["displacement"] = displacement_component
+    if humanitarian_access_component is not None:
+        payload_kwargs["humanitarian_access"] = humanitarian_access_component
     if sectors_component is not None:
         payload_kwargs["sectors"] = sectors_component
     if scenarios_component is not None:
         payload_kwargs["scenarios"] = scenarios_component
+    if not skip:
+        # Per-leaf retrieval fingerprint for the NEXT run's selective diff (#1067).
+        payload_kwargs["evidence_index"] = leaf_result.evidence_index
     payload = SituationAnalysisPayload(**payload_kwargs)
 
     # "What changed" vs the frame's PRIOR GENERATION (ADR-0007 §8): the current
-    # `analyses` row for this frame IS the prior generation — read here, before
-    # the upsert below supersedes it. Needs the LLM, so skipped on
-    # deterministic-only rows. Best-effort: change notes never block the upsert.
-    if not skip:
+    # `analyses` row for this frame IS the prior generation — reuse the `prior`
+    # already fetched above (before the upsert supersedes it). Needs the LLM, so
+    # skipped on deterministic-only rows. Best-effort: never blocks the upsert.
+    if not skip and prior and prior.get("data"):
         try:
-            prior = clear_api.get_analysis(
-                schema_version=SCHEMA_VERSION, **frame.upsert_kwargs(),
+            payload.changes = generate_changes(
+                llm,
+                prior_payload=prior["data"],
+                new_payload=payload.model_dump(mode="json"),
+                basis="previous_generation",
+                prior_generated_at=prior.get("generatedAt") or "",
+                compared_to_window_start=frame.window_start,
+                compared_to_label=period_label,
+                cache_key=cache_key,
             )
-            if prior and prior.get("data"):
-                payload.changes = generate_changes(
-                    llm,
-                    prior_payload=prior["data"],
-                    new_payload=payload.model_dump(mode="json"),
-                    basis="previous_generation",
-                    prior_generated_at=prior.get("generatedAt") or "",
-                    compared_to_window_start=frame.window_start,
-                    compared_to_label=period_label,
-                    cache_key=cache_key,
-                )
-                log.info(
-                    "[analysis] %s: change notes vs prior generation, %d section(s)",
-                    scope_label, len(payload.changes.notes),
-                )
+            log.info(
+                "[analysis] %s: change notes vs prior generation, %d section(s)",
+                scope_label, len(payload.changes.notes),
+            )
         except Exception as exc:  # noqa: BLE001 - change notes never block the upsert
             log.warning(
                 "[analysis] %s: change-note generation failed (%s); shipping without",
                 scope_label, exc,
             )
 
+    def _ids_from_bullets(bullets: list[Any] | None) -> list[str]:
+        out: list[str] = []
+        for b in bullets or []:
+            out.extend(getattr(b, "source_report_ids", None) or [])
+        return out
+
+    context_source_ids: list[str] = []
+    if context_risks_component is not None:
+        for domain_name in type(context_risks_component).model_fields:
+            domain = getattr(context_risks_component, domain_name)
+            context_source_ids.extend(domain.source_report_ids)
+
+    hazards_source_ids: list[str] = []
+    if hazards_component is not None:
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.hazards))
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.vulnerabilities))
+
+    displacement_source_ids: list[str] = []
+    if displacement_component is not None:
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.push_factors))
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.return_intention))
+
+    ha_source_ids: list[str] = []
+    if humanitarian_access_component is not None:
+        ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.barriers))
+        ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.constraints))
+
     sector_source_ids: list[str] = []
     if sectors_component is not None:
-        for sector_name in (
-            "education", "food_security", "health",
-            "shelter", "wash", "protection",
-        ):
+        for sector_name in type(sectors_component).model_fields:
             sector = getattr(sectors_component, sector_name)
             sector_source_ids.extend(sector.source_report_ids)
 
     all_source_ids: list[str] = list(dict.fromkeys([
         *deterministic_source_ids,
         *(ai_summary_component.source_report_ids if ai_summary_component else []),
-        *(context_risks_component.demographics.source_report_ids if context_risks_component else []),
-        *(hazards_component.hazards[0].source_report_ids if hazards_component and hazards_component.hazards else []),
-        *(displacement_component.push_factors[0].source_report_ids if displacement_component and displacement_component.push_factors else []),
+        *context_source_ids,
+        *hazards_source_ids,
+        *displacement_source_ids,
+        *ha_source_ids,
         *sector_source_ids,
         *(scenarios_component.source_report_ids if scenarios_component else []),
     ]))
+
+    # Rebuild the Sources tab from that full union — every report/incident that
+    # fed any section, not just the datapoint bucket. Incidents (event: ids) are
+    # included with a graceful title fallback (no report_datapoints row to fetch),
+    # so meta is fetched only for report-tier ids. model_dump below picks it up.
+    payload.sources = _build_sources(
+        all_source_ids,
+        _fetch_report_meta([rid for rid in all_source_ids if not rid.startswith("event:")]),
+    )
 
     try:
         result = clear_api.upsert_analysis(
