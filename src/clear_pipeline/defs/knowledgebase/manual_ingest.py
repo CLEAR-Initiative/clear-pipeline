@@ -596,6 +596,12 @@ def manual_document_extract_datapoints(
             s3=s3,
             s3_bucket=bucket,
             log_context=context.log,
+            # A human-uploaded PDF has no ReliefWeb `report.source`: identify its
+            # publisher from the text so it gets the same report-level source
+            # attribution a ReliefWeb report does, and grade that source trusted
+            # (max reliability) — a team member deliberately uploaded it.
+            identify_missing_publisher=True,
+            trust_publisher=True,
         )
     except _NothingExtracted as exc:
         # Every domain failed — probably a scanned PDF with no useful

@@ -78,8 +78,8 @@ query ResolveKnowledgebaseLocation($pcode: String, $name: String, $adminLevel: I
 """
 
 _RESOLVE_DATA_SOURCE = """
-mutation ResolveDataSource($name: String!, $homepage: String) {
-  resolveDataSource(name: $name, homepage: $homepage)
+mutation ResolveDataSource($name: String!, $homepage: String, $markTrusted: Boolean) {
+  resolveDataSource(name: $name, homepage: $homepage, markTrusted: $markTrusted)
 }
 """
 
@@ -498,7 +498,9 @@ def resolve_location(
     return data.get("resolveKnowledgebaseLocation")
 
 
-def resolve_data_source(*, name: str, homepage: str | None = None) -> str | None:
+def resolve_data_source(
+    *, name: str, homepage: str | None = None, mark_trusted: bool = False,
+) -> str | None:
     """Resolve an organisation/source name to a ``data_sources`` id via
     clear-api's ``resolveDataSource`` mutation, creating an ungraded
     ``organisation`` row on miss.
@@ -506,12 +508,18 @@ def resolve_data_source(*, name: str, homepage: str | None = None) -> str | None
     Used for both a figure's cited source (``source_name`` -> ``source_id``)
     and a report's publisher (ReliefWeb ``report.source`` -> the report's
     ``sourceId``). Returns the id, or ``None`` on empty input. See ADR-0004.
+
+    ``mark_trusted`` grades the resolved source at the maximum reliability (4),
+    overwriting any existing grade. Reserved for the publisher of a
+    human-uploaded document — a team member deliberately uploaded it, so the
+    source is trusted. Leave it False for every automated feed (ReliefWeb
+    publishers and LLM-cited sources keep their expert-maintained grades).
     """
     if not name or not name.strip():
         return None
     data = _execute(
         _RESOLVE_DATA_SOURCE,
-        {"name": name.strip(), "homepage": homepage},
+        {"name": name.strip(), "homepage": homepage, "markTrusted": mark_trusted},
     )
     return data.get("resolveDataSource")
 
