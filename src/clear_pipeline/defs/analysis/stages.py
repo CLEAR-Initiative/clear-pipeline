@@ -127,7 +127,14 @@ def _resolve_frame_aggregated(frame: Frame, *, effective_end: str | None = None)
     return combine_aggregated_buckets(buckets)
 
 
-def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = None, force: bool = False):
+def _run_frame_generation(
+    context,
+    frame: Frame,
+    *,
+    effective_end: str | None = None,
+    force: bool = False,
+    boost_team_uploads_id: str | None = None,
+):
     """Shared core of both analysis drains (on-demand + automation): scope
     retrieval + structured datapoints to the frame and (re)generate its analysis,
     returning the ``generate_and_upsert_for_frame`` result (``None`` = all-empty).
@@ -138,11 +145,17 @@ def _run_frame_generation(context, frame: Frame, *, effective_end: str | None = 
     it ``None`` (the frame carries a fixed ``window_end``). The human period label
     is derived from the frame itself, so a rolling frame reads "… to present".
     ``force`` bypasses clear-api's 24h regeneration floor (ADR-0008).
+    ``boost_team_uploads_id`` (when set) promotes that team's own uploaded
+    documents in the retrieval ranking, so a team's manual uploads carry more
+    weight in its own analysis.
 
     Raises on generation failure — the caller owns the outcome/marking policy
     (terminal vs. retry), which differs between the two drains.
     """
-    rag_filters = build_rag_filters(frame, include_time_range=True, effective_end=effective_end)
+    rag_filters = build_rag_filters(
+        frame, include_time_range=True, effective_end=effective_end,
+        boost_team_uploads_id=boost_team_uploads_id,
+    )
     aggregated = _resolve_frame_aggregated(frame, effective_end=effective_end)
     return generate_and_upsert_for_frame(
         frame=frame,
@@ -229,7 +242,12 @@ def _process_one_request(context, req: dict) -> str:
     # skipped. A fixed window needs no effective_end.
     effective_end = None if frame.window_end else now.isoformat()
     try:
-        result = _run_frame_generation(context, frame, effective_end=effective_end, force=force)
+        # A team-scoped request boosts that team's own uploaded documents in
+        # retrieval (team-less platform requests pass None → no boost).
+        result = _run_frame_generation(
+            context, frame, effective_end=effective_end, force=force,
+            boost_team_uploads_id=req.get("teamId"),
+        )
     except clear_api.ClearApiError as exc:
         # Non-retryable (bad frame / rejected payload) — fail terminally.
         context.log.error("[drain_analysis] request %s rejected (non-retryable): %s", request_id, exc)

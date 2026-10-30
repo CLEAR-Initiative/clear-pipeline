@@ -112,6 +112,17 @@ class TestBuildRagFilters:
         f = Frame.build(window_start="2026-01-01")
         assert build_rag_filters(f) is None
 
+    def test_boost_team_uploads_id_sets_ranking_hint(self):
+        f = Frame.build(window_start="2026-01-01", location_ids=["sudan-a0"])
+        filters = build_rag_filters(f, boost_team_uploads_id="team-a")
+        assert filters["boostTeamUploadsId"] == "team-a"
+        # It's a ranking hint, not an exclusion — the team filter is NOT set.
+        assert "teamId" not in filters
+
+    def test_boost_team_uploads_id_omitted_when_none(self):
+        f = Frame.build(window_start="2026-01-01", location_ids=["sudan-a0"])
+        assert "boostTeamUploadsId" not in build_rag_filters(f)
+
 
 LOCS = {
     "sdn": {"id": "sdn", "name": "Sudan", "parent": None},

@@ -100,6 +100,7 @@ def build_rag_filters(
     country_scope_id: str | None = None,
     include_time_range: bool = False,
     effective_end: str | None = None,
+    boost_team_uploads_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Turn a frame into a ``KnowledgebaseFilters`` dict for
     ``searchKnowledgebase``.
@@ -146,6 +147,12 @@ def build_rag_filters(
         if end:
             time_range["to"] = end
         filters["timeRange"] = time_range
+    # Ranking hint (not an exclusion): promote this team's own uploaded documents
+    # in the topical fusion so a team's manual uploads carry more weight in its
+    # own analysis. Only the analysis drains pass it, and only when a single team
+    # owns the frame.
+    if boost_team_uploads_id:
+        filters["boostTeamUploadsId"] = boost_team_uploads_id
     return filters or None
 
 
