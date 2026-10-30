@@ -18,7 +18,6 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
-  │ dtm        │  True   │  False  │ ingest asset + poll sensor; NOT grouped     │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
@@ -33,9 +32,8 @@ capability flags:
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
   ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
-- **drained** — its NEW signals are processed by the classify/group stage.
-  ``dtm`` is the exception: a bulletin can span many districts, so its signals
-  are ingested but not grouped into events (see ``DRAINED_SOURCES``).
+- **drained** — its NEW signals are processed by the classify/group stage
+  (see ``DRAINED_SOURCES``). Every source is drained.
 
 Connectors reuse the consolidated ``clear_pipeline.providers`` modules
 (dataminr, acled, gdacs, darfur24, signal, …) so every source shares one
@@ -54,7 +52,6 @@ from clear_pipeline.providers import (
     darfur24,
     dataminr,
     gdacs,
-    iom_dtm_flash_alerts,
 )
 from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
@@ -526,98 +523,6 @@ class SudanWitnessConnector:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# IOM DTM Flash Alerts — Sudan displacement narrative bulletins
-# ──────────────────────────────────────────────────────────────────────────────
-class DTMFlashAlertConnector:
-    """No server-side filter or pagination — one poll fetches the entire
-    export and filters to configured countries client-side; dedup is a plain
-    seen-set (no revision handling).
-
-    ``drained = False``: district+type grouping isn't a good fit for this
-    source yet (a single bulletin can span many districts), so signals are
-    ingested but not grouped into events for now."""
-
-    source = settings.iom_dtm_flash_alerts_source_name
-    polled = True
-    drained = False
-    poll_interval_minutes = settings.iom_dtm_flash_alerts_poll_interval_minutes
-
-    def __init__(self) -> None:
-        self._location_ids: dict[str, str | None] = {}
-
-    def _resolve_location_id(self, country_name: str) -> str | None:
-        """L0 location id for a Flash Alert's field_country1 (cached per
-        country, best-effort — None on failure so a signal is never dropped
-        over a location lookup)."""
-        if country_name in self._location_ids:
-            return self._location_ids[country_name]
-
-        location_id = None
-        try:
-            for loc in get_locations_by_level(0):
-                if loc["name"] == country_name:
-                    location_id = loc["id"]
-                    break
-        except Exception:  # noqa: BLE001 — location is best-effort
-            location_id = None
-
-        self._location_ids[country_name] = location_id
-        return location_id
-
-    def poll(self, since: datetime | None) -> list[Any]:
-        return iom_dtm_flash_alerts.fetch_iom_dtm_flash_alerts(since=since)
-
-    def external_id(self, record: Any) -> str:
-        return record["external_id"]
-
-    def published_at(self, record: Any) -> str:
-        return record.get("field_published_date") or ""
-
-    def raw_bytes(self, record: Any) -> bytes:
-        # Bronze must stay raw — send the untouched original, not "record"
-        # (which also carries decoded fields, meant for Postgres instead).
-        return json.dumps(record["raw"]).encode("utf-8")
-
-    def api_source_id(self) -> str:
-        return get_source_id_by_name(settings.iom_dtm_flash_alerts_source_name)
-
-    def to_signal_input(self, record: Any, api_source_id: str) -> dict:
-        location_id = self._resolve_location_id(record["field_country1"])
-        return iom_dtm_flash_alerts.build_iom_dtm_flash_alert_signal_input(
-            record, api_source_id, location_id
-        )
-
-    def last_synced(self) -> datetime | None:
-        return iom_dtm_flash_alerts.get_last_synced()
-
-    def set_watermark(self, ts: datetime) -> None:
-        iom_dtm_flash_alerts.set_last_synced(ts)
-
-    def post_create(self, record: Any) -> None:
-        iom_dtm_flash_alerts.mark_seen(record["external_id"])
-
-    def to_content_update_input(self, input_data: dict, created: dict) -> dict | None:
-        return None  # Flash Alert bulletins are never revised in place
-
-    def parse(self, raw: bytes) -> dict:
-        return json.loads(raw)
-
-    def project(self, record: dict, created: dict) -> SignalView:
-        # `record` is the pristine S3 blob — re-derive decoded fields + external_id.
-        parsed = iom_dtm_flash_alerts.parse_record(record) or record
-        return SignalView(
-            external_id=parsed.get("external_id") or "",
-            title=parsed.get("title") or "",
-            timestamp=created.get("publishedAt")
-            or parsed.get("field_published_date")
-            or "",
-            description=parsed.get("field_summary"),
-            location_name=parsed.get("field_country1") or _first_location_name(created),
-            url=parsed.get("field_report_file"),
-        )
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Manual — analyst-created signals (NOT polled, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class ManualConnector:
@@ -709,7 +614,6 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     SudanWitnessConnector(),
-    DTMFlashAlertConnector(),
     *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]
