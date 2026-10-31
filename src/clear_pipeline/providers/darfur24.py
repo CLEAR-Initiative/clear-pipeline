@@ -236,9 +236,10 @@ def build_darfur24_signal_input(article: dict, source_id: str, location_id: str 
     """Convert a parsed darfur24 article into a CLEAR CreateSignalInput dict.
 
     News articles carry no structured casualty or coordinate data — unlike
-    ACLED/GDACS we deliberately set none of those. Location is the country
-    L0 (see `darfur24_default_country`); finer-grained resolution is the
-    classification follow-up, not this tracer.
+    ACLED/GDACS we deliberately set none of those. ``location_id``, when
+    given, pins the signal at creation; the production connector passes None
+    and the drain resolves the article's location from its text
+    (``Darfur24Connector.locate``), scoped to `darfur24_default_country`.
     """
     input_data = {
         "sourceId": source_id,

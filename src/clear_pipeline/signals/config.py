@@ -52,14 +52,15 @@ class Settings(BaseSettings):
     darfur24_feed_urls: str = "https://darfur24.com/en/feed/"
     darfur24_poll_interval_minutes: int = 30
     darfur24_source_name: str = "darfur24"
-    # Country whose L0 location every darfur24 signal is attached to.
-    # News articles carry no structured coordinates, but a signal without a
-    # location is invisible in every country-scoped UI view (signalsPage
-    # filters by location descendants) — so we pin signals to the outlet's
-    # deployment country and leave finer-grained resolution to the
-    # classification follow-up. Must match a level-0 location `name` in the
-    # CLEAR API (expo-385).
+    # Country every darfur24 article is about. The drain resolves each
+    # article's location from its text, scoped to this country's states and
+    # districts (``Darfur24Connector.locate``), and falls back to the country
+    # itself: a signal without a location is invisible in every country-scoped
+    # UI view (expo-385). Must match a level-0 location `name` in the CLEAR API.
     darfur24_default_country: str = "Sudan"
+    # ISO2 of that country. The place Claude names in an article is geocoded
+    # within it (gazetteer, then LocationIQ) to reach a point; empty disables.
+    darfur24_country_code: str = "sd"
 
     # IDMC IDU (Internal Displacement Updates, via the Helix Tools API). The
     # endpoint requires a registered `client_id` (query param) — request one

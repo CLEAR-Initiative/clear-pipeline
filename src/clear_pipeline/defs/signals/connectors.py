@@ -426,8 +426,28 @@ class Darfur24Connector:
         return get_source_id_by_name(settings.darfur24_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
-        return darfur24.build_darfur24_signal_input(
-            record, api_source_id, self._resolve_location_id()
+        # No location at creation: the drain's ``locate`` places the article
+        # from its text before grouping and falls back to the country itself,
+        # so a darfur24 signal never ends up location-less (expo-385).
+        return darfur24.build_darfur24_signal_input(record, api_source_id, None)
+
+    def locate(self, view: SignalView) -> str | None:
+        """Every article on this feed is about Sudan, but carries no
+        coordinates: resolve the most specific state or district Claude can
+        match in the text, geocode the place it names to a point inside that
+        area, else Sudan itself. Until 31 Oct 2026 every darfur24 signal was
+        pinned to the country at creation, so none could join an event
+        (grouping keys on district)."""
+        return (
+            locate_in_country(
+                view.title,
+                view.description,
+                settings.darfur24_default_country,
+                country_code=settings.darfur24_country_code or None,
+            )
+            # None only when the country isn't a known level-0 location; keep
+            # the never-location-less guarantee on that path too.
+            or self._resolve_location_id()
         )
 
     def last_synced(self) -> datetime | None:
