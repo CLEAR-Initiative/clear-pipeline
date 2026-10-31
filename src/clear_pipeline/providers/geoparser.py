@@ -312,6 +312,14 @@ def _is_landmark(name: str) -> bool:
     return False
 
 
+def is_landmark_name(name: str) -> bool:
+    """Public form of `_is_landmark`: whether `name` ends with a known facility
+    suffix ("Um Dabakir power station", "Merowe Dam"). A facility is one site
+    by construction, which the locator relies on when Claude answers the
+    country for a post about one site with a wider impact."""
+    return _is_landmark(name.strip())
+
+
 def _is_disqualified(candidate: Candidate, text: str) -> bool:
     """True iff the text immediately before the candidate matches a
     disqualifying phrase. Checks up to 30 chars back from the candidate's
