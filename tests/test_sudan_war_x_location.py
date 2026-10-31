@@ -681,3 +681,37 @@ def test_the_gazetteer_client_drops_the_argument_on_an_older_clear_api():
     # One rejected attempt, then the argument isn't sent again in this process.
     assert ["withinLocationId" in v for v in calls] == [True, False, False]
 
+
+
+# ── incident site over impact area (location-v3) ─────────────────────────────
+
+def test_prompt_prefers_the_incident_site_over_the_impact_area():
+    assert location.LOCATION_PROMPT_VERSION == "location-v3"
+    assert "belongs to the site's district, not the country" in location.SYSTEM_PROMPT
+    assert "or the places named span several states, use the country-level Sudan entry" in location.SYSTEM_PROMPT
+
+
+def test_explicit_country_answer_with_a_facility_keeps_the_country():
+    # Separate strikes on facilities in different states: the answer carries
+    # one facility's name, so geocoding it would pin the whole report to that
+    # state and hide its scope from location filters (Greptile on PR #152).
+    patcher, _ = _llm_returning(location_type="general", location_id="sd", place_name="Merowe Dam")
+    with patcher, patch.object(location, "_geocode_within") as geocode:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd"
+    geocode.assert_not_called()
+
+
+def test_explicit_country_answer_with_a_town_keeps_the_country():
+    # Several incidents in several towns: one town's point must not pull the
+    # whole report into its district.
+    patcher, _ = _llm_returning(location_type="general", location_id="sd", place_name="Nyala")
+    with patcher, patch.object(location, "_geocode_within") as geocode:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd"
+    geocode.assert_not_called()
+
+
+def test_state_answer_with_a_facility_is_geocoded_inside_the_state():
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab power station")
+    with patcher, patch.object(location, "_geocode_within", return_value="sd-pt") as geocode:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-pt"
+    assert geocode.call_args.args[:2] == ("Al Dibab power station", "sd-wk")

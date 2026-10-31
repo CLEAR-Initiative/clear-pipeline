@@ -125,7 +125,7 @@ def resolve_country_only_location(name: str | None) -> str | None:
 
 
 # Bump whenever SYSTEM_PROMPT below changes (see CLASSIFY_PROMPT_VERSION for rationale).
-LOCATION_PROMPT_VERSION = "location-v2"
+LOCATION_PROMPT_VERSION = "location-v3"
 
 SYSTEM_PROMPT = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on Sudan.
 
@@ -145,7 +145,8 @@ IMPORTANT RULES:
 
 3. Match locations to the provided location list by name. Return the exact location ID from the list.
    - Prefer the most granular match (district > state > country)
-   - If a city, town, village or neighbourhood is mentioned, return the district that contains it, even when a state name appears first (as a headline, hashtag or dateline). Many districts share their main town's name (Kadugli, Tendalti, Shendi).
+   - If a city, town, village, neighbourhood or named facility is mentioned, return the district that contains it, even when a state name appears first (as a headline, hashtag or dateline). Many districts share their main town's name (Kadugli, Tendalti, Shendi).
+   - An incident at one site whose consequences reach several states (a strike on a power station that cuts electricity in four states) belongs to the site's district, not the country
    - Use a state only when no place inside it is named
    - If no specific location in Sudan is mentioned, or the places named span several states, use the country-level Sudan entry
 
@@ -282,7 +283,9 @@ def locate_in_country(
     (gazetteer, then LocationIQ) and, when the point falls inside the area
     Claude picked, promoted to an L4 point — which clear-api parents to its
     containing district, so a post Claude could only place in a state still
-    reaches district level.
+    reaches district level. When Claude answers the country itself, nothing is
+    geocoded: the post describes several places, and one place name (even a
+    facility's) says nothing about the others.
     """
     resolved = resolve_signal_location(title, description, None, country=country)
     matched_id = (
@@ -296,7 +299,9 @@ def locate_in_country(
         and place_name
         and area_id
         # Claude chose the country itself: the places span several states, so
-        # one town's point would pull the whole report into that district.
+        # one place's point would pull the whole report into its district. That
+        # holds for a facility too: a post about strikes on Nyala Airport and
+        # Merowe Dam names one of them as place_name and describes both states.
         # (No match at all still falls back to the country and is geocoded.)
         and not (matched_id and matched_id == country_id)
         and not _names_country_or_state(place_name, country)
