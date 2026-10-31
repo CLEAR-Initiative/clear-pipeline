@@ -691,13 +691,14 @@ def test_prompt_prefers_the_incident_site_over_the_impact_area():
     assert "or the places named span several states, use the country-level Sudan entry" in location.SYSTEM_PROMPT
 
 
-def test_explicit_country_answer_with_a_facility_is_still_geocoded():
-    # One site with a multi-state impact: Claude answered the country but
-    # named the facility, which is one place by construction.
-    patcher, _ = _llm_returning(location_type="general", location_id="sd", place_name="Um Dabakir power station")
-    with patcher, patch.object(location, "_geocode_within", return_value="sd-pt-umdabakir") as geocode:
-        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-pt-umdabakir"
-    assert geocode.call_args.args[:2] == ("Um Dabakir power station", "sd")
+def test_explicit_country_answer_with_a_facility_keeps_the_country():
+    # Separate strikes on facilities in different states: the answer carries
+    # one facility's name, so geocoding it would pin the whole report to that
+    # state and hide its scope from location filters (Greptile on PR #152).
+    patcher, _ = _llm_returning(location_type="general", location_id="sd", place_name="Merowe Dam")
+    with patcher, patch.object(location, "_geocode_within") as geocode:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd"
+    geocode.assert_not_called()
 
 
 def test_explicit_country_answer_with_a_town_keeps_the_country():

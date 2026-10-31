@@ -15,7 +15,6 @@ from clear_pipeline.providers.clear_api import (
 from clear_pipeline.providers.geoparser import (
     arabic_lookup_applies,
     geocode_place_name,
-    is_landmark_name,
     latin_name_key,
 )
 
@@ -284,9 +283,9 @@ def locate_in_country(
     (gazetteer, then LocationIQ) and, when the point falls inside the area
     Claude picked, promoted to an L4 point — which clear-api parents to its
     containing district, so a post Claude could only place in a state still
-    reaches district level. When Claude answers the country itself, only a
-    named facility is geocoded (anywhere in the country): a facility is one
-    site, while a list of towns is several incidents.
+    reaches district level. When Claude answers the country itself, nothing is
+    geocoded: the post describes several places, and one place name (even a
+    facility's) says nothing about the others.
     """
     resolved = resolve_signal_location(title, description, None, country=country)
     matched_id = (
@@ -299,12 +298,12 @@ def locate_in_country(
         country_code
         and place_name
         and area_id
-        # Claude chose the country itself: usually separate incidents in several
-        # states, where one town's point would pull the whole report into that
-        # district. A named facility (a power station, a dam, an airport) is one
-        # site by construction, so it is still geocoded, anywhere in the country.
+        # Claude chose the country itself: the places span several states, so
+        # one place's point would pull the whole report into its district. That
+        # holds for a facility too: a post about strikes on Nyala Airport and
+        # Merowe Dam names one of them as place_name and describes both states.
         # (No match at all still falls back to the country and is geocoded.)
-        and (not (matched_id and matched_id == country_id) or is_landmark_name(place_name))
+        and not (matched_id and matched_id == country_id)
         and not _names_country_or_state(place_name, country)
     ):
         point_id = _geocode_within(
