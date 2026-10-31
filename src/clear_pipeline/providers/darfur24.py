@@ -232,13 +232,22 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("darfur24:last_synced", ts.isoformat())
 
 
+def article_text(article: dict) -> str | None:
+    """The article's full text with the HTML stripped, for location resolution.
+    ``article["description"]`` is cut to 500 characters for display; the uncut
+    HTML stays in ``article["raw"]["description"]``."""
+    raw = (article.get("raw") or {}).get("description") or ""
+    return _strip_html(raw) or None if raw else None
+
+
 def build_darfur24_signal_input(article: dict, source_id: str, location_id: str | None) -> dict:
     """Convert a parsed darfur24 article into a CLEAR CreateSignalInput dict.
 
     News articles carry no structured casualty or coordinate data — unlike
-    ACLED/GDACS we deliberately set none of those. Location is the country
-    L0 (see `darfur24_default_country`); finer-grained resolution is the
-    classification follow-up, not this tracer.
+    ACLED/GDACS we deliberately set none of those. ``location_id``, when
+    given, pins the signal at creation; the production connector passes None
+    and the drain resolves the article's location from its text
+    (``Darfur24Connector.locate``), scoped to `darfur24_default_country`.
     """
     input_data = {
         "sourceId": source_id,
