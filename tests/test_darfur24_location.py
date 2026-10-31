@@ -94,3 +94,33 @@ def test_drain_leaves_an_already_placed_article_alone():
         assert stages._locate_if_unplaced(connector, _view(), placed) is placed
     locate.assert_not_called()
     update.assert_not_called()
+
+
+def test_locate_falls_back_to_the_country_when_the_lookup_raises():
+    # A cold location cache or a model outage must not leave the article NEW
+    # until the drain marks it FAILED: the country pin is the fallback.
+    connector = Darfur24Connector()
+    with (
+        patch.object(connectors, "locate_in_country", side_effect=RuntimeError("clear-api down")),
+        patch.object(connector, "_resolve_location_id", return_value="sd"),
+    ):
+        assert connector.locate(_view()) == "sd"
+
+
+def test_locate_reads_the_uncut_article_text():
+    # The display description is cut at 500 characters; a district named only
+    # later in the article must still reach the locator.
+    tail = "Residents said the shelling came from positions outside Kutum."
+    html = "<p>" + ("Reports from North Darfur describe a long day of fighting. " * 12) + tail + "</p>"
+    article = {**ARTICLE, "description": darfur24._strip_html(html)[:500], "raw": {"guid": "12345", "description": html}}
+    view = Darfur24Connector().project(article, ROW)
+    assert len(view.description) == 500 and "Kutum" not in view.description
+    assert view.full_text.endswith(tail)
+    with patch.object(connectors, "locate_in_country", return_value="sd-nd-kutum") as locate:
+        assert Darfur24Connector().locate(view) == "sd-nd-kutum"
+    assert locate.call_args.args[1].endswith(tail)
+
+
+def test_article_text_is_none_without_raw_description():
+    assert darfur24.article_text({"raw": {}}) is None
+    assert darfur24.article_text({}) is None

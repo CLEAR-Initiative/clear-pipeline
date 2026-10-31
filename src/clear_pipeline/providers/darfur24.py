@@ -232,6 +232,14 @@ def set_last_synced(ts: datetime) -> None:
     _redis.set("darfur24:last_synced", ts.isoformat())
 
 
+def article_text(article: dict) -> str | None:
+    """The article's full text with the HTML stripped, for location resolution.
+    ``article["description"]`` is cut to 500 characters for display; the uncut
+    HTML stays in ``article["raw"]["description"]``."""
+    raw = (article.get("raw") or {}).get("description") or ""
+    return _strip_html(raw) or None if raw else None
+
+
 def build_darfur24_signal_input(article: dict, source_id: str, location_id: str | None) -> dict:
     """Convert a parsed darfur24 article into a CLEAR CreateSignalInput dict.
 

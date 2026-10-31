@@ -43,6 +43,7 @@ implementation.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
@@ -61,6 +62,8 @@ from clear_pipeline.providers.location import locate_in_country
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class SignalView:
@@ -78,6 +81,10 @@ class SignalView:
     title: str                            # raw headline — classify/group title
     timestamp: str                        # ISO-8601 publication time
     description: str | None = None        # short summary
+    #: Uncut source text for location resolution, when the source shortens
+    #: ``description`` for display (darfur24 keeps 500 chars). None = use
+    #: ``description``. Classification and grouping keep reading ``description``.
+    full_text: str | None = None
     location_name: str | None = None
     url: str | None = None
     lat: float | None = None
@@ -438,17 +445,24 @@ class Darfur24Connector:
         area, else Sudan itself. Until 31 Oct 2026 every darfur24 signal was
         pinned to the country at creation, so none could join an event
         (grouping keys on district)."""
-        return (
-            locate_in_country(
+        try:
+            located = locate_in_country(
                 view.title,
-                view.description,
+                # The uncut article: a district named only after the first 500
+                # characters would otherwise be missed.
+                view.full_text or view.description,
                 settings.darfur24_default_country,
                 country_code=settings.darfur24_country_code or None,
             )
-            # None only when the country isn't a known level-0 location; keep
-            # the never-location-less guarantee on that path too.
-            or self._resolve_location_id()
-        )
+        except Exception:  # noqa: BLE001 — location is best-effort (expo-385)
+            # A clear-api or model failure must not leave the article NEW until
+            # the drain's attempt counter marks it FAILED; the country pin the
+            # connector used to apply at creation is the right fallback.
+            logger.warning("[darfur24] locating %s failed; keeping the country", view.external_id, exc_info=True)
+            located = None
+        # None only when the country isn't a known level-0 location; keep the
+        # never-location-less guarantee on that path too.
+        return located or self._resolve_location_id()
 
     def last_synced(self) -> datetime | None:
         return darfur24.get_last_synced()
@@ -472,6 +486,7 @@ class Darfur24Connector:
             title=record["title"],
             timestamp=created.get("publishedAt") or record.get("published_at") or "",
             description=record.get("description"),
+            full_text=darfur24.article_text(record),
             location_name=_first_location_name(created),
             url=record.get("url"),
         )
