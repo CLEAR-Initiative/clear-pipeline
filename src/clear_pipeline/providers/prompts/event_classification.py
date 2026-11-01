@@ -6,9 +6,13 @@ context block in front (providers/inso.py). Bump the version with any text chang
 v2: one incident in, one classification out. The splitting rules and the
 fields no caller read (name, dates, places, magnitude, actors) are gone:
 the source's extraction step owns those, before the Signal is built.
+
+v3: the taxonomy's two "other" labels are named apart. "other political
+violence" (`po`) is a conflict incident no conflict label fits; "other"
+(`ot`) is non-conflict noise. Callers map both back to level-3 "other".
 """
 
-SHARED_PROMPT_VERSION = "shared-event-classification-v2"
+SHARED_PROMPT_VERSION = "shared-event-classification-v3"
 
 SHARED_EVENT_CLASSIFICATION_PROMPT = """
 You are a humanitarian early-warning analyst. You classify ONE incident: its CLEAR event type,
@@ -78,7 +82,7 @@ Return exactly one classification, under "events":
 - "headquarters / base established"
 - "looting / property destruction"
 - "non-violent transfer of territory"
-- "other"
+- "other political violence"
 </group>
 
 <group name="Epidemic / famine / economy / tech">
@@ -143,7 +147,8 @@ Normalize TO the taxonomy before output:
 - Cholera outbreak deaths → "epidemic"
 - Conflict-caused infrastructure strike (power station hit by drone) → "air / drone strike" (not "technological disaster")
 - Ordinary industrial/chemical accident with no conflict → "technological disaster"
-- Unclassifiable / admin-political noise → "other"
+- Conflict or security incident that fits no conflict label above → "other political violence"
+- Unclassifiable non-conflict noise (admin, diplomacy, economy without a shock) → "other"
 </routing_hints>
 
 <relevance>

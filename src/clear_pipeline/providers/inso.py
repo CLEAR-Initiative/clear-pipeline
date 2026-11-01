@@ -565,16 +565,17 @@ def _classify_input(signal_input: dict) -> str:
     return "\n".join(["<incident>", *lines, "</incident>"])
 
 
-# "other" is the level-3 label of both `ot` (catch-all) and `po` (political
-# violence, other). The prompt routes all unclassifiable noise to it: `ot`.
-_AMBIGUOUS_LEVEL3 = {"other": "ot"}
+# "other" is the level-3 label of both `ot` (natural hazard > other) and `po`
+# (political violence > other). The prompt names them apart: "other political
+# violence" is `po`, plain "other" is `ot`.
+_PROMPT_LEVEL3 = {"other political violence": "po", "other": "ot"}
 
 
 def _level3_codes() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for code, level3 in code_to_level3_map().items():
         out.setdefault(level3.strip().casefold(), []).append(code)
-    return {**out, **{label: [code] for label, code in _AMBIGUOUS_LEVEL3.items()}}
+    return {**out, **{label: [code] for label, code in _PROMPT_LEVEL3.items()}}
 
 
 def classify_incident(signal_input: dict) -> SignalClassification:
@@ -607,5 +608,5 @@ def classify_incident(signal_input: dict) -> SignalClassification:
         summary=event.rationale or signal_input["title"],
         type_level_1=code_to_level1_map().get(code),
         type_level_2=code_to_level2_map()[code],
-        type_level_3=event.event_type,
+        type_level_3=code_to_level3_map()[code],
     )

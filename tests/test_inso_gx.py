@@ -387,11 +387,15 @@ def test_classify_reads_the_verbatim_source_text_and_fields_not_the_generated_de
     assert _signal(h, "inso:SDN/Khartoum/IR/20261410/R1:1")["description"] not in sent
 
 
-def test_other_maps_to_the_catch_all_not_political_violence(h):
-    h.llm.classifications = {"On 14 October": {"events": [{"event_type": "other", "relevance": "RELEVANT", "severity": 1}]}}
+@pytest.mark.parametrize("label, event_type", [
+    pytest.param("other", "other", id="other-is-the-catch-all"),
+    pytest.param("other political violence", "strategic developments / political violence", id="other-political"),
+])
+def test_the_two_other_labels_map_to_their_own_codes(h, label, event_type):
+    h.llm.classifications = {"On 14 October": {"events": [{"event_type": label, "relevance": "RELEVANT", "severity": 1}]}}
     h.folder.add("02_single_incident")
     assert h.run().success
-    assert h.gold["inso:SDN/Khartoum/IR/20261410/R1:1"]["eventType"] == "other"
+    assert h.gold["inso:SDN/Khartoum/IR/20261410/R1:1"]["eventType"] == event_type
 
 
 def test_not_relevant_scores_zero_and_unknown_severity_stays_null(h):

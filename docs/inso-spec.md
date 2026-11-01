@@ -85,7 +85,7 @@ A new GX-path source, `inso`, that:
 - **Incident identity.** `inso:<serial verbatim>:<ordinal>`. Revisions aren't handled.
 - **Classify hook.**
   - The GX source protocol gets an optional `classify(row)` hook, found with `getattr` in the same way as the existing optional hooks. When it's present, the classify stage calls it instead of the Jev classifier; other sources are unchanged.
-  - INSO's implementation runs the shared event-classification prompt (v2: one incident in, one classification out) through the `signal` LLM role, one incident per call, with a single-object schema.
+  - INSO's implementation runs the shared event-classification prompt (v3: one incident in, one classification out; the taxonomy's two "other" labels are named apart, "other political violence" → `po`, "other" → `ot`) through the `signal` LLM role, one incident per call, with a single-object schema.
   - Before the shared prompt, it adds an INSO source context block: incidents affecting humanitarian staff, assets, premises or access are relevant, crime included; severity at least 2 for crime against humanitarian staff or assets. Null severity when the text gives no basis is a rule of the shared prompt (v2), not of the INSO block.
   - The model reads the incident's verbatim source text and extracted fields, not the generated title and description.
   - Mapping: level-3 type → level 2 and GLIDE code through the existing taxonomy mirror (an unmapped label raises); RELEVANT/NOT_RELEVANT → relevance 1.0/0.0; severity passed through, nullable.
