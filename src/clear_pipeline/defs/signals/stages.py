@@ -134,6 +134,12 @@ def _event_location_id(created: dict) -> str | None:
     return None
 
 
+def _needs_locating(created: dict) -> bool:
+    """True iff the drain would call the LLM to place this signal (``_locate_if_unplaced``)."""
+    connector = CONNECTORS_BY_SOURCE.get((created.get("source") or {}).get("name") or "")
+    return isinstance(connector, LocatingSource) and not _event_location_id(created)
+
+
 def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     """For a connector that can locate its own signals (``LocatingSource`` —
     push feeds that arrive with no location), resolve and persist a location
@@ -381,6 +387,8 @@ def _mark(items: list[dict], status: str) -> int:
 
 def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = conflicts = 0
+    deferred: set[str] = set()  # left NEW for want of an LLM; seen again in each later batch
+    llm_unavailable: LLMUnavailableError | None = None
     touched_events: set[str] = set()
     # Reset so the emitted fallback rate reflects THIS drain, not the worker's
     # whole lifetime (a serial drain owns the single-flight lock, so no other
@@ -393,15 +401,18 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         done_ids: list[dict] = []
         failed_ids: list[dict] = []
         for created in batch:
+            if llm_unavailable and _needs_locating(created):
+                deferred.add(created["id"])  # would fail the same way: leave NEW, no attempt charged
+                continue
             try:
                 outcome = _process_one_signal(created, touched_events)
-            except LLMUnavailableError:
-                # No usable LLM: every remaining signal would fail the same way. Leave this one
-                # NEW without charging an attempt, keep what already finished, and fail the run.
-                _mark(done_ids, "PROCESSED")
-                _mark(failed_ids, "FAILED")
-                _sync_event_cards(context, touched_events)
-                raise
+            except LLMUnavailableError as exc:
+                # No usable LLM: leave this one NEW without charging an attempt, defer the
+                # other signals that need locating, drain the rest, and fail the run at the end.
+                context.log.error("[classify_group] signal %s: no usable LLM (%s) — deferring", created["id"], exc)
+                llm_unavailable = exc
+                deferred.add(created["id"])
+                continue
             except Exception:  # noqa: BLE001 — isolate one signal's failure
                 # Transient (S3/clear-api blip) vs persistent: retry up to
                 # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely
@@ -478,11 +489,14 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
 
     metadata = {
         "processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed,
-        "mark_conflicts": conflicts, **recompute,
+        "llm_deferred": len(deferred), "mark_conflicts": conflicts, **recompute,
         "jev_classified": jev_ok, "jev_failed": jev_failed,
         "jev_failure_rate": round(failure_rate, 4),
     }
     context.log.info("[classify_group] %s", " ".join(f"{k}={v}" for k, v in metadata.items()))
+    if llm_unavailable is not None:
+        # Everything else drained; fail so the outage is visible instead of a quiet backlog.
+        raise llm_unavailable
     return dg.MaterializeResult(metadata=metadata)
 
 

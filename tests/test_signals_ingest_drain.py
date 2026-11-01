@@ -1007,7 +1007,7 @@ def test_mark_conflicts_are_counted():
 def test_drain_metadata_keys():
     result, *_ = _run_lanes([], [])
     assert set(result.metadata) == {
-        "processed", "dropped", "requeued", "failed", "mark_conflicts",
+        "processed", "dropped", "requeued", "failed", "llm_deferred", "mark_conflicts",
         "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred", "recompute_stale",
         "recompute_head_blocked",
         "jev_classified", "jev_failed", "jev_failure_rate",
@@ -1059,11 +1059,20 @@ def test_member_text_raises_on_other_s3_errors():
         stages._member_text(member)
 
 
-def test_drain_fails_when_no_llm_is_usable_and_keeps_finished_work():
-    # No usable LLM: abort instead of burning every signal's attempts (or pinning them
-    # to a fallback). Signals already processed this batch stay marked; the failing one
-    # stays NEW without an attempt charged.
+def test_drain_defers_only_signals_that_need_locating_when_no_llm_is_usable():
+    # No usable LLM: don't burn attempts (or pin to a fallback), but don't stall the
+    # sources that never call it either. Signals that need locating stay NEW with no
+    # attempt charged; the rest drain; the run fails at the end so the outage shows.
     from clear_pipeline.providers.llm import LLMUnavailableError
+
+    darfur = {"name": "darfur24"}
+    rows = [
+        {"id": "first", "source": {"name": "acled"}},
+        {"id": "second", "source": darfur},
+        {"id": "third", "source": darfur},  # unplaced: skipped without calling the LLM
+        {"id": "fourth", "source": darfur, "generalLocation": {"id": "sd-nd"}},  # placed: no LLM
+        {"id": "fifth", "source": {"name": "acled"}},
+    ]
 
     def process(created, touched_events):
         if created["id"] == "second":
@@ -1072,14 +1081,16 @@ def test_drain_fails_when_no_llm_is_usable_and_keeps_finished_work():
 
     marked: list[tuple[str, list[str]]] = []
     with (
-        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "first"}, {"id": "second"}, {"id": "third"}]])),
+        patch.object(stages, "pending_signals", side_effect=_batched([rows])),
         patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
         patch.object(stages, "_process_one_signal", side_effect=process) as processed,
         patch.object(stages._redis, "incr") as incr,
+        patch.object(stages, "_drain_recomputes", wraps=stages._drain_recomputes) as recomputes,
         pytest.raises(LLMUnavailableError),
     ):
         _run()
 
-    assert ("PROCESSED", ["first"]) in marked
-    assert processed.call_count == 2  # "third" never attempted
+    assert ("PROCESSED", ["first", "fourth", "fifth"]) in marked
+    assert [c.args[0]["id"] for c in processed.call_args_list] == ["first", "second", "fourth", "fifth"]
     incr.assert_not_called()
+    recomputes.assert_called_once()  # the recompute lane still runs

@@ -5,7 +5,7 @@ import re
 
 from pydantic import BaseModel
 
-from clear_pipeline.providers.llm import LLM_PROVIDER_ERRORS, LLMUnavailableError, make_llm_provider
+from clear_pipeline.providers.llm import LLMUnavailableError, is_llm_unavailable, make_llm_provider
 from clear_pipeline.providers.clear_api import (
     find_or_create_landmark_l4,
     get_location_with_geometry,
@@ -266,10 +266,10 @@ def resolve_signal_location(
             "place_name": (result.place_name or "").strip() or None,
         }
 
-    except LLM_PROVIDER_ERRORS as e:
-        # Every later signal would fail the same way: fail instead of pinning them all to the fallback.
-        raise LLMUnavailableError(f"Location resolution: {e}") from e
     except Exception as e:
+        if is_llm_unavailable(e):
+            # Every later signal would fail the same way: fail instead of pinning them all to the fallback.
+            raise LLMUnavailableError(f"Location resolution: {e}") from e
         logger.error("Location resolution failed: %s", e)
         return {"location_type": "general", "origin_id": None, "destination_id": None,
                 "location_id": None, "place_name": None}
@@ -358,9 +358,9 @@ def arabic_spelling(text: str, place_name: str) -> str | None:
             schema=_ArabicSpelling,
         )
         name = (result.place_name_ar or "").strip()
-    except LLM_PROVIDER_ERRORS as exc:
-        raise LLMUnavailableError(f"Arabic spelling: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 — an enrichment; the Latin path follows
+        if is_llm_unavailable(exc):
+            raise LLMUnavailableError(f"Arabic spelling: {exc}") from exc
         logger.warning("[locate] Arabic spelling of %r failed: %s", place_name, exc)
         return None
     if not name or not _ARABIC_LETTER.search(name) or name not in text:

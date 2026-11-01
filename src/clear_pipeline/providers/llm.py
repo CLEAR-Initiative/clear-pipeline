@@ -91,11 +91,6 @@ class LLMUnavailableError(RuntimeError):
     a caller must fail on it rather than degrade the result."""
 
 
-# Provider-side failures that outlive the retries and the fallback. A caller that
-# degrades on bad model output re-raises these as LLMUnavailableError instead.
-LLM_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (openai.APIError, anthropic.APIError)
-
-
 # Exceptions that mean "the provider/transport failed" and should trigger the
 # fallback + count against the circuit breaker. Deliberately EXCLUDES our own
 # programming errors (TypeError / ValueError / KeyError / AttributeError) so a
@@ -122,6 +117,28 @@ TRANSIENT_LLM_ERRORS: tuple[type[BaseException], ...] = (
     openai.APIConnectionError,
     openai.InternalServerError,
 )
+
+# Failures that outlive the retries and the fallback and mean no usable LLM: an
+# outage, a refused key, exhausted credits. NOT a per-input 4xx (context too long,
+# rejected content): that would fail every run on the same signal, never retired.
+_LLM_UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
+    *TRANSIENT_LLM_ERRORS,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    openai.AuthenticationError,
+    openai.PermissionDeniedError,
+)
+
+
+def is_llm_unavailable(exc: BaseException) -> bool:
+    """True iff ``exc`` means no usable LLM rather than a bad input. A caller that
+    degrades on bad model output re-raises these as LLMUnavailableError instead."""
+    if isinstance(exc, _LLM_UNAVAILABLE_ERRORS):
+        return True
+    if not isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
+        return False
+    # Out of credits: OpenRouter answers 402; Anthropic a 400 naming the credit balance.
+    return exc.status_code == 402 or (exc.status_code == 400 and "credit balance" in str(exc).lower())
 
 # New roles fall back to `extraction`'s env vars when their own aren't set.
 # Keeps a code deploy safe if it lands before the infra apply that adds the

@@ -742,6 +742,42 @@ def test_locate_in_country_fails_when_the_llm_is_not_configured():
         location.locate_in_country(POST, POST, "Sudan")
 
 
+def test_a_per_input_rejection_degrades_instead_of_failing():
+    # A 400 about this post (context too long) isn't an outage: failing would block
+    # the drain on the same signal every run, never retired.
+    import anthropic
+    import httpx
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    provider = MagicMock()
+    provider.complete_structured.side_effect = anthropic.BadRequestError(
+        "prompt is too long", response=httpx.Response(400, request=request), body=None
+    )
+    with patch.object(location, "make_llm_provider", return_value=provider):
+        assert location.locate_in_country(POST, POST, "Sudan") == "sd"
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "unavailable"),
+    [
+        (400, "Your credit balance is too low", True),
+        (400, "prompt is too long", False),
+        (401, "invalid x-api-key", True),
+        (402, "Insufficient credits", True),
+        (404, "model not found", False),
+        (529, "overloaded", True),
+    ],
+)
+def test_is_llm_unavailable(status, message, unavailable):
+    import httpx
+    import openai
+    from clear_pipeline.providers.llm import is_llm_unavailable
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    exc = openai.OpenAI(api_key="x")._make_status_error(
+        message, body=None, response=httpx.Response(status, request=request)
+    )
+    assert is_llm_unavailable(exc) is unavailable
+
+
 def test_arabic_spelling_fails_when_no_llm_is_usable():
     provider = MagicMock()
     provider.complete_structured.side_effect = _provider_error()
