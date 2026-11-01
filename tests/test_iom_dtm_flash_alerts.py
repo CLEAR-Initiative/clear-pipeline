@@ -3,6 +3,7 @@
 import json
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from clear_pipeline.defs.gx_pipeline.sources import IOMDTMFlashAlertsGXSource
@@ -17,6 +18,7 @@ from clear_pipeline.providers.iom_dtm_flash_alerts import (
     _extract_external_id_from_report_file,
     build_iom_dtm_flash_alert_signal_input,
     build_signal_content_update,
+    fetch_iom_dtm_flash_alerts,
     parse_record,
 )
 
@@ -36,6 +38,72 @@ def _raw(**overrides) -> dict:
     }
     row.update(overrides)
     return row
+
+
+# ─── fetch_iom_dtm_flash_alerts ─────────────────────────────────────────────
+
+_PROVIDER = "clear_pipeline.providers.iom_dtm_flash_alerts"
+_EXPORT_URL = "https://dtm.example/flash-alerts.json"
+
+
+def _response(status: int = 200, **kwargs) -> httpx.Response:
+    return httpx.Response(status, request=httpx.Request("GET", _EXPORT_URL), **kwargs)
+
+
+@pytest.fixture
+def export_settings(monkeypatch):
+    from clear_pipeline.providers.iom_dtm_flash_alerts import settings
+
+    monkeypatch.setattr(settings, "iom_dtm_flash_alerts_export_url", _EXPORT_URL)
+    monkeypatch.setattr(settings, "iom_dtm_flash_alerts_countries", "Sudan")
+
+
+def test_fetch_raises_on_http_error(export_settings):
+    # A failed download must fail the run, not pass as an empty poll.
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(503)), \
+         pytest.raises(httpx.HTTPStatusError):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_raises_on_transport_error(export_settings):
+    with patch(f"{_PROVIDER}.httpx.get", side_effect=httpx.ConnectTimeout("timed out")), \
+         pytest.raises(httpx.ConnectTimeout):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_raises_on_invalid_json(export_settings):
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(text="<html>maintenance</html>")), \
+         pytest.raises(ValueError, match="JSON parse failed.*maintenance"):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_raises_on_non_list_payload(export_settings):
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json={"error": "nope"})), \
+         pytest.raises(TypeError, match="dict"):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_returns_empty_for_a_valid_export_without_matching_country(export_settings):
+    export = [_raw(field_country1="Nigeria")]
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json=export)):
+        assert fetch_iom_dtm_flash_alerts() == []
+
+
+def test_fetch_returns_matching_records(export_settings):
+    export = [_raw(), _raw(field_country1="Nigeria")]
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json=export)):
+        records = fetch_iom_dtm_flash_alerts()
+    assert [r["external_id"] for r in records] == ["iom_dtm_flash_alert:65946"]
+
+
+
+def test_fetch_skips_records_without_a_country(export_settings):
+    # One malformed bulletin must not fail every poll and block the others.
+    no_key = {k: v for k, v in _raw().items() if k != "field_country1"}
+    export = [no_key, _raw(field_country1=None), _raw()]
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json=export)):
+        records = fetch_iom_dtm_flash_alerts()
+    assert [r["external_id"] for r in records] == ["iom_dtm_flash_alert:65946"]
 
 
 # ─── _extract_external_id_from_report_file ──────────────────────────────────

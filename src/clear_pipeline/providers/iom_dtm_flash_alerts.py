@@ -21,30 +21,25 @@ _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 def fetch_iom_dtm_flash_alerts(since: datetime | None = None) -> list[dict]:
     """Fetch the full export, filtered to the configured countries.
+    Raises on a failed request or malformed export, so the run fails; [] means a valid export with no match.
     `since` exists only for GXSource protocol parity; it does not narrow the request."""
-    try:
-        resp = httpx.get(
-            settings.iom_dtm_flash_alerts_export_url,
-            timeout=120,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        logger.error("[DTM_FLASH_ALERTS] request failed: %s", e)
-        return []
+    resp = httpx.get(
+        settings.iom_dtm_flash_alerts_export_url,
+        timeout=120,
+    )
+    resp.raise_for_status()
 
     try:
         data = resp.json()
     except ValueError as e:
-        logger.error(
-            "[DTM_FLASH_ALERTS] JSON parse failed: %s, body=%s", e, resp.text[:200]
-        )
-        return []
+        raise ValueError(
+            f"[DTM_FLASH_ALERTS] JSON parse failed: {e}, body={resp.text[:200]!r}"
+        ) from e
 
     if not isinstance(data, list):
-        logger.error(
-            "[DTM_FLASH_ALERTS] unexpected response type: %s", type(data).__name__
+        raise TypeError(
+            f"[DTM_FLASH_ALERTS] unexpected response type: {type(data).__name__}"
         )
-        return []
 
     logger.info("[DTM_FLASH_ALERTS] fetched %d raw records", len(data))
 
@@ -53,8 +48,11 @@ def fetch_iom_dtm_flash_alerts(since: datetime | None = None) -> list[dict]:
         for c in settings.iom_dtm_flash_alerts_countries.split(",")
         if c.strip()
     }
+    # A record with no country can't be one of ours; skipping it keeps one malformed
+    # bulletin (of any country) from failing every poll.
+    no_country = sum(1 for record in data if not record.get("field_country1"))
     country_matched = [
-        record for record in data if record["field_country1"] in countries
+        record for record in data if record.get("field_country1") in countries
     ]
 
     new_records = []
@@ -76,11 +74,12 @@ def fetch_iom_dtm_flash_alerts(since: datetime | None = None) -> list[dict]:
 
     logger.info(
         "[DTM_FLASH_ALERTS] result: %d records (parse_failed=%d, duplicate=%d) "
-        "out of %d country-matched",
+        "out of %d country-matched (no_country=%d)",
         len(new_records),
         parse_failed,
         deduped,
         len(country_matched),
+        no_country,
     )
     return new_records
 
