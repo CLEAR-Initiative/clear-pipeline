@@ -19,6 +19,7 @@ The serial is opaque: nothing is derived from its parts.
 """
 
 import html
+import logging
 import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -42,6 +43,8 @@ from clear_pipeline.providers.prompts.event_classification import (
     SHARED_PROMPT_VERSION,
 )
 from clear_pipeline.providers.signal import enrich_with_geoparser
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "Country",
@@ -508,12 +511,14 @@ def build_inso_signal_inputs(
 # ──────────────────────────────────────────────────────────────────────────────
 class EventClassification(BaseModel):
     """The shared prompt's output: classification only. Place, date, actors
-    and casualties come from extraction, before the Signal is built."""
+    and casualties come from extraction, before the Signal is built.
+    ``rationale`` is first so the model reasons before it answers; it is
+    logged for audit, never shown as the signal's summary."""
 
+    rationale: str = Field("", description="One or two sentences reasoning about type, relevance and severity.")
     event_type: str = Field(description="Exactly one type_level_3 label from the taxonomy.")
     relevance: Literal["RELEVANT", "NOT_RELEVANT"]
     severity: int | None = Field(None, ge=1, le=5)
-    rationale: str = ""
 
 
 class EventClassificationAnswer(BaseModel):
@@ -601,11 +606,15 @@ def classify_incident(signal_input: dict) -> SignalClassification:
             f"{signal_input['externalId']}: level-3 type {event.event_type!r} maps to {codes or 'no'} taxonomy code(s)"
         )
     code = codes[0]
+    logger.info(
+        "[inso classify] %s: type=%s relevance=%s severity=%s rationale=%s",
+        signal_input["externalId"], event.event_type, event.relevance, event.severity, event.rationale,
+    )
     return SignalClassification(
         disaster_types=[code],
         relevance=1.0 if event.relevance == "RELEVANT" else 0.0,
         severity=event.severity,
-        summary=event.rationale or signal_input["title"],
+        summary=signal_input["title"],
         type_level_1=code_to_level1_map().get(code),
         type_level_2=code_to_level2_map()[code],
         type_level_3=code_to_level3_map()[code],

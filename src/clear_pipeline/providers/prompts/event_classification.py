@@ -10,6 +10,7 @@ the source's extraction step owns those, before the Signal is built.
 v3: the taxonomy's two "other" labels are named apart. "other political
 violence" (`po`) is a conflict incident no conflict label fits; "other"
 (`ot`) is non-conflict noise. Callers map both back to level-3 "other".
+The rationale comes first, so the model reasons before it answers.
 """
 
 SHARED_PROMPT_VERSION = "shared-event-classification-v3"
@@ -26,10 +27,10 @@ Return exactly one classification, under "events":
 {
   "events": [
     {
+      "rationale": string,                   // first: one or two sentences reasoning about type, relevance and severity
       "event_type": string,                  // exactly one label from <event_type_taxonomy>
       "relevance": "RELEVANT" | "NOT_RELEVANT",
-      "severity": 1 | 2 | 3 | 4 | 5 | null,  // null only when the text gives no basis for a score
-      "rationale": string                    // one or two sentences: why this type, relevance and severity
+      "severity": 1 | 2 | 3 | 4 | 5 | null   // null only when the text gives no basis for a score
     }
   ]
 }
