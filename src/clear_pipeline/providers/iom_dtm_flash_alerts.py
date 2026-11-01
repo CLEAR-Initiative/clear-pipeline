@@ -1,24 +1,5 @@
-"""IOM DTM Flash Alerts client — narrative displacement bulletins, via a
-static JSON export covering multiple countries and report types (e.g.
-Sudan's Emergency Event Tracking Report / Displacement Report, Nigeria's
-Flash Report, Mozambique's Situation Report). Currently configured to only
-ingest Sudan via `iom_dtm_flash_alerts_countries`.
-
-No authentication. Plain GET only — sending any extra header (Accept
-included) makes the request fail. The export has no server-side filter or
-pagination — every poll fetches every country in one response and filters
-client-side.
-
-Separate product from `providers/iom_dtm.py` (admin-level displacement
-figures, feeding location_metadata, not signals) — same platform, different
-feed.
-
-Ingested only by gx (`IOMDTMFlashAlertsGXSource`): every poll returns every
-country-matched bulletin, and gx's bronze skip (gold content hash) drops the
-unchanged ones — no seen-set, like IDMC and Sudan Witness.
-
-Endpoint: settings.iom_dtm_flash_alerts_export_url.
-"""
+"""IOM DTM Flash Alerts client: narrative displacement bulletins from a static multi-country JSON export.
+Plain GET only (any extra header, Accept included, fails); no server-side filter, so countries filter client-side."""
 
 import hashlib
 import html
@@ -39,12 +20,8 @@ _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 
 def fetch_iom_dtm_flash_alerts(since: datetime | None = None) -> list[dict]:
-    """Fetch the full DTM Flash Alerts JSON export, filtered to the configured
-    countries.
-
-    `since` is accepted only for GXSource protocol parity and does not narrow
-    the request.
-    """
+    """Fetch the full export, filtered to the configured countries.
+    `since` exists only for GXSource protocol parity; it does not narrow the request."""
     try:
         resp = httpx.get(
             settings.iom_dtm_flash_alerts_export_url,
@@ -109,13 +86,8 @@ def fetch_iom_dtm_flash_alerts(since: datetime | None = None) -> list[dict]:
 
 
 def _extract_external_id_from_report_file(url: str | None) -> str | None:
-    """Extract the stable `externalId` from a Flash Alert's `field_report_file`
-    URL, e.g. ".../dtm_download_track/100646?file=1&type=node&id=65946" ->
-    "iom_dtm_flash_alert:65946".
-
-    Uses the `id` query param (the Drupal node id — the report's actual
-    content identity)
-    """
+    """Stable `externalId` from `field_report_file`'s `id` query param.
+    That's the Drupal node id: the report's content identity."""
     if not url:
         logger.warning("[DTM_FLASH_ALERTS] no field_report_file to parse an id from")
         return None
@@ -130,9 +102,7 @@ def _extract_external_id_from_report_file(url: str | None) -> str | None:
 
 def _decode_html_entities(value: Any) -> Any:
     """Recursively html.unescape every string in a JSON-shaped value.
-    Empirically, 3 of the export's fields carry literal entities —
-    field_report_file (546/547 records), field_summary (310/547), title
-    (193/547) — but this runs on the whole record so rawData is clean too."""
+    The export embeds literal entities (`&amp;` in `field_report_file` breaks id parsing)."""
     if isinstance(value, str):
         return html.unescape(value)
     if isinstance(value, list):
@@ -167,9 +137,7 @@ def parse_record(raw: dict) -> dict | None:
 
 
 def get_last_synced() -> datetime | None:
-    """Informational only — fetch_iom_dtm_flash_alerts ignores `since` (no
-    server-side filter to narrow with), so this never gates what gets
-    fetched. A debuggable "last clean poll" marker, nothing more."""
+    """Informational "last clean poll" marker; never gates fetching (`since` is ignored)."""
     # decode_responses=True guarantees str at runtime; the stub can't see that.
     val = cast("str | None", _redis.get("iom_dtm_flash_alerts:last_synced"))
     if val:
@@ -182,10 +150,8 @@ def set_last_synced(ts: datetime) -> None:
 
 
 def _day(value: Any) -> str | None:
-    """The calendar day of a `field_from`/`field_to` value
-    ("2025-10-25T12:00:00" → "2025-10-25"), or None when empty/unparseable.
-    The export pins every date to a placeholder 12:00; a bare date makes
-    clear-api store UTC midnight instead of a server-local noon."""
+    """Calendar day of a `field_from`/`field_to` value, or None when empty/unparseable.
+    Drops the export's placeholder 12:00, which clear-api would store as server-local noon."""
     if not isinstance(value, str) or len(value) < 10:
         return None
     try:
@@ -195,16 +161,10 @@ def _day(value: Any) -> str | None:
 
 
 def build_iom_dtm_flash_alert_signal_input(
-    record: dict, source_id: str, location_id: str | None
+    record: dict, source_id: str, country_id: str | None
 ) -> dict:
     """Convert a parsed Flash Alert record into a CLEAR CreateSignalInput dict.
-
-    rawData is the decoded fields only — "external_id"/"content_hash" (derived,
-    not from the source) and "raw" (the pristine copy, which `raw_bytes` sends
-    to S3 instead) are excluded so Postgres stays clean and readable.
-
-    No magnitude or actors: bulletins name places and IDP counts, not parties.
-    """
+    rawData excludes derived keys and "raw" (the pristine copy goes to S3); no actors: bulletins name none."""
     clean_fields = {
         k: v for k, v in record.items() if k not in ("external_id", "content_hash", "raw")
     }
@@ -217,10 +177,8 @@ def build_iom_dtm_flash_alert_signal_input(
         "url": record["field_report_file"],
         "title": record["title"],
         "description": record["field_summary"],
-        # TODO: no "casualties" — Sudan's field_summary never states one. Revisit
-        # if iom_dtm_flash_alerts_countries ever includes Nigeria or another
-        # country whose reports carry real casualty figures (e.g. "three
-        # fatalities").
+        # TODO: no "casualties" — Sudan's summaries never state one; revisit if a country
+        # whose reports carry casualty figures (e.g. Nigeria) is added.
     }
     start, end = _day(record.get("field_from")), _day(record.get("field_to"))
     if start:
@@ -229,20 +187,15 @@ def build_iom_dtm_flash_alert_signal_input(
     if end:
         input_data["endDate"] = end
         input_data["endDateAccuracy"] = "DAY"
-    # location_id: L0 id for record["field_country1"]; None when clear-api has
-    # no such country.
-    if location_id is not None:
-        input_data["locationId"] = location_id
-        input_data["countryIds"] = [location_id]
+    # No locationId: the drain locates the signal from its text (`IOMDTMFlashAlertsConnector.locate`).
+    if country_id is not None:
+        input_data["countryIds"] = [country_id]
     return input_data
 
 
 def build_signal_content_update(input_data: dict, *, retracted: bool | None = None) -> dict:
-    """Adapt a `build_iom_dtm_flash_alert_signal_input` dict into an
-    updateSignalContent input keyed by ``(sourceId, externalId)`` (gold never
-    has the clear-api id), reusing its values so create and update agree.
-    Fields the input lacks are left out, not sent as None: an absent key
-    leaves the stored value alone. ``retracted=None`` leaves the flag unchanged."""
+    """updateSignalContent input keyed by ``(sourceId, externalId)``, reusing the create input's values.
+    Absent/None fields are omitted so the stored value stays; ``retracted=None`` leaves the flag alone."""
     update = {
         k: input_data[k]
         for k in (

@@ -314,18 +314,15 @@ class Settings(BaseSettings):
     # BA/FM overlap.
     iom_dtm_assessment_type: str = "BA,FM"
 
-    # DTM Flash Alert bulletins (Sudan narrative reports) — a different product
-    # from IOM DTM API (admin-level displacement figures). Ingested only by gx
-    # (`IOMDTMFlashAlertsGXSource`).
+    # DTM Flash Alert narrative bulletins — a different product from the IOM DTM API above.
+    # Ingested only by gx (`IOMDTMFlashAlertsGXSource`).
     iom_dtm_flash_alerts_source_name: str = "iom_dtm_flash_alerts"
-    # Plain GET on a static JSON export, no Accept header. Returns every
-    # country in one export — no server-side filter/pagination, so
-    # `iom_dtm_flash_alerts_countries` below filters client-side
+    # Every country in one export, no server-side filter: `iom_dtm_flash_alerts_countries` filters client-side.
     iom_dtm_flash_alerts_export_url: str = "https://dtm.iom.int/flash-reports-export"
     iom_dtm_flash_alerts_countries: str = "Sudan"
-    # Export updates whenever new bulletins publish — irregular (~monthly for
-    # Sudan, more frequent elsewhere during active crises). IOM recommends
-    # polling once or twice daily to avoid unnecessary server load
+    # ISO2 per `field_country1` for geocoding to a point; a missing country still reaches state/district.
+    iom_dtm_flash_alerts_country_codes: dict[str, str] = {"Sudan": "sd"}
+    # IOM asks for polling at most once or twice daily; bulletins publish irregularly (~monthly for Sudan).
     iom_dtm_flash_alerts_poll_interval_minutes: int = 60 * 24
 
     # ─── Nominatim geocoder (currently LocationIQ as the backend) ────────────

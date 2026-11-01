@@ -1,8 +1,4 @@
-"""Unit tests for IOM DTM Flash Alerts' external-id parsing (HTML-entity
-handling) and the bronze/silver separation between the S3 lake blob and
-Postgres's rawData. Plain dict fixtures, no network/DB — mirrors
-test_idmc_split.py's style.
-"""
+"""IOM DTM Flash Alerts: external-id parsing, bronze (S3 blob) vs silver (rawData), drain location."""
 
 import json
 from unittest.mock import patch
@@ -10,7 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from clear_pipeline.defs.gx_pipeline.sources import IOMDTMFlashAlertsGXSource
-from clear_pipeline.defs.signals.connectors import IOMDTMFlashAlertsConnector
+from clear_pipeline.defs.signals.connectors import (
+    IOMDTMFlashAlertsConnector,
+    LocatingSource,
+    SignalView,
+)
 from clear_pipeline.providers.iom_dtm_flash_alerts import (
     _extract_external_id_from_report_file,
     build_iom_dtm_flash_alert_signal_input,
@@ -40,9 +40,7 @@ def _raw(**overrides) -> dict:
 
 
 def test_extract_external_id_does_not_decode_entities_itself():
-    """Decoding is parse_record's job (it decodes the whole record before
-    calling this) — this documents that calling it directly on undecoded
-    "&amp;"-style input fails, so that responsibility never gets assumed here."""
+    """Decoding is parse_record's job: undecoded "&amp;" input must fail here."""
     url = "https://dtm.iom.int/dtm_download_track/100646?file=1&amp;type=node&amp;id=65946"
     assert _extract_external_id_from_report_file(url) is None
 
@@ -153,10 +151,10 @@ def test_signal_input_omits_a_missing_period_bound():
     assert signal_input["endDate"] == "2026-06-23"
 
 
-def test_signal_input_country_is_location_and_countries():
+def test_signal_input_sends_the_country_and_leaves_the_location_to_the_drain():
     signal_input = build_iom_dtm_flash_alert_signal_input(parse_record(_raw()), "source-1", "loc-sdn")
-    assert signal_input["locationId"] == "loc-sdn"
     assert signal_input["countryIds"] == ["loc-sdn"]
+    assert "locationId" not in signal_input
 
 
 def test_signal_input_without_country_sends_neither():
@@ -177,11 +175,12 @@ def test_content_update_mirrors_the_create_input():
     update = build_signal_content_update(signal_input, retracted=False)
     for key in (
         "sourceId", "externalId", "contentHash", "rawData", "startDate", "endDate",
-        "countryIds", "locationId", "rawS3Key",
+        "countryIds", "rawS3Key",
     ):
         assert update[key] == signal_input[key]
     assert update["retracted"] is False
     assert "publishedAt" not in update  # not an updateSignalContent field
+    assert "locationId" not in update  # a revision keeps the drain's location
 
 
 def test_content_update_leaves_absent_fields_out():
@@ -204,3 +203,61 @@ def test_gx_source_resolves_country_once():
         second = source.to_silver_input(parse_record(_raw()), "source-1")
     assert first["countryIds"] == second["countryIds"] == ["loc-sdn"]
     lookup.assert_called_once_with(0)
+
+
+# ─── drain location ──────────────────────────────────────────────────────────
+
+_CONNECTORS = "clear_pipeline.defs.signals.connectors"
+
+
+def test_connector_is_located_by_the_drain():
+    assert isinstance(IOMDTMFlashAlertsConnector(), LocatingSource)
+
+
+def test_connector_locates_within_the_bulletins_country():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", return_value="l4") as locate:
+        assert IOMDTMFlashAlertsConnector().locate(view) == "l4"
+    locate.assert_called_once_with("t", "d", "Sudan", country_code="sd")
+
+
+def test_connector_without_a_country_code_is_not_geocoded():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Nigeria")
+    with patch(f"{_CONNECTORS}.locate_in_country", return_value="ng-borno") as locate:
+        assert IOMDTMFlashAlertsConnector().locate(view) == "ng-borno"
+    locate.assert_called_once_with("t", "d", "Nigeria", country_code=None)
+
+
+def test_connector_without_a_country_is_not_located():
+    view = SignalView(external_id="e", title="t", timestamp="")
+    with patch(f"{_CONNECTORS}.locate_in_country") as locate:
+        assert IOMDTMFlashAlertsConnector().locate(view) is None
+    locate.assert_not_called()
+
+
+def test_connector_falls_back_to_the_country_when_nothing_matches():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", return_value=None), \
+         patch(f"{_CONNECTORS}.get_locations_by_level",
+               return_value=[{"id": "loc-sdn", "name": "Sudan"}]):
+        assert IOMDTMFlashAlertsConnector().locate(view) == "loc-sdn"
+
+
+def test_connector_falls_back_to_the_country_when_locating_fails():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", side_effect=RuntimeError("clear-api down")), \
+         patch(f"{_CONNECTORS}.get_locations_by_level",
+               return_value=[{"id": "loc-sdn", "name": "Sudan"}]):
+        assert IOMDTMFlashAlertsConnector().locate(view) == "loc-sdn"
+
+
+def test_connector_country_fallback_is_best_effort():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", return_value=None), \
+         patch(f"{_CONNECTORS}.get_locations_by_level", side_effect=RuntimeError("down")):
+        assert IOMDTMFlashAlertsConnector().locate(view) is None

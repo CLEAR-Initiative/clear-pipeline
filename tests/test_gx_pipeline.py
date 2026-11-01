@@ -37,9 +37,8 @@ def test_registered_sources_conform_to_protocol():
 
 
 def test_only_gx_only_jobs_are_polled():
-    """gx is IDMC's, Sudan Witness's and DTM Flash Alerts' only
-    ingestion path, so their jobs need a trigger. The other sources share
-    watermarks with the production poll and must not get one."""
+    """gx-only sources need a trigger; the others share watermarks with the
+    production poll and must not get one."""
     sensors = {
         s.source: [d for d in build_gx_source_assets(s) if isinstance(d, dg.SensorDefinition)]
         for s in GX_SOURCES

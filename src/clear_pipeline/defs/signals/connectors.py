@@ -565,10 +565,8 @@ class SudanWitnessConnector:
 # IOM DTM Flash Alerts — Sudan displacement bulletins (downloaded by gx, drained)
 # ──────────────────────────────────────────────────────────────────────────────
 class IOMDTMFlashAlertsConnector:
-    """Downloaded only by ``gx_pipeline`` (``IOMDTMFlashAlertsGXSource``), like
-    IDMC. A bulletin spans many districts, so it sits at country level and
-    the district + type heuristic gives it an event of its own. ``project``
-    reads the pristine export record from the S3 blob."""
+    """Downloaded only by gx (``IOMDTMFlashAlertsGXSource``), which sends only the country,
+    so the drain locates the bulletin from its title and summary."""
 
     source = settings.iom_dtm_flash_alerts_source_name
     polled = False
@@ -593,6 +591,41 @@ class IOMDTMFlashAlertsConnector:
             location_name=parsed.get("field_country1") or _first_location_name(created),
             url=parsed.get("field_report_file"),
         )
+
+    def __init__(self) -> None:
+        self._country_ids: dict[str, str | None] = {}
+
+    def _resolve_country_id(self, country_name: str) -> str | None:
+        """L0 location id for ``country_name`` (cached, best-effort: None on failure)."""
+        if country_name not in self._country_ids:
+            try:
+                self._country_ids[country_name] = next(
+                    (loc["id"] for loc in get_locations_by_level(0) if loc["name"] == country_name),
+                    None,
+                )
+            except Exception:  # noqa: BLE001 — location is best-effort (expo-385)
+                return None
+        return self._country_ids[country_name]
+
+    def locate(self, view: SignalView) -> str | None:
+        """Most specific state/district in the bulletin's country, geocoded to a point if it has an ISO2,
+        else the country itself. Pinned to the displacement's origin: the summary also lists where people went."""
+        if not view.location_name:
+            return None
+        try:
+            located = locate_in_country(
+                view.title,
+                view.description,
+                view.location_name,
+                country_code=settings.iom_dtm_flash_alerts_country_codes.get(view.location_name),
+            )
+        except Exception:  # noqa: BLE001 — location is best-effort (expo-385)
+            # Like darfur24: a clear-api or model failure keeps the country rather than failing the drain.
+            logger.warning(
+                "[iom_dtm_flash_alerts] locating %s failed; keeping the country", view.external_id, exc_info=True
+            )
+            located = None
+        return located or self._resolve_country_id(view.location_name)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
