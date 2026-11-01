@@ -135,9 +135,9 @@ def resolve_country_only_location(name: str | None) -> str | None:
 
 
 # Bump whenever SYSTEM_PROMPT below changes (see CLASSIFY_PROMPT_VERSION for rationale).
-LOCATION_PROMPT_VERSION = "location-v3"
+LOCATION_PROMPT_VERSION = "location-v4"
 
-SYSTEM_PROMPT = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on Sudan.
+_SYSTEM_PROMPT_TEMPLATE = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on {country}.
 
 Your task is to extract location information from signal/alert text and match it to known locations in the database.
 
@@ -158,13 +158,23 @@ IMPORTANT RULES:
    - If a city, town, village, neighbourhood or named facility is mentioned, return the district that contains it, even when a state name appears first (as a headline, hashtag or dateline). Many districts share their main town's name (Kadugli, Tendalti, Shendi).
    - An incident at one site whose consequences reach several states (a strike on a power station that cuts electricity in four states) belongs to the site's district, not the country
    - Use a state only when no place inside it is named
-   - If no specific location in Sudan is mentioned, or the places named span several states, use the country-level Sudan entry
+   - If no specific location in {country} is mentioned, or the places named span several states, use the country-level {country} entry
 
 4. Set "place_name" to the most specific named place your answer is based on (for displacement, the origin's): a town, village, neighbourhood or named facility, in its usual English spelling (e.g. "Tendalti", "El Fasher", "Um Sufaifa"). Use null when the text names only a state or the country.
 
-5. If the signal is NOT about Sudan at all (e.g., about Chad, Ethiopia with no Sudan connection), return all fields as null.
+5. If the signal is NOT about {country} at all (e.g., only about a neighbouring country, with no {country} connection), return all fields as null.
 
 Respond with valid JSON only. No explanations."""
+
+
+def system_prompt(country: str) -> str:
+    """The location prompt for signals from ``country``: a non-Sudan source under
+    the Sudan prompt would be told to drop everything (rule 5)."""
+    return _SYSTEM_PROMPT_TEMPLATE.format(country=country)
+
+
+# Unscoped resolutions (Dataminr) keep the Sudan prompt.
+SYSTEM_PROMPT = system_prompt("Sudan")
 
 
 def _build_prompt(
@@ -249,7 +259,9 @@ def resolve_signal_location(
 
     try:
         result = llm.complete_structured(
-            system=SYSTEM_PROMPT, user=prompt, schema=_LocationResolution
+            system=system_prompt(country) if country else SYSTEM_PROMPT,
+            user=prompt,
+            schema=_LocationResolution,
         )
 
         # Validate returned IDs against known locations

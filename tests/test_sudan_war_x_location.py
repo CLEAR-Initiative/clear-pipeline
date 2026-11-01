@@ -684,12 +684,33 @@ def test_the_gazetteer_client_drops_the_argument_on_an_older_clear_api():
 
 
 
-# ── incident site over impact area (location-v3) ─────────────────────────────
+# ── incident site over impact area (location-v3), country-scoped (location-v4) ─
 
 def test_prompt_prefers_the_incident_site_over_the_impact_area():
-    assert location.LOCATION_PROMPT_VERSION == "location-v3"
+    assert location.LOCATION_PROMPT_VERSION == "location-v4"
     assert "belongs to the site's district, not the country" in location.SYSTEM_PROMPT
     assert "or the places named span several states, use the country-level Sudan entry" in location.SYSTEM_PROMPT
+
+
+def test_a_non_sudan_bulletin_is_located_under_its_own_country_prompt():
+    # Under the Sudan prompt, rule 5 would null every field of a Chad bulletin and
+    # pin it to the country; the scoped prompt and candidates are Chad's.
+    calls: list[dict] = []
+
+    def answer(*, system, user, schema):
+        calls.append({"system": system, "user": user})
+        return schema(location_type="general", location_id="td-ou") if schema is location._LocationResolution else schema()
+
+    provider = MagicMock()
+    provider.complete_structured.side_effect = answer
+    with patch.object(location, "make_llm_provider", return_value=provider):
+        located = location.locate_in_country("Displacement in Ouaddai", "Families fled.", "Chad")
+
+    assert located == "td-ou"
+    system, user = calls[0]["system"], calls[0]["user"]
+    assert "focused on Chad" in system and "country-level Chad entry" in system
+    assert "NOT about Chad at all" in system and "Sudan" not in system
+    assert "Ouaddai" in user and "West Kordofan" not in user
 
 
 def test_explicit_country_answer_with_a_facility_keeps_the_country():
