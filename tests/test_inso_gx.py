@@ -194,7 +194,11 @@ def test_an_incident_signal_carries_its_own_place_date_and_casualties(h):
     assert market["publishedAt"] == "2026-10-20T09:30:00+00:00"
     assert market["title"] == "RSF shelling of El Fasher city market"
     assert market["description"].startswith("On 18 October, the RSF shelled a market in El Fasher city")
-    assert market["rawData"]["incident"]["date"] == "2026-10-18"
+    assert market["rawData"]["incident"]["start_date"] == "2026-10-18"
+    assert (market["startDate"], market["startDateAccuracy"]) == ("2026-10-18", "DAY")
+    assert "endDate" not in market and "endDateAccuracy" not in market
+    assert market["actors"] == ["RSF"]
+    assert market["countryIds"] == ["loc-sd"]
     assert market["rawData"]["incident"]["source_text"].endswith("nine injuries among civilians.")
     assert market["casualties"] == 4
     assert (market["lat"], market["lng"]) == (13.63, 25.35)
@@ -214,6 +218,14 @@ def test_an_unresolved_place_is_pinned_to_the_report_country(h):
     assert "lat" not in tawila and "pointName" not in tawila
 
 
+def test_an_unknown_actor_is_not_sent_as_a_name(h):
+    h.folder.add("01_multi_incident")
+    h.run()
+    tawila = _signal(h, "inso:SDN/Darfur/IR/20262010/R1:2")
+    assert tawila["rawData"]["incident"]["event_actors"] == ["UNKNOWN"]
+    assert "actors" not in tawila
+
+
 def test_none_reported_is_zero_and_unspecified_is_null(h):
     h.folder.add("01_multi_incident")
     h.run()
@@ -230,17 +242,38 @@ def test_none_reported_is_zero_and_unspecified_is_null(h):
 def test_the_year_comes_from_the_email_and_rolls_back_across_new_year(h):
     h.folder.add("03_new_year")
     h.run()
-    assert _signal(h, "inso:SDN/Kassala/IR/20270201/R1:1")["rawData"]["incident"]["date"] == "2026-12-30"
-    assert _signal(h, "inso:SDN/Kassala/IR/20270201/R1:2")["rawData"]["incident"]["date"] == "2027-01-01"
+    assert _signal(h, "inso:SDN/Kassala/IR/20270201/R1:1")["startDate"] == "2026-12-30"
+    assert _signal(h, "inso:SDN/Kassala/IR/20270201/R1:2")["startDate"] == "2027-01-01"
 
 
-def test_an_incident_with_no_stated_date_has_a_null_date_not_the_report_date(h):
+def test_an_incident_over_several_days_has_an_end_date_whose_year_follows_the_start(h):
+    information = inso.parse(_eml("03_new_year")).information
+    h.llm.extractions[information]["incidents"][0].update(end_day=2, end_month=1)
+    h.folder.add("03_new_year")
+    h.run()
+    signal = _signal(h, "inso:SDN/Kassala/IR/20270201/R1:1")
+    assert (signal["startDate"], signal["endDate"]) == ("2026-12-30", "2027-01-02")
+    assert (signal["startDateAccuracy"], signal["endDateAccuracy"]) == ("DAY", "DAY")
+
+
+def test_a_month_only_date_is_the_first_of_the_month_at_month_accuracy(h):
     information = inso.parse(_eml("02_single_incident")).information
-    h.llm.extractions[information]["incidents"][0].update(day=None, month=None)
+    h.llm.extractions[information]["incidents"][0].update(start_day=None)
     h.folder.add("02_single_incident")
     h.run()
     signal = _signal(h, "inso:SDN/Khartoum/IR/20261410/R1:1")
-    assert signal["rawData"]["incident"]["date"] is None
+    assert (signal["startDate"], signal["startDateAccuracy"]) == ("2026-10-01", "MONTH")
+    assert "<date>2026-10</date>" in h.llm.classify_inputs[0]
+
+
+def test_an_incident_with_no_stated_date_has_no_date_not_the_report_date(h):
+    information = inso.parse(_eml("02_single_incident")).information
+    h.llm.extractions[information]["incidents"][0].update(start_day=None, start_month=None)
+    h.folder.add("02_single_incident")
+    h.run()
+    signal = _signal(h, "inso:SDN/Khartoum/IR/20261410/R1:1")
+    assert signal["rawData"]["incident"]["start_date"] is None
+    assert "startDate" not in signal and "startDateAccuracy" not in signal
 
 
 @pytest.mark.parametrize("field", ["killed", "injured"])
@@ -294,7 +327,9 @@ def test_a_new_prompt_version_extracts_again(h):
 
 @pytest.mark.parametrize("change, reason", [
     pytest.param({"source_text": "Armed men stole an NGO vehicle in Omdurman."}, "not verbatim", id="invented-source-text"),
-    pytest.param({"day": 31, "month": 2}, "impossible incident date", id="impossible-date"),
+    pytest.param({"start_day": 31, "start_month": 2}, "impossible incident date", id="impossible-date"),
+    pytest.param({"end_day": 15, "end_month": None}, "has no month", id="end-day-without-month"),
+    pytest.param({"end_day": 10, "end_month": 10}, "before it starts", id="end-before-start"),
 ])
 def test_a_bad_extraction_is_quarantined_and_never_stored(h, change, reason):
     information = inso.parse(_eml("02_single_incident")).information
