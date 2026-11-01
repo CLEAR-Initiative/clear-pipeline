@@ -429,7 +429,8 @@ def _geocode_within(
     Claude matched. Village names repeat across Sudan; a hit outside the
     area Claude read from the text is the wrong village, so each lookup tier
     is asked for a point inside it, and with none the area wins.
-    Best-effort: any failure returns None and the caller keeps the area."""
+    Best-effort: any failure returns None and the caller keeps the area,
+    except an LLM outage, which the caller defers on."""
     try:
         area = _area_shape(area_id)
         if area is None:
@@ -467,6 +468,9 @@ def _geocode_within(
             place_name, promo["locationId"], promo.get("reused"), area_id,
         )
         return promo["locationId"]
+    except LLMUnavailableError:
+        # An outage isn't a miss: keeping the area would be saved and never retried.
+        raise
     except Exception as exc:  # noqa: BLE001 — geocoding is an enrichment, never a failure
         logger.warning("[locate] geocoding %r failed: %s", place_name, exc)
         return None

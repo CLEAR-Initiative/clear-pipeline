@@ -815,3 +815,38 @@ def test_arabic_spelling_fails_when_no_llm_is_usable():
     with patch.object(location, "make_llm_provider", return_value=provider), \
          pytest.raises(LLMUnavailableError):
         location.arabic_spelling("قصف في الفاشر", "El Fasher")
+
+
+def _spelling_failing_with(error):
+    """Fake LLM: the location call answers West Kordofan / Al Dibab; the Arabic
+    spelling call raises `error`."""
+    def answer(*, system, user, schema):
+        if schema is location._LocationResolution:
+            return schema(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+        raise error
+
+    provider = MagicMock()
+    provider.complete_structured.side_effect = answer
+    return patch.object(location, "make_llm_provider", return_value=provider)
+
+
+def test_an_outage_during_the_arabic_spelling_fails_the_locate():
+    # Keeping the area would be saved, and the drain never locates the signal again.
+    with (
+        _spelling_failing_with(_provider_error()),
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        _geocoding(hit=_hit(11.5, 28.5)) as m,
+        pytest.raises(LLMUnavailableError),
+    ):
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    m["geocode"].assert_not_called()
+
+
+def test_a_failed_arabic_spelling_still_geocodes_the_latin_name():
+    with (
+        _spelling_failing_with(RuntimeError("model down")),
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        _geocoding(hit=_hit(11.5, 28.5)) as m,
+    ):
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "l4-dibab"
+    assert m["geocode"].call_args.kwargs["arabic_name"] is None
