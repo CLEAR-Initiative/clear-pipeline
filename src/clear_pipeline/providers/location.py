@@ -5,8 +5,12 @@ import re
 
 from pydantic import BaseModel
 
+import httpx
+
 from clear_pipeline.providers.llm import LLMUnavailableError, is_llm_unavailable, make_llm_provider
 from clear_pipeline.providers.clear_api import (
+    ClearApiError,
+    GraphQLErrors,
     find_or_create_landmark_l4,
     get_location_with_geometry,
     get_locations,
@@ -41,6 +45,12 @@ def _get_locations() -> list[dict]:
     if _locations_cache is None:
         _locations_cache = get_locations()
     return _locations_cache
+
+
+class LocationsUnavailableError(RuntimeError):
+    """clear-api couldn't serve the locations a signal is matched against. Like
+    LLMUnavailableError, not a fault of the signal: a caller defers it rather
+    than place it at country level, or nowhere, for good."""
 
 
 def invalidate_locations_cache() -> None:
@@ -299,11 +309,15 @@ def locate_in_country(
     geocoded: the post describes several places, and one place name (even a
     facility's) says nothing about the others.
     """
-    resolved = resolve_signal_location(title, description, None, country=country)
+    try:
+        resolved = resolve_signal_location(title, description, None, country=country)
+        country_id = resolve_country_only_location(country)
+    except (GraphQLErrors, ClearApiError, httpx.HTTPError) as exc:
+        # The gazetteer is unreachable: every later signal would fail the same way.
+        raise LocationsUnavailableError(f"locations for {country!r}: {exc}") from exc
     matched_id = (
         resolved["location_id"] or resolved["origin_id"] or resolved["destination_id"]
     )
-    country_id = resolve_country_only_location(country)
     area_id = matched_id or country_id
     place_name = resolved.get("place_name")
     if (

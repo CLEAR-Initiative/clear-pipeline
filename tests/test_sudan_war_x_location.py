@@ -742,6 +742,16 @@ def test_locate_in_country_fails_when_the_llm_is_not_configured():
         location.locate_in_country(POST, POST, "Sudan")
 
 
+def test_locate_in_country_fails_when_the_locations_are_unreachable():
+    # A clear-api outage is not "nothing matched": the caller defers instead of pinning to the country.
+    from clear_pipeline.providers.clear_api import GraphQLErrors
+    location.invalidate_locations_cache()
+    with patch.object(location, "get_locations_by_level", side_effect=GraphQLErrors([{"message": "timeout"}])), \
+         patch.object(location, "get_locations", side_effect=GraphQLErrors([{"message": "timeout"}])), \
+         pytest.raises(location.LocationsUnavailableError):
+        location.locate_in_country(POST, POST, "Sudan")
+
+
 def test_a_per_input_rejection_degrades_instead_of_failing():
     # A 400 about this post (context too long) isn't an outage: failing would block
     # the drain on the same signal every run, never retired.

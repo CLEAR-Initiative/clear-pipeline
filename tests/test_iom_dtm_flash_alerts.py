@@ -12,6 +12,7 @@ from clear_pipeline.defs.signals.connectors import (
     SignalView,
 )
 from clear_pipeline.providers.llm import LLMUnavailableError
+from clear_pipeline.providers.location import LocationsUnavailableError
 from clear_pipeline.providers.iom_dtm_flash_alerts import (
     _extract_external_id_from_report_file,
     build_iom_dtm_flash_alert_signal_input,
@@ -238,30 +239,14 @@ def test_connector_without_a_country_is_not_located():
     locate.assert_not_called()
 
 
-def test_connector_falls_back_to_the_country_when_nothing_matches():
+def test_connector_lets_a_locations_outage_through():
+    # Pinning to the country (or nowhere) would lose the district for good; the
+    # drain defers the bulletin instead.
     view = SignalView(external_id="e", title="t", timestamp="", description="d",
                       location_name="Sudan")
-    with patch(f"{_CONNECTORS}.locate_in_country", return_value=None), \
-         patch(f"{_CONNECTORS}.get_locations_by_level",
-               return_value=[{"id": "loc-sdn", "name": "Sudan"}]):
-        assert IOMDTMFlashAlertsConnector().locate(view) == "loc-sdn"
-
-
-def test_connector_falls_back_to_the_country_when_locating_fails():
-    view = SignalView(external_id="e", title="t", timestamp="", description="d",
-                      location_name="Sudan")
-    with patch(f"{_CONNECTORS}.locate_in_country", side_effect=RuntimeError("clear-api down")), \
-         patch(f"{_CONNECTORS}.get_locations_by_level",
-               return_value=[{"id": "loc-sdn", "name": "Sudan"}]):
-        assert IOMDTMFlashAlertsConnector().locate(view) == "loc-sdn"
-
-
-def test_connector_country_fallback_is_best_effort():
-    view = SignalView(external_id="e", title="t", timestamp="", description="d",
-                      location_name="Sudan")
-    with patch(f"{_CONNECTORS}.locate_in_country", return_value=None), \
-         patch(f"{_CONNECTORS}.get_locations_by_level", side_effect=RuntimeError("down")):
-        assert IOMDTMFlashAlertsConnector().locate(view) is None
+    with patch(f"{_CONNECTORS}.locate_in_country", side_effect=LocationsUnavailableError("down")), \
+         pytest.raises(LocationsUnavailableError):
+        IOMDTMFlashAlertsConnector().locate(view)
 
 
 def test_connector_fails_when_no_llm_is_usable():
