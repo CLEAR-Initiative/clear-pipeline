@@ -758,3 +758,45 @@ def test_iceberg_signals_type1_upsert(tmp_path):
         all_rows = table.scan().to_pandas()
         assert len(all_rows) == 1, "Type-1: update in place, no history row"
         assert iceberg_signals.signals_to_sync(table, can_update=False)["create"] == []
+
+
+# ─── silver location check ───────────────────────────────────────────────────
+
+def _silver_check(source):
+    return next(d for d in build_gx_source_assets(source)
+                if isinstance(d, dg.AssetChecksDefinition) and d.check_key.name == "silver_completeness")
+
+
+def _silver_df(*signal_inputs: dict) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"externalId": f"e{i}", "publishedAt": "2026-11-01T00:00:00Z", "title": "t", "description": "d",
+         "severity": 3, "lat": s.get("lat"), "lng": s.get("lng"), "geoparsedData": s.get("geoparsedData"),
+         "signalInput": s}
+        for i, s in enumerate(signal_inputs)
+    ])
+
+
+@pytest.mark.parametrize("signal_input", [
+    {"locationId": "loc-1"},
+    {"lat": 15.6, "lng": 32.5},
+    {"geoparsedData": {"display_name": "Khartoum, Sudan"}},
+    {"countryIds": ["loc-sdn"]},
+])
+def test_silver_check_accepts_any_location_anchor(signal_input):
+    result = _silver_check(PartialSeverityFakeSource())(_silver_df(signal_input))
+    assert result.passed
+    assert result.metadata["unlocated"].value == []
+
+
+def test_silver_check_warns_on_an_unlocated_minority():
+    located = {"countryIds": ["loc-sdn"]}
+    result = _silver_check(PartialSeverityFakeSource())(_silver_df(located, located, {"lat": 15.6}))
+    assert not result.passed
+    assert result.severity == dg.AssetCheckSeverity.WARN
+    assert result.metadata["unlocated"].value == ["e2"]
+
+
+def test_silver_check_blocks_a_mostly_unlocated_batch():
+    result = _silver_check(PartialSeverityFakeSource())(_silver_df({}, {"countryIds": []}, {"locationId": "l"}))
+    assert not result.passed
+    assert result.severity == dg.AssetCheckSeverity.ERROR

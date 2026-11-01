@@ -85,6 +85,17 @@ def _district_key(geoparsed: dict | None) -> str | None:
     return parts[1] if len(parts) > 1 else (parts[0] if parts else None)
 
 
+def _has_location(signal_input: dict) -> bool:
+    """True iff the create input carries any location anchor clear-api or the drain can place it from:
+    sources anchor differently (ACLED lat/lng, Dataminr geoparse, DTM Flash Alerts the country only)."""
+    return bool(
+        signal_input.get("locationId")
+        or (signal_input.get("lat") is not None and signal_input.get("lng") is not None)
+        or signal_input.get("geoparsedData")
+        or signal_input.get("countryIds")
+    )
+
+
 def _already_synced(polled_hash: str | None, gold_hash: str | None, pushed_state: str | None) -> bool:
     """True iff gold holds this hash AND Postgres received it. Either check
     alone misses a revert after a failed push (h1 -> h2, push fails -> h1)."""
@@ -732,10 +743,13 @@ def build_gx_source_assets(source: GXSource) -> list:
         if df.empty:
             # Every polled row unchanged and skipped at bronze: nothing to validate.
             return dg.AssetCheckResult(passed=True, metadata={"row_count": 0, "skipped": "nothing changed"})
+        located = df["signalInput"].map(_has_location)
         result = validate_dataframe(
-            df, suite_name=f"{src}_silver",
+            df.assign(hasLocation=located), suite_name=f"{src}_silver",
             expectations=[
                 gx.expectations.ExpectColumnValuesToNotBeNull(column="title", mostly=0.95),
+                # Any unlocated row warns (a location-less signal can't join an event); a majority blocks.
+                gx.expectations.ExpectColumnValuesToBeInSet(column="hasLocation", value_set=[True]),
                 gx.expectations.ExpectColumnValuesToNotBeNull(column="description", mostly=0.95),
                 gx.expectations.ExpectColumnValuesToBeBetween(column="severity", min_value=1, max_value=5),
                 gx.expectations.ExpectColumnValuesToBeUnique(column="externalId"),
@@ -743,7 +757,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 gx.expectations.ExpectColumnValuesToBeBetween(column="lng", min_value=-180, max_value=180, mostly=0.99),
             ],
         )
-        return _blocking_result(result)
+        return _blocking_result(result, unlocated=df.loc[~located, "externalId"].head(20).tolist())
 
     @dg.asset_check(asset=_classify, name="classify_populated")
     def _classify_check(df: pd.DataFrame) -> dg.AssetCheckResult:
