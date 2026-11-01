@@ -62,6 +62,7 @@ from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
     get_source_id_by_name,
 )
+from clear_pipeline.providers.llm import LLMUnavailableError
 from clear_pipeline.providers.location import locate_in_country
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
@@ -458,6 +459,8 @@ class Darfur24Connector:
                 settings.darfur24_default_country,
                 country_code=settings.darfur24_country_code or None,
             )
+        except LLMUnavailableError:
+            raise  # no usable LLM: the drain fails rather than pin every article to Sudan
         except Exception:  # noqa: BLE001 — location is best-effort (expo-385)
             # A clear-api or model failure must not leave the article NEW until
             # the drain's attempt counter marks it FAILED; the country pin the
@@ -619,6 +622,8 @@ class IOMDTMFlashAlertsConnector:
                 view.location_name,
                 country_code=settings.iom_dtm_flash_alerts_country_codes.get(view.location_name),
             )
+        except LLMUnavailableError:
+            raise  # no usable LLM: the drain fails rather than pin every bulletin to its country
         except Exception:  # noqa: BLE001 — location is best-effort (expo-385)
             # Like darfur24: a clear-api or model failure keeps the country rather than failing the drain.
             logger.warning(

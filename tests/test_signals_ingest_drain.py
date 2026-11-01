@@ -1057,3 +1057,29 @@ def test_member_text_raises_on_other_s3_errors():
     member = {"id": "a1", "source": {"name": "acled"}, "rawS3Key": "raw/acled/x.json"}
     with patch.object(lake, "s3_client", return_value=denied), pytest.raises(ClientError):
         stages._member_text(member)
+
+
+def test_drain_fails_when_no_llm_is_usable_and_keeps_finished_work():
+    # No usable LLM: abort instead of burning every signal's attempts (or pinning them
+    # to a fallback). Signals already processed this batch stay marked; the failing one
+    # stays NEW without an attempt charged.
+    from clear_pipeline.providers.llm import LLMUnavailableError
+
+    def process(created, touched_events):
+        if created["id"] == "second":
+            raise LLMUnavailableError("billing")
+        return stages._PROCESSED
+
+    marked: list[tuple[str, list[str]]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([[{"id": "first"}, {"id": "second"}, {"id": "third"}]])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
+        patch.object(stages, "_process_one_signal", side_effect=process) as processed,
+        patch.object(stages._redis, "incr") as incr,
+        pytest.raises(LLMUnavailableError),
+    ):
+        _run()
+
+    assert ("PROCESSED", ["first"]) in marked
+    assert processed.call_count == 2  # "third" never attempted
+    incr.assert_not_called()

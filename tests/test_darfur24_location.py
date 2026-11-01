@@ -124,3 +124,14 @@ def test_locate_reads_the_uncut_article_text():
 def test_article_text_is_none_without_raw_description():
     assert darfur24.article_text({"raw": {}}) is None
     assert darfur24.article_text({}) is None
+
+
+def test_locate_fails_when_no_llm_is_usable():
+    # Unlike any other failure, this must not fall back to Sudan: every article would.
+    import pytest
+
+    from clear_pipeline.providers.llm import LLMUnavailableError
+
+    with patch.object(connectors, "locate_in_country", side_effect=LLMUnavailableError("billing")), \
+         pytest.raises(LLMUnavailableError):
+        Darfur24Connector().locate(_view())

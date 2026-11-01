@@ -40,6 +40,7 @@ from clear_pipeline.defs.signals.connectors import (
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
 from clear_pipeline.providers.jev import JevError
+from clear_pipeline.providers.llm import LLMUnavailableError
 from clear_pipeline.providers.signal_classifier import (
     classifier_stats_snapshot,
     classify_signal,
@@ -394,6 +395,13 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
         for created in batch:
             try:
                 outcome = _process_one_signal(created, touched_events)
+            except LLMUnavailableError:
+                # No usable LLM: every remaining signal would fail the same way. Leave this one
+                # NEW without charging an attempt, keep what already finished, and fail the run.
+                _mark(done_ids, "PROCESSED")
+                _mark(failed_ids, "FAILED")
+                _sync_event_cards(context, touched_events)
+                raise
             except Exception:  # noqa: BLE001 — isolate one signal's failure
                 # Transient (S3/clear-api blip) vs persistent: retry up to
                 # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely

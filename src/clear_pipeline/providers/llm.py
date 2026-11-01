@@ -85,6 +85,17 @@ class EmptyResponseError(RuntimeError):
     silently embedding a blank prefix and poisoning that chunk."""
 
 
+class LLMUnavailableError(RuntimeError):
+    """No usable LLM: the provider (and any fallback) refused or was unreachable
+    after the built-in retries, or the role isn't configured. Not a bad input, so
+    a caller must fail on it rather than degrade the result."""
+
+
+# Provider-side failures that outlive the retries and the fallback. A caller that
+# degrades on bad model output re-raises these as LLMUnavailableError instead.
+LLM_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (openai.APIError, anthropic.APIError)
+
+
 # Exceptions that mean "the provider/transport failed" and should trigger the
 # fallback + count against the circuit breaker. Deliberately EXCLUDES our own
 # programming errors (TypeError / ValueError / KeyError / AttributeError) so a

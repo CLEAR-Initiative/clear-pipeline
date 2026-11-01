@@ -5,7 +5,7 @@ import re
 
 from pydantic import BaseModel
 
-from clear_pipeline.providers.llm import make_llm_provider
+from clear_pipeline.providers.llm import LLM_PROVIDER_ERRORS, LLMUnavailableError, make_llm_provider
 from clear_pipeline.providers.clear_api import (
     find_or_create_landmark_l4,
     get_location_with_geometry,
@@ -198,6 +198,14 @@ Extract location info and return JSON:
 }}"""
 
 
+def _signal_llm():
+    """The `signal` role's provider; a missing or invalid config is no usable LLM."""
+    try:
+        return make_llm_provider("signal")
+    except (RuntimeError, ValueError) as exc:
+        raise LLMUnavailableError(f"signal LLM not configured: {exc}") from exc
+
+
 def resolve_signal_location(
     title: str | None,
     description: str | None,
@@ -227,9 +235,10 @@ def resolve_signal_location(
                 "location_id": None, "place_name": None}
 
     prompt = _build_prompt(title, description, dataminr_location_name, locations)
+    llm = _signal_llm()
 
     try:
-        result = make_llm_provider("signal").complete_structured(
+        result = llm.complete_structured(
             system=SYSTEM_PROMPT, user=prompt, schema=_LocationResolution
         )
 
@@ -257,6 +266,9 @@ def resolve_signal_location(
             "place_name": (result.place_name or "").strip() or None,
         }
 
+    except LLM_PROVIDER_ERRORS as e:
+        # Every later signal would fail the same way: fail instead of pinning them all to the fallback.
+        raise LLMUnavailableError(f"Location resolution: {e}") from e
     except Exception as e:
         logger.error("Location resolution failed: %s", e)
         return {"location_type": "general", "origin_id": None, "destination_id": None,
@@ -338,13 +350,16 @@ def arabic_spelling(text: str, place_name: str) -> str | None:
     spelling the model made up must not reach the gazetteer."""
     if not text or not _ARABIC_LETTER.search(text):
         return None
+    llm = _signal_llm()
     try:
-        result = make_llm_provider("signal").complete_structured(
+        result = llm.complete_structured(
             system=ARABIC_SPELLING_SYSTEM,
             user=f"POST:\n{text}\n\nENGLISH PLACE NAME: {place_name}",
             schema=_ArabicSpelling,
         )
         name = (result.place_name_ar or "").strip()
+    except LLM_PROVIDER_ERRORS as exc:
+        raise LLMUnavailableError(f"Arabic spelling: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 — an enrichment; the Latin path follows
         logger.warning("[locate] Arabic spelling of %r failed: %s", place_name, exc)
         return None

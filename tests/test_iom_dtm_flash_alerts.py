@@ -11,6 +11,7 @@ from clear_pipeline.defs.signals.connectors import (
     LocatingSource,
     SignalView,
 )
+from clear_pipeline.providers.llm import LLMUnavailableError
 from clear_pipeline.providers.iom_dtm_flash_alerts import (
     _extract_external_id_from_report_file,
     build_iom_dtm_flash_alert_signal_input,
@@ -261,3 +262,11 @@ def test_connector_country_fallback_is_best_effort():
     with patch(f"{_CONNECTORS}.locate_in_country", return_value=None), \
          patch(f"{_CONNECTORS}.get_locations_by_level", side_effect=RuntimeError("down")):
         assert IOMDTMFlashAlertsConnector().locate(view) is None
+
+
+def test_connector_fails_when_no_llm_is_usable():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", side_effect=LLMUnavailableError("billing")), \
+         pytest.raises(LLMUnavailableError):
+        IOMDTMFlashAlertsConnector().locate(view)

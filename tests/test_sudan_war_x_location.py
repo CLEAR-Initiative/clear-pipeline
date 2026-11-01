@@ -19,6 +19,7 @@ from clear_pipeline.defs.signals.connectors import (
     SudanWarXConnector,
 )
 from clear_pipeline.providers import location
+from clear_pipeline.providers.llm import LLMUnavailableError
 
 SUDAN = {"id": "sd", "name": "Sudan", "level": 0, "parent": None}
 CHAD = {"id": "td", "name": "Chad", "level": 0, "parent": None}
@@ -715,3 +716,35 @@ def test_state_answer_with_a_facility_is_geocoded_inside_the_state():
     with patcher, patch.object(location, "_geocode_within", return_value="sd-pt") as geocode:
         assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-pt"
     assert geocode.call_args.args[:2] == ("Al Dibab power station", "sd-wk")
+
+
+def _provider_error():
+    import anthropic
+    import httpx
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.BadRequestError(
+        "credit balance is too low", response=httpx.Response(400, request=request), body=None
+    )
+
+
+def test_locate_in_country_fails_when_no_llm_is_usable():
+    # A billing/auth/outage error is not "nothing matched": pinning to the country would hide it.
+    provider = MagicMock()
+    provider.complete_structured.side_effect = _provider_error()
+    with patch.object(location, "make_llm_provider", return_value=provider), \
+         pytest.raises(LLMUnavailableError):
+        location.locate_in_country(POST, POST, "Sudan")
+
+
+def test_locate_in_country_fails_when_the_llm_is_not_configured():
+    with patch.object(location, "make_llm_provider", side_effect=RuntimeError("Missing env var LLM_SIGNAL_MODEL")), \
+         pytest.raises(LLMUnavailableError):
+        location.locate_in_country(POST, POST, "Sudan")
+
+
+def test_arabic_spelling_fails_when_no_llm_is_usable():
+    provider = MagicMock()
+    provider.complete_structured.side_effect = _provider_error()
+    with patch.object(location, "make_llm_provider", return_value=provider), \
+         pytest.raises(LLMUnavailableError):
+        location.arabic_spelling("قصف في الفاشر", "El Fasher")
