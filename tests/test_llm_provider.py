@@ -30,19 +30,33 @@ class TestDisableThinkingWiring:
 
     def test_disable_thinking_sets_both_provider_switches(self):
         p = self._provider(disable_thinking=True)
-        body = p._extra_kwargs["extra_body"]
-        assert body["think"] is False                    # Ollama
-        assert body["reasoning"] == {"enabled": False}   # OpenRouter
+        assert p._base_extra_body["think"] is False                   # Ollama
+        assert p._base_extra_body["reasoning"] == {"enabled": False}  # OpenRouter
 
-    def test_no_extra_body_when_thinking_left_on(self):
+    def test_no_base_body_when_thinking_left_on(self):
         p = self._provider(disable_thinking=False)
-        assert p._extra_kwargs == {}
+        assert p._base_extra_body == {}
 
-    def test_require_parameters_is_independent_of_thinking(self):
-        p = self._provider(disable_thinking=False, require_parameters=True)
-        body = p._extra_kwargs["extra_body"]
-        assert body == {"provider": {"require_parameters": True}}
-        assert "think" not in body and "reasoning" not in body
+    def test_require_parameters_only_on_structured_calls(self):
+        # The crux of the translate 404: require_parameters must NOT ride on a
+        # complete_text call. With it, OpenRouter ALSO requires support for the
+        # reasoning off-switch, and a non-reasoning model's endpoints get filtered
+        # out ("Filter by Parameters" -> 404). It belongs only on structured
+        # (response_format) calls.
+        p = self._provider(disable_thinking=True, require_parameters=True)
+        structured = p._request_extra_kwargs(structured=True)["extra_body"]
+        text = p._request_extra_kwargs(structured=False)["extra_body"]
+        assert structured["provider"] == {"require_parameters": True}
+        assert "provider" not in text  # never on the complete_text path
+        # the reasoning off-switch rides BOTH paths
+        for body in (structured, text):
+            assert body["think"] is False
+            assert body["reasoning"] == {"enabled": False}
+
+    def test_require_parameters_absent_when_not_requested(self):
+        p = self._provider(disable_thinking=False, require_parameters=False)
+        assert p._request_extra_kwargs(structured=True) == {}
+        assert p._request_extra_kwargs(structured=False) == {}
 
     def test_no_think_reaches_an_openrouter_fallback(self, monkeypatch):
         # Regression: the enrich error was an empty response from the FALLBACK
@@ -66,9 +80,37 @@ class TestDisableThinkingWiring:
         provider = make_llm_provider("context")
         assert isinstance(provider, FallbackProvider)
         for p in (provider._primary, provider._fallback):
-            assert p._extra_kwargs["extra_body"]["reasoning"] == {"enabled": False}
-            assert p._extra_kwargs["extra_body"]["think"] is False
+            assert p._base_extra_body["reasoning"] == {"enabled": False}
+            assert p._base_extra_body["think"] is False
 
+    def test_require_parameters_reaches_an_openrouter_fallback(self, monkeypatch):
+        # The extraction fallback is a cheap OpenRouter structured model (not
+        # Claude), so the role's REQUIRE_PARAMETERS must force it — like the
+        # primary — onto a backend that enforces response_format; otherwise a
+        # fallback call can land on a response_format-only endpoint and corrupt
+        # the JSON. (Translation inherits this role.)
+        env = {
+            "LLM_EXTRACTION_PROVIDER": "openai_compat",
+            "LLM_EXTRACTION_MODEL": "qwen/qwen3-235b-a22b-2507",
+            "LLM_EXTRACTION_API_KEY": "sk-primary",
+            "LLM_EXTRACTION_BASE_URL": "https://openrouter.ai/api/v1",
+            "LLM_EXTRACTION_REQUIRE_PARAMETERS": "true",
+            "LLM_EXTRACTION_FALLBACK_PROVIDER": "openai_compat",
+            "LLM_EXTRACTION_FALLBACK_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_EXTRACTION_FALLBACK_API_KEY": "sk-fallback",
+            "LLM_EXTRACTION_FALLBACK_BASE_URL": "https://openrouter.ai/api/v1",
+        }
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+
+        provider = make_llm_provider("extraction")
+        assert isinstance(provider, FallbackProvider)
+        for p in (provider._primary, provider._fallback):
+            assert p._request_extra_kwargs(structured=True)["extra_body"]["provider"] == {
+                "require_parameters": True
+            }
+            # ...but never on a complete_text call (the translate path).
+            assert "provider" not in p._request_extra_kwargs(structured=False).get("extra_body", {})
 
 class TestStripCodeFence:
     """Some OpenRouter-hosted models (observed: google/gemma-4-26b-a4b)
