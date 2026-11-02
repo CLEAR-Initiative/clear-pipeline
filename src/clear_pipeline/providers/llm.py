@@ -837,7 +837,11 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     no_think = (_env("NO_THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
     # Force OpenRouter to route to a backend that honours `response_format`;
     # without it a "supports structured outputs" model can still land on a
-    # backend that ignores the schema → free-form output → truncation.
+    # backend that ignores the schema → free-form output → truncation. Applied to
+    # BOTH primary and fallback: when the fallback is a non-Claude OpenRouter
+    # structured model (so a cheap OSS primary doesn't fall back to pricey Claude),
+    # it must enforce structured output the same way. No-op on a Claude fallback
+    # (AnthropicProvider ignores it).
     require_params = (_env("REQUIRE_PARAMETERS", required=False) or "").strip().lower() in ("1", "true", "yes")
 
     def _construct(
@@ -889,7 +893,7 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         fb_provider = (_env("FALLBACK_PROVIDER", required=False) or "anthropic").strip().lower()
         fallback = _construct(
             fb_provider, fb_model, fb_key, _env("FALLBACK_BASE_URL", required=False),
-            disable_thinking=no_think,
+            disable_thinking=no_think, require_parameters=require_params,
         )
         logger.info(
             "[LLM] role=%s primary=%s with fallback=%s", role, model, fb_model,

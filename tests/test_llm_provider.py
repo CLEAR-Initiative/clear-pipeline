@@ -69,6 +69,31 @@ class TestDisableThinkingWiring:
             assert p._extra_kwargs["extra_body"]["reasoning"] == {"enabled": False}
             assert p._extra_kwargs["extra_body"]["think"] is False
 
+    def test_require_parameters_reaches_an_openrouter_fallback(self, monkeypatch):
+        # The extraction fallback is a cheap OpenRouter structured model (not
+        # Claude), so the role's REQUIRE_PARAMETERS must force it — like the
+        # primary — onto a backend that enforces response_format; otherwise a
+        # fallback call can land on a response_format-only endpoint and corrupt
+        # the JSON. (Translation inherits this role.)
+        env = {
+            "LLM_EXTRACTION_PROVIDER": "openai_compat",
+            "LLM_EXTRACTION_MODEL": "qwen/qwen3-235b-a22b-2507",
+            "LLM_EXTRACTION_API_KEY": "sk-primary",
+            "LLM_EXTRACTION_BASE_URL": "https://openrouter.ai/api/v1",
+            "LLM_EXTRACTION_REQUIRE_PARAMETERS": "true",
+            "LLM_EXTRACTION_FALLBACK_PROVIDER": "openai_compat",
+            "LLM_EXTRACTION_FALLBACK_MODEL": "deepseek/deepseek-v4-flash",
+            "LLM_EXTRACTION_FALLBACK_API_KEY": "sk-fallback",
+            "LLM_EXTRACTION_FALLBACK_BASE_URL": "https://openrouter.ai/api/v1",
+        }
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+
+        provider = make_llm_provider("extraction")
+        assert isinstance(provider, FallbackProvider)
+        for p in (provider._primary, provider._fallback):
+            assert p._extra_kwargs["extra_body"]["provider"] == {"require_parameters": True}
+
 
 class TestStripCodeFence:
     """Some OpenRouter-hosted models (observed: google/gemma-4-26b-a4b)
