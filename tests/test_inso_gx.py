@@ -315,6 +315,7 @@ def test_a_new_prompt_version_extracts_again(h):
 @pytest.mark.parametrize("change, reason", [
     pytest.param({"source_text": "Armed men stole an NGO vehicle in Omdurman."}, "not verbatim", id="invented-source-text"),
     pytest.param({"start_day": 31, "start_month": 2}, "impossible incident date", id="impossible-date"),
+    pytest.param({"start_day": 0, "start_month": 10}, "impossible incident date", id="day-zero"),
     pytest.param({"end_day": 15, "end_month": None}, "has no month", id="end-day-without-month"),
     pytest.param({"end_day": 10, "end_month": 10}, "before it starts", id="end-before-start"),
 ])

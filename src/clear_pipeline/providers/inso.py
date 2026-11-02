@@ -391,7 +391,10 @@ def _partial(day: int | None, month: int | None, year: int, which: str) -> tuple
             raise InsoParseError(f"incident {which} day {day} has no month")
         return None
     try:
-        return date(year, month, day or 1), "DAY" if day is not None else "MONTH"
+        # `is None`, not `or`: a day of 0 must fail in date(), not become the 1st.
+        if day is None:
+            return date(year, month, 1), "MONTH"
+        return date(year, month, day), "DAY"
     except ValueError as e:
         raise InsoParseError(f"impossible incident date {day}/{month}") from e
 
