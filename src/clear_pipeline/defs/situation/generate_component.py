@@ -8,6 +8,7 @@ post-processing (scoped-RAG fallback, coverage areas).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +69,9 @@ class BulletComponentSpec:
     fallback_topic: str = ""
     # LLM field → result field when names differ (e.g. answer → bullets).
     field_map: dict[str, str] | None = None
+    # Custom LLM-answer → result mapping, for components that are not plain
+    # bullet lists. None uses `assemble_bullet_result`.
+    assemble: Callable[[Any, RAGContext], BaseModel] | None = None
 
 
 def sourced_bullets(
@@ -165,7 +169,7 @@ def run_bullet_component_from_rag(
     system = build_system_prompt(country_name, period_label, agg)
     user = build_evidence_user_prompt(
         format_question_block(question, fallback_topic=fallback),
-        spec.map_instruction,
+        spec.map_instruction.replace("{area}", country_name),
         rag.formatted_for_prompt,
     )
     try:
@@ -184,6 +188,8 @@ def run_bullet_component_from_rag(
         )
         return spec.result_cls()
 
+    if spec.assemble is not None:
+        return spec.assemble(result, rag)
     return assemble_bullet_result(spec, result, rag)
 
 

@@ -66,6 +66,14 @@ class SourcedBullet(BaseModel):
     source_report_ids: list[str] = Field(default_factory=list)
 
 
+class TopicBullet(SourcedBullet):
+    """A finding filed under one topic of the humanitarian taxonomy, e.g.
+    "economic_fragility". `scope` names the wider area the finding applies to
+    ("Sudan-wide") when that is not the analysed area; None otherwise."""
+    topic: str
+    scope: Optional[str] = None
+
+
 class QuestionCoverage(BaseModel):
     """How completely a CSV analysis question was answered from evidence."""
     completeness: Optional[float] = Field(default=None, ge=0.0, le=1.0)
@@ -226,7 +234,15 @@ class ContextRisks(BaseModel):
 
 class HazardsAndVulnerabilities(QuestionCoverage):
     hazards: list[SourcedBullet] = Field(default_factory=list)
+    # Older readers (report PDF, change notes) read this list; it now repeats
+    # the aggravating factors.
     vulnerabilities: list[SourcedBullet] = Field(default_factory=list)
+    # One-sentence takeaway shown under the section title.
+    hazards_summary: Optional[str] = None
+    # What makes the shock worse and what reduces its impact, each filed under
+    # a Shock-Event topic. Rows generated before these fields lack them.
+    aggravating_factors: list[TopicBullet] = Field(default_factory=list)
+    mitigating_factors: list[TopicBullet] = Field(default_factory=list)
     # report_id -> the bullets (hazards + vulnerabilities) that report
     # contributed to (v2). Per-bullet ids also live on each SourcedBullet.
     contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
@@ -237,9 +253,40 @@ class HazardsAndVulnerabilities(QuestionCoverage):
 # ────────────────────────────────────────────────────────────────────
 
 
+class DisplacementFinding(SourcedBullet):
+    """One finding of the displacement story (see `displacement_story.py`)."""
+    label: str
+    callout: Optional[str] = None
+    direction: Literal["out", "back", "neutral"] = "neutral"
+    group: Literal["idp", "refugee", "both"] = "both"
+    as_of: Optional[str] = None
+
+
+class DisplacementFlow(BaseModel):
+    """One movement on the displacement map. `finding` is the 1-based finding it illustrates."""
+    direction: Literal["out", "back", "within"]
+    group: Literal["idp", "refugee"]
+    from_name: Optional[str] = None
+    from_location_id: Optional[str] = None
+    to_name: Optional[str] = None
+    to_location_id: Optional[str] = None
+    label: str
+    sublabel: Optional[str] = None
+    people: Optional[int] = None
+    finding: Optional[int] = None
+    source_report_ids: list[str] = Field(default_factory=list)
+
+
 class DisplacementNarrative(QuestionCoverage):
+    # Older readers (report PDF, change notes) read these two lists; they are
+    # now filled from the findings.
     push_factors: list[SourcedBullet] = Field(default_factory=list)
     return_intention: list[SourcedBullet] = Field(default_factory=list)
+    summary: Optional[str] = None
+    findings: list[DisplacementFinding] = Field(default_factory=list)
+    data_check: Optional[SourcedBullet] = None
+    flows: list[DisplacementFlow] = Field(default_factory=list)
+    map_since: Optional[str] = None
     # report_id -> the bullets (push_factors + return_intention) that report
     # contributed to (v2). Per-bullet ids also live on each SourcedBullet.
     contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
@@ -253,8 +300,12 @@ class DisplacementNarrative(QuestionCoverage):
 class HumanitarianAccess(QuestionCoverage):
     """Situation-analysis pillar: barriers for responders and affected
     people, plus physical / seasonal / operational constraints."""
+    # Older readers read these two lists; they are now filled from `items`.
     barriers: list[SourcedBullet] = Field(default_factory=list)
     constraints: list[SourcedBullet] = Field(default_factory=list)
+    summary: Optional[str] = None
+    # Findings filed under the five Humanitarian Access topics.
+    items: list[TopicBullet] = Field(default_factory=list)
     contributing_sources: dict[str, list[str]] = Field(default_factory=dict)
 
 
