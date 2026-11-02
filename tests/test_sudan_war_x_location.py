@@ -19,6 +19,7 @@ from clear_pipeline.defs.signals.connectors import (
     SudanWarXConnector,
 )
 from clear_pipeline.providers import location
+from clear_pipeline.providers.llm import LLMUnavailableError
 
 SUDAN = {"id": "sd", "name": "Sudan", "level": 0, "parent": None}
 CHAD = {"id": "td", "name": "Chad", "level": 0, "parent": None}
@@ -683,12 +684,33 @@ def test_the_gazetteer_client_drops_the_argument_on_an_older_clear_api():
 
 
 
-# ── incident site over impact area (location-v3) ─────────────────────────────
+# ── incident site over impact area (location-v3), country-scoped (location-v4) ─
 
 def test_prompt_prefers_the_incident_site_over_the_impact_area():
-    assert location.LOCATION_PROMPT_VERSION == "location-v3"
+    assert location.LOCATION_PROMPT_VERSION == "location-v4"
     assert "belongs to the site's district, not the country" in location.SYSTEM_PROMPT
     assert "or the places named span several states, use the country-level Sudan entry" in location.SYSTEM_PROMPT
+
+
+def test_a_non_sudan_bulletin_is_located_under_its_own_country_prompt():
+    # Under the Sudan prompt, rule 5 would null every field of a Chad bulletin and
+    # pin it to the country; the scoped prompt and candidates are Chad's.
+    calls: list[dict] = []
+
+    def answer(*, system, user, schema):
+        calls.append({"system": system, "user": user})
+        return schema(location_type="general", location_id="td-ou") if schema is location._LocationResolution else schema()
+
+    provider = MagicMock()
+    provider.complete_structured.side_effect = answer
+    with patch.object(location, "make_llm_provider", return_value=provider):
+        located = location.locate_in_country("Displacement in Ouaddai", "Families fled.", "Chad")
+
+    assert located == "td-ou"
+    system, user = calls[0]["system"], calls[0]["user"]
+    assert "focused on Chad" in system and "country-level Chad entry" in system
+    assert "NOT about Chad at all" in system and "Sudan" not in system
+    assert "Ouaddai" in user and "West Kordofan" not in user
 
 
 def test_explicit_country_answer_with_a_facility_keeps_the_country():
@@ -715,3 +737,116 @@ def test_state_answer_with_a_facility_is_geocoded_inside_the_state():
     with patcher, patch.object(location, "_geocode_within", return_value="sd-pt") as geocode:
         assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-pt"
     assert geocode.call_args.args[:2] == ("Al Dibab power station", "sd-wk")
+
+
+def _provider_error():
+    import anthropic
+    import httpx
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    return anthropic.BadRequestError(
+        "credit balance is too low", response=httpx.Response(400, request=request), body=None
+    )
+
+
+def test_locate_in_country_fails_when_no_llm_is_usable():
+    # A billing/auth/outage error is not "nothing matched": pinning to the country would hide it.
+    provider = MagicMock()
+    provider.complete_structured.side_effect = _provider_error()
+    with patch.object(location, "make_llm_provider", return_value=provider), \
+         pytest.raises(LLMUnavailableError):
+        location.locate_in_country(POST, POST, "Sudan")
+
+
+def test_locate_in_country_fails_when_the_llm_is_not_configured():
+    with patch.object(location, "make_llm_provider", side_effect=RuntimeError("Missing env var LLM_SIGNAL_MODEL")), \
+         pytest.raises(LLMUnavailableError):
+        location.locate_in_country(POST, POST, "Sudan")
+
+
+def test_locate_in_country_fails_when_the_locations_are_unreachable():
+    # A clear-api outage is not "nothing matched": the caller defers instead of pinning to the country.
+    from clear_pipeline.providers.clear_api import GraphQLErrors
+    location.invalidate_locations_cache()
+    with patch.object(location, "get_locations_by_level", side_effect=GraphQLErrors([{"message": "timeout"}])), \
+         patch.object(location, "get_locations", side_effect=GraphQLErrors([{"message": "timeout"}])), \
+         pytest.raises(location.LocationsUnavailableError):
+        location.locate_in_country(POST, POST, "Sudan")
+
+
+def test_a_per_input_rejection_degrades_instead_of_failing():
+    # A 400 about this post (context too long) isn't an outage: failing would block
+    # the drain on the same signal every run, never retired.
+    import anthropic
+    import httpx
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    provider = MagicMock()
+    provider.complete_structured.side_effect = anthropic.BadRequestError(
+        "prompt is too long", response=httpx.Response(400, request=request), body=None
+    )
+    with patch.object(location, "make_llm_provider", return_value=provider):
+        assert location.locate_in_country(POST, POST, "Sudan") == "sd"
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "unavailable"),
+    [
+        (400, "Your credit balance is too low", True),
+        (400, "prompt is too long", False),
+        (401, "invalid x-api-key", True),
+        (402, "Insufficient credits", True),
+        (404, "model not found", False),
+        (529, "overloaded", True),
+    ],
+)
+def test_is_llm_unavailable(status, message, unavailable):
+    import httpx
+    import openai
+    from clear_pipeline.providers.llm import is_llm_unavailable
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    exc = openai.OpenAI(api_key="x")._make_status_error(
+        message, body=None, response=httpx.Response(status, request=request)
+    )
+    assert is_llm_unavailable(exc) is unavailable
+
+
+def test_arabic_spelling_fails_when_no_llm_is_usable():
+    provider = MagicMock()
+    provider.complete_structured.side_effect = _provider_error()
+    with patch.object(location, "make_llm_provider", return_value=provider), \
+         pytest.raises(LLMUnavailableError):
+        location.arabic_spelling("قصف في الفاشر", "El Fasher")
+
+
+def _spelling_failing_with(error):
+    """Fake LLM: the location call answers West Kordofan / Al Dibab; the Arabic
+    spelling call raises `error`."""
+    def answer(*, system, user, schema):
+        if schema is location._LocationResolution:
+            return schema(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+        raise error
+
+    provider = MagicMock()
+    provider.complete_structured.side_effect = answer
+    return patch.object(location, "make_llm_provider", return_value=provider)
+
+
+def test_an_outage_during_the_arabic_spelling_fails_the_locate():
+    # Keeping the area would be saved, and the drain never locates the signal again.
+    with (
+        _spelling_failing_with(_provider_error()),
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        _geocoding(hit=_hit(11.5, 28.5)) as m,
+        pytest.raises(LLMUnavailableError),
+    ):
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    m["geocode"].assert_not_called()
+
+
+def test_a_failed_arabic_spelling_still_geocodes_the_latin_name():
+    with (
+        _spelling_failing_with(RuntimeError("model down")),
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        _geocoding(hit=_hit(11.5, 28.5)) as m,
+    ):
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "l4-dibab"
+    assert m["geocode"].call_args.kwargs["arabic_name"] is None

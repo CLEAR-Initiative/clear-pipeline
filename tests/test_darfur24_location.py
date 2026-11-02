@@ -9,6 +9,8 @@ resolves one from the article text, scoped to Sudan, falling back to Sudan.
 
 from unittest.mock import patch
 
+import pytest
+
 from clear_pipeline.defs.signals import connectors, stages
 from clear_pipeline.defs.signals.connectors import Darfur24Connector, LocatingSource
 from clear_pipeline.providers import darfur24
@@ -63,15 +65,6 @@ def test_locate_scopes_the_lookup_to_the_configured_country():
     )
 
 
-def test_locate_falls_back_to_the_country_row():
-    connector = Darfur24Connector()
-    with (
-        patch.object(connectors, "locate_in_country", return_value=None),
-        patch.object(connector, "_resolve_location_id", return_value="sd"),
-    ):
-        assert connector.locate(_view()) == "sd"
-
-
 def test_drain_locates_an_unplaced_article_before_grouping():
     connector = Darfur24Connector()
     located = {"id": "sd-nd-elfasher", "name": "El Fasher", "level": 2, "ancestorIds": ["sd", "sd-nd"]}
@@ -96,15 +89,13 @@ def test_drain_leaves_an_already_placed_article_alone():
     update.assert_not_called()
 
 
-def test_locate_falls_back_to_the_country_when_the_lookup_raises():
-    # A cold location cache or a model outage must not leave the article NEW
-    # until the drain marks it FAILED: the country pin is the fallback.
-    connector = Darfur24Connector()
-    with (
-        patch.object(connectors, "locate_in_country", side_effect=RuntimeError("clear-api down")),
-        patch.object(connector, "_resolve_location_id", return_value="sd"),
-    ):
-        assert connector.locate(_view()) == "sd"
+def test_locate_lets_a_locations_outage_through():
+    # Pinning to the country would lose the district for good; the drain defers the article instead.
+    from clear_pipeline.providers.location import LocationsUnavailableError
+
+    with patch.object(connectors, "locate_in_country", side_effect=LocationsUnavailableError("down")), \
+         pytest.raises(LocationsUnavailableError):
+        Darfur24Connector().locate(_view())
 
 
 def test_locate_reads_the_uncut_article_text():
@@ -124,3 +115,14 @@ def test_locate_reads_the_uncut_article_text():
 def test_article_text_is_none_without_raw_description():
     assert darfur24.article_text({"raw": {}}) is None
     assert darfur24.article_text({}) is None
+
+
+def test_locate_fails_when_no_llm_is_usable():
+    # Unlike any other failure, this must not fall back to Sudan: every article would.
+    import pytest
+
+    from clear_pipeline.providers.llm import LLMUnavailableError
+
+    with patch.object(connectors, "locate_in_country", side_effect=LLMUnavailableError("billing")), \
+         pytest.raises(LLMUnavailableError):
+        Darfur24Connector().locate(_view())

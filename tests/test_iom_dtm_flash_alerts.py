@@ -1,0 +1,325 @@
+"""IOM DTM Flash Alerts: external-id parsing, bronze (S3 blob) vs silver (rawData), drain location."""
+
+import json
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from clear_pipeline.defs.gx_pipeline.sources import IOMDTMFlashAlertsGXSource
+from clear_pipeline.defs.signals.connectors import (
+    IOMDTMFlashAlertsConnector,
+    LocatingSource,
+    SignalView,
+)
+from clear_pipeline.providers.llm import LLMUnavailableError
+from clear_pipeline.providers.location import LocationsUnavailableError
+from clear_pipeline.providers.iom_dtm_flash_alerts import (
+    _extract_external_id_from_report_file,
+    build_iom_dtm_flash_alert_signal_input,
+    build_signal_content_update,
+    fetch_iom_dtm_flash_alerts,
+    parse_record,
+)
+
+
+def _raw(**overrides) -> dict:
+    row = {
+        "field_country1": "Sudan",
+        "field_report_file": (
+            "https://dtm.iom.int/dtm_download_track/100646"
+            "?file=1&amp;type=node&amp;id=65946"
+        ),
+        "field_published_date": "2026-06-30T12:00:00",
+        "title": "DTM Sudan Focused Flash Alert: Kordofan Region (6)",
+        "field_summary": "An estimated 219,319 IDPs&nbsp;displaced from Kordofan.",
+        "field_from": "2025-10-25T12:00:00",
+        "field_to": "2026-06-23T12:00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+# ─── fetch_iom_dtm_flash_alerts ─────────────────────────────────────────────
+
+_PROVIDER = "clear_pipeline.providers.iom_dtm_flash_alerts"
+_EXPORT_URL = "https://dtm.example/flash-alerts.json"
+
+
+def _response(status: int = 200, **kwargs) -> httpx.Response:
+    return httpx.Response(status, request=httpx.Request("GET", _EXPORT_URL), **kwargs)
+
+
+@pytest.fixture
+def export_settings(monkeypatch):
+    from clear_pipeline.providers.iom_dtm_flash_alerts import settings
+
+    monkeypatch.setattr(settings, "iom_dtm_flash_alerts_export_url", _EXPORT_URL)
+    monkeypatch.setattr(settings, "iom_dtm_flash_alerts_countries", "Sudan")
+
+
+def test_fetch_raises_on_http_error(export_settings):
+    # A failed download must fail the run, not pass as an empty poll.
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(503)), \
+         pytest.raises(httpx.HTTPStatusError):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_raises_on_transport_error(export_settings):
+    with patch(f"{_PROVIDER}.httpx.get", side_effect=httpx.ConnectTimeout("timed out")), \
+         pytest.raises(httpx.ConnectTimeout):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_raises_on_invalid_json(export_settings):
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(text="<html>maintenance</html>")), \
+         pytest.raises(ValueError, match="JSON parse failed.*maintenance"):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_raises_on_non_list_payload(export_settings):
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json={"error": "nope"})), \
+         pytest.raises(TypeError, match="dict"):
+        fetch_iom_dtm_flash_alerts()
+
+
+def test_fetch_returns_empty_for_a_valid_export_without_matching_country(export_settings):
+    export = [_raw(field_country1="Nigeria")]
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json=export)):
+        assert fetch_iom_dtm_flash_alerts() == []
+
+
+def test_fetch_returns_matching_records(export_settings):
+    export = [_raw(), _raw(field_country1="Nigeria")]
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json=export)):
+        records = fetch_iom_dtm_flash_alerts()
+    assert [r["external_id"] for r in records] == ["iom_dtm_flash_alert:65946"]
+
+
+
+def test_fetch_skips_records_without_a_country(export_settings):
+    # One malformed bulletin must not fail every poll and block the others.
+    no_key = {k: v for k, v in _raw().items() if k != "field_country1"}
+    export = [no_key, _raw(field_country1=None), _raw()]
+    with patch(f"{_PROVIDER}.httpx.get", return_value=_response(json=export)):
+        records = fetch_iom_dtm_flash_alerts()
+    assert [r["external_id"] for r in records] == ["iom_dtm_flash_alert:65946"]
+
+
+# ─── _extract_external_id_from_report_file ──────────────────────────────────
+
+
+def test_extract_external_id_does_not_decode_entities_itself():
+    """Decoding is parse_record's job: undecoded "&amp;" input must fail here."""
+    url = "https://dtm.iom.int/dtm_download_track/100646?file=1&amp;type=node&amp;id=65946"
+    assert _extract_external_id_from_report_file(url) is None
+
+
+def test_extract_external_id_plain_ampersand_still_works():
+    url = "https://dtm.iom.int/dtm_download_track/100646?file=1&type=node&id=65946"
+    assert _extract_external_id_from_report_file(url) == "iom_dtm_flash_alert:65946"
+
+
+def test_extract_external_id_none_url_returns_none():
+    assert _extract_external_id_from_report_file(None) is None
+
+
+def test_extract_external_id_missing_id_param_returns_none():
+    assert (
+        _extract_external_id_from_report_file("https://dtm.iom.int/no-id-here") is None
+    )
+
+
+# ─── parse_record ────────────────────────────────────────────────────────────
+
+
+def test_parse_record_attaches_external_id():
+    parsed = parse_record(_raw())
+    assert parsed["external_id"] == "iom_dtm_flash_alert:65946"
+
+
+def test_parse_record_decodes_html_entities_in_top_level_fields():
+    parsed = parse_record(_raw())
+    assert "&nbsp;" not in parsed["field_summary"]
+    assert "&amp;" not in parsed["field_report_file"]
+
+
+def test_parse_record_keeps_raw_untouched():
+    raw = _raw()
+    parsed = parse_record(raw)
+    assert parsed["raw"] == raw
+    assert "&amp;" in parsed["raw"]["field_report_file"]
+
+
+def test_parse_record_returns_none_when_id_unparseable():
+    raw = _raw(field_report_file="https://dtm.iom.int/no-id-here")
+    assert parse_record(raw) is None
+
+
+# ─── bronze (S3) / silver (Postgres rawData) separation ─────────────────────
+
+
+def test_raw_bytes_serializes_only_the_pristine_original():
+    raw = _raw()
+    parsed = parse_record(raw)
+    blob = IOMDTMFlashAlertsGXSource().raw_bytes(parsed)
+    assert json.loads(blob) == raw
+
+
+def test_gx_parse_round_trips_the_bronze_blob():
+    source = IOMDTMFlashAlertsGXSource()
+    parsed = parse_record(_raw())
+    assert source.parse(source.raw_bytes(parsed)) == parsed
+
+
+def test_signal_input_raw_data_is_decoded_and_excludes_housekeeping_keys():
+    parsed = parse_record(_raw())
+    signal_input = build_iom_dtm_flash_alert_signal_input(parsed, "source-1", None)
+    raw_data = signal_input["rawData"]
+    assert "raw" not in raw_data
+    assert "external_id" not in raw_data
+    assert "content_hash" not in raw_data
+    assert "&nbsp;" not in raw_data["field_summary"]
+
+
+def test_project_rehydrated_from_pristine_blob_still_decodes():
+    raw = _raw()
+    parsed = parse_record(raw)
+    connector = IOMDTMFlashAlertsConnector()
+    blob = IOMDTMFlashAlertsGXSource().raw_bytes(parsed)
+    rehydrated = connector.parse(blob)
+    assert rehydrated == raw  # confirms the round-trip is truly pristine
+
+    view = connector.project(rehydrated, {"publishedAt": None})
+    assert view.external_id == "iom_dtm_flash_alert:65946"
+    assert "&amp;" not in view.url
+    assert "&nbsp;" not in (view.description or "")
+
+
+def test_project_without_blob_is_an_anomaly():
+    with pytest.raises(ValueError, match="no rawS3Key"):
+        IOMDTMFlashAlertsConnector().project(None, {"id": "sig-1"})
+
+
+# ─── structured fields ──────────────────────────────────────────────────────
+
+
+def test_signal_input_carries_reporting_period_as_day_dates():
+    signal_input = build_iom_dtm_flash_alert_signal_input(parse_record(_raw()), "source-1", None)
+    assert signal_input["startDate"] == "2025-10-25"
+    assert signal_input["startDateAccuracy"] == "DAY"
+    assert signal_input["endDate"] == "2026-06-23"
+    assert signal_input["endDateAccuracy"] == "DAY"
+
+
+def test_signal_input_omits_a_missing_period_bound():
+    signal_input = build_iom_dtm_flash_alert_signal_input(
+        parse_record(_raw(field_from="")), "source-1", None
+    )
+    assert "startDate" not in signal_input
+    assert "startDateAccuracy" not in signal_input
+    assert signal_input["endDate"] == "2026-06-23"
+
+
+def test_signal_input_sends_the_country_and_leaves_the_location_to_the_drain():
+    signal_input = build_iom_dtm_flash_alert_signal_input(parse_record(_raw()), "source-1", "loc-sdn")
+    assert signal_input["countryIds"] == ["loc-sdn"]
+    assert "locationId" not in signal_input
+
+
+def test_signal_input_without_country_sends_neither():
+    signal_input = build_iom_dtm_flash_alert_signal_input(parse_record(_raw()), "source-1", None)
+    assert "locationId" not in signal_input
+    assert "countryIds" not in signal_input
+
+
+def test_content_hash_tracks_the_pristine_record():
+    base = parse_record(_raw())["content_hash"]
+    assert parse_record(_raw())["content_hash"] == base
+    assert parse_record(_raw(field_summary="revised"))["content_hash"] != base
+
+
+def test_content_update_mirrors_the_create_input():
+    signal_input = build_iom_dtm_flash_alert_signal_input(parse_record(_raw()), "source-1", "loc-sdn")
+    signal_input["rawS3Key"] = "raw/iom_dtm_flash_alerts/k.json"
+    update = build_signal_content_update(signal_input, retracted=False)
+    for key in (
+        "sourceId", "externalId", "contentHash", "rawData", "startDate", "endDate",
+        "countryIds", "rawS3Key",
+    ):
+        assert update[key] == signal_input[key]
+    assert update["retracted"] is False
+    assert "publishedAt" not in update  # not an updateSignalContent field
+    assert "locationId" not in update  # a revision keeps the drain's location
+
+
+def test_content_update_leaves_absent_fields_out():
+    signal_input = build_iom_dtm_flash_alert_signal_input(
+        parse_record(_raw(field_from="")), "source-1", None
+    )
+    update = build_signal_content_update(signal_input)
+    assert "startDate" not in update
+    assert "countryIds" not in update
+    assert "retracted" not in update
+
+
+def test_gx_source_resolves_country_once():
+    source = IOMDTMFlashAlertsGXSource()
+    with patch(
+        "clear_pipeline.defs.gx_pipeline.sources.get_locations_by_level",
+        return_value=[{"id": "loc-sdn", "name": "Sudan"}],
+    ) as lookup:
+        first = source.to_silver_input(parse_record(_raw()), "source-1")
+        second = source.to_silver_input(parse_record(_raw()), "source-1")
+    assert first["countryIds"] == second["countryIds"] == ["loc-sdn"]
+    lookup.assert_called_once_with(0)
+
+
+# ─── drain location ──────────────────────────────────────────────────────────
+
+_CONNECTORS = "clear_pipeline.defs.signals.connectors"
+
+
+def test_connector_is_located_by_the_drain():
+    assert isinstance(IOMDTMFlashAlertsConnector(), LocatingSource)
+
+
+def test_connector_locates_within_the_bulletins_country():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", return_value="l4") as locate:
+        assert IOMDTMFlashAlertsConnector().locate(view) == "l4"
+    locate.assert_called_once_with("t", "d", "Sudan", country_code="sd")
+
+
+def test_connector_without_a_country_code_is_not_geocoded():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Nigeria")
+    with patch(f"{_CONNECTORS}.locate_in_country", return_value="ng-borno") as locate:
+        assert IOMDTMFlashAlertsConnector().locate(view) == "ng-borno"
+    locate.assert_called_once_with("t", "d", "Nigeria", country_code=None)
+
+
+def test_connector_without_a_country_is_not_located():
+    view = SignalView(external_id="e", title="t", timestamp="")
+    with patch(f"{_CONNECTORS}.locate_in_country") as locate:
+        assert IOMDTMFlashAlertsConnector().locate(view) is None
+    locate.assert_not_called()
+
+
+def test_connector_lets_a_locations_outage_through():
+    # Pinning to the country (or nowhere) would lose the district for good; the
+    # drain defers the bulletin instead.
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", side_effect=LocationsUnavailableError("down")), \
+         pytest.raises(LocationsUnavailableError):
+        IOMDTMFlashAlertsConnector().locate(view)
+
+
+def test_connector_fails_when_no_llm_is_usable():
+    view = SignalView(external_id="e", title="t", timestamp="", description="d",
+                      location_name="Sudan")
+    with patch(f"{_CONNECTORS}.locate_in_country", side_effect=LLMUnavailableError("billing")), \
+         pytest.raises(LLMUnavailableError):
+        IOMDTMFlashAlertsConnector().locate(view)

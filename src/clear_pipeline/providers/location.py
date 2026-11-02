@@ -5,8 +5,12 @@ import re
 
 from pydantic import BaseModel
 
-from clear_pipeline.providers.llm import make_llm_provider
+import httpx
+
+from clear_pipeline.providers.llm import LLMUnavailableError, is_llm_unavailable, make_llm_provider
 from clear_pipeline.providers.clear_api import (
+    ClearApiError,
+    GraphQLErrors,
     find_or_create_landmark_l4,
     get_location_with_geometry,
     get_locations,
@@ -41,6 +45,12 @@ def _get_locations() -> list[dict]:
     if _locations_cache is None:
         _locations_cache = get_locations()
     return _locations_cache
+
+
+class LocationsUnavailableError(RuntimeError):
+    """clear-api couldn't serve the locations a signal is matched against. Like
+    LLMUnavailableError, not a fault of the signal: a caller defers it rather
+    than place it at country level, or nowhere, for good."""
 
 
 def invalidate_locations_cache() -> None:
@@ -125,9 +135,9 @@ def resolve_country_only_location(name: str | None) -> str | None:
 
 
 # Bump whenever SYSTEM_PROMPT below changes (see CLASSIFY_PROMPT_VERSION for rationale).
-LOCATION_PROMPT_VERSION = "location-v3"
+LOCATION_PROMPT_VERSION = "location-v4"
 
-SYSTEM_PROMPT = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on Sudan.
+_SYSTEM_PROMPT_TEMPLATE = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on {country}.
 
 Your task is to extract location information from signal/alert text and match it to known locations in the database.
 
@@ -148,13 +158,23 @@ IMPORTANT RULES:
    - If a city, town, village, neighbourhood or named facility is mentioned, return the district that contains it, even when a state name appears first (as a headline, hashtag or dateline). Many districts share their main town's name (Kadugli, Tendalti, Shendi).
    - An incident at one site whose consequences reach several states (a strike on a power station that cuts electricity in four states) belongs to the site's district, not the country
    - Use a state only when no place inside it is named
-   - If no specific location in Sudan is mentioned, or the places named span several states, use the country-level Sudan entry
+   - If no specific location in {country} is mentioned, or the places named span several states, use the country-level {country} entry
 
 4. Set "place_name" to the most specific named place your answer is based on (for displacement, the origin's): a town, village, neighbourhood or named facility, in its usual English spelling (e.g. "Tendalti", "El Fasher", "Um Sufaifa"). Use null when the text names only a state or the country.
 
-5. If the signal is NOT about Sudan at all (e.g., about Chad, Ethiopia with no Sudan connection), return all fields as null.
+5. If the signal is NOT about {country} at all (e.g., only about a neighbouring country, with no {country} connection), return all fields as null.
 
 Respond with valid JSON only. No explanations."""
+
+
+def system_prompt(country: str) -> str:
+    """The location prompt for signals from ``country``: a non-Sudan source under
+    the Sudan prompt would be told to drop everything (rule 5)."""
+    return _SYSTEM_PROMPT_TEMPLATE.format(country=country)
+
+
+# Unscoped resolutions (Dataminr) keep the Sudan prompt.
+SYSTEM_PROMPT = system_prompt("Sudan")
 
 
 def _build_prompt(
@@ -198,6 +218,14 @@ Extract location info and return JSON:
 }}"""
 
 
+def _signal_llm():
+    """The `signal` role's provider; a missing or invalid config is no usable LLM."""
+    try:
+        return make_llm_provider("signal")
+    except (RuntimeError, ValueError) as exc:
+        raise LLMUnavailableError(f"signal LLM not configured: {exc}") from exc
+
+
 def resolve_signal_location(
     title: str | None,
     description: str | None,
@@ -227,10 +255,13 @@ def resolve_signal_location(
                 "location_id": None, "place_name": None}
 
     prompt = _build_prompt(title, description, dataminr_location_name, locations)
+    llm = _signal_llm()
 
     try:
-        result = make_llm_provider("signal").complete_structured(
-            system=SYSTEM_PROMPT, user=prompt, schema=_LocationResolution
+        result = llm.complete_structured(
+            system=system_prompt(country) if country else SYSTEM_PROMPT,
+            user=prompt,
+            schema=_LocationResolution,
         )
 
         # Validate returned IDs against known locations
@@ -258,6 +289,9 @@ def resolve_signal_location(
         }
 
     except Exception as e:
+        if is_llm_unavailable(e):
+            # Every later signal would fail the same way: fail instead of pinning them all to the fallback.
+            raise LLMUnavailableError(f"Location resolution: {e}") from e
         logger.error("Location resolution failed: %s", e)
         return {"location_type": "general", "origin_id": None, "destination_id": None,
                 "location_id": None, "place_name": None}
@@ -287,11 +321,15 @@ def locate_in_country(
     geocoded: the post describes several places, and one place name (even a
     facility's) says nothing about the others.
     """
-    resolved = resolve_signal_location(title, description, None, country=country)
+    try:
+        resolved = resolve_signal_location(title, description, None, country=country)
+        country_id = resolve_country_only_location(country)
+    except (GraphQLErrors, ClearApiError, httpx.HTTPError) as exc:
+        # The gazetteer is unreachable: every later signal would fail the same way.
+        raise LocationsUnavailableError(f"locations for {country!r}: {exc}") from exc
     matched_id = (
         resolved["location_id"] or resolved["origin_id"] or resolved["destination_id"]
     )
-    country_id = resolve_country_only_location(country)
     area_id = matched_id or country_id
     place_name = resolved.get("place_name")
     if (
@@ -338,14 +376,17 @@ def arabic_spelling(text: str, place_name: str) -> str | None:
     spelling the model made up must not reach the gazetteer."""
     if not text or not _ARABIC_LETTER.search(text):
         return None
+    llm = _signal_llm()
     try:
-        result = make_llm_provider("signal").complete_structured(
+        result = llm.complete_structured(
             system=ARABIC_SPELLING_SYSTEM,
             user=f"POST:\n{text}\n\nENGLISH PLACE NAME: {place_name}",
             schema=_ArabicSpelling,
         )
         name = (result.place_name_ar or "").strip()
     except Exception as exc:  # noqa: BLE001 — an enrichment; the Latin path follows
+        if is_llm_unavailable(exc):
+            raise LLMUnavailableError(f"Arabic spelling: {exc}") from exc
         logger.warning("[locate] Arabic spelling of %r failed: %s", place_name, exc)
         return None
     if not name or not _ARABIC_LETTER.search(name) or name not in text:
@@ -388,7 +429,8 @@ def _geocode_within(
     Claude matched. Village names repeat across Sudan; a hit outside the
     area Claude read from the text is the wrong village, so each lookup tier
     is asked for a point inside it, and with none the area wins.
-    Best-effort: any failure returns None and the caller keeps the area."""
+    Best-effort: any failure returns None and the caller keeps the area,
+    except an LLM outage, which the caller defers on."""
     try:
         area = _area_shape(area_id)
         if area is None:
@@ -426,6 +468,9 @@ def _geocode_within(
             place_name, promo["locationId"], promo.get("reused"), area_id,
         )
         return promo["locationId"]
+    except LLMUnavailableError:
+        # An outage isn't a miss: keeping the area would be saved and never retried.
+        raise
     except Exception as exc:  # noqa: BLE001 — geocoding is an enrichment, never a failure
         logger.warning("[locate] geocoding %r failed: %s", place_name, exc)
         return None

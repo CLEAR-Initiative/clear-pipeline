@@ -30,22 +30,24 @@ from clear_pipeline.providers.classify import SignalClassification
 
 def test_registered_sources_conform_to_protocol():
     sources = {s.source: s for s in GX_SOURCES}
-    assert sources.keys() == {"dataminr", "acled", "darfur24", "idmc", "sudan_witness", "inso"}
+    assert sources.keys() == {
+        "dataminr", "acled", "darfur24", "idmc", "sudan_witness", "iom_dtm_flash_alerts", "inso",
+    }
     assert all(isinstance(s, GXSource) for s in sources.values())
 
 
 def test_only_gx_only_jobs_are_polled():
-    """gx is IDMC's, Sudan Witness's and INSO's only ingestion path, so their
-    jobs need a trigger. The other sources share watermarks with the production
-    poll and must not get one."""
+    """gx-only sources need a trigger; the others share watermarks with the
+    production poll and must not get one."""
     sensors = {
         s.source: [d for d in build_gx_source_assets(s) if isinstance(d, dg.SensorDefinition)]
         for s in GX_SOURCES
     }
     assert {src: len(v) for src, v in sensors.items()} == {
-        "dataminr": 0, "acled": 0, "darfur24": 0, "idmc": 1, "sudan_witness": 1, "inso": 1,
+        "dataminr": 0, "acled": 0, "darfur24": 0, "idmc": 1, "sudan_witness": 1,
+        "iom_dtm_flash_alerts": 1, "inso": 1,
     }
-    for src in ("idmc", "sudan_witness", "inso"):
+    for src in ("idmc", "sudan_witness", "iom_dtm_flash_alerts", "inso"):
         (sensor,) = sensors[src]
         assert sensor.job_name == f"{src}_gx"
         assert sensor.default_status == dg.DefaultSensorStatus.RUNNING
@@ -756,3 +758,45 @@ def test_iceberg_signals_type1_upsert(tmp_path):
         all_rows = table.scan().to_pandas()
         assert len(all_rows) == 1, "Type-1: update in place, no history row"
         assert iceberg_signals.signals_to_sync(table, can_update=False)["create"] == []
+
+
+# ─── silver location check ───────────────────────────────────────────────────
+
+def _silver_check(source):
+    return next(d for d in build_gx_source_assets(source)
+                if isinstance(d, dg.AssetChecksDefinition) and d.check_key.name == "silver_completeness")
+
+
+def _silver_df(*signal_inputs: dict) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"externalId": f"e{i}", "publishedAt": "2026-11-01T00:00:00Z", "title": "t", "description": "d",
+         "severity": 3, "lat": s.get("lat"), "lng": s.get("lng"), "geoparsedData": s.get("geoparsedData"),
+         "signalInput": s}
+        for i, s in enumerate(signal_inputs)
+    ])
+
+
+@pytest.mark.parametrize("signal_input", [
+    {"locationId": "loc-1"},
+    {"lat": 15.6, "lng": 32.5},
+    {"geoparsedData": {"display_name": "Khartoum, Sudan"}},
+    {"countryIds": ["loc-sdn"]},
+])
+def test_silver_check_accepts_any_location_anchor(signal_input):
+    result = _silver_check(PartialSeverityFakeSource())(_silver_df(signal_input))
+    assert result.passed
+    assert result.metadata["unlocated"].value == []
+
+
+def test_silver_check_warns_on_an_unlocated_minority():
+    located = {"countryIds": ["loc-sdn"]}
+    result = _silver_check(PartialSeverityFakeSource())(_silver_df(located, located, {"lat": 15.6}))
+    assert not result.passed
+    assert result.severity == dg.AssetCheckSeverity.WARN
+    assert result.metadata["unlocated"].value == ["e2"]
+
+
+def test_silver_check_blocks_a_mostly_unlocated_batch():
+    result = _silver_check(PartialSeverityFakeSource())(_silver_df({}, {"countryIds": []}, {"locationId": "l"}))
+    assert not result.passed
+    assert result.severity == dg.AssetCheckSeverity.ERROR
