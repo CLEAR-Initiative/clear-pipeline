@@ -18,9 +18,9 @@ calendar year. This asset:
      (bitemporal supersede + insert on the clear-api side).
 
 Cost: ~15 LLM calls per country-year (5 narrative + 10 sector). Runs
-downstream of `reliefweb_weekly_datapoint_aggregations` so the numbers
+downstream of `kb_datapoint_aggregations` so the numbers
 reflect this week's freshly-recomputed aggregates, and of
-`reliefweb_weekly_knowledgebase_upsert` so the narrative is grounded in
+`kb_upsert` so the narrative is grounded in
 this week's chunks rather than last week's.
 """
 
@@ -809,13 +809,13 @@ def generate_and_upsert_for_country_month(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
-    deps=["reliefweb_weekly_knowledgebase_upsert"],
+    group_name="kb",
+    deps=["kb_upsert"],
     partitions_def=country_partitions,
 )
 def weekly_situation_analyses(
     context: AssetExecutionContext,
-    reliefweb_weekly_datapoint_aggregations: dict,
+    kb_datapoint_aggregations: dict,
 ) -> list[dict]:
     """Generate + upsert the situation-analysis snapshots for THIS country
     partition (calendar-year-to-date + current month) for the current year.
@@ -823,12 +823,12 @@ def weekly_situation_analyses(
     Two upstream dependencies - the analysis needs BOTH branches of
     this week's ingest to be fresh before it runs:
 
-      - ``reliefweb_weekly_datapoint_aggregations`` (parameter dep):
+      - ``kb_datapoint_aggregations`` (parameter dep):
         the yearly × country aggregated_datapoint bucket must be
         refreshed for the deterministic Datapoints component + as
         the numeric context prompt-cached across every LLM call.
 
-      - ``reliefweb_weekly_knowledgebase_upsert`` (``deps=`` dep):
+      - ``kb_upsert`` (``deps=`` dep):
         the narrative components (AI summary, context risks, hazards,
         displacement, sectors) all run RAG searches over
         `knowledgebase`. Without this dep declared, Dagster might
@@ -841,7 +841,7 @@ def weekly_situation_analyses(
     refresh actually ran" - we re-fetch aggregations from clear-api
     to pick up the freshly-inserted rows.
     """
-    del reliefweb_weekly_datapoint_aggregations  # only used to enforce ordering
+    del kb_datapoint_aggregations  # only used to enforce ordering
 
     iso3 = context.partition_key
     # Map the partition iso3 back to the country's name + pcode. The generators

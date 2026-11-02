@@ -2,7 +2,7 @@
 
 A `KbConnector` fetches a source's PDF reports, stages each PDF into S3, and
 returns a `KbRawDocument` per PDF. Those fields are exactly what the existing
-`reliefweb_weekly_pdf_text` asset already emits per report, so the whole
+`kb_pdf_text` asset already emits per report, so the whole
 downstream chain (text → chunks → enrich → upsert → datapoints → figures) can
 consume documents from ANY connector without change.
 

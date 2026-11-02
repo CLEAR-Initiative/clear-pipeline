@@ -135,7 +135,7 @@ def _report_summary(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
+    group_name="kb",
     # `reliefweb_fetch` stages every PDF (to the same S3 keys) and returns the
     # staged document records this asset reads back. Taking it as an input both
     # supplies those records and orders this strictly after the upload — closing
@@ -143,7 +143,7 @@ def _report_summary(
     # explicit dep on the upload asset guarded against.
     partitions_def=country_partitions,
 )
-def reliefweb_weekly_pdf_text(
+def kb_pdf_text(
     context: AssetExecutionContext,
     reliefweb_fetch: list[dict],
 ) -> list[dict]:

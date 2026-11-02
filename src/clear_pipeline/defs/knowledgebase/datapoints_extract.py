@@ -1,7 +1,7 @@
 """Extract structured humanitarian datapoints from each week's reports.
 
 Phase 1 of the datapoint pipeline (docs/humanitarian-datapoint-extraction.md).
-For each report in ``reliefweb_weekly_pdf_text``:
+For each report in ``kb_pdf_text``:
 
   1. Read the concatenated page text back from S3.
   2. Run the 6 domain-partitioned LLM calls in sequence, sharing a
@@ -1095,20 +1095,20 @@ def extract_datapoints_for_one_report(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
+    group_name="kb",
     # Ordering dep on chunks (not a parameter): extraction backfills each
     # figure's `chunk_index` by reading the report's chunk artifact from S3
     # (see `_backfill_chunk_indices`). Both assets fan out from
-    # `reliefweb_weekly_pdf_text`; without this edge they'd race and the
+    # `kb_pdf_text`; without this edge they'd race and the
     # chunk file could be absent when extraction runs, leaving chunk_index
     # null. We read the artifact by report_id, so we need the ordering, not
     # the chunks value passed in.
-    deps=["reliefweb_weekly_chunks"],
+    deps=["kb_chunks"],
     partitions_def=country_partitions,
 )
-def reliefweb_weekly_datapoints(
+def kb_datapoints(
     context: AssetExecutionContext,
-    reliefweb_weekly_pdf_text: list[dict],
+    kb_pdf_text: list[dict],
 ) -> list[dict]:
     """One extraction pass per report in this country partition's ingest.
 
@@ -1117,7 +1117,7 @@ def reliefweb_weekly_datapoints(
     (Phase 2) will consume clear-api directly rather than piping
     through Dagster IO, so the summary is for observability only.
 
-    Runs after ``reliefweb_weekly_chunks`` so the chunk artifact exists
+    Runs after ``kb_chunks`` so the chunk artifact exists
     when we backfill ``chunk_index`` (see the decorator's `deps`).
     """
     iso3 = context.partition_key
@@ -1138,7 +1138,7 @@ def reliefweb_weekly_datapoints(
     # would 400 each report AFTER its 6 LLM calls, and the per-report `continue`
     # below would let the run finish GREEN with zero data. Probe read-only; only
     # when there's work.
-    if reliefweb_weekly_pdf_text:
+    if kb_pdf_text:
         try:
             source_attribution_ready = clear_api.supports_source_attribution()
         except Exception as exc:  # noqa: BLE001
@@ -1161,7 +1161,7 @@ def reliefweb_weekly_datapoints(
 
     summaries: list[dict] = []
     reused = 0
-    for report in reliefweb_weekly_pdf_text:
+    for report in kb_pdf_text:
         report_id = report["report_id"]
 
         # Idempotency: skip reports whose datapoints a prior run already

@@ -56,7 +56,7 @@ class ReliefWebConnector:
         """Fetch ReliefWeb reports for the window, stage each PDF to S3 (same keys
         the live assets use, HEAD-skipping ones already there), and return one
         `KbRawDocument` per staged PDF. Reuses the proven client/download helpers;
-        the metadata mapping mirrors `reliefweb_weekly_pdf_text._report_summary`."""
+        the metadata mapping mirrors `kb_pdf_text._report_summary`."""
         # Imported lazily to avoid importing the Dagster defs module at connector
         # import time (registration below must stay import-light).
         from clear_pipeline.defs.reliefweb_to_s3 import (

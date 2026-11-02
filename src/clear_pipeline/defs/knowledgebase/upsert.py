@@ -141,11 +141,11 @@ def _embedding_batches(enriched: list[dict], embedder):
         yield batch
 
 
-@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
-def reliefweb_weekly_knowledgebase_upsert(
+@dg.asset(group_name="kb", partitions_def=country_partitions)
+def kb_upsert(
     context: AssetExecutionContext,
-    reliefweb_weekly_enriched_chunks: list[dict],
-    reliefweb_weekly_figures: list[dict],
+    kb_enriched_chunks: list[dict],
+    kb_figures: list[dict],
 ) -> dg.MaterializeResult:
     """Embed enriched chunks — and, when figure capture is enabled, the report's
     figure transcriptions merged in as extra KB rows (the RAG merge) — and hand
@@ -164,7 +164,7 @@ def reliefweb_weekly_knowledgebase_upsert(
     # Empty when KB_CAPTURE_FIGURES is off (that asset returns no summaries).
     figure_record_by_report = {
         r["report_id"]: r.get("s3_record_key")
-        for r in reliefweb_weekly_figures
+        for r in kb_figures
         if r.get("report_id")
     }
 
@@ -173,20 +173,20 @@ def reliefweb_weekly_knowledgebase_upsert(
     # re-materialize pinpoints it. The overlap is the tell: 0 → the figures-asset
     # and enriched-chunks report_id sets don't line up; >0 → the per-report record
     # read/parse is yielding nothing (caught below).
-    _enriched_ids = [r.get("report_id") for r in reliefweb_weekly_enriched_chunks]
+    _enriched_ids = [r.get("report_id") for r in kb_enriched_chunks]
     _keys_present = [rid for rid, k in figure_record_by_report.items() if k]
     _overlap = set(_enriched_ids) & set(figure_record_by_report)
     context.log.info(
         "[FIGURE-MERGE] figure_summaries=%d with_record_key=%d enriched_reports=%d "
         "overlap=%d | sample figure_ids=%s | sample enriched_ids=%s",
-        len(reliefweb_weekly_figures), len(_keys_present), len(_enriched_ids),
+        len(kb_figures), len(_keys_present), len(_enriched_ids),
         len(_overlap), list(figure_record_by_report)[:3], _enriched_ids[:3],
     )
 
     total_upserted = 0
     total_figure_chunks = 0
     total_reports = 0
-    for report in reliefweb_weekly_enriched_chunks:
+    for report in kb_enriched_chunks:
         report_id = report["report_id"]
         enriched = _read_enriched(s3, bucket, report["s3_enriched_key"])
 

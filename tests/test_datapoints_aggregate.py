@@ -1,4 +1,4 @@
-"""Tests for reliefweb_weekly_datapoint_aggregations — the asset that
+"""Tests for kb_datapoint_aggregations — the asset that
 triggers clear-api's four-tier refresh.
 
 The asset itself is a thin coordinator: check first-run state → pick
@@ -15,7 +15,7 @@ import dagster as dg
 import pytest
 
 from clear_pipeline.defs.knowledgebase.datapoints_aggregate import (
-    reliefweb_weekly_datapoint_aggregations,
+    kb_datapoint_aggregations,
 )
 
 
@@ -47,8 +47,8 @@ class TestAggregationAsset:
         with patch(
             "clear_pipeline.defs.knowledgebase.datapoints_aggregate.clear_api.refresh_aggregated_datapoints",
         ) as mock_refresh:
-            result = reliefweb_weekly_datapoint_aggregations(
-                _build_op_context(), reliefweb_weekly_datapoints=[],
+            result = kb_datapoint_aggregations(
+                _build_op_context(), kb_datapoints=[],
             )
         mock_refresh.assert_not_called()
         assert result["skipped"] is True
@@ -76,8 +76,8 @@ class TestAggregationAsset:
                 "schemaVersion": "v1",
             }
             ctx = _build_op_context()
-            reliefweb_weekly_datapoint_aggregations(
-                ctx, reliefweb_weekly_datapoints=[{"report_id": "r1"}],
+            kb_datapoint_aggregations(
+                ctx, kb_datapoints=[{"report_id": "r1"}],
             )
             # The `from_iso` argument should be ~90 days before `to_iso`
             call_kwargs = mock_refresh.call_args.kwargs
@@ -107,8 +107,8 @@ class TestAggregationAsset:
             mock_refresh.return_value = {
                 "computedBuckets": 1, "supersededBuckets": 0, "schemaVersion": "v1",
             }
-            reliefweb_weekly_datapoint_aggregations(
-                _build_op_context(), reliefweb_weekly_datapoints=[{"report_id": "r1"}],
+            kb_datapoint_aggregations(
+                _build_op_context(), kb_datapoints=[{"report_id": "r1"}],
             )
             mock_has.assert_not_called()  # None short-circuits the existence check
             call_kwargs = mock_refresh.call_args.kwargs
@@ -135,8 +135,8 @@ class TestAggregationAsset:
                 "supersededBuckets": 2,
                 "schemaVersion": "v1",
             }
-            reliefweb_weekly_datapoint_aggregations(
-                _build_op_context(), reliefweb_weekly_datapoints=[{"report_id": "r1"}],
+            kb_datapoint_aggregations(
+                _build_op_context(), kb_datapoints=[{"report_id": "r1"}],
             )
             call_kwargs = mock_refresh.call_args.kwargs
             from_dt = _parse_iso(call_kwargs["from_iso"])
@@ -163,8 +163,8 @@ class TestAggregationAsset:
                 "supersededBuckets": 0,
                 "schemaVersion": "v1",
             }
-            reliefweb_weekly_datapoint_aggregations(
-                _build_op_context(), reliefweb_weekly_datapoints=[{"report_id": "r1"}],
+            kb_datapoint_aggregations(
+                _build_op_context(), kb_datapoints=[{"report_id": "r1"}],
             )
             call_kwargs = mock_refresh.call_args.kwargs
             from_dt = _parse_iso(call_kwargs["from_iso"])
@@ -189,9 +189,9 @@ class TestAggregationAsset:
             mock_refresh.return_value = {
                 "computedBuckets": 0, "supersededBuckets": 0, "schemaVersion": "v1",
             }
-            reliefweb_weekly_datapoint_aggregations(
+            kb_datapoint_aggregations(
                 _build_op_context(),
-                reliefweb_weekly_datapoints=[
+                kb_datapoints=[
                     {"report_id": "r1", "reporting_period_end": "2016-06-30T00:00:00+00:00"},
                 ],
             )
@@ -219,8 +219,8 @@ class TestAggregationAsset:
                 mock_refresh.return_value = {
                     "computedBuckets": 0, "supersededBuckets": 0, "schemaVersion": "v1",
                 }
-                reliefweb_weekly_datapoint_aggregations(
-                    _build_op_context(), reliefweb_weekly_datapoints=[{"report_id": "r1"}],
+                kb_datapoint_aggregations(
+                    _build_op_context(), kb_datapoints=[{"report_id": "r1"}],
                 )
                 call_kwargs = mock_refresh.call_args.kwargs
                 from_dt = _parse_iso(call_kwargs["from_iso"])

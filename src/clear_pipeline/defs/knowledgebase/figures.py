@@ -213,17 +213,17 @@ def _capture_pdf(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
+    group_name="kb",
     # `reliefweb_fetch` stages the PDFs we read back here, so taking it as an
     # input both supplies the per-report PDF keys and orders this after the
     # upload (the NoSuchKey race pdf_text guards against). pdf_text carries the
     # per-report metadata (title/url/publisher/country) we attach to each figure.
     partitions_def=country_partitions,
 )
-def reliefweb_weekly_figures(
+def kb_figures(
     context: AssetExecutionContext,
     reliefweb_fetch: list[dict],
-    reliefweb_weekly_pdf_text: list[dict],
+    kb_pdf_text: list[dict],
 ) -> list[dict]:
     """Per-report captured figures: cropped PNGs in S3 + structured transcription
     upserted to clear-api's ``report_figures``. Returns a slim summary list.
@@ -253,7 +253,7 @@ def reliefweb_weekly_figures(
         )
 
     # Per-report metadata (title/url/publisher/country) from the text stage.
-    meta_by_report = {r["report_id"]: r for r in reliefweb_weekly_pdf_text}
+    meta_by_report = {r["report_id"]: r for r in kb_pdf_text}
 
     summaries: list[dict] = []
     total_figures = 0
