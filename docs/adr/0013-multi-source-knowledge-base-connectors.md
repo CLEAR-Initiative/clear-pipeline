@@ -2,7 +2,7 @@
 status: proposed
 ---
 
-# Multi-source knowledge base via connectors + an S3-staged asset fan-in
+# Multi-source knowledge base: per-source fetch connectors + a sensor-triggered source-neutral downstream
 
 ## Context
 
@@ -12,126 +12,124 @@ ReliefWeb reports (3 assets: `reliefweb_weekly_reports_in_s3` → `_pdf_manifest
 (`reliefweb_weekly_pdf_text → _chunks → _enriched_chunks → knowledgebase upsert`,
 plus `figures`, `datapoints`, `datapoint_aggregations`) turns PDFs-in-S3 into the
 knowledgebase. The downstream is **source-agnostic in logic** — it consumes
-"PDFs in S3 + a per-report metadata record" — but is named and wired to
-ReliefWeb.
+"PDFs in S3 + a per-report metadata record" — but is named/wired to ReliefWeb,
+and a single schedule + `reliefweb_weekly_kb_job` runs fetch → downstream as one
+group.
 
-We want more PDF sources (and to fold **manual upload** in, replacing the
-bespoke `manual_ingest` path) feeding the *same* downstream, the way the signals
-pipeline fans many providers (acled/gdacs/…) into one drain. The downstream
-should process a document as soon as any source produces one.
+We want more PDF sources (and to fold **manual upload** in, replacing the bespoke
+`manual_ingest` path), with:
+
+- a **separate fetch schedule per source** (each source polls on its own cadence,
+  independently — one source's outage never blocks another), and
+- **one source-neutral downstream** that **auto-starts as soon as *any* source
+  stages new data**,
+
+mirroring how the signals pipeline fans many providers into shared processing.
 
 Landed already (additive, inert):
 
-- **#155** — `providers/kb_sources/`: `KbRawDocument` (the staged-PDF contract —
-  the exact per-report shape `reliefweb_weekly_pdf_text` already emits),
-  `KbConnector` protocol + registry, and source-parameterized S3 path builders.
+- **#155** (merged) — `providers/kb_sources/`: `KbRawDocument` (the staged-PDF
+  contract — the exact per-report shape `pdf_text` already emits), `KbConnector`
+  protocol + registry, and source-parameterized S3 path builders.
   `test_reliefweb_paths_byte_identical_to_legacy` pins that `source="reliefweb"`
   reproduces `reliefweb_partitions.py`'s keys **byte-for-byte**.
-- **#156** — `ReliefWebConnector.fetch`, reusing the existing
-  `_fetch_window`/`_upload_pdf`/`_s3_object_exists` helpers and staging to the
-  **same** S3 keys; additive, no change to the live asset graph.
+- **#156** (in review) — `ReliefWebConnector.fetch`, reusing the existing fetch /
+  download helpers and staging to the **same** S3 keys.
 
 ## Decision
 
-Introduce an **S3-staged Dagster asset fan-in** (chosen over a per-source asset
-factory and over a clear-api DB-queue drain — see Alternatives):
+Each source is a `KbConnector` with its **own fetch asset + schedule**; a single
+**source-neutral downstream** processes staged documents from any source, kicked
+off by a **sensor** the moment any source stages new data. (Chosen over a single
+fan-in-fetch job and over a clear-api DB-queue drain — see Alternatives.)
 
-1. A new country-partitioned fan-in asset — **`kb_staged_docs`** — iterates every
-   registered `KbConnector`, calls `fetch(country_iso3, window_start, window_end)`
-   (each connector stages its PDFs to its own `<source>/…` S3 namespace and
-   returns `KbRawDocument`s), and returns the **union** across connectors for the
-   partition. The ingest window is computed exactly as
-   `reliefweb_weekly_reports_in_s3` does today (first-ingest initial-backfill vs
-   weekly delta, via `_is_first_ingest` + the lookback env vars).
-2. Re-point **`reliefweb_weekly_pdf_text`** to consume `kb_staged_docs` (a list of
-   `KbRawDocument`, keyed by `pdf_s3_key`) instead of
-   `reliefweb_weekly_pdf_manifest`/`_pdfs_in_s3`. The rest of the downstream is
-   unchanged — it already keys off the per-report record.
-3. The three ReliefWeb fetch assets collapse into `ReliefWebConnector.fetch`
-   (called by `kb_staged_docs`), so `reliefweb_weekly_{reports_in_s3,
-   pdf_manifest, pdfs_in_s3}` are removed.
-4. A new source is then "write a `providers/kb_sources/<source>.py` connector +
-   register it" — `kb_staged_docs` picks it up with no graph change.
+1. **Per-source fetch, per-source schedule.** Each connector gets a
+   country-partitioned fetch asset (e.g. `reliefweb_fetch`, `<source>_fetch`)
+   that calls `KbConnector.fetch(...)` — staging PDFs to its own `<source>/…` S3
+   namespace and recording the staged `KbRawDocument`s — plus its own
+   `@dg.schedule` on that source's cadence. ReliefWeb's three fetch assets
+   collapse into `reliefweb_fetch` (calling `ReliefWebConnector.fetch`); the
+   window is computed as today (first-ingest backfill vs weekly delta).
+2. **Source-neutral downstream.** Rename `reliefweb_weekly_* → kb_*`
+   (`kb_pdf_text → kb_chunks → kb_enriched_chunks → kb_upsert`, plus `kb_figures`,
+   `kb_datapoints`, `kb_datapoint_aggregations`). Each processes a document
+   regardless of source and writes its artifacts at the document's own
+   `<source>/kb/…` path — so ReliefWeb's land at `reliefweb/kb/…` unchanged.
+3. **Sensor-triggered.** A sensor watches the per-source fetch assets'
+   materializations (cursor-tracked) and launches the downstream for the country
+   partition that just got new data. So the downstream **auto-starts as soon as
+   any source has data** and processes only the new documents. A newly-registered
+   source + schedule is picked up without touching the downstream or the sensor.
+4. A new source = `providers/kb_sources/<source>.py` (connector) + a fetch asset
+   + a schedule. Downstream + sensor untouched.
 
-### Invariants that MUST hold (no re-materialization, no re-ingest)
+### Invariants — why renaming the downstream is safe
 
-These are the reason this is safe; a reviewer should check each:
+The earlier concern was re-**ingest** cost, which is governed by the **S3 paths**,
+not the asset name:
 
-- **Keep the downstream asset *keys* unchanged.** Generalize bodies, not keys:
-  `reliefweb_weekly_pdf_text`, `_chunks`, `_enriched_chunks`, the upsert,
-  `figures`, `datapoints`, `datapoint_aggregations` keep their current
-  `AssetKey`s (rename the functions only with `@dg.asset(name="…")` pinning the
-  old key if cosmetic cleanup is wanted). Unchanged keys → full materialization
-  history → the scheduler never sees them as new.
-- **No `AutoMaterializePolicy` exists on these assets** (verified: they are driven
-  by `reliefweb_weekly_kb_job = define_asset_job(selection=AssetSelection.groups(
-  "reliefweb", "reliefweb_kb"))` + a `@dg.schedule` + a `@dg.sensor`). So even a
-  key change can't auto-backfill history; materialization stays schedule/sensor
-  driven over the current partition.
-- **ReliefWeb's S3 paths stay byte-identical** (`source="reliefweb"` +
-  `FORMAT_SLUG`, pinned by the #155 test). The skip-if-exists idempotency in
+- **Per-source S3 paths are unchanged.** `kb_pdf_text` writes a document's text to
+  `<doc.source>/kb/text/<iso3>/<slug>` — for ReliefWeb exactly `reliefweb/kb/text/…`
+  (byte-identical, pinned by the #155 test). So the skip-if-exists guards in
   `pdf_text` (`_existing_page_count`), `enrich` (existing enriched JSONL), and
-  `datapoints` (existing `reportDatapoint`) keys off these paths — so even a
-  re-run of a partition re-extracts/re-embeds nothing.
-- **`report_id`s stay stable and source-namespaced** (ReliefWeb's native ids;
-  `manual:<sha>` for uploads), so `(sourceId, externalId)` dedup downstream is
-  unchanged.
-- The removed fetch assets (`reliefweb_weekly_reports_in_s3` etc.) lose their own
-  materialization history (cosmetic); nothing downstream re-runs because of it,
-  per the no-auto-materialize point above.
+  `datapoints` (existing `reportDatapoint`) still hit → no re-extract, no
+  re-embed, even on a re-run of an already-processed partition.
+- **The trigger is a cursor-based sensor**, so it processes only newly-staged
+  documents — it does **not** backfill history. Do NOT put an eager
+  `AutoMaterializePolicy` on the renamed partitioned assets: with fresh keys it
+  could queue every partition. (There is no auto-materialize policy today; keep
+  it that way — the sensor is the controlled trigger.)
+- **What the rename costs:** only the *Dagster materialization history* of the old
+  `reliefweb_weekly_*` keys (cosmetic — the UI timeline resets). No data moves,
+  nothing re-ingests.
+- **`report_id`s stay stable + source-namespaced** (ReliefWeb native ids,
+  `manual:<sha>` for uploads) so `(sourceId, externalId)` dedup is unchanged.
 
-### Trigger ("downstream acts as soon as a connector has data")
-
-Keep the existing group-selected `reliefweb_weekly_kb_job` + schedule/sensor.
-`kb_staged_docs` joins a selected group so the weekly cron runs
-`kb_staged_docs → pdf_text → …` end to end; a newly-registered connector is
-included automatically (the asset enumerates the registry at run time). No
-`AutoMaterializePolicy` is introduced — the group job already runs the chain, and
-adding one would reintroduce the backfill risk the invariants above avoid.
-
-### Manual upload (phase 3)
+## Manual upload (phase 3)
 
 Manual upload becomes a **push** `KbConnector` (no `fetch`): the
-`uploadKnowledgebaseDocument` path stages one `KbRawDocument` to
-`manual/…` and triggers the downstream for that document (a run keyed to the
-upload), reusing the same `pdf_text → …` code and retiring the bespoke
-`manual_ingest` chain. Its publisher is marked trusted (reliability 4) as today.
+`uploadKnowledgebaseDocument` path stages one `KbRawDocument` under `manual/…`
+and its staging event trips the same sensor, so the upload flows through the
+identical `kb_pdf_text → …` downstream — retiring the bespoke `manual_ingest`
+chain. Its publisher is still marked trusted (reliability 4).
 
 ## Consequences
 
-- One downstream, many sources; a new source is a small connector module. Manual
-  upload stops being a parallel code path.
-- The three ReliefWeb fetch assets are replaced by a connector; their Dagster
-  history is lost (cosmetic).
-- Fan-in is per-country-partition; a slow/failing connector is isolated
-  per-connector within `kb_staged_docs` (one source's failure must not drop the
-  others — mirror the per-report resilience already in the download asset).
-- This is the only step that changes *which assets run*; it must be validated in
-  **dev** before prod (see checklist).
+- Each source fetches on its own schedule and in isolation; the downstream runs
+  per new batch of staged docs from any source. New source = a connector + a
+  fetch asset + a schedule.
+- The `reliefweb_weekly_*` asset keys are renamed to `kb_*` (one-time cosmetic
+  Dagster-history reset; no re-ingest per the invariants).
+- A slow/failing source is isolated to its own fetch asset/schedule; within the
+  downstream, per-document failures stay isolated (mirror the per-report
+  resilience already in the pipeline).
+- The sensor + the rename are the parts that change which assets run / how they
+  are triggered — validate in **dev** before prod (checklist below).
 
 ## Alternatives considered
 
-- **Per-source asset factory** (one downstream lineage per source via a factory):
-  N copies of the downstream; doesn't literally fan in; manual upload stays
-  separate. Rejected — more surface, less unification.
-- **clear-api DB-queue drain** (a `kb_documents` table with NEW/PROCESSED, a
-  sensor-driven drain — the exact signals model): most robust dedup/status, but a
-  new Prisma table + resolvers + offline migration, and it migrates the KB off
-  the asset-lineage model. Rejected for now as heavier than needed; the S3-staged
-  fan-in stays asset-native and schema-free. Revisit if per-document status/retry
+- **Single fan-in-fetch job** (one job calls every connector and runs the
+  downstream in the same group): couples all sources to one schedule and one run
+  — rejected; the ask is independent per-source schedules + auto-trigger.
+- **Per-source downstream factory** (a full downstream lineage per source):
+  N copies; no shared processing; manual upload stays separate. Rejected.
+- **clear-api DB-queue drain** (a `kb_documents` NEW/PROCESSED table + drain —
+  the exact signals model): most robust dedup/status/retry, but a new Prisma
+  table + resolvers + offline migration, and it moves the KB off asset lineage.
+  Rejected for now as heavier than needed; revisit if per-document status/retry
   tracking becomes necessary.
 
 ## Dev-first validation checklist (before prod)
 
-1. `kb_staged_docs` for `sdn` returns the same set of documents (report_ids +
-   `pdf_s3_key`s) the current `reliefweb_weekly_pdf_manifest` produces for the
-   same window.
-2. A full dev run of `reliefweb_weekly_kb_job` materializes
-   `kb_staged_docs → pdf_text → … → upsert` with **zero** new text/enriched/
-   datapoint artifacts written for already-processed reports (skip-if-exists all
-   hit) — confirm via asset metadata (`skipped_already_present`, reused counts).
-3. The schedule/sensor still enqueues one run per live country partition; run
-   keys unchanged.
-4. No partition shows a full re-materialization in the Dagster UI after deploy.
-5. Register a trivial second connector in dev and confirm its docs flow through
-   without any downstream change.
+1. `reliefweb_fetch` for `sdn` stages the same report_ids + `pdf_s3_key`s the
+   current `reliefweb_weekly_pdf_manifest`/`_pdfs_in_s3` produce for the window.
+2. After a `reliefweb_fetch` run, the **sensor** launches the downstream for
+   `sdn` and it writes **zero** new text/enriched/datapoint artifacts for
+   already-processed reports (skip-if-exists all hit) — confirm via asset
+   metadata (reused / `skipped_already_present` counts).
+3. Each source's schedule fires independently on its own cadence; run keys
+   per-source-per-window.
+4. No partition shows a full re-materialization of *work* (only the one-time
+   history reset from the key rename).
+5. Register a trivial second connector + schedule in dev; confirm its staged docs
+   trip the sensor and flow through the unchanged downstream.
