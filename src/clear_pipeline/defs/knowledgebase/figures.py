@@ -214,15 +214,15 @@ def _capture_pdf(
 
 @dg.asset(
     group_name="reliefweb_kb",
-    # Ordering-only dep: PDFs must be uploaded before we read them back (same
-    # NoSuchKey race pdf_text guards against). pdf_text also carries the
+    # `reliefweb_fetch` stages the PDFs we read back here, so taking it as an
+    # input both supplies the per-report PDF keys and orders this after the
+    # upload (the NoSuchKey race pdf_text guards against). pdf_text carries the
     # per-report metadata (title/url/publisher/country) we attach to each figure.
-    deps=["reliefweb_weekly_pdfs_in_s3"],
     partitions_def=country_partitions,
 )
 def reliefweb_weekly_figures(
     context: AssetExecutionContext,
-    reliefweb_weekly_pdf_manifest: list[dict],
+    reliefweb_fetch: list[dict],
     reliefweb_weekly_pdf_text: list[dict],
 ) -> list[dict]:
     """Per-report captured figures: cropped PNGs in S3 + structured transcription
@@ -241,11 +241,16 @@ def reliefweb_weekly_figures(
     s3 = _s3_client()
     llm_extract = make_llm_provider("extraction")
 
-    # PDF attachments grouped by report, in manifest order (matches pdf_text's
-    # concatenation so pageNumber lines up across a report's multiple PDFs).
+    # PDF attachments grouped by report, in staged order (matches pdf_text's
+    # concatenation so pageNumber lines up across a report's multiple PDFs). The
+    # staged KbRawDocument dicts carry `pdf_s3_key`; normalise to the `s3_key`
+    # shape the capture loop below reads.
     by_report: dict[str, list[dict]] = {}
-    for entry in reliefweb_weekly_pdf_manifest:
-        by_report.setdefault(entry["report_id"], []).append(entry)
+    for doc in reliefweb_fetch:
+        report_id = str(doc["report_id"])
+        by_report.setdefault(report_id, []).append(
+            {"report_id": report_id, "s3_key": doc["pdf_s3_key"], "filename": doc.get("filename")},
+        )
 
     # Per-report metadata (title/url/publisher/country) from the text stage.
     meta_by_report = {r["report_id"]: r for r in reliefweb_weekly_pdf_text}

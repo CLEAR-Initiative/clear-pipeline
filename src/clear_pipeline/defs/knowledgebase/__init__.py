@@ -1,6 +1,7 @@
-"""Weekly knowledge-base build over ReliefWeb Sudan PDFs.
+"""Source-neutral knowledge-base build over staged KB PDFs.
 
-Downstream of ``reliefweb_weekly_pdfs_in_s3``:
+Downstream of ``reliefweb_fetch`` (and future per-source fetch assets),
+triggered by ``kb_fetch_sensor``:
 
   pdf_text  → chunks  → enriched_chunks  → knowledgebase_upsert
 
