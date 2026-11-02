@@ -610,3 +610,38 @@ class TestRecentWindow:
         )
         user = llm.complete_structured.call_args.kwargs["user"]
         assert "30 days up to 31 March 2026" in user
+
+
+class TestDisplacementMapArea:
+    def _story(self):
+        return DisplacementStoryLLM.model_validate({
+            "summary": "People keep moving.",
+            "findings": [{"label": "Local", "callout": "500", "description": "people left [R1].",
+                          "direction": "out", "group": "idp"}],
+            "flows": [
+                {"direction": "out", "group": "idp", "from_place": "Sheikan", "to_place": "Kosti",
+                 "label": "Sheikan 500", "evidence": "[R1]"},
+                {"direction": "within", "group": "idp", "from_place": "Nyala", "to_place": "Kosti",
+                 "label": "Nyala 300", "evidence": "[R1]"},
+            ],
+        })
+
+    def _assemble(self, area):
+        from clear_pipeline.defs.situation import narrative
+
+        places = {"Sheikan": "loc-sheikan", "Nyala": "loc-nyala", "Kosti": "loc-kosti"}
+        parents = {"loc-sheikan": "loc-nk", "loc-nk": "loc-sd", "loc-nyala": "loc-south-darfur",
+                   "loc-south-darfur": "loc-sd", "loc-kosti": "loc-wn", "loc-wn": "loc-sd"}
+        token = narrative.analysis_area.set(area)
+        try:
+            with patch.object(narrative, "_resolve_place", side_effect=lambda name, kind: places.get(name)), \
+                    patch.object(narrative.clear_api, "get_location_parents", return_value=parents):
+                return narrative.assemble_displacement(self._story(), _fake_rag_context(hits=1, report_ids=["r-1"]))
+        finally:
+            narrative.analysis_area.reset(token)
+
+    def test_created_analysis_keeps_only_flows_that_touch_its_area(self):
+        assert [f.label for f in self._assemble(("loc-nk",)).flows] == ["Sheikan 500"]
+
+    def test_country_analysis_keeps_every_flow(self):
+        assert [f.label for f in self._assemble(None).flows] == ["Sheikan 500", "Nyala 300"]

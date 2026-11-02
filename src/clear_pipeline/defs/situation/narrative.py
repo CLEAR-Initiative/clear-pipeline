@@ -28,6 +28,8 @@ empty default. One bad LLM call doesn't drop the other three.
 """
 
 import logging
+from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Literal
@@ -313,8 +315,34 @@ def _resolve_place(name: str, kind: str) -> str | None:
         return None
 
 
+# The selected locations of a created analysis, set by the generator for the
+# run. When set, a map flow must start or end in one of them or below them; a
+# country analysis leaves it unset and keeps every flow.
+analysis_area: ContextVar[tuple[str, ...] | None] = ContextVar("analysis_area", default=None)
+
+
+def _area_check(area: tuple[str, ...]) -> Callable[[str], bool]:
+    parents: dict[str, str | None] = {}
+
+    def in_scope(location_id: str) -> bool:
+        if not parents:
+            parents.update(clear_api.get_location_parents())
+        seen: set[str] = set()
+        current: str | None = location_id
+        while current and current not in seen:
+            if current in area:
+                return True
+            seen.add(current)
+            current = parents.get(current)
+        return False
+
+    return in_scope
+
+
 def assemble_displacement(result: DisplacementStoryLLM, rag: RAGContext) -> DisplacementNarrative:
-    return DisplacementNarrative.model_validate(assemble_story(result, rag, _resolve_place))
+    area = analysis_area.get()
+    in_scope = _area_check(area) if area else None
+    return DisplacementNarrative.model_validate(assemble_story(result, rag, _resolve_place, in_scope))
 
 
 class _ScenariosLLM(BaseModel):

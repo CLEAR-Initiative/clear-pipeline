@@ -196,10 +196,13 @@ def assemble_story(
     and this enforces it. A country analysis passes None: every place it can
     resolve is in the country."""
     findings: list[dict[str, Any]] = []
-    for f in llm.findings[:MAX_FINDINGS]:
+    # The model's 1-based finding number -> the stored one, after empty findings are dropped.
+    kept_number: dict[int, int] = {}
+    for number, f in enumerate(llm.findings[:MAX_FINDINGS], start=1):
         text, ids = _resolve_one(f.description, rag)
         if not f.label.strip() or not text:
             continue
+        kept_number[number] = len(findings) + 1
         findings.append({
             "label": f.label.strip(),
             "callout": f.callout.strip() or None,
@@ -238,12 +241,17 @@ def assemble_story(
             "label": fl.label.strip(),
             "sublabel": fl.sublabel.strip() or None,
             "people": fl.people if fl.people and fl.people > 0 else None,
-            "finding": fl.finding if fl.finding and 1 <= fl.finding <= len(findings) else None,
+            "finding": kept_number.get(fl.finding) if fl.finding else None,
             "source_report_ids": evidence_ids,
         })
 
+    # The whole fact (label, callout, sentence): the description alone leaves out
+    # the figure, and the executive summary reads these lines.
+    def full(f: dict[str, Any]) -> str:
+        return f"{f['label']}: {(f['callout'] + ' ') if f['callout'] else ''}{f['description']}"
+
     contributing = merge_contributing(*(
-        {rid: [f["description"]] for rid in f["source_report_ids"]} for f in findings
+        {rid: [full(f)] for rid in f["source_report_ids"]} for f in findings
     ))
     return {
         "summary": llm.summary.strip() or None,
@@ -253,13 +261,11 @@ def assemble_story(
         "map_since": llm.map_since.strip() or None,
         # The older fields stay filled so the report PDF and other readers keep working.
         "push_factors": [
-            {"description": f"{f['label']}: {(f['callout'] + ' ') if f['callout'] else ''}{f['description']}",
-             "source_report_ids": f["source_report_ids"]}
+            {"description": full(f), "source_report_ids": f["source_report_ids"]}
             for f in findings if f["direction"] != "back"
         ],
         "return_intention": [
-            {"description": f"{f['label']}: {(f['callout'] + ' ') if f['callout'] else ''}{f['description']}",
-             "source_report_ids": f["source_report_ids"]}
+            {"description": full(f), "source_report_ids": f["source_report_ids"]}
             for f in findings if f["direction"] == "back"
         ],
         "completeness": llm.completeness,

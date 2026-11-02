@@ -73,3 +73,21 @@ def test_older_readers_still_get_push_and_return_bullets():
 def test_instruction_names_the_scope():
     text = map_instruction("North Kordofan, Sudan")
     assert "North Kordofan, Sudan" in text and "idp" in text
+
+
+def test_summary_lines_keep_the_label_and_callout():
+    out = assemble_story(answer(), RAG, resolve)
+    assert out["contributing_sources"]["event:ev-3"] == ["Gebrat Al Sheikh: 31,287 people were displaced."]
+
+
+def test_flow_follows_its_finding_when_an_empty_finding_is_dropped():
+    findings = [
+        {"label": " ", "callout": "", "description": "No label [R1].", "direction": "out", "group": "idp"},
+        {"label": "Gebrat Al Sheikh", "callout": "31,287", "description": "people were displaced [R3].",
+         "direction": "out", "group": "idp"},
+    ]
+    flows = [{"direction": "out", "group": "idp", "from_place": "Gebrat Al Sheikh", "to_place": "East Darfur",
+              "label": "Gebrat Al Sheikh · 31,287", "finding": 2, "evidence": "[R3]"}]
+    out = assemble_story(answer(findings=findings, flows=flows), RAG, resolve)
+    assert [f["label"] for f in out["findings"]] == ["Gebrat Al Sheikh"]
+    assert out["flows"][0]["finding"] == 1

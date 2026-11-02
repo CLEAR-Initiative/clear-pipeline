@@ -43,6 +43,7 @@ from clear_pipeline.defs.situation.frame import (
     build_rag_filters,
     country_frame,
 )
+from clear_pipeline.defs.situation.narrative import analysis_area
 from clear_pipeline.defs.situation.selective import (
     build_leaf_components,
     generate_ai_summary_fanin,
@@ -406,6 +407,7 @@ def generate_and_upsert_for_frame(
     rag_filters: dict[str, Any] | None,
     log_context=None,
     force: bool = False,
+    limit_map_to_area: bool = False,
 ) -> dict | None:
     """Generate + upsert one unified analysis snapshot for a FRAME (ADR-0007) —
     the generalisation of the situation generator. Instead of a (country,
@@ -488,11 +490,17 @@ def generate_and_upsert_for_frame(
             )
         prior_data = prior.get("data") if prior else None
 
-        leaf_result = build_leaf_components(
-            llm, prior_payload=None if force else prior_data, country_name=scope_label,
-            period_label=period_label, aggregated=aggregated, cache_key=cache_key,
-            rag_filters=rag_filters, log=log,
-        )
+        # A created analysis keeps only map flows that touch its area
+        # (`limit_map_to_area`); a country analysis keeps every flow.
+        area_token = analysis_area.set(frame.location_ids if limit_map_to_area else None)
+        try:
+            leaf_result = build_leaf_components(
+                llm, prior_payload=None if force else prior_data, country_name=scope_label,
+                period_label=period_label, aggregated=aggregated, cache_key=cache_key,
+                rag_filters=rag_filters, log=log,
+            )
+        finally:
+            analysis_area.reset(area_token)
         context_risks_component = leaf_result.context_risks
         hazards_component = leaf_result.hazards_and_vulnerabilities
         displacement_component = leaf_result.displacement
