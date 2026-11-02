@@ -20,11 +20,11 @@ pure transform, no clear-api write, built on
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_pipeline.providers import acled, darfur24, dataminr, idmc, sudan_witness
+from clear_pipeline.providers import acled, darfur24, dataminr, idmc, iom_dtm_flash_alerts, sudan_witness
 from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
     get_source_id_by_name,
@@ -240,10 +240,8 @@ class IDMCGXSource:
     ingestion path. IDU rows revise in place (same `idu_id`), so the sync hooks
     let bronze skip unchanged rows and `_push` send revisions and retractions."""
 
-    # Optional, probed via `getattr` in factory.py: gives the job a poll sensor.
-    # Only gx-only sources (IDMC, Sudan Witness) set it — the other sources'
-    # watermarks and seen-sets are shared with the production poll in
-    # `defs/signals`, which a second poller would race.
+    # Optional (probed in factory.py): gives the job a poll sensor. gx-only sources only —
+    # the others share watermarks/seen-sets with the `defs/signals` poll, which a second poller would race.
     poll_interval_minutes: int = settings.idmc_poll_interval_minutes
 
     @property
@@ -282,8 +280,7 @@ class IDMCGXSource:
         pass
 
     # ── Optional sync hooks ────────────────────────────────────────────────
-    # IDMC revises rows in place (so does Sudan Witness). Probed via `getattr`
-    # in factory.py, like the group hooks below.
+    # IDMC revises rows in place. Probed via `getattr` in factory.py, like the group hooks below.
 
     def content_hash(self, record: Any) -> str:
         return record["content_hash"]
@@ -360,15 +357,82 @@ class SudanWitnessGXSource:
         return sudan_witness.build_signal_content_update(signal_input, retracted=retracted)
 
 
-# IDMC runs the full chain for QA and pre-push filtering, like ACLED/Darfur24.
-# IDMC-native event grouping is NOT designed: the district+type heuristic runs
-# as-is (as in the drain, IDMCConnector drained=True), and gold events are a
-# QA-only sandbox that never reaches clear-api. Only IDMCGXSource and
-# SudanWitnessGXSource define the sync hooks; other sources stay create-only.
+@dataclass
+class IOMDTMFlashAlertsGXSource:
+    """DTM Flash Alerts' only ingestion path; every poll returns every bulletin, so the sync hooks dedup.
+    Not frozen: caches the L0 location id per country."""
+
+    poll_interval_minutes: int = settings.iom_dtm_flash_alerts_poll_interval_minutes
+    _location_ids: dict[str, str | None] = field(default_factory=dict, repr=False)
+
+    @property
+    def source(self) -> str:
+        return settings.iom_dtm_flash_alerts_source_name
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        return iom_dtm_flash_alerts.fetch_iom_dtm_flash_alerts(since=since)
+
+    def external_id(self, record: Any) -> str:
+        return record["external_id"]
+
+    def published_at(self, record: Any) -> str:
+        return record.get("field_published_date") or ""
+
+    def raw_bytes(self, record: Any) -> bytes:
+        # Bronze stays raw: the untouched original, not the decoded fields.
+        return json.dumps(record["raw"]).encode("utf-8")
+
+    def parse(self, raw: bytes) -> Any:
+        record = iom_dtm_flash_alerts.parse_record(json.loads(raw))
+        if record is None:  # bronze only writes records that parsed
+            raise ValueError("DTM Flash Alert blob has no parseable external id")
+        return record
+
+    def api_source_id(self) -> str:
+        return get_source_id_by_name(settings.iom_dtm_flash_alerts_source_name)
+
+    def last_synced(self) -> datetime | None:
+        return iom_dtm_flash_alerts.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        iom_dtm_flash_alerts.set_last_synced(ts)
+
+    def _resolve_location_id(self, country_name: str) -> str | None:
+        """L0 location id for `field_country1`, cached per country.
+        Failures propagate: better silver fails than push a signal with no location and no countries."""
+        if country_name not in self._location_ids:
+            self._location_ids[country_name] = next(
+                (loc["id"] for loc in get_locations_by_level(0) if loc["name"] == country_name),
+                None,
+            )
+        return self._location_ids[country_name]
+
+    def to_silver_input(self, record: Any, source_id: str) -> dict:
+        # Country only: the drain locates the bulletin from its text
+        # (`IOMDTMFlashAlertsConnector.locate`), so silver writes nothing.
+        return iom_dtm_flash_alerts.build_iom_dtm_flash_alert_signal_input(
+            record, source_id, self._resolve_location_id(record["field_country1"])
+        )
+
+    def mark_seen(self, external_id: str) -> None:
+        pass  # No seen-set: the bronze skip (gold hash + pushedState) dedups.
+
+    # ── Optional sync hooks (probed via `getattr` in factory.py) ──────────
+    def content_hash(self, record: Any) -> str:
+        return record["content_hash"]
+
+    def content_update_input(self, signal_input: dict, *, retracted: bool) -> dict:
+        return iom_dtm_flash_alerts.build_signal_content_update(signal_input, retracted=retracted)
+
+
+
+# IDMC has no native grouping: the district+type heuristic runs as-is; gold events are QA-only, never pushed.
+# Sources without the sync hooks stay create-only.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),
     Darfur24GXSource(),
     IDMCGXSource(),
     SudanWitnessGXSource(),
+    IOMDTMFlashAlertsGXSource(),
 ]
