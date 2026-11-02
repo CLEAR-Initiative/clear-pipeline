@@ -9,8 +9,9 @@ from dagster import DagsterInstance
 
 from clear_pipeline.defs import reliefweb_partitions as rp
 from clear_pipeline.defs.reliefweb_to_s3 import (
+    kb_fetch_sensor,
     reliefweb_country_partition_sensor,
-    reliefweb_weekly_schedule,
+    reliefweb_fetch_schedule,
 )
 
 _PART = rp.country_partitions.name
@@ -89,7 +90,7 @@ def test_sensor_is_add_only_never_removes_delisted():
     assert "sdn" in instance.get_dynamic_partitions(_PART)
 
 
-# ── Weekly schedule: one RunRequest per live partition ───────────────────────
+# ── Per-source fetch schedule: one RunRequest per live partition ─────────────
 
 _TICK = datetime(2026, 8, 10, 6, 0, tzinfo=timezone.utc)
 
@@ -98,7 +99,7 @@ def test_schedule_fans_out_one_run_per_partition():
     with DagsterInstance.local_temp() as instance:
         instance.add_dynamic_partitions(_PART, ["sdn", "eth"])
         ctx = dg.build_schedule_context(instance=instance, scheduled_execution_time=_TICK)
-        run_requests = list(reliefweb_weekly_schedule(ctx))
+        run_requests = list(reliefweb_fetch_schedule(ctx))
     assert sorted(r.partition_key for r in run_requests) == ["eth", "sdn"]
     # run_key is per-country-per-week so a re-tick in the same week is deduped.
     assert all(r.run_key and r.partition_key in r.run_key for r in run_requests)
@@ -107,5 +108,63 @@ def test_schedule_fans_out_one_run_per_partition():
 def test_schedule_skips_when_no_partitions_registered():
     with DagsterInstance.local_temp() as instance:
         ctx = dg.build_schedule_context(instance=instance, scheduled_execution_time=_TICK)
-        result = reliefweb_weekly_schedule(ctx)
+        result = reliefweb_fetch_schedule(ctx)
     assert isinstance(result, dg.SkipReason)
+
+
+# ── kb_fetch_sensor: trigger the downstream on new fetch materializations ────
+
+
+def _materialize_fetch(instance, partition):
+    """Record a runless reliefweb_fetch materialization for a country partition,
+    the way the fetch asset's run would."""
+    instance.report_runless_asset_event(
+        dg.AssetMaterialization(asset_key="reliefweb_fetch", partition=partition),
+    )
+
+
+def test_kb_fetch_sensor_primes_then_triggers_on_new_data():
+    instance = DagsterInstance.ephemeral()
+    _materialize_fetch(instance, "sdn")  # pre-existing before the sensor is enabled
+
+    # First tick primes to the current high-water mark and triggers NOTHING —
+    # so enabling the sensor never backfills history.
+    ctx = dg.build_sensor_context(instance=instance)
+    primed = kb_fetch_sensor(ctx)
+    assert isinstance(primed, dg.SkipReason)
+    assert ctx.cursor is not None
+
+    # A fresh fetch after priming triggers the downstream for just that country.
+    _materialize_fetch(instance, "eth")
+    ctx2 = dg.build_sensor_context(instance=instance, cursor=ctx.cursor)
+    requests = kb_fetch_sensor(ctx2)
+    assert isinstance(requests, list)
+    assert [r.partition_key for r in requests] == ["eth"]
+    assert requests[0].run_key and "eth" in requests[0].run_key
+
+
+def test_kb_fetch_sensor_skips_when_no_new_materializations():
+    instance = DagsterInstance.ephemeral()
+    _materialize_fetch(instance, "sdn")
+    ctx = dg.build_sensor_context(instance=instance)
+    kb_fetch_sensor(ctx)  # prime
+    # No new materialization since priming.
+    ctx2 = dg.build_sensor_context(instance=instance, cursor=ctx.cursor)
+    result = kb_fetch_sensor(ctx2)
+    assert isinstance(result, dg.SkipReason)
+
+
+def test_kb_fetch_sensor_dedups_reprocessing_via_run_key():
+    # The same materialization never yields two different run_keys: run_key is
+    # keyed on the event storage_id, so Dagster dedups a re-tick.
+    instance = DagsterInstance.ephemeral()
+    ctx = dg.build_sensor_context(instance=instance)
+    kb_fetch_sensor(ctx)  # prime (no events yet)
+    _materialize_fetch(instance, "sdn")
+    ctx2 = dg.build_sensor_context(instance=instance, cursor=ctx.cursor)
+    first = kb_fetch_sensor(ctx2)
+    assert [r.partition_key for r in first] == ["sdn"]
+    # Re-tick with the advanced cursor: the already-seen event is not re-emitted.
+    ctx3 = dg.build_sensor_context(instance=instance, cursor=ctx2.cursor)
+    second = kb_fetch_sensor(ctx3)
+    assert isinstance(second, dg.SkipReason)
