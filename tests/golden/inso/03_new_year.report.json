@@ -1,0 +1,18 @@
+{
+  "message_id": "<synthetic-03_new_year@security-reports.example>",
+  "sender": "reports@security-reports.example",
+  "subject": "[SYNTHETIC] SECURITY REPORT – SUDAN –KASSALA: Crime, Risking Humanitarian Operations",
+  "published_at": "2027-01-02T08:00:00+00:00",
+  "severity_raw": "ATTENTION RECOMMENDED",
+  "location_raw": "Republic of Sudan, Kassala",
+  "country_raw": "Republic of Sudan",
+  "incident_type": "Crime, Risking Humanitarian Operations",
+  "report_datetime": "2027-01-02T08:00:00",
+  "serial": "SDN/Kassala/IR/20270201/R1",
+  "issued_by": "Sudan Security Team",
+  "information": "On 30 December, in Kassala town, Kassala State, unidentified gunmen robbed an NGO guesthouse and assaulted a guard, who was injured.\n\nOn 1 January, near Wad Sharifey camp, Kassala locality, a local NGO staff member was briefly detained by armed men.",
+  "analysis": "Criminality around Kassala town typically rises over the holiday period.",
+  "advice": [
+    "NGOs should reinforce guard shifts at guesthouses."
+  ]
+}

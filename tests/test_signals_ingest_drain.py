@@ -28,6 +28,7 @@ from clear_pipeline.defs.signals.connectors import (
     ManualConnector,
     SignalSource,
     SudanWarXConnector,
+    InsoConnector,
     SudanWitnessConnector,
 )
 from clear_pipeline.providers.translation_hash import (
@@ -101,6 +102,7 @@ EXPECTED_FLAGS = {
     "idmc": (False, True),
     "sudan_witness": (False, True),
     "iom_dtm_flash_alerts": (False, True),
+    "inso": (False, True),
     "manual": (False, True),
     "field_officer": (False, True),
     "partner": (False, True),
@@ -128,6 +130,7 @@ def test_connectors_by_source_map():
         assert CONNECTORS_BY_SOURCE[name].source == name
     assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["sudan_witness"], SudanWitnessConnector)
+    assert isinstance(CONNECTORS_BY_SOURCE["inso"], InsoConnector)
 
 
 def test_manual_source_names_keep_legacy_setting_and_dedupe():
