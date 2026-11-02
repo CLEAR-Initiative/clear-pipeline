@@ -42,7 +42,6 @@ from clear_pipeline.providers.prompts.event_classification import (
     SHARED_EVENT_CLASSIFICATION_PROMPT,
     SHARED_PROMPT_VERSION,
 )
-from clear_pipeline.providers.signal import enrich_with_geoparser
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +440,28 @@ class Country:
 
     location_id: str
     name: str
-    iso2: str
+    iso2: str | None  # from the L0 pCode; None skips the geocode in the drain
+
+
+def _normalise_country(name: str) -> str:
+    """Casefolded country name without its long form: `Republic of Sudan`,
+    `Sudan (Republic of the)` and `the Sudan` all give `sudan`, while
+    `Republic of South Sudan` gives `south sudan`, not `sudan`."""
+    name = re.sub(r"\([^)]*\)", "", name).strip().casefold()
+    name = re.sub(r"^.*\brepublic of\s+(the\s+)?", "", name)
+    return re.sub(r"^the\s+", "", name).strip()
+
+
+def match_country(country_raw: str, l0s: list[dict]) -> Country | None:
+    """The L0 location the header's country names, or None. Shared by gx
+    (an unknown country quarantines the email) and the drain (which locates
+    each incident inside that country)."""
+    wanted = _normalise_country(country_raw)
+    for loc in l0s:
+        if loc.get("name") and _normalise_country(loc["name"]) == wanted:
+            pcode = loc.get("pCode")
+            return Country(location_id=loc["id"], name=loc["name"], iso2=pcode[:2].lower() if pcode else None)
+    return None
 
 
 def build_inso_signal_inputs(
@@ -449,16 +469,14 @@ def build_inso_signal_inputs(
 ) -> list[dict]:
     """One CreateSignalInput-shaped dict per incident, no clear-api write.
 
-    Location: the geoparser over "place, locality, admin1, country", limited to
-    the report's country, without L4 promotion. Resolved → its coordinates go
-    as lat/lng (clear-api resolves the point); unresolved → the signal is pinned
-    to the country L0, so it still shows in country views. Severity is left to
-    the classify hook. Dates, actors and countries are only sent when known,
+    Location: only the country (``countryIds``). The drain's
+    ``InsoConnector.locate`` places each incident from its title and
+    description, as for darfur24 and the DTM bulletins; a ``locationId`` here
+    would stop it running. Severity is left to the classify hook. Dates, actors and countries are only sent when known,
     as in ``event_extraction.extracted_signal_fields``."""
     inputs = []
     for ordinal, incident in enumerate(incidents, start=1):
         when = incident_dates(incident, report.published_at)
-        where = ", ".join(p for p in (incident.place, incident.locality, incident.admin1, country.name) if p)
         input_data: dict = {
             "sourceId": source_id,
             "externalId": external_id(report.serial, ordinal),
@@ -491,16 +509,6 @@ def build_inso_signal_inputs(
             input_data["actors"] = actors
         if incident.killed is not None:
             input_data["casualties"] = incident.killed
-        geo = enrich_with_geoparser(
-            input_data, title=where, description=None, promote=False, log_tag="inso",
-            scope_country=country.iso2,
-        )
-        if geo is not None:
-            input_data["lat"], input_data["lng"] = geo.lat, geo.lng
-            input_data["pointName"] = geo.candidate
-        else:
-            input_data.pop("pointName", None)
-            input_data["locationId"] = country.location_id
         inputs.append(input_data)
     return inputs
 

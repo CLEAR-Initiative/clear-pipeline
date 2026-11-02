@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
+import httpx
+
 from clear_pipeline.providers import (
     acled,
     darfur24,
@@ -60,8 +62,13 @@ from clear_pipeline.providers import (
     inso,
     iom_dtm_flash_alerts,
 )
-from clear_pipeline.providers.clear_api import get_source_id_by_name
-from clear_pipeline.providers.location import locate_in_country
+from clear_pipeline.providers.clear_api import (
+    ClearApiError,
+    GraphQLErrors,
+    get_locations_by_level,
+    get_source_id_by_name,
+)
+from clear_pipeline.providers.location import LocationsUnavailableError, locate_in_country
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
 
@@ -542,7 +549,10 @@ class InsoConnector:
     """Downloaded only by ``gx_pipeline`` (``InsoGXSource``). One email holds
     several incidents, each its own signal, all pointing at the same raw
     ``.eml``: ``project`` takes the incident's fields from the clear-api row
-    gx created, and only the report from the blob."""
+    gx created, and only the report from the blob. gx sends only the country,
+    so the drain locates each incident from its title and description."""
+
+    _countries: list[dict] | None = None  # L0 locations, fetched once per process
 
     source = settings.inso_source_name
     polled = False
@@ -560,9 +570,30 @@ class InsoConnector:
             title=created.get("title") or "",
             timestamp=created.get("publishedAt") or record.published_at,
             description=created.get("description"),
-            location_name=_first_location_name(created),
+            # The header's country, as written: ``locate`` matches it to an L0.
+            location_name=record.country_raw,
             url=created.get("url"),
         )
+
+    def locate(self, view: SignalView) -> str | None:
+        """Most specific state/district in the report's country, geocoded to a
+        point when the country has an ISO2, else the country itself. Reads the
+        incident's own title and description (written by extraction), not the
+        report: one email spans several places."""
+        if not view.location_name:
+            return None
+        if self._countries is None:
+            try:
+                self._countries = get_locations_by_level(0)
+            except (GraphQLErrors, ClearApiError, httpx.HTTPError) as exc:
+                raise LocationsUnavailableError(f"countries for inso: {exc}") from exc
+        country = inso.match_country(view.location_name, self._countries)
+        if country is None:  # gx quarantines an unknown country, so only a renamed L0 lands here
+            logger.warning("[inso] country %r matches no L0 location", view.location_name)
+            return None
+        # Errors propagate: a locations outage defers the incident (the drain), where
+        # a country pin, or none, would lose its district for good.
+        return locate_in_country(view.title, view.description, country.name, country_code=country.iso2)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

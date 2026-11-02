@@ -2,14 +2,13 @@
 assertions on gold rows, clear-api creates, quarantine entries, check results
 and the cursor. Fake S3, a SQLite Iceberg catalog in a temp dir, the shared
 fake Redis. Replaced boundaries: the mailbox fetch, the LLM (extraction and
-classify answers) and the geoparser's network lookup; clear-api reads/creates
+classify answers); clear-api reads/creates
 are faked as in the other GX tests. No LLM call is made.
 """
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import dagster as dg
@@ -28,8 +27,6 @@ L0 = [
     {"id": "loc-sd", "name": "Sudan", "level": 0, "pCode": "SD"},
     {"id": "loc-af", "name": "Afghanistan", "level": 0, "pCode": "AF"},
 ]
-# The geoparser resolves these places; anything else stays unresolved.
-GAZETTEER = {"El Fasher": (13.63, 25.35), "Omdurman": (15.65, 32.48), "Kassala": (15.45, 36.4)}
 
 
 def _eml(name: str) -> bytes:
@@ -82,15 +79,6 @@ class FakeLLM:
         return schema.model_validate({"events": [{"event_type": "attack", "relevance": "RELEVANT", "severity": 3}]})
 
 
-def _fake_geoparser(input_data, *, title, **_):
-    place = title.split(",")[0]
-    if place not in GAZETTEER:
-        return None
-    lat, lng = GAZETTEER[place]
-    input_data["geoparsedData"] = {"candidate": place, "display_name": title, "lat": lat, "lng": lng}
-    return SimpleNamespace(lat=lat, lng=lng, candidate=place)
-
-
 class Harness:
     def __init__(self, tmp_path, fake_redis):
         self.warehouse = f"file://{tmp_path / 'warehouse'}"
@@ -134,7 +122,6 @@ class Harness:
             patch.object(newsletter_mailbox, "fetch_after", side_effect=self.folder.fetch_after),
             patch.object(newsletter_mailbox, "_redis", self.redis),
             patch.object(inso, "make_llm_provider", return_value=self.llm),
-            patch.object(inso, "enrich_with_geoparser", side_effect=_fake_geoparser),
         ):
             return dg.materialize(self.assets + self.checks, raise_on_error=False)
 
@@ -201,8 +188,6 @@ def test_an_incident_signal_carries_its_own_place_date_and_casualties(h):
     assert market["countryIds"] == ["loc-sd"]
     assert market["rawData"]["incident"]["source_text"].endswith("nine injuries among civilians.")
     assert market["casualties"] == 4
-    assert (market["lat"], market["lng"]) == (13.63, 25.35)
-    assert "locationId" not in market
     # Report-level text stays on the report.
     assert market["rawData"]["report"]["analysis"].startswith("Mid-October confirmed")
     assert market["rawData"]["report"]["serial"] == "SDN/Darfur/IR/20262010/R1"
@@ -210,12 +195,14 @@ def test_an_incident_signal_carries_its_own_place_date_and_casualties(h):
     assert not any("Kutum" in _signal(h, x)["description"] for x in h.gold)
 
 
-def test_an_unresolved_place_is_pinned_to_the_report_country(h):
+def test_gx_sends_only_the_country_so_the_drain_locates_each_incident(h):
+    # A locationId or point here would stop the drain's `locate` running.
     h.folder.add("01_multi_incident")
     h.run()
-    tawila = _signal(h, "inso:SDN/Darfur/IR/20262010/R1:2")
-    assert tawila["locationId"] == "loc-sd"
-    assert "lat" not in tawila and "pointName" not in tawila
+    for external_id in h.gold:
+        signal = _signal(h, external_id)
+        assert signal["countryIds"] == ["loc-sd"]
+        assert not {"locationId", "lat", "lng", "pointName"} & signal.keys()
 
 
 def test_an_unknown_actor_is_not_sent_as_a_name(h):
@@ -567,4 +554,7 @@ def test_the_drain_connector_projects_an_incident_from_its_clear_api_row(h):
         "generalLocation": {"id": "loc-sd", "name": "Sudan"},
     }
     view = connector.project(connector.parse(_eml("01_multi_incident")), created)
-    assert (view.external_id, view.title, view.location_name) == (created["externalId"], created["title"], "Sudan")
+    # The header's country as written; `locate` matches it to an L0.
+    assert (view.external_id, view.title, view.location_name) == (
+        created["externalId"], created["title"], "Republic of Sudan",
+    )

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -444,15 +443,6 @@ class IOMDTMFlashAlertsGXSource:
         return iom_dtm_flash_alerts.build_signal_content_update(signal_input, retracted=retracted)
 
 
-def _normalise_country(name: str) -> str:
-    """Casefolded country name without its long form: `Republic of Sudan`,
-    `Sudan (Republic of the)` and `the Sudan` all give `sudan`, while
-    `Republic of South Sudan` gives `south sudan`, not `sudan`."""
-    name = re.sub(r"\([^)]*\)", "", name).strip().casefold()
-    name = re.sub(r"^.*\brepublic of\s+(the\s+)?", "", name)
-    return re.sub(r"^the\s+", "", name).strip()
-
-
 @dataclass
 class InsoGXSource:
     """INSO security newsletters, read from the shared newsletter mailbox
@@ -556,13 +546,10 @@ class InsoGXSource:
     def _country(self, report: inso.InsoReport) -> inso.Country:
         if self._countries is None:
             self._countries = get_locations_by_level(0)
-        wanted = _normalise_country(report.country_raw)
-        for loc in self._countries:
-            if loc.get("name") and _normalise_country(loc["name"]) == wanted:
-                if not loc.get("pCode"):
-                    raise Quarantined(f"country {loc['name']} has no pCode to scope the geoparser")
-                return inso.Country(location_id=loc["id"], name=loc["name"], iso2=loc["pCode"][:2].lower())
-        raise Quarantined(f"country {report.country_raw!r} matches no country location")
+        country = inso.match_country(report.country_raw, self._countries)
+        if country is None:
+            raise Quarantined(f"country {report.country_raw!r} matches no country location")
+        return country
 
     def to_silver_input(self, record: Any, source_id: str) -> dict:
         raise NotImplementedError("INSO fans out: the factory calls to_silver_inputs")
