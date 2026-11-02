@@ -4,6 +4,7 @@ regression names the field that broke. Fixtures: tests/golden/inso/."""
 
 import json
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -87,3 +88,24 @@ def test_unknown_charset_raises():
 def test_serial_is_kept_verbatim():
     raw = _replace(_eml("02_single_incident"), "SDN/Khartoum/IR/20261410/R1", "sdn / khartoum-IR 7")
     assert inso.parse(raw).serial == "sdn / khartoum-IR 7"
+
+
+def _dates(published_at: str, **when) -> inso.IncidentDates:
+    incident = inso.Incident(source_text="x", title="x", description="x", **when)
+    return inso.incident_dates(incident, published_at)
+
+
+def test_a_leap_day_before_a_non_leap_report_rolls_back_to_the_leap_year():
+    # 29/2/2025 doesn't exist; the year must be chosen before the date is built.
+    dates = _dates("2025-01-15T08:00:00+00:00", start_day=29, start_month=2)
+    assert (dates.start, dates.start_accuracy) == (date(2024, 2, 29), "DAY")
+
+
+def test_a_leap_day_end_without_a_start_rolls_back_too():
+    assert _dates("2025-01-15T08:00:00+00:00", end_day=29, end_month=2).end == date(2024, 2, 29)
+
+
+def test_a_leap_day_in_a_non_leap_report_year_is_still_impossible():
+    # Within the slack of a 2025 report, so it stays in 2025, where it doesn't exist.
+    with pytest.raises(InsoParseError, match="impossible incident date"):
+        _dates("2025-02-25T08:00:00+00:00", start_day=29, start_month=2)

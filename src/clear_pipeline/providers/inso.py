@@ -399,13 +399,18 @@ def _partial(day: int | None, month: int | None, year: int, which: str) -> tuple
         raise InsoParseError(f"impossible incident date {day}/{month}") from e
 
 
-def _year_of(day: int | None, month: int | None, published: date, which: str) -> int:
+def _year_of(day: int | None, month: int | None, published: date) -> int:
     """The email's year, or the year before when that would put the date more
-    than a week after the email."""
-    dated = _partial(day, month, published.year, which)
-    if dated is not None and dated[0] > published + _YEAR_ROLLBACK_SLACK:
-        return published.year - 1
-    return published.year
+    than a week after the email.
+
+    Compares (month, day) without building a date: 29 February in a
+    non-leap email year must roll back, not fail. ``_partial`` validates the
+    date afterwards in the chosen year."""
+    cutoff = published + _YEAR_ROLLBACK_SLACK
+    if month is None or cutoff.year > published.year:
+        return published.year
+    after_cutoff = (month, 1 if day is None else day) > (cutoff.month, cutoff.day)
+    return published.year - 1 if after_cutoff else published.year
 
 
 def incident_dates(incident: Incident, published_at: str) -> IncidentDates:
@@ -416,10 +421,10 @@ def incident_dates(incident: Incident, published_at: str) -> IncidentDates:
     published = datetime.fromisoformat(published_at).date()
     start = _partial(
         incident.start_day, incident.start_month,
-        _year_of(incident.start_day, incident.start_month, published, "start"), "start",
+        _year_of(incident.start_day, incident.start_month, published), "start",
     )
     if start is None:
-        end_year = _year_of(incident.end_day, incident.end_month, published, "end")
+        end_year = _year_of(incident.end_day, incident.end_month, published)
     else:
         crosses_new_year = incident.end_month is not None and incident.end_month < start[0].month
         end_year = start[0].year + 1 if crosses_new_year else start[0].year
