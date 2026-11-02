@@ -11,9 +11,12 @@ v3: the taxonomy's two "other" labels are named apart. "other political
 violence" (`po`) is a conflict incident no conflict label fits; "other"
 (`ot`) is non-conflict noise. Callers map both back to level-3 "other".
 The rationale comes first, so the model reasons before it answers.
+
+v4: <relevance> matches the reference extraction prompt: a statement is
+NOT_RELEVANT unless it carries a new combat/humanitarian fact.
 """
 
-SHARED_PROMPT_VERSION = "shared-event-classification-v3"
+SHARED_PROMPT_VERSION = "shared-event-classification-v4"
 
 SHARED_EVENT_CLASSIFICATION_PROMPT = """
 You are a humanitarian early-warning analyst. You classify ONE incident: its CLEAR event type,
@@ -163,7 +166,8 @@ rehab schedules); macroeconomy/resources without an active humanitarian shock; o
 crime/smuggling/accidents/labor disputes; generic advocacy; court sentencing; protests with no
 conflict/access link (exception: active war-zone protests e.g. al-Fashir); tests/gibberish.
 
-Statement-only (AU/Arab League/ministry condemnations, Amnesty on past attacks) → NOT_RELEVANT.
+Statement-only (AU/Arab League/ministry condemnations, Amnesty on past attacks) → NOT_RELEVANT
+unless the same text has a new combat/humanitarian fact.
 When unsure → NOT_RELEVANT.
 </relevance>
 
