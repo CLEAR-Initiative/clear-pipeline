@@ -455,13 +455,22 @@ def _normalise_country(name: str) -> str:
 def match_country(country_raw: str, l0s: list[dict]) -> Country | None:
     """The L0 location the header's country names, or None. Shared by gx
     (an unknown country quarantines the email) and the drain (which locates
-    each incident inside that country)."""
-    wanted = _normalise_country(country_raw)
-    for loc in l0s:
-        if loc.get("name") and _normalise_country(loc["name"]) == wanted:
-            pcode = loc.get("pCode")
-            return Country(location_id=loc["id"], name=loc["name"], iso2=pcode[:2].lower() if pcode else None)
-    return None
+    each incident inside that country).
+
+    An exact (casefolded) name wins. Otherwise the long-form-stripped name
+    must match exactly one L0: stripping folds both Congos (and both Koreas)
+    to one key, and an ambiguous header is unknown rather than a guess."""
+    named = [loc for loc in l0s if loc.get("name")]
+    exact = country_raw.strip().casefold()
+    matches = [loc for loc in named if loc["name"].strip().casefold() == exact]
+    if not matches:
+        wanted = _normalise_country(country_raw)
+        matches = [loc for loc in named if _normalise_country(loc["name"]) == wanted]
+    if len(matches) != 1:
+        return None
+    loc = matches[0]
+    pcode = loc.get("pCode")
+    return Country(location_id=loc["id"], name=loc["name"], iso2=pcode[:2].lower() if pcode else None)
 
 
 def build_inso_signal_inputs(

@@ -72,6 +72,27 @@ def test_a_long_form_header_country_is_not_mistaken_for_its_neighbour():
     assert inso.match_country("Republic of South Sudan", L0).location_id == "loc-ss"
 
 
+CONGOS = [
+    {"id": "loc-cg", "name": "Republic of the Congo", "level": 0, "pCode": "CG"},
+    {"id": "loc-cd", "name": "Democratic Republic of the Congo", "level": 0, "pCode": "CD"},
+]
+
+
+def test_an_exact_country_name_wins_over_a_long_form_collision():
+    for l0 in (CONGOS, CONGOS[::-1]):
+        assert inso.match_country("Democratic Republic of the Congo", l0).location_id == "loc-cd"
+        assert inso.match_country("Republic of the Congo", l0).location_id == "loc-cg"
+
+
+def test_a_long_form_matching_several_countries_is_unknown():
+    assert inso.match_country("Congo", CONGOS) is None
+
+
+def test_a_long_form_still_matches_a_single_country():
+    l0 = [{"id": "loc-ve", "name": "Venezuela", "level": 0, "pCode": "VE"}]
+    assert inso.match_country("Bolivarian Republic of Venezuela", l0).location_id == "loc-ve"
+
+
 def test_a_country_without_a_pcode_is_located_without_geocoding():
     _, locate, _ = _locate(_view(), l0=[{"id": "loc-sd", "name": "Sudan", "level": 0}])
     assert locate.call_args.kwargs["country_code"] is None
