@@ -1,4 +1,4 @@
-"""End-to-end tests for the reliefweb_weekly_datapoints extraction asset.
+"""End-to-end tests for the kb_datapoints extraction asset.
 
 All external I/O is mocked:
   - S3: returns a canned doc-text JSONL body
@@ -22,7 +22,7 @@ import dagster as dg
 import pytest
 
 from clear_pipeline.defs.knowledgebase.datapoints_extract import (
-    reliefweb_weekly_datapoints,
+    kb_datapoints,
 )
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     AccessAndIncidents,
@@ -234,8 +234,8 @@ class TestExtractionAsset:
                 "createdOrReplaced": False,
             }
 
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[PDF_TEXT_SUMMARY],
             )
 
         # All 6 domains attempted.
@@ -294,8 +294,8 @@ class TestExtractionAsset:
             ) as mock_upsert,
         ):
             _configure_llm_mock(mock_make_llm)
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[PDF_TEXT_SUMMARY],
             )
 
         # No domain extraction, no upsert — the report was reused.
@@ -325,8 +325,8 @@ class TestExtractionAsset:
         ):
             _configure_llm_mock(mock_make_llm)
             with pytest.raises(dg.Failure, match="sourceId"):
-                reliefweb_weekly_datapoints(
-                    _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+                kb_datapoints(
+                    _build_asset_context(), kb_pdf_text=[PDF_TEXT_SUMMARY],
                 )
         # Failed before spending anything.
         assert mock_make_llm.return_value.complete_structured.call_count == 0
@@ -345,8 +345,8 @@ class TestExtractionAsset:
             ),
         ):
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[],
             )
         assert result == []
 
@@ -383,8 +383,8 @@ class TestExtractionAsset:
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
             mock_make_llm.return_value.complete_structured.side_effect = raising
 
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[PDF_TEXT_SUMMARY],
             )
 
         assert mock_upsert.call_count == 1
@@ -419,8 +419,8 @@ class TestExtractionAsset:
                 "provider down",
             )
 
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[PDF_TEXT_SUMMARY],
             )
 
         mock_upsert.assert_not_called()
@@ -438,8 +438,8 @@ class TestExtractionAsset:
                 "clear_pipeline.defs.knowledgebase.datapoints_extract.clear_api.upsert_report_datapoints",
             ) as mock_upsert,
         ):
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[PDF_TEXT_SUMMARY],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[PDF_TEXT_SUMMARY],
             )
 
         mock_make_llm.assert_not_called()
@@ -454,8 +454,8 @@ class TestExtractionAsset:
             # end of the asset — it's still emitted even when no
             # reports process.
             mock_make_llm.return_value.model = "claude-sonnet-4-6"
-            result = reliefweb_weekly_datapoints(
-                _build_asset_context(), reliefweb_weekly_pdf_text=[],
+            result = kb_datapoints(
+                _build_asset_context(), kb_pdf_text=[],
             )
         # LLM provider is instantiated once at asset entry (needed to
         # pick the right model), but no complete_structured calls fire.

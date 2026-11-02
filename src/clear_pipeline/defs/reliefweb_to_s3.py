@@ -345,7 +345,7 @@ reliefweb_fetch_job = dg.define_asset_job(
 # its own job/schedule (separate `reliefweb_kb_figures` group).
 kb_downstream_job = dg.define_asset_job(
     name="kb_downstream_job",
-    selection=dg.AssetSelection.groups("reliefweb_kb"),
+    selection=dg.AssetSelection.groups("kb"),
     tags=_HEAVY_RUN_TAGS,
 )
 
@@ -384,7 +384,7 @@ def reliefweb_fetch_schedule(context: dg.ScheduleEvaluationContext):
 # already-processed report a no-op, so even a replayed materialization is safe.
 #
 # Adding a source = append its fetch AssetKey to `_FETCH_ASSET_KEYS` (and union it
-# into `reliefweb_weekly_pdf_text`); the downstream + this sensor body are
+# into `kb_pdf_text`); the downstream + this sensor body are
 # otherwise untouched.
 _FETCH_ASSET_KEYS = [dg.AssetKey("reliefweb_fetch")]
 

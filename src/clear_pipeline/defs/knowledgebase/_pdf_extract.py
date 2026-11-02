@@ -1,6 +1,6 @@
 """Isolated PDF text extraction — deliberately dependency-light.
 
-This runs in a short-lived worker process spawned by `reliefweb_weekly_pdf_text`,
+This runs in a short-lived worker process spawned by `kb_pdf_text`,
 so it imports only `io` + `os` + `pdfplumber` and nothing from Dagster. Under the
 `spawn` start method the worker re-imports the target function's module; keeping
 this module lean means the child starts with a small memory baseline and leaves

@@ -1,6 +1,6 @@
 """Weekly situation-analysis generation.
 
-Downstream of ``reliefweb_weekly_datapoint_aggregations``, this
+Downstream of ``kb_datapoint_aggregations``, this
 package produces one pre-computed snapshot per (country × year)
 covering:
 

@@ -143,14 +143,14 @@ def _slice_into_chunks(
     return chunks
 
 
-@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
-def reliefweb_weekly_chunks(
+@dg.asset(group_name="kb", partitions_def=country_partitions)
+def kb_chunks(
     context: AssetExecutionContext,
-    reliefweb_weekly_pdf_text: list[dict],
+    kb_pdf_text: list[dict],
 ) -> list[dict]:
     """Per-report chunk stream as JSONL in S3.
 
-    Downstream (``reliefweb_weekly_enriched_chunks``) reads back from
+    Downstream (``kb_enriched_chunks``) reads back from
     S3 so chunk boundaries can be re-tweaked and the enrichment
     replayed without re-extracting PDFs.
     """
@@ -160,7 +160,7 @@ def reliefweb_weekly_chunks(
 
     summaries: list[dict] = []
     total_chunks = 0
-    for report in reliefweb_weekly_pdf_text:
+    for report in kb_pdf_text:
         pages = _read_pages(s3, bucket, report["s3_text_key"])
         chunks = _slice_into_chunks(
             pages,
