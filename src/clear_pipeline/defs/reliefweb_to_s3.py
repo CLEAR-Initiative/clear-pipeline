@@ -383,9 +383,11 @@ def reliefweb_fetch_schedule(context: dg.ScheduleEvaluationContext):
 # skip-if-exists (pdf_text / enrich / datapoints) makes a re-trigger of an
 # already-processed report a no-op, so even a replayed materialization is safe.
 #
-# Adding a source = append its fetch AssetKey to `_FETCH_ASSET_KEYS` (and union it
-# into `kb_pdf_text`); the downstream + this sensor body are
-# otherwise untouched.
+# Adding a PULL source = append its fetch AssetKey here (so this sensor launches
+# the downstream when it stages data). The downstream discovers the staged docs
+# from S3 itself (`read_latest_staged_documents`), so `kb_pdf_text` needs no edit.
+# PUSH sources (manual upload) have no fetch asset — clear-api launches
+# `kb_downstream_job` directly — so they are not listed here.
 _FETCH_ASSET_KEYS = [dg.AssetKey("reliefweb_fetch")]
 
 

@@ -41,6 +41,9 @@ class ReliefWebConnector:
     key = SOURCE
     format_slug = FORMAT_SLUG
 
+    def reports_prefix(self, iso3: str) -> str:
+        return paths.reports_prefix(self.key, iso3, self.format_slug)
+
     def text_prefix(self, iso3: str) -> str:
         return paths.text_prefix(self.key, iso3, self.format_slug)
 
