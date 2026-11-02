@@ -524,14 +524,30 @@ class OpenAICompatibleProvider:
         #    backends; only some honour `response_format`. This forces routing to a
         #    backend that supports every requested param, so structured output is
         #    actually enforced (not silently dropped → free-form → truncation).
+        #    Applied ONLY to complete_structured (see `_request_extra_kwargs`): it
+        #    is meaningful only when `response_format` is sent. On a plain
+        #    complete_text call it would make OpenRouter ALSO require support for
+        #    every other body field — notably the `reasoning` off-switch above —
+        #    and a non-reasoning model's endpoints don't advertise `reasoning`, so
+        #    the whole request 404s ("Filter by Parameters"). Keeping it off the
+        #    text path is what lets a non-reasoning model (e.g. the qwen translate
+        #    primary) route while reasoning is still being disabled.
         # No-ops on providers that ignore unknown body fields.
-        extra_body: dict[str, Any] = {}
+        base_extra_body: dict[str, Any] = {}
         if disable_thinking:
-            extra_body["think"] = False
-            extra_body["reasoning"] = {"enabled": False}
-        if require_parameters:
-            extra_body["provider"] = {"require_parameters": True}
-        self._extra_kwargs: dict[str, Any] = {"extra_body": extra_body} if extra_body else {}
+            base_extra_body["think"] = False
+            base_extra_body["reasoning"] = {"enabled": False}
+        self._base_extra_body = base_extra_body
+        self._require_parameters = require_parameters
+
+    def _request_extra_kwargs(self, *, structured: bool) -> dict[str, Any]:
+        """Per-call ``extra_body``: the shared think/reasoning switches always,
+        plus ``provider.require_parameters`` ONLY on a structured (response_format)
+        call — never on complete_text (see __init__ for why)."""
+        body = dict(self._base_extra_body)
+        if structured and self._require_parameters:
+            body["provider"] = {"require_parameters": True}
+        return {"extra_body": body} if body else {}
 
     @retry(
         retry=retry_if_exception_type(
@@ -588,7 +604,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format=response_format,  # type: ignore[arg-type]
-            **self._extra_kwargs,
+            **self._request_extra_kwargs(structured=True),
         )
         self.last_usage = _openai_usage(raw)
         if not raw.choices:
@@ -620,6 +636,7 @@ class OpenAICompatibleProvider:
                     },
                 ],
                 response_format=response_format,  # type: ignore[arg-type]
+                **self._request_extra_kwargs(structured=True),
             )
             self.last_usage = _add_usage(self.last_usage, _openai_usage(repair))
             repaired_text = _strip_code_fence(repair.choices[0].message.content or "")
@@ -661,7 +678,7 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            **self._extra_kwargs,
+            **self._request_extra_kwargs(structured=False),
         )
         self.last_usage = _openai_usage(raw)
         if not raw.choices:
@@ -889,7 +906,7 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         fb_provider = (_env("FALLBACK_PROVIDER", required=False) or "anthropic").strip().lower()
         fallback = _construct(
             fb_provider, fb_model, fb_key, _env("FALLBACK_BASE_URL", required=False),
-            disable_thinking=no_think,
+            disable_thinking=no_think, require_parameters=require_params,
         )
         logger.info(
             "[LLM] role=%s primary=%s with fallback=%s", role, model, fb_model,
