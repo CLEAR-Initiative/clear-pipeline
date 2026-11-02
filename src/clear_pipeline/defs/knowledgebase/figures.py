@@ -45,6 +45,7 @@ from clear_pipeline.defs.reliefweb_partitions import (
     figures_prefix,
 )
 from clear_pipeline.providers import clear_api, make_llm_provider
+from clear_pipeline.providers.kb_sources.staging import read_latest_staged_documents
 from clear_pipeline.providers.pdf_regions import detect_figure_regions, pad_bbox
 from clear_pipeline.providers.pdf_render import (
     figure_s3_key,
@@ -214,15 +215,15 @@ def _capture_pdf(
 
 @dg.asset(
     group_name="kb",
-    # `reliefweb_fetch` stages the PDFs we read back here, so taking it as an
-    # input both supplies the per-report PDF keys and orders this after the
-    # upload (the NoSuchKey race pdf_text guards against). pdf_text carries the
-    # per-report metadata (title/url/publisher/country) we attach to each figure.
+    # Source-neutral, mirroring kb_pdf_text: the per-report PDF keys come from the
+    # staged docs discovered in S3 (`read_latest_staged_documents`), and the
+    # `kb_pdf_text` input supplies both the per-report metadata and the set of
+    # reports that successfully produced text (so we skip ones whose PDF was
+    # unreadable upstream). kb_pdf_text runs first, so the PDFs are present.
     partitions_def=country_partitions,
 )
 def kb_figures(
     context: AssetExecutionContext,
-    reliefweb_fetch: list[dict],
     kb_pdf_text: list[dict],
 ) -> list[dict]:
     """Per-report captured figures: cropped PNGs in S3 + structured transcription
@@ -246,7 +247,7 @@ def kb_figures(
     # staged KbRawDocument dicts carry `pdf_s3_key`; normalise to the `s3_key`
     # shape the capture loop below reads.
     by_report: dict[str, list[dict]] = {}
-    for doc in reliefweb_fetch:
+    for doc in read_latest_staged_documents(s3, bucket, iso3):
         report_id = str(doc["report_id"])
         by_report.setdefault(report_id, []).append(
             {"report_id": report_id, "s3_key": doc["pdf_s3_key"], "filename": doc.get("filename")},

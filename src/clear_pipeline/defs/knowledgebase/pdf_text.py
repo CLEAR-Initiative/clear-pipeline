@@ -1,12 +1,18 @@
-"""Extract text from the week's staged KB PDFs.
+"""Extract text from the staged KB PDFs for a country.
 
-Reads each PDF staged by ``reliefweb_fetch`` (by its ``pdf_s3_key``) from S3,
-extracts text page-by-page with pdfplumber, and writes one JSONL per report
-back to S3. Downstream chunk / enrich stages read from S3 so a failure in
-either can be replayed without re-hitting the PDFs.
+Source-neutral: reads whatever any KB source has staged for this partition
+(`read_latest_staged_documents` unions the `.staged.jsonl` markers written by
+`reliefweb_fetch` on its schedule, or by the manual-upload path on demand), then
+extracts text page-by-page with pdfplumber and writes one JSONL per report back
+to S3. Downstream chunk / enrich stages read from S3 so a failure in either can
+be replayed without re-hitting the PDFs.
 
-S3 layout:
+S3 layout — text output is keyed by the partition's (ReliefWeb-named) text
+prefix + the report_id; report_ids are source-namespaced (ReliefWeb native ids,
+`manual:<sha>` for uploads) so documents from different sources never collide:
     reliefweb/kb/text/<iso3>/<format-slug>/<report_id>.jsonl
+(Per-source OUTPUT prefixes — `<source>/kb/...` — are a future cleanup; inputs
+are already fully source-neutral.)
 
 Each line is::
 
@@ -31,6 +37,7 @@ from clear_pipeline.defs.reliefweb_partitions import (
     country_partitions,
     text_prefix,
 )
+from clear_pipeline.providers.kb_sources.staging import read_latest_staged_documents
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
@@ -136,16 +143,17 @@ def _report_summary(
 
 @dg.asset(
     group_name="kb",
-    # `reliefweb_fetch` stages every PDF (to the same S3 keys) and returns the
-    # staged document records this asset reads back. Taking it as an input both
-    # supplies those records and orders this strictly after the upload — closing
-    # the NoSuchKey race (text extraction racing the PDF upload) the previous
-    # explicit dep on the upload asset guarded against.
+    # Source-neutral: this asset discovers whatever any KB source has STAGED for
+    # this country (the `.staged.jsonl` markers written by `reliefweb_fetch` on
+    # its schedule, or by the manual-upload path on demand) — see
+    # `read_latest_staged_documents`. No typed dependency on a specific fetch
+    # asset, so a manual upload to a country with no prior ReliefWeb run still
+    # works. The trigger (the fetch sensor, or clear-api's direct launch) is what
+    # orders this strictly after staging, closing the NoSuchKey race.
     partitions_def=country_partitions,
 )
 def kb_pdf_text(
     context: AssetExecutionContext,
-    reliefweb_fetch: list[dict],
 ) -> list[dict]:
     """Per-report page text as JSONL in S3.
 
@@ -158,19 +166,20 @@ def kb_pdf_text(
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
 
-    # `reliefweb_fetch` returns one staged `KbRawDocument` (as a dict) per PDF
-    # attachment; a report may have several. Translate that stream into the two
-    # shapes the rest of this asset already consumes — so the per-report
-    # extraction loop and `_report_summary` stay byte-for-byte what they were
-    # under the old three-asset fetch:
+    # The staged `KbRawDocument` dicts (one per PDF attachment; a report may have
+    # several) from every source that staged data for this country. Translate
+    # them into the two shapes the rest of this asset already consumes — so the
+    # per-report extraction loop and `_report_summary` stay byte-for-byte what
+    # they were under the three-asset fetch:
     #   * `by_report`    — attachment rows ({report_id, filename, url, s3_key}),
     #     grouped per report and processed as a unit (contiguous chunk indices).
     #   * `reports_by_id`— one synthetic ReliefWeb-`fields`-shaped metadata record
     #     per report, carrying the title/url/date/publisher/country the staged
     #     doc captured, so `_report_summary` reads them exactly as before.
+    staged = read_latest_staged_documents(s3, bucket, iso3)
     by_report: dict[str, list[dict]] = {}
     reports_by_id: dict[str, dict] = {}
-    for doc in reliefweb_fetch:
+    for doc in staged:
         report_id = str(doc["report_id"])
         by_report.setdefault(report_id, []).append(
             {
@@ -235,7 +244,7 @@ def kb_pdf_text(
                 pdf_bytes = obj["Body"].read()
             except Exception as exc:  # noqa: BLE001
                 # Missing S3 objects are surfaced but don't abort the
-                # week — a re-run of `reliefweb_fetch` will re-stage them
+                # week — a re-run of the source's fetch/upload re-stages them
                 # and a subsequent kb build catches up.
                 context.log.warning(
                     "s3 fetch failed for %s (%s) — skipping: %s",
