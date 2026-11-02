@@ -40,6 +40,7 @@ Credentials come from environment variables (``.env`` at project root):
 import json
 import os
 import tempfile
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -431,6 +432,114 @@ def reliefweb_weekly_pdfs_in_s3(
             "\n".join(f"- `{line}`" for line in failures[:10]),
         )
     return dg.MaterializeResult(metadata=metadata)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Multi-source KB connector fetch (ADR-0013) — additive, phase-2 step 1
+# ────────────────────────────────────────────────────────────────────────
+#
+# `reliefweb_fetch` is the connector-based replacement for the three
+# `reliefweb_weekly_*` fetch assets above. It is deliberately ADDITIVE and INERT
+# in this PR: it lives in its own group (`kb_fetch`), so the live
+# `reliefweb_weekly_knowledgebase` job — which selects groups "reliefweb" +
+# "reliefweb_kb" — does NOT pick it up, and no schedule points at it yet. Nothing
+# consumes its output either. Dev materializes it by hand to confirm it stages
+# the same report_ids + PDF keys the legacy assets do (ADR-0013 checklist #1).
+#
+# The phase-2b cutover (separate PR, validated in dev first) re-points the
+# source-neutral `kb_*` downstream at this asset, adds the per-source
+# `@dg.schedule`, and adds the fetch sensor — and removes the three legacy fetch
+# assets + the old job/schedule.
+
+
+@dg.asset(group_name="kb_fetch", partitions_def=country_partitions)
+def reliefweb_fetch(context: dg.AssetExecutionContext) -> list[dict]:
+    """Fetch ReliefWeb reports for this country partition via the
+    `ReliefWebConnector`, staging each PDF to S3 and returning the staged
+    `KbRawDocument`s (as dicts) for the downstream to process.
+
+    The ingest window is computed exactly as `reliefweb_weekly_reports_in_s3`:
+    a country's FIRST ingest (no report window in S3 yet for its iso3) reaches
+    back the wider initial lookback (90d) so the datapoint aggregation has a full
+    window to backfill; routine runs take the 7-day weekly delta. Both knobs are
+    env-overridable, same as the legacy asset.
+
+    The connector stages PDFs to the SAME S3 keys the legacy assets use (pinned
+    byte-for-byte by `test_reliefweb_paths_byte_identical_to_legacy`), HEAD-
+    skipping ones already present — so running this against an established
+    country re-stages nothing.
+    """
+    # Instantiate the connector directly (rather than via the registry) so this
+    # asset has no import-order dependency on the connector module having been
+    # imported for its registration side effect. The registry + `all_connectors`
+    # are what the phase-2b fetch SENSOR enumerates to stay source-agnostic.
+    from clear_pipeline.providers.kb_sources.reliefweb import ReliefWebConnector
+
+    iso3 = context.partition_key
+    bucket = _require_env("S3_BUCKET")
+    s3 = _s3_client()
+
+    # Same window rule as the legacy ingest asset, keyed off whether THIS country
+    # already has a report window in S3 (country-scoped first-ingest detection).
+    if _is_first_ingest(s3, bucket, iso3):
+        lookback_days = int(
+            os.environ.get("KB_INGEST_INITIAL_LOOKBACK_DAYS", str(_DEFAULT_INITIAL_LOOKBACK_DAYS)),
+        )
+        window_label = "initial-backfill"
+    else:
+        lookback_days = int(
+            os.environ.get("KB_INGEST_LOOKBACK_DAYS", str(_DEFAULT_LOOKBACK_DAYS)),
+        )
+        window_label = "weekly"
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=lookback_days)
+    context.log.info(
+        "reliefweb_fetch: country=%s mode=%s window=[%s, %s]",
+        iso3, window_label, start.isoformat(), end.isoformat(),
+    )
+
+    docs = ReliefWebConnector().fetch(
+        country_iso3=iso3,
+        window_start=start.isoformat(),
+        window_end=end.isoformat(),
+    )
+    records = [asdict(d) for d in docs]
+
+    # First-ingest marker. `_is_first_ingest` keys off ANY object under the
+    # country's reports prefix; the legacy `reliefweb_weekly_reports_in_s3` wrote
+    # the raw report JSONL there as that marker. The connector returns
+    # `KbRawDocument`s instead, so persist the staged-doc records under the same
+    # prefix — under a distinct `.staged.jsonl` key so it never clobbers the
+    # legacy `<week>.jsonl` while both coexist pre-cutover. This keeps first-
+    # ingest detection correct: the next run sees the country as established and
+    # takes the weekly delta instead of re-running the 90-day backfill.
+    marker_key = f"{reports_prefix(iso3)}{_week_tag(end)}.staged.jsonl"
+    body = b"\n".join(
+        json.dumps(r, separators=(",", ":")).encode("utf-8") for r in records
+    )
+    if body:
+        body += b"\n"
+    s3.put_object(
+        Bucket=bucket, Key=marker_key, Body=body, ContentType="application/x-ndjson",
+    )
+
+    context.log.info(
+        "reliefweb_fetch: staged %d document(s) for %s; marker -> s3://%s/%s",
+        len(records), iso3, bucket, marker_key,
+    )
+    context.add_output_metadata(
+        {
+            "country": dg.MetadataValue.text(iso3),
+            "source": dg.MetadataValue.text("reliefweb"),
+            "mode": dg.MetadataValue.text(window_label),
+            "window_from": dg.MetadataValue.text(start.isoformat()),
+            "window_to": dg.MetadataValue.text(end.isoformat()),
+            "staged_documents": dg.MetadataValue.int(len(records)),
+            "marker_s3_key": dg.MetadataValue.text(marker_key),
+        },
+    )
+    return records
 
 
 # ────────────────────────────────────────────────────────────────────────
