@@ -605,6 +605,13 @@ def generate_and_upsert_for_frame(
                 scope_label, exc,
             )
 
+    # Token usage of the whole generation — summed across every component + the
+    # change-note call on this one `narrative` provider instance — recorded on
+    # the analysis so spend can be derived downstream from current prices (the
+    # native-Anthropic generation returns tokens, not cost). None on the
+    # deterministic-only path, where no LLM provider was created.
+    generation_usage = llm.total_usage if not skip else None
+
     def _ids_from_bullets(bullets: list[Any] | None) -> list[str]:
         out: list[str] = []
         for b in bullets or []:
@@ -669,7 +676,11 @@ def generate_and_upsert_for_frame(
             data=payload.model_dump(mode="json"),
             source_report_ids=all_source_ids,
             generated_by_model=generated_by_model,
+            # Cost stays null — native Anthropic reports no price; we persist the
+            # token usage instead and derive USD downstream (see upsert_analysis).
             generation_cost_usd=None,
+            generation_input_tokens=(generation_usage or {}).get("input_tokens"),
+            generation_output_tokens=(generation_usage or {}).get("output_tokens"),
             schema_version=SCHEMA_VERSION,
             force=force,
             **frame.upsert_kwargs(),

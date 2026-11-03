@@ -1061,6 +1061,8 @@ def upsert_analysis(
     source_report_ids: list[str],
     generated_by_model: str,
     generation_cost_usd: float | None,
+    generation_input_tokens: int | None = None,
+    generation_output_tokens: int | None = None,
     schema_version: str,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -1087,6 +1089,8 @@ def upsert_analysis(
         "sourceReportIds": source_report_ids,
         "generatedByModel": generated_by_model,
         "generationCostUsd": generation_cost_usd,
+        "generationInputTokens": generation_input_tokens,
+        "generationOutputTokens": generation_output_tokens,
         "schemaVersion": schema_version,
         "force": force,
     }

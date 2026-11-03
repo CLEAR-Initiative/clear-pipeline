@@ -207,6 +207,11 @@ class LLMProvider(Protocol):
     #: the last call that finished, so keep one provider per sequential job
     #: when spend is recorded (the Task Worker does).
     last_usage: dict[str, int] | None
+    #: Cumulative token usage across EVERY call this provider instance has made —
+    #: ``{"input_tokens", "output_tokens"}``, starting at zero. Lets a caller sum
+    #: a multi-call job (e.g. one situation-analysis generation) by reading it
+    #: once at the end, instead of snapshotting ``last_usage`` after each call.
+    total_usage: dict[str, int]
 
     def complete_structured(
         self,
@@ -288,6 +293,7 @@ class AnthropicProvider:
         self.role = role
         self.model = model
         self.last_usage: dict[str, int] | None = None
+        self.total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
     def _note_usage(self, response: Any) -> None:
@@ -298,6 +304,7 @@ class AnthropicProvider:
             "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
         }
+        self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
 
     @retry(
         retry=retry_if_exception_type(
@@ -536,6 +543,7 @@ class OpenAICompatibleProvider:
         self.role = role
         self.model = model
         self.last_usage: dict[str, int] | None = None
+        self.total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         # Non-standard request-body fields sent via the OpenAI `extra_body`:
@@ -635,6 +643,7 @@ class OpenAICompatibleProvider:
             **self._request_extra_kwargs(structured=True),
         )
         self.last_usage = _openai_usage(raw)
+        self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         text = _strip_code_fence(raw.choices[0].message.content or "")
@@ -666,7 +675,9 @@ class OpenAICompatibleProvider:
                 response_format=response_format,  # type: ignore[arg-type]
                 **self._request_extra_kwargs(structured=True),
             )
-            self.last_usage = _add_usage(self.last_usage, _openai_usage(repair))
+            repair_usage = _openai_usage(repair)
+            self.last_usage = _add_usage(self.last_usage, repair_usage)
+            self.total_usage = _add_usage(self.total_usage, repair_usage) or self.total_usage
             repaired_text = _strip_code_fence(repair.choices[0].message.content or "")
             return schema.model_validate_json(repaired_text)
 
@@ -709,6 +720,7 @@ class OpenAICompatibleProvider:
             **self._request_extra_kwargs(structured=False),
         )
         self.last_usage = _openai_usage(raw)
+        self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         # Cheap OSS models wrap free text in ```fences``` (the same reason
@@ -769,6 +781,16 @@ class FallbackProvider:
         with self._lock:
             served = self._fallback if self._served_model == self._fallback.model else self._primary
         return getattr(served, "last_usage", None)
+
+    @property
+    def total_usage(self) -> dict[str, int]:
+        """Cumulative usage across every call this instance served — the sum of
+        the primary's and the fallback's running totals (each child tallies the
+        calls routed to it, so summing covers a job that spilled to fallback)."""
+        return _add_usage(
+            getattr(self._primary, "total_usage", None),
+            getattr(self._fallback, "total_usage", None),
+        ) or {"input_tokens": 0, "output_tokens": 0}
 
     @property
     def model(self) -> str:
