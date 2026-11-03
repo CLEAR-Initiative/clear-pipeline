@@ -626,17 +626,16 @@ class TestDisplacementMapArea:
             ],
         })
 
-    def _assemble(self, area, parents_error=None):
+    def _assemble(self, area):
         from clear_pipeline.defs.situation import narrative
 
         places = {"Sheikan": "loc-sheikan", "Nyala": "loc-nyala", "Kosti": "loc-kosti"}
         parents = {"loc-sheikan": "loc-nk", "loc-nk": "loc-sd", "loc-nyala": "loc-south-darfur",
                    "loc-south-darfur": "loc-sd", "loc-kosti": "loc-wn", "loc-wn": "loc-sd"}
-        lookup = {"side_effect": parents_error} if parents_error else {"return_value": parents}
         token = narrative.analysis_area.set(area)
         try:
             with patch.object(narrative, "_resolve_place", side_effect=lambda name, kind: places.get(name)), \
-                    patch.object(narrative.clear_api, "get_location_parents", **lookup):
+                    patch.object(narrative.clear_api, "get_location_parents", return_value=parents):
                 return narrative.assemble_displacement(self._story(), _fake_rag_context(hits=1, report_ids=["r-1"]))
         finally:
             narrative.analysis_area.reset(token)
@@ -647,22 +646,36 @@ class TestDisplacementMapArea:
     def test_country_analysis_keeps_every_flow(self):
         assert [f.label for f in self._assemble(None).flows] == ["Sheikan 500", "Nyala 300"]
 
-    def test_failed_location_lookup_drops_only_the_flows_it_cannot_place(self):
-        down = RuntimeError("clear-api down")
-        below_area = self._assemble(("loc-nk",), parents_error=down)
-        assert below_area.flows == []
-        assert [f.label for f in below_area.findings] == ["Local"]
-        # A flow that ends in the selected location itself needs no lookup.
-        assert [f.label for f in self._assemble(("loc-kosti",), parents_error=down).flows] == ["Sheikan 500", "Nyala 300"]
-
-    def test_a_failed_place_lookup_is_retried(self):
+    def test_a_failed_lookup_fails_the_section_instead_of_the_analysis(self):
+        # An empty section over non-empty evidence is a failed generation: selective
+        # regen keeps the prior section and retries it next run.
         from clear_pipeline.defs.situation import narrative
 
-        narrative._lookup_place.cache_clear()
+        llm = MagicMock()
+        llm.complete_structured.return_value = self._story()
+        token = narrative.analysis_area.set(("loc-nk",))
+        try:
+            with patch(
+                "clear_pipeline.defs.situation.generate_component.fetch_rag_context",
+                return_value=_fake_rag_context(hits=1, report_ids=["r-1"]),
+            ), patch.object(narrative, "_resolve_place", return_value="loc-sheikan"), \
+                    patch.object(narrative.clear_api, "get_location_parents", side_effect=RuntimeError("clear-api down")):
+                result = generate_displacement_narrative(
+                    llm, country_name="North Kordofan", period_label="2026", aggregated=None, cache_key="k",
+                )
+        finally:
+            narrative.analysis_area.reset(token)
+        assert result.findings == [] and result.flows == []
+
+    def test_a_failed_place_lookup_is_not_cached(self):
+        from clear_pipeline.defs.situation import narrative
+
+        narrative._resolve_place.cache_clear()
         try:
             with patch.object(narrative.clear_api, "resolve_location",
                               side_effect=[RuntimeError("clear-api down"), "loc-kosti"]):
-                assert narrative._resolve_place("Kosti", "area") is None
+                with pytest.raises(RuntimeError):
+                    narrative._resolve_place("Kosti", "area")
                 assert narrative._resolve_place("Kosti", "area") == "loc-kosti"
         finally:
-            narrative._lookup_place.cache_clear()
+            narrative._resolve_place.cache_clear()

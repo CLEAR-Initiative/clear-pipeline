@@ -304,20 +304,15 @@ def assemble_access(result: _AccessLLM, rag: RAGContext) -> HumanitarianAccess:
 
 
 @lru_cache(maxsize=1024)
-def _lookup_place(name: str, kind: str) -> str | None:
-    # A lookup that raises is not cached, so one clear-api hiccup is retried next time.
+def _resolve_place(name: str, kind: str) -> str | None:
+    """Location id for a map flow's end as the evidence names it; a country for refugee movements.
+
+    A lookup error propagates: the component guard counts it as a failed
+    generation, so the section keeps its prior version and is regenerated next
+    run (lru_cache does not cache an exception)."""
     if kind == "country":
         return clear_api.resolve_country_location_id(name)
     return clear_api.resolve_location(name=name)
-
-
-def _resolve_place(name: str, kind: str) -> str | None:
-    """Location id for a map flow's end as the evidence names it; a country for refugee movements."""
-    try:
-        return _lookup_place(name, kind)
-    except Exception:  # noqa: BLE001 - an unresolved end still draws as a name
-        logger.warning("[situation:displacement] place lookup failed for %r", name, exc_info=True)
-        return None
 
 
 # The selected locations of a created analysis, set by the generator for the
@@ -327,16 +322,11 @@ analysis_area: ContextVar[tuple[str, ...] | None] = ContextVar("analysis_area", 
 
 
 def _area_check(area: tuple[str, ...]) -> Callable[[str], bool]:
-    parents: dict[str, str | None] | None = None
+    parents: dict[str, str | None] = {}
 
     def in_scope(location_id: str) -> bool:
-        nonlocal parents
-        if parents is None:
-            try:
-                parents = clear_api.get_location_parents()
-            except Exception:  # noqa: BLE001 - this runs outside the component guard; drop the flows, not the analysis
-                logger.warning("[situation:displacement] location tree lookup failed", exc_info=True)
-                parents = {}
+        if not parents:
+            parents.update(clear_api.get_location_parents())
         seen: set[str] = set()
         current: str | None = location_id
         while current and current not in seen:

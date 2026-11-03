@@ -181,16 +181,17 @@ def run_bullet_component_from_rag(
             cache_key=cache_key,
             max_tokens=spec.max_tokens,
         )
+        # Inside the guard: assembly can call clear-api (the displacement map's
+        # lookups), and a failure there is a failed generation like any other.
+        if spec.assemble is not None:
+            return spec.assemble(result, rag)
+        return assemble_bullet_result(spec, result, rag)
     except Exception:  # noqa: BLE001 — component-level isolation
         logger.exception(
-            "[situation:%s] LLM call failed — returning empty component",
+            "[situation:%s] generation failed, returning empty component",
             spec.log_label,
         )
         return spec.result_cls()
-
-    if spec.assemble is not None:
-        return spec.assemble(result, rag)
-    return assemble_bullet_result(spec, result, rag)
 
 
 def run_bullet_component(
