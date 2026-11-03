@@ -43,6 +43,7 @@ from clear_pipeline.defs.situation.frame import (
     build_rag_filters,
     country_frame,
 )
+from clear_pipeline.defs.situation.narrative import analysis_area
 from clear_pipeline.defs.situation.selective import (
     build_leaf_components,
     generate_ai_summary_fanin,
@@ -363,11 +364,16 @@ def _log_component_summary(
     cr = bool(context_risks and any(
         getattr(getattr(context_risks, d, None), "bullets", None) for d in _CR_DOMAINS
     ))
-    hz = bool(hazards and (hazards.hazards or hazards.vulnerabilities))
-    dp = bool(displacement and (displacement.push_factors or displacement.return_intention))
+    hz = bool(hazards and (
+        hazards.hazards or hazards.vulnerabilities
+        or hazards.aggravating_factors or hazards.mitigating_factors
+    ))
+    dp = bool(displacement and (
+        displacement.push_factors or displacement.return_intention or displacement.findings
+    ))
     ha = bool(
         humanitarian_access
-        and (humanitarian_access.barriers or humanitarian_access.constraints)
+        and (humanitarian_access.barriers or humanitarian_access.constraints or humanitarian_access.items)
     )
     sec_total = sec_pop = 0
     if sectors is not None:
@@ -401,6 +407,7 @@ def generate_and_upsert_for_frame(
     rag_filters: dict[str, Any] | None,
     log_context=None,
     force: bool = False,
+    limit_map_to_area: bool = False,
 ) -> dict | None:
     """Generate + upsert one unified analysis snapshot for a FRAME (ADR-0007) —
     the generalisation of the situation generator. Instead of a (country,
@@ -483,11 +490,17 @@ def generate_and_upsert_for_frame(
             )
         prior_data = prior.get("data") if prior else None
 
-        leaf_result = build_leaf_components(
-            llm, prior_payload=None if force else prior_data, country_name=scope_label,
-            period_label=period_label, aggregated=aggregated, cache_key=cache_key,
-            rag_filters=rag_filters, log=log,
-        )
+        # A created analysis keeps only map flows that touch its area
+        # (`limit_map_to_area`); a country analysis keeps every flow.
+        area_token = analysis_area.set(frame.location_ids if limit_map_to_area else None)
+        try:
+            leaf_result = build_leaf_components(
+                llm, prior_payload=None if force else prior_data, country_name=scope_label,
+                period_label=period_label, aggregated=aggregated, cache_key=cache_key,
+                rag_filters=rag_filters, log=log,
+            )
+        finally:
+            analysis_area.reset(area_token)
         context_risks_component = leaf_result.context_risks
         hazards_component = leaf_result.hazards_and_vulnerabilities
         displacement_component = leaf_result.displacement
@@ -608,16 +621,22 @@ def generate_and_upsert_for_frame(
     if hazards_component is not None:
         hazards_source_ids.extend(_ids_from_bullets(hazards_component.hazards))
         hazards_source_ids.extend(_ids_from_bullets(hazards_component.vulnerabilities))
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.aggravating_factors))
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.mitigating_factors))
 
     displacement_source_ids: list[str] = []
     if displacement_component is not None:
         displacement_source_ids.extend(_ids_from_bullets(displacement_component.push_factors))
         displacement_source_ids.extend(_ids_from_bullets(displacement_component.return_intention))
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.findings))
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.flows))
+        displacement_source_ids.extend(_ids_from_bullets([displacement_component.data_check]))
 
     ha_source_ids: list[str] = []
     if humanitarian_access_component is not None:
         ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.barriers))
         ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.constraints))
+        ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.items))
 
     sector_source_ids: list[str] = []
     if sectors_component is not None:

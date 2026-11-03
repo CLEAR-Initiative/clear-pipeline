@@ -28,16 +28,25 @@ empty default. One bad LLM call doesn't drop the other three.
 """
 
 import logging
+from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from functools import lru_cache
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from clear_pipeline.defs.situation.citations import (
     _SENTENCE_RE,
     merge_contributing,
+    resolve_bullets,
     resolve_prose,
 )
+from clear_pipeline.defs.situation.displacement_story import (
+    DisplacementStoryLLM,
+    assemble_story,
+)
+from clear_pipeline.defs.situation.displacement_story import map_instruction as story_instruction
 from clear_pipeline.defs.situation.generate_component import (
     BulletComponentSpec,
     GuidedCoverageLLM,
@@ -68,7 +77,9 @@ from clear_pipeline.defs.situation.schemas import (
     RiskDomain,
     Scenarios,
     SourcedBullet,
+    TopicBullet,
 )
+from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.llm import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -138,37 +149,200 @@ class _GuidedAnswerLLM(GuidedCoverageLLM):
     )
 
 
-class _HumanitarianAccessLLM(GuidedCoverageLLM):
-    barriers: list[str] = Field(
-        default_factory=list,
-        description="Access barriers for actors and affected populations. Terse bullets.",
-    )
-    constraints: list[str] = Field(
-        default_factory=list,
-        description="Physical, seasonal, and operational access constraints. Terse bullets.",
+# Shocks and hazards, and humanitarian access, file their findings under topics
+# of the humanitarian taxonomy (Shock-Event and Humanitarian Access, levels 2
+# and 3). The keys must match the frontend's `taxonomy-topics.ts`.
+AggravatingTopic = Literal[
+    "economic_fragility", "environment_technology", "governance_policy",
+    "social_inequality", "resource_shortfalls", "coordination_failures",
+]
+MitigatingTopic = Literal[
+    "preparedness", "risk_reduction", "recovery_support",
+    "protective_infrastructure", "public_warning", "response_surge",
+]
+AccessTopic = Literal[
+    "people_facing_gaps", "physical", "security", "relief_to_population", "population_to_relief",
+]
+
+MAX_HAZARDS = 12
+MAX_FACTORS = 8
+MAX_ACCESS_ITEMS = 15
+
+_ITEM_FORMAT = (
+    "'Label: detail [Rn]'. Label: 2-4 words naming the finding ('Currency collapse'). "
+    "Detail: one fact, at most 15 words, with place and date. Markers last."
+)
+_SCOPE = (
+    "Empty when the finding is about the analysed area. When the evidence describes a "
+    "wider area, name that area: 'Sudan-wide', 'Darfur region'."
+)
+_SECTION_SUMMARY = "ONE sentence, at most 30 words: the main takeaway of this section. No [Rn] markers."
+
+
+class _AggravatingLLM(BaseModel):
+    topic: AggravatingTopic = Field(description=(
+        "economic_fragility: markets, income, debt, prices, livelihoods, poverty. "
+        "environment_technology: degraded ecosystems, climate extremes, failing infrastructure. "
+        "governance_policy: contested authority, instability, weak policies or interventions. "
+        "social_inequality: discrimination and unequal access that hit some groups hardest. "
+        "resource_shortfalls: too little staff, funding, supplies or logistics to respond. "
+        "coordination_failures: unclear roles, late or contradictory alerts, poor information sharing."
+    ))
+    text: str = Field(description=_ITEM_FORMAT)
+    scope: str = Field(default="", description=_SCOPE)
+
+
+class _MitigatingLLM(BaseModel):
+    topic: MitigatingTopic = Field(description=(
+        "preparedness: response plans, trained staff, pre-positioned supplies. "
+        "risk_reduction: hazard assessment, early-warning triggers, safety rules. "
+        "recovery_support: cash, psychosocial care, shelter repair after the shock. "
+        "protective_infrastructure: reinforced buildings, drainage, shelters, backup power. "
+        "public_warning: alerts and guidance that tell people about the shock. "
+        "response_surge: rapid deployment of teams, contingency funds, scaled-up logistics."
+    ))
+    text: str = Field(description=_ITEM_FORMAT)
+    scope: str = Field(default="", description=_SCOPE)
+
+
+class _AccessItemLLM(BaseModel):
+    topic: AccessTopic = Field(description=(
+        "people_facing_gaps: how many people, or which areas, face access constraints. "
+        "physical: roads, bridges, terrain, rains or floods cutting access. "
+        "security: fighting, armed groups or crime making movement unsafe. "
+        "relief_to_population: whether aid and aid workers can reach people (permits, "
+        "restrictions, attacks on aid workers). "
+        "population_to_relief: whether people can reach aid and services (distance, cost, "
+        "checkpoints, information)."
+    ))
+    text: str = Field(description=_ITEM_FORMAT)
+    scope: str = Field(default="", description=_SCOPE)
+
+
+class _ShocksLLM(GuidedCoverageLLM):
+    summary: str = Field(default="", description=_SECTION_SUMMARY)
+    hazards: list[str] = Field(default_factory=list, description=(
+        f"At most {MAX_HAZARDS} current shocks and threats ahead, most severe first. Each "
+        f"{_ITEM_FORMAT} One item per hazard: merge items about the same incident or trend."
+    ))
+    aggravating_factors: list[_AggravatingLLM] = Field(default_factory=list, description=(
+        f"At most {MAX_FACTORS} conditions that make the shock worse, each under one topic."
+    ))
+    mitigating_factors: list[_MitigatingLLM] = Field(default_factory=list, description=(
+        f"At most {MAX_FACTORS} measures or capacities that reduce the shock's impact, each "
+        "under one topic. Only what the evidence states."
+    ))
+
+
+class _AccessLLM(GuidedCoverageLLM):
+    summary: str = Field(default="", description=_SECTION_SUMMARY)
+    items: list[_AccessItemLLM] = Field(default_factory=list, description=(
+        f"At most {MAX_ACCESS_ITEMS} access findings, most severe first, each under one topic. "
+        "Merge items about the same constraint."
+    ))
+
+
+def _resolve_one(text: str, rag: RAGContext) -> tuple[str, list[str]]:
+    clean, ids, _ = resolve_bullets([text], rag.hit_report_ids)
+    return (clean[0], ids[0]) if clean else ("", [])
+
+
+def _topic_bullets(items: list[Any], rag: RAGContext, limit: int) -> list[TopicBullet]:
+    out: list[TopicBullet] = []
+    for item in items[:limit]:
+        text, ids = _resolve_one(item.text, rag)
+        if text:
+            out.append(TopicBullet(
+                topic=item.topic, description=text, source_report_ids=ids,
+                scope=item.scope.strip() or None,
+            ))
+    return out
+
+
+def _plain(bullets: Any) -> list[SourcedBullet]:
+    return [SourcedBullet(description=b.description, source_report_ids=list(b.source_report_ids)) for b in bullets]
+
+
+def _contributing(*lists: list[Any]) -> dict[str, list[str]]:
+    return merge_contributing(*(
+        {rid: [b.description] for rid in b.source_report_ids} for items in lists for b in items
+    ))
+
+
+def assemble_shocks(result: _ShocksLLM, rag: RAGContext) -> HazardsAndVulnerabilities:
+    hazards, _ = sourced_bullets(result.hazards[:MAX_HAZARDS], rag)
+    aggravating = _topic_bullets(result.aggravating_factors, rag, MAX_FACTORS)
+    mitigating = _topic_bullets(result.mitigating_factors, rag, MAX_FACTORS)
+    return HazardsAndVulnerabilities(
+        hazards=hazards,
+        vulnerabilities=_plain(aggravating),
+        hazards_summary=_resolve_one(result.summary, rag)[0] or None,
+        aggravating_factors=aggravating,
+        mitigating_factors=mitigating,
+        completeness=result.completeness,
+        questions_not_answered=list(result.questions_not_answered),
+        contributing_sources=_contributing(hazards, aggravating, mitigating),
     )
 
 
-class _HazardsVulnerabilitiesLLM(GuidedCoverageLLM):
-    hazards: list[str] = Field(
-        default_factory=list,
-        description="Natural / man-made shocks. Terse bullets.",
-    )
-    vulnerabilities: list[str] = Field(
-        default_factory=list,
-        description="Pre-crisis structural vulnerabilities. Terse bullets.",
+# Access topics that are about the operating environment rather than about who
+# can reach whom; older readers see them as `constraints`, the rest as `barriers`.
+_CONSTRAINT_TOPICS = frozenset({"physical", "security"})
+
+
+def assemble_access(result: _AccessLLM, rag: RAGContext) -> HumanitarianAccess:
+    items = _topic_bullets(result.items, rag, MAX_ACCESS_ITEMS)
+    return HumanitarianAccess(
+        barriers=_plain(i for i in items if i.topic not in _CONSTRAINT_TOPICS),
+        constraints=_plain(i for i in items if i.topic in _CONSTRAINT_TOPICS),
+        summary=_resolve_one(result.summary, rag)[0] or None,
+        items=items,
+        completeness=result.completeness,
+        questions_not_answered=list(result.questions_not_answered),
+        contributing_sources=_contributing(items),
     )
 
 
-class _DisplacementLLM(GuidedCoverageLLM):
-    push_factors: list[str] = Field(
-        default_factory=list,
-        description="Drivers of displacement. Terse bullets.",
-    )
-    return_intention: list[str] = Field(
-        default_factory=list,
-        description="Return intent, blockers, and conditions. Terse bullets.",
-    )
+@lru_cache(maxsize=1024)
+def _resolve_place(name: str, kind: str) -> str | None:
+    """Location id for a map flow's end as the evidence names it; a country for refugee movements.
+
+    A lookup error propagates: the component guard counts it as a failed
+    generation, so the section keeps its prior version and is regenerated next
+    run (lru_cache does not cache an exception)."""
+    if kind == "country":
+        return clear_api.resolve_country_location_id(name)
+    return clear_api.resolve_location(name=name)
+
+
+# The selected locations of a created analysis, set by the generator for the
+# run. When set, a map flow must start or end in one of them or below them; a
+# country analysis leaves it unset and keeps every flow.
+analysis_area: ContextVar[tuple[str, ...] | None] = ContextVar("analysis_area", default=None)
+
+
+def _area_check(area: tuple[str, ...]) -> Callable[[str], bool]:
+    parents: dict[str, str | None] = {}
+
+    def in_scope(location_id: str) -> bool:
+        if not parents:
+            parents.update(clear_api.get_location_parents())
+        seen: set[str] = set()
+        current: str | None = location_id
+        while current and current not in seen:
+            if current in area:
+                return True
+            seen.add(current)
+            current = parents.get(current)
+        return False
+
+    return in_scope
+
+
+def assemble_displacement(result: DisplacementStoryLLM, rag: RAGContext) -> DisplacementNarrative:
+    area = analysis_area.get()
+    in_scope = _area_check(area) if area else None
+    return DisplacementNarrative.model_validate(assemble_story(result, rag, _resolve_place, in_scope))
 
 
 class _ScenariosLLM(BaseModel):
@@ -198,31 +372,45 @@ class _ScenariosLLM(BaseModel):
 _HAZARDS_SPEC = BulletComponentSpec(
     schema_key="hazards_and_vulnerabilities",
     log_label="hazards_and_vulnerabilities",
-    llm_schema=_HazardsVulnerabilitiesLLM,
+    llm_schema=_ShocksLLM,
     result_cls=HazardsAndVulnerabilities,
-    bullet_fields=("hazards", "vulnerabilities"),
-    map_instruction="Map the answer into `hazards` and `vulnerabilities`.",
+    bullet_fields=("hazards",),
+    map_instruction=(
+        "Answer as the 'Shocks and hazards' section of an analyst's dashboard: a one-sentence "
+        "`summary`, `hazards`, and `aggravating_factors` and `mitigating_factors` each filed "
+        "under one topic. Leave a list empty when the evidence has nothing for it."
+    ),
     fallback_topic="Shock-Event",
+    max_tokens=4000,
+    assemble=assemble_shocks,
 )
 
 _DISPLACEMENT_SPEC = BulletComponentSpec(
     schema_key="displacement",
     log_label="displacement",
-    llm_schema=_DisplacementLLM,
+    llm_schema=DisplacementStoryLLM,
     result_cls=DisplacementNarrative,
-    bullet_fields=("push_factors", "return_intention"),
-    map_instruction="Map the answer into `push_factors` and `return_intention`.",
+    bullet_fields=("findings",),
+    # "{area}" is replaced with the analysed area's name at generation time.
+    map_instruction=story_instruction("{area}"),
     fallback_topic="Displacement",
+    max_tokens=4000,
+    assemble=assemble_displacement,
 )
 
 _ACCESS_SPEC = BulletComponentSpec(
     schema_key="humanitarian_access",
     log_label="humanitarian_access",
-    llm_schema=_HumanitarianAccessLLM,
+    llm_schema=_AccessLLM,
     result_cls=HumanitarianAccess,
-    bullet_fields=("barriers", "constraints"),
-    map_instruction="Map the answer into `barriers` and `constraints`.",
+    bullet_fields=("items",),
+    map_instruction=(
+        "Answer as the 'Humanitarian access' section of an analyst's dashboard: a one-sentence "
+        "`summary` and `items`, each filed under one topic."
+    ),
     fallback_topic="Humanitarian Access",
+    max_tokens=3000,
+    assemble=assemble_access,
 )
 
 _CONTEXT_DOMAIN_SPEC = BulletComponentSpec(

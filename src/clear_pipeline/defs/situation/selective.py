@@ -209,11 +209,14 @@ def _component_has_content(component: BaseModel) -> bool:
             or component.top_needs or component.priority_interventions
         )
     if isinstance(component, HazardsAndVulnerabilities):
-        return bool(component.hazards or component.vulnerabilities)
+        return bool(
+            component.hazards or component.vulnerabilities
+            or component.aggravating_factors or component.mitigating_factors
+        )
     if isinstance(component, DisplacementNarrative):
-        return bool(component.push_factors or component.return_intention)
+        return bool(component.push_factors or component.return_intention or component.findings)
     if isinstance(component, HumanitarianAccess):
-        return bool(component.barriers or component.constraints)
+        return bool(component.barriers or component.constraints or component.items)
     if isinstance(component, Scenarios):
         return bool(
             component.most_likely or component.best_case

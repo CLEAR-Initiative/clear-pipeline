@@ -44,6 +44,22 @@ def _bullet_descriptions(items: Any) -> list[dict[str, str]]:
     return out
 
 
+def _prose_fields(items: Any, keys: tuple[str, ...]) -> list[dict[str, str]]:
+    """Project a list of objects to the given text keys. A key that is empty
+    stays out, so the merged translation never turns a null into ""."""
+    return [
+        {k: b[k] for k in keys if isinstance(b.get(k), str) and b[k]}
+        for b in items or []
+        if isinstance(b, dict)
+    ]
+
+
+def _with_text(out: dict[str, Any], block: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """Add the block's non-empty string fields to `out`."""
+    out.update({k: block[k] for k in keys if isinstance(block.get(k), str) and block[k]})
+    return out
+
+
 def _questions_not_answered(block: Any) -> list[str]:
     """Coverage-gap strings are prose; completeness (float) stays canonical."""
     return list((block or {}).get("questions_not_answered") or [])
@@ -72,25 +88,32 @@ def extract_situation_prose(data: dict[str, Any]) -> dict[str, Any]:
     }
 
     hv = data.get("hazards_and_vulnerabilities") or {}
-    hazards_and_vulnerabilities = {
+    hazards_and_vulnerabilities = _with_text({
         "hazards": _bullet_descriptions(hv.get("hazards")),
         "vulnerabilities": _bullet_descriptions(hv.get("vulnerabilities")),
+        "aggravating_factors": _prose_fields(hv.get("aggravating_factors"), ("description", "scope")),
+        "mitigating_factors": _prose_fields(hv.get("mitigating_factors"), ("description", "scope")),
         "questions_not_answered": _questions_not_answered(hv),
-    }
+    }, hv, "hazards_summary")
 
     disp = data.get("displacement") or {}
-    displacement = {
+    displacement = _with_text({
         "push_factors": _bullet_descriptions(disp.get("push_factors")),
         "return_intention": _bullet_descriptions(disp.get("return_intention")),
+        "findings": _prose_fields(disp.get("findings"), ("label", "callout", "description", "as_of")),
+        "flows": _prose_fields(disp.get("flows"), ("label", "sublabel")),
         "questions_not_answered": _questions_not_answered(disp),
-    }
+    }, disp, "summary", "map_since")
+    if isinstance(disp.get("data_check"), dict) and disp["data_check"].get("description"):
+        displacement["data_check"] = {"description": disp["data_check"]["description"]}
 
     ha = data.get("humanitarian_access") or {}
-    humanitarian_access = {
+    humanitarian_access = _with_text({
         "barriers": _bullet_descriptions(ha.get("barriers")),
         "constraints": _bullet_descriptions(ha.get("constraints")),
+        "items": _prose_fields(ha.get("items"), ("description", "scope")),
         "questions_not_answered": _questions_not_answered(ha),
-    }
+    }, ha, "summary")
 
     sectors: dict[str, Any] = {}
     for sector, block in (data.get("sectors") or {}).items():

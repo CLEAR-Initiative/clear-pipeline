@@ -165,6 +165,7 @@ def _run_frame_generation(
         rag_filters=rag_filters,
         log_context=context.log,
         force=force,
+        limit_map_to_area=True,
     )
 
 
