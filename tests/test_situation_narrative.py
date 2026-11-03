@@ -626,16 +626,17 @@ class TestDisplacementMapArea:
             ],
         })
 
-    def _assemble(self, area):
+    def _assemble(self, area, parents_error=None):
         from clear_pipeline.defs.situation import narrative
 
         places = {"Sheikan": "loc-sheikan", "Nyala": "loc-nyala", "Kosti": "loc-kosti"}
         parents = {"loc-sheikan": "loc-nk", "loc-nk": "loc-sd", "loc-nyala": "loc-south-darfur",
                    "loc-south-darfur": "loc-sd", "loc-kosti": "loc-wn", "loc-wn": "loc-sd"}
+        lookup = {"side_effect": parents_error} if parents_error else {"return_value": parents}
         token = narrative.analysis_area.set(area)
         try:
             with patch.object(narrative, "_resolve_place", side_effect=lambda name, kind: places.get(name)), \
-                    patch.object(narrative.clear_api, "get_location_parents", return_value=parents):
+                    patch.object(narrative.clear_api, "get_location_parents", **lookup):
                 return narrative.assemble_displacement(self._story(), _fake_rag_context(hits=1, report_ids=["r-1"]))
         finally:
             narrative.analysis_area.reset(token)
@@ -645,3 +646,11 @@ class TestDisplacementMapArea:
 
     def test_country_analysis_keeps_every_flow(self):
         assert [f.label for f in self._assemble(None).flows] == ["Sheikan 500", "Nyala 300"]
+
+    def test_failed_location_lookup_drops_only_the_flows_it_cannot_place(self):
+        down = RuntimeError("clear-api down")
+        below_area = self._assemble(("loc-nk",), parents_error=down)
+        assert below_area.flows == []
+        assert [f.label for f in below_area.findings] == ["Local"]
+        # A flow that ends in the selected location itself needs no lookup.
+        assert [f.label for f in self._assemble(("loc-kosti",), parents_error=down).flows] == ["Sheikan 500", "Nyala 300"]

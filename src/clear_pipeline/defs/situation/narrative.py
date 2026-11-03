@@ -322,11 +322,16 @@ analysis_area: ContextVar[tuple[str, ...] | None] = ContextVar("analysis_area", 
 
 
 def _area_check(area: tuple[str, ...]) -> Callable[[str], bool]:
-    parents: dict[str, str | None] = {}
+    parents: dict[str, str | None] | None = None
 
     def in_scope(location_id: str) -> bool:
-        if not parents:
-            parents.update(clear_api.get_location_parents())
+        nonlocal parents
+        if parents is None:
+            try:
+                parents = clear_api.get_location_parents()
+            except Exception:  # noqa: BLE001 - this runs outside the component guard; drop the flows, not the analysis
+                logger.warning("[situation:displacement] location tree lookup failed", exc_info=True)
+                parents = {}
         seen: set[str] = set()
         current: str | None = location_id
         while current and current not in seen:
