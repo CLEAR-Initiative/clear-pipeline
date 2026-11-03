@@ -654,3 +654,15 @@ class TestDisplacementMapArea:
         assert [f.label for f in below_area.findings] == ["Local"]
         # A flow that ends in the selected location itself needs no lookup.
         assert [f.label for f in self._assemble(("loc-kosti",), parents_error=down).flows] == ["Sheikan 500", "Nyala 300"]
+
+    def test_a_failed_place_lookup_is_retried(self):
+        from clear_pipeline.defs.situation import narrative
+
+        narrative._lookup_place.cache_clear()
+        try:
+            with patch.object(narrative.clear_api, "resolve_location",
+                              side_effect=[RuntimeError("clear-api down"), "loc-kosti"]):
+                assert narrative._resolve_place("Kosti", "area") is None
+                assert narrative._resolve_place("Kosti", "area") == "loc-kosti"
+        finally:
+            narrative._lookup_place.cache_clear()

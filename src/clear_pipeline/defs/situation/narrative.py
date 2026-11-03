@@ -304,12 +304,17 @@ def assemble_access(result: _AccessLLM, rag: RAGContext) -> HumanitarianAccess:
 
 
 @lru_cache(maxsize=1024)
+def _lookup_place(name: str, kind: str) -> str | None:
+    # A lookup that raises is not cached, so one clear-api hiccup is retried next time.
+    if kind == "country":
+        return clear_api.resolve_country_location_id(name)
+    return clear_api.resolve_location(name=name)
+
+
 def _resolve_place(name: str, kind: str) -> str | None:
     """Location id for a map flow's end as the evidence names it; a country for refugee movements."""
     try:
-        if kind == "country":
-            return clear_api.resolve_country_location_id(name)
-        return clear_api.resolve_location(name=name)
+        return _lookup_place(name, kind)
     except Exception:  # noqa: BLE001 - an unresolved end still draws as a name
         logger.warning("[situation:displacement] place lookup failed for %r", name, exc_info=True)
         return None
