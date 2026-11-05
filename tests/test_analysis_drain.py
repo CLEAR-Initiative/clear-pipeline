@@ -9,7 +9,7 @@ from clear_pipeline.defs.analysis.stages import (
     _period_label,
     _resolve_frame_aggregated,
 )
-from clear_pipeline.defs.situation.frame import Frame
+from clear_pipeline.defs.analysis.frame import Frame
 
 
 class TestFrameFromRequest:

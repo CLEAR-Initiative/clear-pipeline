@@ -23,7 +23,7 @@ import dagster as dg
 
 from clear_pipeline.defs.analysis.stages import _run_frame_generation, evidence_gate, touch_synced
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_pipeline.defs.situation.frame import Frame
+from clear_pipeline.defs.analysis.frame import Frame
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.signals.config import settings

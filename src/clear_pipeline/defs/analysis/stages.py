@@ -18,9 +18,13 @@ from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_pipeline.defs.situation.frame import FALLBACK_SCOPE_LABEL, Frame, build_rag_filters, scope_label
+from clear_pipeline.defs.analysis.frame import FALLBACK_SCOPE_LABEL, Frame, build_rag_filters, scope_label
+from clear_pipeline.defs.analysis.schemas import SCHEMA_VERSION as ANALYSIS_SCHEMA_VERSION
+
+# TODO(analysis-retire-situation): the unified generator still lives in
+# defs/situation; it is subsumed as the descriptive DAG is built, after which
+# situation is deleted. This is the last remaining analysis -> situation import.
 from clear_pipeline.defs.situation.generate import generate_and_upsert_for_frame
-from clear_pipeline.defs.situation.schemas import SCHEMA_VERSION as ANALYSIS_SCHEMA_VERSION
 from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.signals.config import settings
