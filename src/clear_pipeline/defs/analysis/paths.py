@@ -41,6 +41,11 @@ def evaluation_key(iso3: str, window_kind: str, prompt_version: str, schema_vers
     return f"{_ROOT}/evaluation/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
 
 
+def numbers_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country extracted-numbers artifact (pre-gap, §10)."""
+    return f"{_ROOT}/numbers/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
 def gapfill_key(
     iso3: str, window_kind: str, prompt_version: str, schema_version: str, node_key: str
 ) -> str:
