@@ -39,3 +39,16 @@ def gaps_key(iso3: str, window_kind: str, prompt_version: str, schema_version: s
 def evaluation_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
     """S3 key for the per-country evaluated-package (programmatic filter) artifact."""
     return f"{_ROOT}/evaluation/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
+def gapfill_key(
+    iso3: str, window_kind: str, prompt_version: str, schema_version: str, node_key: str
+) -> str:
+    """S3 key for one gap's web gap-fill result (keyed by the gap's node)."""
+    return f"{_ROOT}/gapfill/{iso3}/{window_kind}/{prompt_version}_{schema_version}/{node_key}.json"
+
+
+def pinned_sites_key(iso3: str) -> str:
+    """S3 key for the operator-maintained per-frame pinned-sites map
+    (``{domain: category}``) consumed by the source classifier (§9.1)."""
+    return f"{_ROOT}/config/pinned_sites/{iso3}.json"
