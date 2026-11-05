@@ -68,7 +68,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision"]
+LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision", "analysis"]
 
 # Per-request timeout (seconds). A flaky/hung model must fail FAST so it can be
 # retried or fall back — never block the pipeline. 600s (the old value) let a
@@ -160,6 +160,13 @@ _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     # yield null transcriptions. Narrative is vision-capable and higher quality.
     # A dedicated LLM_VISION_* block still overrides this fallback.
     "vision": "narrative",
+    # Standalone analysis module (defs/analysis). Falls back to the OSS
+    # extraction role's creds unless a dedicated LLM_ANALYSIS_* block is set —
+    # so a code deploy is safe before the infra apply that adds the vars, and
+    # the module defaults to the cheap OSS backend rather than the pinned
+    # Anthropic narrative. Production sets LLM_ANALYSIS_* to DeepSeek via
+    # OpenRouter.
+    "analysis": "extraction",
 }
 
 # Pydantic bound so `complete_structured` returns the exact subclass the

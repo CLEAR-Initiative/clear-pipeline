@@ -81,6 +81,7 @@ Then fill in `.env`. [`.env.example`](.env.example) documents every variable. Th
 | `CLEAR_API_URL`, `CLEAR_API_KEY` | All reads and writes. The key's user needs the `admin` or `pipeline` role. |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Raw source blobs, PDFs, text and chunk snapshots. |
 | `LLM_<ROLE>_PROVIDER`, `LLM_<ROLE>_MODEL`, `LLM_<ROLE>_API_KEY` | LLM calls, per role. |
+| `LLM_ANALYSIS_*` | The analysis module (`defs/analysis`). DeepSeek via OpenRouter by default (`openai_compat`); unset falls back to `LLM_EXTRACTION_*`. |
 | `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_DIMENSIONS` | Knowledge-base embeddings. `EMBEDDING_DIMENSIONS` must match clear-api's pgvector column (1024). |
 | `REDIS_URL` | Locks, watermarks and dedup for the drains. |
 | `RELIEFWEB_APPNAME` | The ReliefWeb ingest. |
