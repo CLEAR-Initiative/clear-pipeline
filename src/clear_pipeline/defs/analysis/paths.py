@@ -29,3 +29,13 @@ def descriptive_key(
 ) -> str:
     """S3 key for one taxonomy node's descriptive artifact."""
     return f"{descriptive_prefix(iso3, window_kind, prompt_version, schema_version)}/{node_key}.json"
+
+
+def gaps_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country ranked information-gaps artifact."""
+    return f"{_ROOT}/gaps/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
+def evaluation_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country evaluated-package (programmatic filter) artifact."""
+    return f"{_ROOT}/evaluation/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
