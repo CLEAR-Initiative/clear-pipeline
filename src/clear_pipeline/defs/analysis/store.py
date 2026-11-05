@@ -37,3 +37,12 @@ def save_json(s3, bucket: str, key: str, payload: dict) -> None:
     """Persist a JSON artifact (compact, UTF-8)."""
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+
+
+def load_json(s3, bucket: str, key: str) -> dict | None:
+    """Load one JSON artifact, or None if absent/unreadable."""
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(obj["Body"].read())
+    except Exception:  # noqa: BLE001 — missing/unreadable → None
+        return None
