@@ -75,17 +75,16 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
 
 @dg.asset(
     group_name="analysis",
-    deps=["kb_upsert"],  # ordering: RAG must see this week's chunks (no value use)
     partitions_def=country_partitions,
 )
-def analysis_sub(
-    context: dg.AssetExecutionContext,
-    kb_datapoint_aggregations: dict,
-) -> list[dict]:
+def analysis_sub(context: dg.AssetExecutionContext) -> list[dict]:
     """Descriptive L1 analysis for THIS country partition — one artifact per L1
-    node, written to S3 (skip-if-exists). Returns a per-node summary list."""
-    del kb_datapoint_aggregations  # ordering/gating only — re-fetched below
+    node, written to S3 (skip-if-exists). Returns a per-node summary list.
 
+    Root of the analysis subgraph — deliberately NOT a Dagster dependency of the
+    weekly knowledge-base pipeline. The analysis module is its OWN automation
+    (its own job + schedule); it reads the current KB state via clear-api (RAG)
+    at run time rather than being chained to the KB run."""
     iso3 = context.partition_key
     row = {
         (c.get("iso3") or "").lower(): c for c in clear_api.get_pipeline_countries()
