@@ -575,6 +575,50 @@ def upsert_report_datapoints(
     return result["upsertReportDatapoints"]
 
 
+_UPSERT_ANALYSIS_DATAPOINTS = """
+mutation UpsertAnalysisDatapoints($input: UpsertAnalysisDatapointsInput!) {
+  upsertAnalysisDatapoints(input: $input) {
+    analysisId
+    schemaVersion
+    createdOrReplaced
+  }
+}
+"""
+
+
+def upsert_analysis_datapoints(
+    *,
+    analysis_id: str,
+    data: dict[str, Any],
+    contributing_report_ids: list[str],
+    schema_version: str,
+    origin: str | None = None,
+    newest_source_at: str | None = None,
+    oldest_source_at: str | None = None,
+    data_quality_score: float | None = None,
+    report_count: int | None = None,
+) -> dict[str, Any]:
+    """Upsert the analysis module's final numbers for one analysis generation
+    (clear-api ``upsertAnalysisDatapoints``), keyed on ``analysis_id``.
+
+    The ``data`` blob follows the same QualityEnvelope leaf structure as the
+    aggregated-datapoints cache. Called by the assembly/publish stage once the
+    ``analyses`` row for the generation exists (the FK is non-null)."""
+    payload = {
+        "analysisId": analysis_id,
+        "data": data,
+        "contributingReportIds": contributing_report_ids,
+        "origin": origin,
+        "newestSourceAt": newest_source_at,
+        "oldestSourceAt": oldest_source_at,
+        "dataQualityScore": data_quality_score,
+        "reportCount": report_count,
+        "schemaVersion": schema_version,
+    }
+    result = _execute(_UPSERT_ANALYSIS_DATAPOINTS, {"input": payload})
+    return result["upsertAnalysisDatapoints"]
+
+
 def upsert_report_figures(
     *,
     report_id: str,
