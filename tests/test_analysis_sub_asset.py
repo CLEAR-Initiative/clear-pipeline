@@ -58,7 +58,7 @@ def _run(monkeypatch, *, exists: bool):
         stack.enter_context(patch.object(mod.clear_api, "get_aggregated_datapoint",
                                          return_value=None))
         ctx = dg.build_asset_context(partition_key="SDN")
-        results = mod.analysis_sub(ctx, kb_datapoint_aggregations={})
+        results = mod.analysis_sub(ctx)
     return results, s3
 
 
@@ -87,7 +87,7 @@ def test_unknown_partition_fails(monkeypatch):
     with patch.object(mod.clear_api, "get_pipeline_countries", return_value=[]):
         ctx = dg.build_asset_context(partition_key="SDN")
         try:
-            mod.analysis_sub(ctx, kb_datapoint_aggregations={})
+            mod.analysis_sub(ctx)
         except dg.Failure as e:
             assert "pipelineCountries" in str(e.description)
         else:
