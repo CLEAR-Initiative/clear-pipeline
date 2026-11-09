@@ -3,8 +3,9 @@ the model gets every stale field and every target locale at once and returns
 JSON keyed by locale, mirroring the canonical shape per locale.
 
 A large entity (a situation analysis) is split into several calls — one locale
-at a time, fields packed up to ``_CALL_BUDGET_CHARS`` — and each locale is
-written as soon as it is finished. One huge call ran for 12–21 minutes, hit the
+per call, fields packed up to ``_CALL_BUDGET_CHARS``. The locales are translated
+at the same time, each one's calls in order, and each locale is written as soon
+as it is finished. One huge call ran for 12–21 minutes, hit the
 output-token cap and came back as unparseable JSON, so nothing was ever written.
 
 Ported from clear-pipeline services/translate.py; the Claude client is swapped
@@ -24,7 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
+import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Iterable
 
 from clear_pipeline.providers import clear_api
@@ -654,6 +658,13 @@ def _split_call(locales: list[str], fields: list[str]) -> list[tuple[list[str], 
     return []
 
 
+# How many locales of one large entity are translated at the same time. One
+# after another, three locales of a situation analysis took ~33 minutes (10-12
+# each) and the run was killed at its 30-minute limit. A locale's own calls
+# still run in order.
+_MAX_PARALLEL_LOCALES = 4
+
+
 # Why a field did not translate. A cut-off reply for ONE locale × ONE field
 # cannot be made smaller, so trying again would only re-bill the model: it is
 # given up at once. An unusable reply (malformed JSON, a missing key) is worth
@@ -690,6 +701,11 @@ def _translate_bulk_and_upsert(
     A run that dies part-way has written only finished locales. The others are
     still queued — each is given a queue row before the first call — and the
     next drain redoes them.
+
+    When the entity needs several calls, its locales are translated at the same
+    time (`_MAX_PARALLEL_LOCALES`). Each locale only touches its own entries
+    below, and every call builds its own model client, so the workers share
+    nothing but the attempt count.
     """
     # The row each locale will be written with: what is stored, plus this
     # run's results as they arrive.
@@ -717,39 +733,85 @@ def _translate_bulk_and_upsert(
         if with_text:
             to_translate[locale] = with_text
 
-    failed: dict[str, dict[str, str]] = {}  # locale → {field: why it failed}
+    # locale → {field: why it failed}. One entry per locale up front, so a
+    # worker only ever changes the value under its own key.
+    failed: dict[str, dict[str, str]] = {locale: {} for locale in per_locale_stale}
     outcomes: dict[str, str] = {}  # locale → TRANSLATED | RETRY | UNPARSEABLE
     attempt: int | None = None  # counted once per entity, on its first unusable reply
+    attempt_lock = threading.Lock()
+
+    def failed_attempt() -> int:
+        nonlocal attempt
+        with attempt_lock:
+            if attempt is None:
+                attempt = _note_failed_attempt(entity_type, entity_id)
+            return attempt
 
     def finish(locales: list[str]) -> None:
         """Write (or leave queued) each locale that has no calls left."""
-        nonlocal attempt
         to_write: list[dict] = []
         for locale in locales:
-            reasons = failed.get(locale, {})
+            reasons = failed[locale]
             if not reasons:
                 outcomes[locale] = TRANSLATED
                 to_write.append(rows[locale])
                 continue
-            if _NO_USABLE_REPLY in reasons.values():
-                if attempt is None:
-                    attempt = _note_failed_attempt(entity_type, entity_id)
-                if attempt < _MAX_ATTEMPTS:
-                    # Not written, so an existing queue row stays. But every
-                    # configured locale is translated, queued or not (one
-                    # locale's enqueue can have failed) — so make sure this
-                    # one has a row, or nothing would ever retry it.
-                    _ensure_queued(entity_type, entity_id, locale)
-                    outcomes[locale] = RETRY
-                    continue
+            if _NO_USABLE_REPLY in reasons.values() and failed_attempt() < _MAX_ATTEMPTS:
+                # Not written, so an existing queue row stays. But every
+                # configured locale is translated, queued or not (one
+                # locale's enqueue can have failed) — so make sure this
+                # one has a row, or nothing would ever retry it.
+                _ensure_queued(entity_type, entity_id, locale)
+                outcomes[locale] = RETRY
+                continue
             outcomes[locale] = UNPARSEABLE
             if rows[locale]["sourceHashes"]:
                 to_write.append(rows[locale])
         if to_write:
             clear_api.upsert_translations(entity_type, entity_id, to_write)
 
-    calls = deque(_plan_calls(canonical, to_translate)) if to_translate else deque()
-    if len(calls) > 1:
+    def run(calls: deque[tuple[list[str], list[str]]], stop: threading.Event | None = None) -> int:
+        """Make `calls` in order and finish each locale after its last one.
+        Returns the number of model calls. With `stop` set, returns before the
+        next call and leaves its locales unfinished (so still queued)."""
+        count = 0
+        while calls:
+            if stop is not None and stop.is_set():
+                break
+            locales, fields = calls.popleft()
+            count += 1
+            translated, truncated = _translate_call(
+                entity_type, canonical, locales, fields, entity_id=entity_id,
+            )
+            if translated is None and truncated:
+                smaller = _split_call(locales, fields)
+                if smaller:
+                    calls.extendleft(reversed(smaller))
+                    continue
+
+            why = _CUT_OFF if truncated else _NO_USABLE_REPLY
+            for locale in locales:
+                new_fields = (translated or {}).get(locale) or {}
+                record(locale, {f: new_fields[f] for f in fields if f in new_fields})
+                missing = [f for f in fields if f not in new_fields]
+                failed[locale].update(dict.fromkeys(missing, why))
+
+            still_running = {loc for later_locales, _ in calls for loc in later_locales}
+            finish([locale for locale in locales if locale not in still_running])
+        return count
+
+    def run_locale(locale: str, calls: deque, stop: threading.Event) -> int:
+        started = time.monotonic()
+        count = run(calls, stop)
+        if locale in outcomes:
+            logger.info(
+                "[TRANSLATE] %s %s: %s %s after %d call(s), %.0fs",
+                entity_type, entity_id, locale, outcomes[locale], count, time.monotonic() - started,
+            )
+        return count
+
+    plan = _plan_calls(canonical, to_translate) if to_translate else []
+    if len(plan) > 1:
         # Several calls, so locales are written at different times, and this
         # run can stop (a provider error, the run's time limit) after one is
         # written and before another is done. Give every locale a queue row
@@ -759,34 +821,39 @@ def _translate_bulk_and_upsert(
         for locale in to_translate:
             _ensure_queued(entity_type, entity_id, locale)
     finish([locale for locale in per_locale_stale if locale not in to_translate])
-    call_count = 0
-    while calls:
-        locales, fields = calls.popleft()
-        call_count += 1
-        translated, truncated = _translate_call(
-            entity_type, canonical, locales, fields, entity_id=entity_id,
-        )
-        if translated is None and truncated:
-            smaller = _split_call(locales, fields)
-            if smaller:
-                calls.extendleft(reversed(smaller))
-                continue
 
-        why = _CUT_OFF if truncated else _NO_USABLE_REPLY
-        for locale in locales:
-            new_fields = (translated or {}).get(locale) or {}
-            record(locale, {f: new_fields[f] for f in fields if f in new_fields})
-            missing = [f for f in fields if f not in new_fields]
-            if missing:
-                failed.setdefault(locale, {}).update(dict.fromkeys(missing, why))
-
-        still_running = {loc for later_locales, _ in calls for loc in later_locales}
-        finish([locale for locale in locales if locale not in still_running])
+    if len(plan) <= 1:
+        call_count = run(deque(plan))
+    else:
+        # `_plan_calls` gives a large entity one locale per call.
+        by_locale: dict[str, deque] = {}
+        for locales, fields in plan:
+            by_locale.setdefault(locales[0], deque()).append((locales, fields))
+        stop = threading.Event()
+        with ThreadPoolExecutor(
+            max_workers=min(len(by_locale), _MAX_PARALLEL_LOCALES),
+            thread_name_prefix="translate",
+        ) as pool:
+            futures = [
+                pool.submit(run_locale, locale, calls, stop) for locale, calls in by_locale.items()
+            ]
+            try:
+                wait(futures)
+            except BaseException:
+                # This run is being stopped (its time limit, a deploy). Each
+                # worker ends after the call it is in; a locale that is not
+                # finished is not written and stays queued. Leaving the `with`
+                # waits for them, so the entity lock is held until they end.
+                stop.set()
+                raise
+        # One locale's error (a provider failure) does not stop the others:
+        # they finished and were written above. Now report it.
+        call_count = sum(future.result() for future in futures)
 
     def summary(outcome: str) -> str:
         return "; ".join(
             f"{locale}: " + ", ".join(f"{field} ({why})" for field, why in sorted(failed[locale].items()))
-            for locale in sorted(failed) if outcomes[locale] == outcome
+            for locale in sorted(failed) if failed[locale] and outcomes[locale] == outcome
         )
 
     dropped = [locale for locale, outcome in outcomes.items() if outcome == UNPARSEABLE]

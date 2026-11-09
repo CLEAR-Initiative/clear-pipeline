@@ -15,6 +15,7 @@ mocked.
 
 import json
 import logging
+import threading
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -212,8 +213,9 @@ def test_large_analysis_is_translated_in_small_calls_and_fully_written():
     assert all(tp._payload_chars(canonical, fields) <= tp._CALL_BUDGET_CHARS for _, fields in seen)
     # One write per locale, when the locale is finished: clear-api deletes the
     # locale's queue row on every write, so there must be no earlier one.
-    assert [[row["locale"] for row in c.args[2]] for c in env.upsert.call_args_list] == [
-        ["ar"], ["fr"], ["es"],
+    # (The locales run at the same time, so the order of the writes varies.)
+    assert sorted([row["locale"] for row in c.args[2]] for c in env.upsert.call_args_list) == [
+        ["ar"], ["es"], ["fr"],
     ]
     env.mark.assert_not_called()
     rows = _final_rows(env.upsert)
@@ -321,10 +323,10 @@ def test_a_run_that_dies_part_way_leaves_every_unfinished_locale_queued():
     # Both locales get a queue row BEFORE any model call: fr may never have
     # been queued (every configured locale is translated, queued or not).
     assert events[:2] == ["queue ar", "queue fr"]
-    # ar was finished and written. fr was never written, so nothing deleted
-    # its queue row and the next drain translates it.
+    # fr's error did not stop ar: ar finished and was written. fr was never
+    # written, so nothing deleted its queue row and the next drain translates it.
     assert [e for e in events if e.startswith("write")] == ["write ar"]
-    assert events[-1] == "call fr"
+    assert events.count("call fr") == 1  # fr stopped at its failed call
     env.mark.assert_not_called()
 
 
@@ -337,6 +339,110 @@ def test_a_small_entity_is_not_queued_up_front():
             tp.translate_and_upsert("event", "e1", EVENT)
     env.enqueue.assert_not_called()
     env.upsert.assert_not_called()
+
+
+# ── locales of a large entity are translated at the same time ────────────────
+
+def test_locales_of_a_large_entity_run_at_the_same_time_each_in_order():
+    # One after another, three locales took ~33 minutes on dev and the run was
+    # killed at its 30-minute limit.
+    canonical = _analysis()
+    together = threading.Barrier(3, timeout=5)  # breaks unless 3 calls overlap
+    order: dict[str, list[list[str]]] = {"ar": [], "fr": [], "es": []}
+
+    def call(et, canon, locales, fields, entity_id=None):
+        (locale,) = locales
+        if not order[locale]:
+            together.wait()  # every locale's FIRST call is in flight at once
+        order[locale].append(fields)
+        return _echo(locales, fields, canon), False
+
+    with _env() as env, patch.object(tp, "_translate_call", side_effect=call):
+        outcome = tp.translate_and_upsert("analysis", "a1", canonical)
+
+    assert outcome == tp.TRANSLATED
+    expected = tp._pack_fields(canonical, sorted(FIELDS))
+    assert order == {"ar": expected, "fr": expected, "es": expected}  # in order within a locale
+    rows = _final_rows(env.upsert)
+    assert {loc: row["sourceHashes"] for loc, row in rows.items()} == dict.fromkeys(
+        ("ar", "fr", "es"), compute_source_hashes("analysis", canonical),
+    )
+
+
+def test_a_small_entity_stays_one_call_on_the_calling_thread():
+    threads: list[str] = []
+
+    def call(et, canon, locales, fields, entity_id=None):
+        threads.append(threading.current_thread().name)
+        return _echo(locales, fields, canon), False
+
+    with _env(locales=("ar", "fr", "es")), patch.object(tp, "_translate_call", side_effect=call):
+        assert tp.translate_and_upsert("event", "e1", EVENT) == tp.TRANSLATED
+    assert threads == [threading.current_thread().name]
+
+
+def test_two_locales_failing_at_once_count_as_one_attempt(fake_redis):
+    canonical = _analysis()
+    with (
+        _env(redis=fake_redis, locales=("ar", "fr", "es")) as env,
+        patch.object(tp, "_translate_call", return_value=(None, False)),
+    ):
+        outcome = tp.translate_and_upsert("analysis", "a1", canonical)
+
+    assert outcome == tp.RETRY
+    assert fake_redis.store["translate:attempts:analysis:a1"] == 1  # per entity, not per locale
+    env.upsert.assert_not_called()
+
+
+class _RunStopped(BaseException):
+    """Stands in for Dagster interrupting the run (its time limit, a deploy)."""
+
+
+def test_a_stopped_run_ends_after_the_calls_in_flight_and_writes_nothing_unfinished():
+    canonical = _analysis()
+    in_flight = threading.Barrier(3, timeout=5)
+    release = threading.Event()
+    calls: list[str] = []
+
+    def call(et, canon, locales, fields, entity_id=None):
+        calls.append(locales[0])
+        in_flight.wait()
+        release.wait(timeout=5)  # the call is still running when the run is stopped
+        return _echo(locales, fields, canon), False
+
+    def stopped(futures):
+        threading.Timer(0.2, release.set).start()  # the calls in flight return a moment later
+        raise _RunStopped
+
+    with (
+        _env() as env,
+        patch.object(tp, "_translate_call", side_effect=call),
+        patch.object(tp, "wait", side_effect=stopped),
+    ):
+        with pytest.raises(_RunStopped):
+            tp.translate_and_upsert("analysis", "a1", canonical)
+
+    assert sorted(calls) == ["ar", "es", "fr"]  # no worker started another call
+    env.upsert.assert_not_called()  # no locale was finished, so none was written
+    env.mark.assert_not_called()  # and every one is still queued
+
+
+def test_each_locale_logs_when_it_is_done(caplog):
+    canonical = _analysis()
+    call = MagicMock(side_effect=lambda et, canon, locales, fields, entity_id=None: (
+        _echo(locales, fields, canon), False,
+    ))
+    with (
+        _env(locales=("ar", "fr")),
+        patch.object(tp, "_translate_call", call),
+        caplog.at_level(logging.INFO, logger=tp.logger.name),
+    ):
+        tp.translate_and_upsert("analysis", "a1", canonical)
+
+    per_locale = len(tp._pack_fields(canonical, sorted(FIELDS)))
+    for locale in ("ar", "fr"):
+        assert f"analysis a1: {locale} translated after {per_locale} call(s)" in caplog.text
+    assert f"wrote 2 locale(s) in {2 * per_locale} call(s)" in caplog.text
 
 
 def test_next_attempt_translates_only_what_is_still_stale():
