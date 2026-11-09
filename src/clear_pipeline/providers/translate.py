@@ -3,8 +3,8 @@ the model gets every stale field and every target locale at once and returns
 JSON keyed by locale, mirroring the canonical shape per locale.
 
 A large entity (a situation analysis) is split into several calls — one locale
-at a time, fields packed up to ``_CALL_BUDGET_CHARS`` — and each call's result
-is written as soon as it returns. One huge call ran for 12–21 minutes, hit the
+at a time, fields packed up to ``_CALL_BUDGET_CHARS`` — and each locale is
+written as soon as it is finished. One huge call ran for 12–21 minutes, hit the
 output-token cap and came back as unparseable JSON, so nothing was ever written.
 
 Ported from clear-pipeline services/translate.py; the Claude client is swapped
@@ -46,10 +46,12 @@ logger = logging.getLogger(__name__)
 # (and paid for) the same analysis at once.
 _TRANSLATE_LOCK_TTL_SECONDS = 360  # 6 min
 
-# A translation that fails (cut-off or unparseable reply) is left queued and
-# tried again by a later drain, up to this many attempts in a row. Then it is
-# dropped from the queue, so a payload the model cannot handle does not re-bill
-# the model on every run. Counted in Redis; the count expires after a day.
+# A locale that gets an unusable reply (malformed JSON, a missing field) is
+# left queued and tried again by a later drain, up to this many attempts in a
+# row. Then it is dropped from the queue, so a payload the model cannot handle
+# does not re-bill the model on every run. A reply cut off even for one locale
+# × one field is dropped at once: another attempt would be cut off again.
+# Counted in Redis per entity; the count expires after a day.
 _MAX_ATTEMPTS = 3
 _ATTEMPTS_TTL_SECONDS = 24 * 60 * 60
 
@@ -652,6 +654,14 @@ def _split_call(locales: list[str], fields: list[str]) -> list[tuple[list[str], 
     return []
 
 
+# Why a field did not translate. A cut-off reply for ONE locale × ONE field
+# cannot be made smaller, so trying again would only re-bill the model: it is
+# given up at once. An unusable reply (malformed JSON, a missing key) is worth
+# another attempt.
+_CUT_OFF = "reply cut off at the token cap"
+_NO_USABLE_REPLY = "no usable reply"
+
+
 def _translate_bulk_and_upsert(
     entity_type: str,
     entity_id: str,
@@ -662,45 +672,77 @@ def _translate_bulk_and_upsert(
 ) -> str:
     """Translate every stale field of an English-canonical entity and write it.
 
-    Each call's result is upserted as soon as it returns, merged over what is
-    stored, with ``sourceHashes`` updated ONLY for the fields that call
-    translated. So a field that failed stays stale, and a later attempt (or a
-    run that was killed part-way) translates only what is still missing.
+    A locale is written ONCE, when every call for it has returned. clear-api's
+    ``upsertTranslations`` deletes the queue row of each locale it writes, and
+    nothing re-queues a locale whose row exists but is incomplete — so a write
+    must mean "this locale needs no more work". Until then its results are held
+    in memory and its queue row is left alone:
 
-    clear-api's ``upsertTranslations`` deletes the queue row of every locale it
-    writes, and nothing re-queues a locale whose row exists but is incomplete.
-    So a locale that still has work left is put back on the queue right after
-    each write: if this run dies before the locale is finished, the next drain
-    picks it up.
+    - every field translated → written; the write clears the queue row.
+    - a field got an unusable reply and attempts remain → NOT written. The
+      queue row is untouched, so a later drain translates the locale again.
+    - a field cannot be translated (cut off even on its own, or attempts used
+      up) → what did translate is written and the locale is dropped from the
+      queue. ``sourceHashes`` cover only the translated fields, so the rest
+      stay stale and are translated when the entity is next enqueued.
+
+    A run that dies part-way has written only finished locales. The others are
+    still queued and the next drain redoes them.
     """
-    failed: dict[str, dict[str, str]] = {}  # locale → {field: why it failed}
-    written: set[str] = set()
+    # The row each locale will be written with: what is stored, plus this
+    # run's results as they arrive.
+    rows: dict[str, dict] = {
+        locale: {
+            "locale": locale,
+            "data": dict((stored.get(locale) or {}).get("data") or {}),
+            "sourceHashes": dict((stored.get(locale) or {}).get("sourceHashes") or {}),
+        }
+        for locale in per_locale_stale
+    }
+
+    def record(locale: str, values: dict[str, Any]) -> None:
+        rows[locale]["data"].update(values)
+        rows[locale]["sourceHashes"].update({f: fresh_hashes[f] for f in values})
 
     # A field with no text (null, "", an empty prose component) has nothing to
-    # translate. Record it as current — null, fresh hash — without a model call.
-    # clear-api reads a null overlay as "show the canonical value". It is
-    # written with the locale's first translated call, or at the end if the
-    # locale gets none.
-    unflushed: set[str] = set()
+    # translate. Record it as current — null, fresh hash — without a model
+    # call. clear-api reads a null overlay as "show the canonical value".
     to_translate: dict[str, list[str]] = {}
     for locale, fields in per_locale_stale.items():
         textless = [f for f in fields if not _has_text(canonical.get(f))]
-        if textless:
-            previous = stored.get(locale) or {}
-            stored[locale] = {
-                "locale": locale,
-                "data": {**(previous.get("data") or {}), **dict.fromkeys(textless)},
-                "sourceHashes": {
-                    **(previous.get("sourceHashes") or {}),
-                    **{f: fresh_hashes[f] for f in textless},
-                },
-            }
-            unflushed.add(locale)
+        record(locale, dict.fromkeys(textless))
         with_text = [f for f in fields if f not in textless]
         if with_text:
             to_translate[locale] = with_text
 
+    failed: dict[str, dict[str, str]] = {}  # locale → {field: why it failed}
+    outcomes: dict[str, str] = {}  # locale → TRANSLATED | RETRY | UNPARSEABLE
+    attempt: int | None = None  # counted once per entity, on its first unusable reply
+
+    def finish(locales: list[str]) -> None:
+        """Write (or leave queued) each locale that has no calls left."""
+        nonlocal attempt
+        to_write: list[dict] = []
+        for locale in locales:
+            reasons = failed.get(locale, {})
+            if not reasons:
+                outcomes[locale] = TRANSLATED
+                to_write.append(rows[locale])
+                continue
+            if _NO_USABLE_REPLY in reasons.values():
+                if attempt is None:
+                    attempt = _note_failed_attempt(entity_type, entity_id)
+                if attempt < _MAX_ATTEMPTS:
+                    outcomes[locale] = RETRY  # not written: its queue row stays
+                    continue
+            outcomes[locale] = UNPARSEABLE
+            if rows[locale]["sourceHashes"]:
+                to_write.append(rows[locale])
+        if to_write:
+            clear_api.upsert_translations(entity_type, entity_id, to_write)
+
     calls = deque(_plan_calls(canonical, to_translate)) if to_translate else deque()
+    finish([locale for locale in per_locale_stale if locale not in to_translate])
     call_count = 0
     while calls:
         locales, fields = calls.popleft()
@@ -714,83 +756,51 @@ def _translate_bulk_and_upsert(
                 calls.extendleft(reversed(smaller))
                 continue
 
-        # Named in the final log line, so a cut-off reply is never mistaken
-        # for malformed JSON.
-        why = "reply cut off at the token cap" if truncated else "no usable reply"
-        rows: list[dict] = []
+        why = _CUT_OFF if truncated else _NO_USABLE_REPLY
         for locale in locales:
             new_fields = (translated or {}).get(locale) or {}
-            done = [f for f in fields if f in new_fields]
+            record(locale, {f: new_fields[f] for f in fields if f in new_fields})
             missing = [f for f in fields if f not in new_fields]
             if missing:
                 failed.setdefault(locale, {}).update(dict.fromkeys(missing, why))
-            if not done:
-                continue
-            # Merge over stored data so fields this call didn't refresh keep
-            # their previous translations.
-            previous = stored.get(locale) or {}
-            row = {
-                "locale": locale,
-                "data": {**(previous.get("data") or {}), **{f: new_fields[f] for f in done}},
-                "sourceHashes": {
-                    **(previous.get("sourceHashes") or {}),
-                    **{f: fresh_hashes[f] for f in done},
-                },
-            }
-            rows.append(row)
-            stored[locale] = row
-        if rows:
-            clear_api.upsert_translations(entity_type, entity_id, rows)
-            written.update(row["locale"] for row in rows)
-            unflushed.difference_update(row["locale"] for row in rows)
-            # The write deleted these locales' queue rows. Put back every
-            # locale that is not finished (see the docstring).
-            unfinished = {loc for later_locales, _ in calls for loc in later_locales} | set(failed)
-            for row in rows:
-                if row["locale"] in unfinished:
-                    _requeue(entity_type, entity_id, row["locale"])
 
-    if unflushed:
-        clear_api.upsert_translations(
-            entity_type, entity_id, [stored[locale] for locale in sorted(unflushed)],
+        still_running = {loc for later_locales, _ in calls for loc in later_locales}
+        finish([locale for locale in locales if locale not in still_running])
+
+    def summary(outcome: str) -> str:
+        return "; ".join(
+            f"{locale}: " + ", ".join(f"{field} ({why})" for field, why in sorted(failed[locale].items()))
+            for locale in sorted(failed) if outcomes[locale] == outcome
         )
-        written.update(unflushed)
 
-    if not failed:
-        _reset_attempts(entity_type, entity_id)
-        logger.info(
-            "[TRANSLATE] %s %s: wrote %d locale(s) in %d call(s)",
-            entity_type, entity_id, len(written), call_count,
+    dropped = [locale for locale, outcome in outcomes.items() if outcome == UNPARSEABLE]
+    retrying = [locale for locale, outcome in outcomes.items() if outcome == RETRY]
+    if dropped:
+        # Given up. Clear the queue rows so this entity can't re-drain and
+        # re-invoke the (paid) model on every run — the alternative is a
+        # poisoned queue head that stalls all translation. The write above
+        # already cleared them when there was something to write.
+        _clear_queue(entity_type, entity_id, dropped)
+        logger.error(
+            "[TRANSLATE] %s %s: gave up, not translated — %s%s",
+            entity_type, entity_id, summary(UNPARSEABLE),
+            f" (attempt {attempt} of {_MAX_ATTEMPTS})" if attempt is not None else "",
         )
-        return TRANSLATED
-
-    summary = "; ".join(
-        f"{locale}: " + ", ".join(f"{field} ({why})" for field, why in sorted(fields.items()))
-        for locale, fields in sorted(failed.items())
-    )
-    attempt = _note_failed_attempt(entity_type, entity_id)
-    if attempt < _MAX_ATTEMPTS:
-        # Make sure every locale with a failed field is on the queue (the last
-        # write above may have deleted its row). Idempotent per locale.
-        for locale in failed:
-            _requeue(entity_type, entity_id, locale)
+    if retrying:
         logger.warning(
             "[TRANSLATE] %s %s: not translated — %s (attempt %d of %d, left queued)",
-            entity_type, entity_id, summary, attempt, _MAX_ATTEMPTS,
+            entity_type, entity_id, summary(RETRY), attempt, _MAX_ATTEMPTS,
         )
         return RETRY
 
-    # Attempts used up. Clear the queue rows so this entity can't re-drain and
-    # re-invoke the (paid) model on every run — the alternative is a poisoned
-    # queue head that stalls all translation. What was written stays written;
-    # the failed fields stay untranslated until the entity is enqueued again.
-    _clear_queue(entity_type, entity_id, list(failed))
     _reset_attempts(entity_type, entity_id)
-    logger.error(
-        "[TRANSLATE] %s %s: gave up after %d attempts, not translated — %s",
-        entity_type, entity_id, _MAX_ATTEMPTS, summary,
+    if dropped:
+        return UNPARSEABLE
+    logger.info(
+        "[TRANSLATE] %s %s: wrote %d locale(s) in %d call(s)",
+        entity_type, entity_id, len(outcomes), call_count,
     )
-    return UNPARSEABLE
+    return TRANSLATED
 
 
 def _attempts_key(entity_type: str, entity_id: str) -> str:
@@ -820,16 +830,6 @@ def _reset_attempts(entity_type: str, entity_id: str) -> None:
         shared_client().delete(_attempts_key(entity_type, entity_id))
     except Exception:  # noqa: BLE001 — best-effort; the key expires on its own
         pass
-
-
-def _requeue(entity_type: str, entity_id: str, locale: str) -> None:
-    """Put one locale back on the translation queue (best-effort)."""
-    try:
-        clear_api.enqueue_translation(entity_type, entity_id, locale)
-    except Exception as exc:  # noqa: BLE001 — a lost retry must not fail the drain
-        logger.warning(
-            "[TRANSLATE] %s %s: could not re-queue %s: %s", entity_type, entity_id, locale, exc,
-        )
 
 
 def _clear_queue(entity_type: str, entity_id: str, locales: list[str]) -> None:

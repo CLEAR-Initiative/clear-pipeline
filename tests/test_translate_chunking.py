@@ -6,10 +6,11 @@ One call used to translate a whole situation analysis into every locale. It ran
 once), and the queue rows were cleared, so the analysis was never translated.
 
 Covered here: a cut-off reply is reported as truncation and never parsed; a
-large entity is split into per-locale calls sized by `_CALL_BUDGET_CHARS`; each
-call is written as soon as it returns; a failed entity is retried a bounded
-number of times; the lock is renewed for as long as the work runs. clear-api /
-the LLM / Redis are mocked.
+large entity is split into per-locale calls sized by `_CALL_BUDGET_CHARS`; a
+locale is written once, when it is finished, so its queue row is never deleted
+while work remains; a failed locale is retried a bounded number of times; the
+lock is renewed for as long as the work runs. clear-api / the LLM / Redis are
+mocked.
 """
 
 import json
@@ -209,11 +210,13 @@ def test_large_analysis_is_translated_in_small_calls_and_fully_written():
     assert outcome == tp.TRANSLATED
     assert all(len(locales) == 1 for locales, _ in seen)  # never 3 locales × 8 fields again
     assert all(tp._payload_chars(canonical, fields) <= tp._CALL_BUDGET_CHARS for _, fields in seen)
-    assert env.upsert.call_count == len(seen)  # written call by call, not at the end
-    # Each write deletes the locale's queue row in clear-api, so an unfinished
-    # locale is put back after every write but its last one.
-    per_locale = len(seen) // 3
-    assert env.enqueue.call_count == 3 * (per_locale - 1)
+    # One write per locale, when the locale is finished: clear-api deletes the
+    # locale's queue row on every write, so there must be no earlier one.
+    assert [[row["locale"] for row in c.args[2]] for c in env.upsert.call_args_list] == [
+        ["ar"], ["fr"], ["es"],
+    ]
+    env.enqueue.assert_not_called()
+    env.mark.assert_not_called()
     rows = _final_rows(env.upsert)
     assert set(rows) == {"ar", "fr", "es"}
     for locale, row in rows.items():
@@ -239,7 +242,7 @@ def test_cut_off_call_is_split_and_retried_smaller():
     assert _final_rows(env.upsert)["ar"]["sourceHashes"] == compute_source_hashes("analysis", canonical)
 
 
-def test_failed_fields_stay_stale_and_the_entity_is_left_queued(fake_redis, caplog):
+def test_unfinished_locale_is_not_written_so_its_queue_row_survives(fake_redis, caplog):
     canonical = _analysis()
 
     def call(et, canon, locales, fields, entity_id=None):
@@ -255,15 +258,12 @@ def test_failed_fields_stay_stale_and_the_entity_is_left_queued(fake_redis, capl
         outcome = tp.translate_and_upsert("analysis", "a1", canonical)
 
     assert outcome == tp.RETRY
+    # fr finished and is written. ar is NOT written: a write would delete its
+    # queue row while fields are still untranslated. Nothing touches the queue.
     rows = _final_rows(env.upsert)
-    fresh = compute_source_hashes("analysis", canonical)
-    assert rows["fr"]["sourceHashes"] == fresh
-    # ar: what translated is kept; the failed call's fields have no hash, so
-    # the next attempt translates only those.
-    assert "sectors" not in rows["ar"]["sourceHashes"]
-    assert set(rows["ar"]["sourceHashes"]) < set(fresh)
-    # ar is still queued for the retry; fr finished, so its last write cleared it.
-    assert env.enqueue.call_args_list[-1].args == ("analysis", "a1", "ar")
+    assert set(rows) == {"fr"}
+    assert rows["fr"]["sourceHashes"] == compute_source_hashes("analysis", canonical)
+    env.enqueue.assert_not_called()
     env.mark.assert_not_called()
     assert fake_redis.store["translate:attempts:analysis:a1"] == 1
     assert "attempt 1 of 3, left queued" in caplog.text
@@ -271,26 +271,23 @@ def test_failed_fields_stay_stale_and_the_entity_is_left_queued(fake_redis, capl
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]  # no GlitchTip issue yet
 
 
-def test_a_run_that_dies_part_way_leaves_the_unfinished_locale_queued():
+def test_a_run_that_dies_part_way_has_written_only_finished_locales():
     canonical = _analysis()
-    events: list[str] = []
-    done = {"n": 0}
 
     def call(et, canon, locales, fields, entity_id=None):
-        done["n"] += 1
-        if done["n"] == 2:
+        if locales == ["fr"]:
             raise ConnectionError("provider went away")  # transport errors propagate
         return _echo(locales, fields, canon), False
 
-    with _env(locales=("ar",)) as env, patch.object(tp, "_translate_call", side_effect=call):
-        env.upsert.side_effect = lambda *a: events.append("upsert")
-        env.enqueue.side_effect = lambda *a: events.append("enqueue")
+    with _env(locales=("ar", "fr")) as env, patch.object(tp, "_translate_call", side_effect=call):
         with pytest.raises(ConnectionError):
             tp.translate_and_upsert("analysis", "a1", canonical)
 
-    # The first call was written (which deleted the queue row) and the locale
-    # was put straight back, so the next drain finishes it.
-    assert events == ["upsert", "enqueue"]
+    # ar was finished and written. fr was never written, so clear-api still
+    # has its queue row and the next drain translates it.
+    assert [[row["locale"] for row in c.args[2]] for c in env.upsert.call_args_list] == [["ar"]]
+    env.enqueue.assert_not_called()
+    env.mark.assert_not_called()
 
 
 def test_next_attempt_translates_only_what_is_still_stale():
@@ -315,27 +312,75 @@ def test_next_attempt_translates_only_what_is_still_stale():
     assert set(row["data"]) == set(FIELDS)  # earlier translations kept
 
 
-def test_gives_up_after_the_attempt_limit_and_clears_the_queue(fake_redis, caplog):
+def test_gives_up_after_the_attempt_limit_and_keeps_what_translated(fake_redis, caplog):
     canonical = _analysis()
     fake_redis.store["translate:attempts:analysis:a1"] = tp._MAX_ATTEMPTS - 1
 
+    def call(et, canon, locales, fields, entity_id=None):
+        if "sectors" in fields:
+            return None, False  # malformed again on the last attempt
+        return _echo(locales, fields, canon), False
+
     with (
         _env(redis=fake_redis, locales=("ar",)) as env,
-        patch.object(tp, "_translate_call", return_value=(None, True)),  # always cut off
+        patch.object(tp, "_translate_call", side_effect=call),
         caplog.at_level(logging.WARNING, logger=tp.logger.name),
     ):
         outcome = tp.translate_and_upsert("analysis", "a1", canonical)
 
     assert outcome == tp.UNPARSEABLE
-    env.upsert.assert_not_called()
-    env.enqueue.assert_not_called()
+    # What translated is written now; the failed call's fields carry no hash,
+    # so they are translated when the entity is next enqueued.
+    row = _final_rows(env.upsert)["ar"]
+    fresh = compute_source_hashes("analysis", canonical)
+    assert "sectors" not in row["sourceHashes"] and set(row["sourceHashes"]) < set(fresh)
     env.mark.assert_called_once_with("analysis", "a1", "ar")  # dropped, cannot re-bill
+    env.enqueue.assert_not_called()
     assert "translate:attempts:analysis:a1" not in fake_redis.store  # a re-enqueue starts fresh
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
-    assert len(errors) == 1 and "gave up after 3 attempts" in errors[0]
+    assert len(errors) == 1
+    assert "gave up" in errors[0] and "sectors (no usable reply)" in errors[0]
+    assert "attempt 3 of 3" in errors[0]
+
+
+def test_a_reply_cut_off_for_one_field_is_given_up_at_once_and_named(fake_redis, caplog):
+    canonical = _analysis()
+
+    def call(et, canon, locales, fields, entity_id=None):
+        if "sectors" in fields:
+            return None, True  # cut off, even once it is alone in the call
+        return _echo(locales, fields, canon), False
+
+    with (
+        _env(redis=fake_redis, locales=("ar",)) as env,
+        patch.object(tp, "_translate_call", side_effect=call) as model,
+        caplog.at_level(logging.WARNING, logger=tp.logger.name),
+    ):
+        outcome = tp.translate_and_upsert("analysis", "a1", canonical)
+
+    assert outcome == tp.UNPARSEABLE  # no retry: it would be cut off again
+    assert ["sectors"] in [c.args[3] for c in model.call_args_list]  # split down to one field first
+    row = _final_rows(env.upsert)["ar"]
+    assert set(row["sourceHashes"]) == set(FIELDS) - {"sectors"}  # the rest is kept
+    env.mark.assert_called_once_with("analysis", "a1", "ar")
+    assert fake_redis.store == {}  # not counted as a retryable attempt
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
     # The error names truncation; it is not reported as a JSON parse failure.
-    assert "sectors (reply cut off at the token cap)" in errors[0]
+    assert len(errors) == 1 and "sectors (reply cut off at the token cap)" in errors[0]
     assert "could not parse" not in errors[0]
+
+
+def test_nothing_translated_and_attempts_used_up_clears_the_queue(fake_redis):
+    fake_redis.store["translate:attempts:event:e1"] = tp._MAX_ATTEMPTS - 1
+    with (
+        _env(redis=fake_redis, locales=("ar",)) as env,
+        patch.object(tp, "_translate_call", return_value=(None, False)),
+    ):
+        outcome = tp.translate_and_upsert("event", "e1", EVENT)
+
+    assert outcome == tp.UNPARSEABLE
+    env.upsert.assert_not_called()  # nothing to write
+    env.mark.assert_called_once_with("event", "e1", "ar")
 
 
 def test_success_clears_the_attempt_counter(fake_redis):
@@ -366,12 +411,15 @@ def test_a_field_the_model_left_out_is_not_marked_current(fake_redis):
         return {"ar": {"title": "فيضان"}}, False  # description missing
 
     with _env(redis=fake_redis, locales=("ar",)) as env, patch.object(tp, "_translate_call", side_effect=call):
-        outcome = tp.translate_and_upsert("event", "e1", EVENT)
+        assert tp.translate_and_upsert("event", "e1", EVENT) == tp.RETRY
+        env.upsert.assert_not_called()  # incomplete: left queued, not written
 
-    assert outcome == tp.RETRY
+        fake_redis.store["translate:attempts:event:e1"] = tp._MAX_ATTEMPTS - 1
+        assert tp.translate_and_upsert("event", "e1", EVENT) == tp.UNPARSEABLE
+
     row = _final_rows(env.upsert)["ar"]
     assert row["data"] == {"title": "فيضان"}
-    assert set(row["sourceHashes"]) == {"title"}
+    assert set(row["sourceHashes"]) == {"title"}  # description stays stale
 
 
 def test_fields_with_no_text_are_recorded_without_a_model_call():
@@ -431,70 +479,92 @@ def test_stage_counts_a_retry_as_requeued_and_invokes_it_once_per_run():
 # ── redis_lock(renew=True) ────────────────────────────────────────────────────
 
 class _LockRedis:
-    """Just enough Redis for redis_lock: SET NX EX plus the two Lua scripts."""
+    """Just enough Redis for redis_lock — SET NX EX plus the two Lua scripts —
+    with keys that really expire, so a lock that is not renewed is lost."""
 
     def __init__(self):
-        self.value = None
-        self.extends: list[int] = []
-        self.released = False
-        self.lost = False
+        self.token = None
+        self.expires_at = 0.0
+        self.extends = 0
+
+    def _current(self):
+        if self.token is not None and time.monotonic() >= self.expires_at:
+            self.token = None
+        return self.token
 
     def set(self, key, token, nx=False, ex=None):
-        if self.value is not None:
+        if self._current() is not None:
             return False
-        self.value = token
+        self.token, self.expires_at = token, time.monotonic() + ex
         return True
 
     def eval(self, script, numkeys, key, token, *args):
+        if self._current() != token:
+            return 0
         if script == rl._EXTEND_SCRIPT:
-            if self.lost or self.value != token:
-                return 0
-            self.extends.append(int(args[0]))
-            return 1
-        self.released = self.value == token
-        self.value = None
+            self.expires_at = time.monotonic() + float(args[0])
+            self.extends += 1
+        else:
+            self.token = None
         return 1
 
 
-def _wait_for(predicate, timeout=2.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.01)
-    return False
+_TTL = 0.6  # seconds; the renewer ticks every _TTL / 3 (wide margin for a slow CI runner)
 
 
-def test_renewed_lock_is_extended_while_held_and_released_after():
+def _held_by_a_peer(client) -> bool:
+    """True when a second holder cannot take the lock right now."""
+    with rl.redis_lock("k", ttl_seconds=_TTL, wait_seconds=0) as acquired:
+        return not acquired
+
+
+def test_renewed_lock_stays_held_past_its_ttl_and_is_released_after():
     client = _LockRedis()
     with patch.object(rl, "_client", return_value=client):
-        with rl.redis_lock("k", ttl_seconds=1, wait_seconds=0, renew=True) as acquired:
+        with rl.redis_lock("k", ttl_seconds=_TTL, wait_seconds=0, renew=True) as acquired:
             assert acquired
-            assert _wait_for(lambda: len(client.extends) >= 2)  # outlasts the TTL
-        extends_at_exit = len(client.extends)
-        time.sleep(0.5)
+            deadline = time.monotonic() + 3 * _TTL  # well past the original expiry
+            while time.monotonic() < deadline:
+                assert _held_by_a_peer(client)  # a second drain cannot take it
+                time.sleep(_TTL / 6)
+        assert client.extends >= 3
+        assert not _held_by_a_peer(client)  # released on exit, not left to expire
 
-    assert client.released
-    assert set(client.extends) == {1}  # each renewal resets the full TTL
-    assert len(client.extends) == extends_at_exit  # the renewer stopped with the lock
+
+def test_without_renewal_the_lock_expires_under_long_work():
+    # The bug: a 6-minute lock under a 12-21 minute call.
+    client = _LockRedis()
+    with patch.object(rl, "_client", return_value=client):
+        with rl.redis_lock("k", ttl_seconds=_TTL, wait_seconds=0) as acquired:
+            assert acquired
+            time.sleep(2 * _TTL)
+            assert not _held_by_a_peer(client)  # a second drain takes the same entity
+    assert client.extends == 0
 
 
 def test_renewal_stops_once_the_lock_is_lost(caplog):
     client = _LockRedis()
-    client.lost = True
     with patch.object(rl, "_client", return_value=client), caplog.at_level(logging.WARNING, logger=rl.logger.name):
-        with rl.redis_lock("k", ttl_seconds=1, wait_seconds=0, renew=True):
-            assert _wait_for(lambda: "Lost k" in caplog.text)
-    assert client.extends == []
+        with rl.redis_lock("k", ttl_seconds=_TTL, wait_seconds=0, renew=True):
+            client.token = "taken-by-a-peer"  # e.g. Redis lost the key and a peer set it
+            client.expires_at = time.monotonic() + 60
+            deadline = time.monotonic() + 2
+            while "Lost k" not in caplog.text and time.monotonic() < deadline:
+                time.sleep(0.01)
+            extends_when_lost = client.extends
+            time.sleep(_TTL)
+    assert "Lost k" in caplog.text
+    assert client.extends == extends_when_lost  # never extends a peer's lock
+    assert client.token == "taken-by-a-peer"  # and never releases it
 
 
-def test_lock_is_not_renewed_by_default_or_when_not_acquired():
+def test_no_renewer_thread_by_default_or_when_not_acquired():
     client = _LockRedis()
     with patch.object(rl, "_client", return_value=client), patch.object(rl.threading, "Thread") as thread:
-        with rl.redis_lock("k", ttl_seconds=1, wait_seconds=0) as acquired:
+        with rl.redis_lock("k", ttl_seconds=_TTL, wait_seconds=0) as acquired:
             assert acquired
-        client.value = "held-by-a-peer"
-        with rl.redis_lock("k", ttl_seconds=1, wait_seconds=0, renew=True) as acquired:
+        client.token, client.expires_at = "held-by-a-peer", time.monotonic() + 60
+        with rl.redis_lock("k", ttl_seconds=_TTL, wait_seconds=0, renew=True) as acquired:
             assert not acquired
     thread.assert_not_called()
 
