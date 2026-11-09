@@ -679,15 +679,17 @@ def _translate_bulk_and_upsert(
     in memory and its queue row is left alone:
 
     - every field translated → written; the write clears the queue row.
-    - a field got an unusable reply and attempts remain → NOT written. The
-      queue row is untouched, so a later drain translates the locale again.
+    - a field got an unusable reply and attempts remain → NOT written. Its
+      queue row is kept (and created if the locale was never queued), so a
+      later drain translates the locale again.
     - a field cannot be translated (cut off even on its own, or attempts used
       up) → what did translate is written and the locale is dropped from the
       queue. ``sourceHashes`` cover only the translated fields, so the rest
       stay stale and are translated when the entity is next enqueued.
 
     A run that dies part-way has written only finished locales. The others are
-    still queued and the next drain redoes them.
+    still queued — each is given a queue row before the first call — and the
+    next drain redoes them.
     """
     # The row each locale will be written with: what is stored, plus this
     # run's results as they arrive.
@@ -733,7 +735,12 @@ def _translate_bulk_and_upsert(
                 if attempt is None:
                     attempt = _note_failed_attempt(entity_type, entity_id)
                 if attempt < _MAX_ATTEMPTS:
-                    outcomes[locale] = RETRY  # not written: its queue row stays
+                    # Not written, so an existing queue row stays. But every
+                    # configured locale is translated, queued or not (one
+                    # locale's enqueue can have failed) — so make sure this
+                    # one has a row, or nothing would ever retry it.
+                    _ensure_queued(entity_type, entity_id, locale)
+                    outcomes[locale] = RETRY
                     continue
             outcomes[locale] = UNPARSEABLE
             if rows[locale]["sourceHashes"]:
@@ -742,6 +749,15 @@ def _translate_bulk_and_upsert(
             clear_api.upsert_translations(entity_type, entity_id, to_write)
 
     calls = deque(_plan_calls(canonical, to_translate)) if to_translate else deque()
+    if len(calls) > 1:
+        # Several calls, so locales are written at different times, and this
+        # run can stop (a provider error, the run's time limit) after one is
+        # written and before another is done. Give every locale a queue row
+        # first, so whatever is unfinished then is picked up by the next drain
+        # even if that locale was never queued. A single call needs none: if
+        # it fails, nothing was written and the queued rows are still there.
+        for locale in to_translate:
+            _ensure_queued(entity_type, entity_id, locale)
     finish([locale for locale in per_locale_stale if locale not in to_translate])
     call_count = 0
     while calls:
@@ -823,6 +839,17 @@ def _note_failed_attempt(entity_type: str, entity_id: str) -> int:
     except Exception as exc:  # noqa: BLE001 — never fail the drain on bookkeeping
         logger.warning("[TRANSLATE] could not count attempts for %s: %s", key, exc)
         return _MAX_ATTEMPTS
+
+
+def _ensure_queued(entity_type: str, entity_id: str, locale: str) -> None:
+    """Make sure the locale has a translation-queue row. clear-api's
+    ``enqueueTranslation`` is an upsert: it creates the row if it is missing
+    and leaves an existing one (and its place in the queue) alone.
+
+    Not best-effort. If the row cannot be confirmed, the retry is not durable,
+    so the error propagates and the drain reports this entity as failed
+    instead of logging a retry that may never happen."""
+    clear_api.enqueue_translation(entity_type, entity_id, locale)
 
 
 def _reset_attempts(entity_type: str, entity_id: str) -> None:

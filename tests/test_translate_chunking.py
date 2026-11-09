@@ -215,7 +215,6 @@ def test_large_analysis_is_translated_in_small_calls_and_fully_written():
     assert [[row["locale"] for row in c.args[2]] for c in env.upsert.call_args_list] == [
         ["ar"], ["fr"], ["es"],
     ]
-    env.enqueue.assert_not_called()
     env.mark.assert_not_called()
     rows = _final_rows(env.upsert)
     assert set(rows) == {"ar", "fr", "es"}
@@ -259,11 +258,12 @@ def test_unfinished_locale_is_not_written_so_its_queue_row_survives(fake_redis, 
 
     assert outcome == tp.RETRY
     # fr finished and is written. ar is NOT written: a write would delete its
-    # queue row while fields are still untranslated. Nothing touches the queue.
+    # queue row while fields are still untranslated.
     rows = _final_rows(env.upsert)
     assert set(rows) == {"fr"}
     assert rows["fr"]["sourceHashes"] == compute_source_hashes("analysis", canonical)
-    env.enqueue.assert_not_called()
+    # ar still has a queue row (made sure of below), and nothing removed it.
+    assert ("analysis", "a1", "ar") in [c.args for c in env.enqueue.call_args_list]
     env.mark.assert_not_called()
     assert fake_redis.store["translate:attempts:analysis:a1"] == 1
     assert "attempt 1 of 3, left queued" in caplog.text
@@ -271,23 +271,72 @@ def test_unfinished_locale_is_not_written_so_its_queue_row_survives(fake_redis, 
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]  # no GlitchTip issue yet
 
 
-def test_a_run_that_dies_part_way_has_written_only_finished_locales():
+def test_a_locale_left_for_retry_gets_a_queue_row_even_if_it_never_had_one(fake_redis):
+    # Only ar was queued (fr's enqueue failed earlier), but both are translated.
+    # The reply has ar and no fr: ar is written, fr must end up queued.
+    def call(et, canon, locales, fields, entity_id=None):
+        return {"ar": {f: f"[ar] {f}" for f in fields}}, False
+
+    with _env(redis=fake_redis, locales=("ar", "fr")) as env, patch.object(tp, "_translate_call", side_effect=call):
+        outcome = tp.translate_and_upsert("event", "e1", EVENT)
+
+    assert outcome == tp.RETRY
+    assert [row["locale"] for row in env.upsert.call_args.args[2]] == ["ar"]
+    env.enqueue.assert_called_once_with("event", "e1", "fr")
+
+
+def test_a_retry_that_cannot_be_queued_is_an_error_not_a_silent_loss(fake_redis):
+    # The locale was never queued (its enqueue failed earlier) and clear-api
+    # refuses the row now. Reporting RETRY would promise a retry nobody runs.
+    with (
+        _env(redis=fake_redis, locales=("ar",)) as env,
+        patch.object(tp, "_translate_call", return_value=(None, False)),
+    ):
+        env.enqueue.side_effect = RuntimeError("clear-api request failed after 3 attempts")
+        with pytest.raises(RuntimeError):
+            tp.translate_and_upsert("event", "e1", EVENT)
+
+    env.upsert.assert_not_called()
+    env.mark.assert_not_called()  # a row that does exist is left in place
+
+
+def test_a_run_that_dies_part_way_leaves_every_unfinished_locale_queued():
     canonical = _analysis()
+    events: list[str] = []
 
     def call(et, canon, locales, fields, entity_id=None):
+        events.append(f"call {locales[0]}")
         if locales == ["fr"]:
             raise ConnectionError("provider went away")  # transport errors propagate
         return _echo(locales, fields, canon), False
 
     with _env(locales=("ar", "fr")) as env, patch.object(tp, "_translate_call", side_effect=call):
+        env.enqueue.side_effect = lambda et, eid, locale: events.append(f"queue {locale}")
+        env.upsert.side_effect = lambda et, eid, rows: events.append(
+            "write " + ",".join(row["locale"] for row in rows),
+        )
         with pytest.raises(ConnectionError):
             tp.translate_and_upsert("analysis", "a1", canonical)
 
-    # ar was finished and written. fr was never written, so clear-api still
-    # has its queue row and the next drain translates it.
-    assert [[row["locale"] for row in c.args[2]] for c in env.upsert.call_args_list] == [["ar"]]
-    env.enqueue.assert_not_called()
+    # Both locales get a queue row BEFORE any model call: fr may never have
+    # been queued (every configured locale is translated, queued or not).
+    assert events[:2] == ["queue ar", "queue fr"]
+    # ar was finished and written. fr was never written, so nothing deleted
+    # its queue row and the next drain translates it.
+    assert [e for e in events if e.startswith("write")] == ["write ar"]
+    assert events[-1] == "call fr"
     env.mark.assert_not_called()
+
+
+def test_a_small_entity_is_not_queued_up_front():
+    # One call: if it fails nothing was written, so the queued rows are still
+    # there. No extra clear-api request per event.
+    call = MagicMock(side_effect=ConnectionError("provider went away"))
+    with _env(locales=("ar", "fr")) as env, patch.object(tp, "_translate_call", call):
+        with pytest.raises(ConnectionError):
+            tp.translate_and_upsert("event", "e1", EVENT)
+    env.enqueue.assert_not_called()
+    env.upsert.assert_not_called()
 
 
 def test_next_attempt_translates_only_what_is_still_stale():
@@ -334,8 +383,9 @@ def test_gives_up_after_the_attempt_limit_and_keeps_what_translated(fake_redis, 
     row = _final_rows(env.upsert)["ar"]
     fresh = compute_source_hashes("analysis", canonical)
     assert "sectors" not in row["sourceHashes"] and set(row["sourceHashes"]) < set(fresh)
-    env.mark.assert_called_once_with("analysis", "a1", "ar")  # dropped, cannot re-bill
-    env.enqueue.assert_not_called()
+    # Dropped, cannot re-bill: the row made sure of before the first call is
+    # removed by the write, and cleared again explicitly.
+    env.mark.assert_called_once_with("analysis", "a1", "ar")
     assert "translate:attempts:analysis:a1" not in fake_redis.store  # a re-enqueue starts fresh
     errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(errors) == 1
