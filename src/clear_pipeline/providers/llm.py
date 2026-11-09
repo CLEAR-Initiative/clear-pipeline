@@ -78,6 +78,18 @@ LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", 
 DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "90"))
 
 
+#: Normalised ``last_stop_reason`` for "the reply hit max_tokens and is cut
+#: off" — OpenAI-compatible ``finish_reason == "length"`` and Anthropic
+#: ``stop_reason == "max_tokens"`` both map to it.
+STOP_LENGTH = "length"
+
+
+def _normalise_stop_reason(reason: Any) -> str | None:
+    if not isinstance(reason, str) or not reason:
+        return None
+    return STOP_LENGTH if reason in ("length", "max_tokens") else reason
+
+
 class EmptyResponseError(RuntimeError):
     """A provider returned an empty/whitespace body (or no choices). Treated as
     a failure — not a successful empty string — so a configured fallback
@@ -219,6 +231,13 @@ class LLMProvider(Protocol):
     #: a multi-call job (e.g. one situation-analysis generation) by reading it
     #: once at the end, instead of snapshotting ``last_usage`` after each call.
     total_usage: dict[str, int]
+    #: Why the most recent ``complete_text`` call stopped. ``STOP_LENGTH`` means
+    #: the reply hit ``max_tokens`` and is cut off; any other value is the
+    #: provider's own reason; ``None`` before the first call. Same "last call
+    #: that finished" caveat as ``last_usage``. Truncation is recorded, not
+    #: raised: a short free-text reply (the context prefix) is still usable when
+    #: cut off, so the caller decides (the translator must not parse one).
+    last_stop_reason: str | None
 
     def complete_structured(
         self,
@@ -301,6 +320,7 @@ class AnthropicProvider:
         self.model = model
         self.last_usage: dict[str, int] | None = None
         self.total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self.last_stop_reason: str | None = None
         self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
     def _note_usage(self, response: Any) -> None:
@@ -407,6 +427,7 @@ class AnthropicProvider:
             messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
         self._note_usage(response)
+        self.last_stop_reason = _normalise_stop_reason(getattr(response, "stop_reason", None))
         text = _strip_code_fence("".join(getattr(b, "text", "") for b in response.content))
         if not text:
             raise EmptyResponseError(f"empty text response from {self.model}")
@@ -551,6 +572,7 @@ class OpenAICompatibleProvider:
         self.model = model
         self.last_usage: dict[str, int] | None = None
         self.total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self.last_stop_reason: str | None = None
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         # Non-standard request-body fields sent via the OpenAI `extra_body`:
@@ -730,6 +752,9 @@ class OpenAICompatibleProvider:
         self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
+        self.last_stop_reason = _normalise_stop_reason(
+            getattr(raw.choices[0], "finish_reason", None),
+        )
         # Cheap OSS models wrap free text in ```fences``` (the same reason
         # complete_structured strips them). And an empty/whitespace body is a
         # FAILURE, not a successful "" — returning it would silently poison this
@@ -788,6 +813,14 @@ class FallbackProvider:
         with self._lock:
             served = self._fallback if self._served_model == self._fallback.model else self._primary
         return getattr(served, "last_usage", None)
+
+    @property
+    def last_stop_reason(self) -> str | None:
+        """Stop reason of the most recent ``complete_text`` call, from whichever
+        provider served it."""
+        with self._lock:
+            served = self._fallback if self._served_model == self._fallback.model else self._primary
+        return getattr(served, "last_stop_reason", None)
 
     @property
     def total_usage(self) -> dict[str, int]:
