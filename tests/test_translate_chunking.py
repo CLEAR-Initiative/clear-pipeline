@@ -401,16 +401,21 @@ class _RunStopped(BaseException):
 def test_a_stopped_run_ends_after_the_calls_in_flight_and_writes_nothing_unfinished():
     canonical = _analysis()
     in_flight = threading.Barrier(3, timeout=5)
+    all_in_flight = threading.Event()
     release = threading.Event()
     calls: list[str] = []
 
     def call(et, canon, locales, fields, entity_id=None):
         calls.append(locales[0])
-        in_flight.wait()
+        in_flight.wait()  # returns once all three locales are inside a call
+        all_in_flight.set()
         release.wait(timeout=5)  # the call is still running when the run is stopped
         return _echo(locales, fields, canon), False
 
     def stopped(futures):
+        # Stop the run only once every worker is inside its first call. Stopped
+        # earlier, a worker that had not started yet would skip its call.
+        assert all_in_flight.wait(timeout=5)
         threading.Timer(0.2, release.set).start()  # the calls in flight return a moment later
         raise _RunStopped
 
