@@ -396,7 +396,15 @@ def locate_in_country(
         # (No match at all still falls back to the country and is geocoded.)
         and not (matched_id and matched_id == country_id)
     ):
-        other_names = _tries_other_names(matched_id, country)
+        other_names = (
+            # A displacement report is pinned to its origin, and the answer's
+            # own name is the origin's. The other names of the post include
+            # where people fled to, which can lie in the same state.
+            resolved.get("location_type") != "displacement"
+            and _tries_other_names(matched_id, country)
+            # Without the state's outline no name can be confirmed inside it.
+            and _area_has_geometry(area_id)
+        )
         for name in _places_to_geocode(place_name, title, description, country, others=other_names):
             point_id = _geocode_within(
                 name, area_id, country_code, text=description or title or ""
@@ -447,15 +455,19 @@ def _places_to_geocode(
     caller comes back for more: the first name gave no point, or there was
     none. The country's and the states' own names are left out (see
     `_names_country_or_state`)."""
+    # Repeats are told by spelling, not by `latin_name_key`: that key drops
+    # vowels to compare two spellings of one place, so it would also skip
+    # "Tandilti" after "Tendalti" missed, and the gazetteer can answer those
+    # two queries differently. Another spelling is another chance.
     tried: set[str] = set()
     if place_name and not _names_country_or_state(place_name, country):
-        tried.add(latin_name_key(place_name))
+        tried.add(_spelling_key(place_name))
         yield place_name
     if not others:
         return
     tried_others = 0
     for name in named_places(title, description, country):
-        key = latin_name_key(name)
+        key = _spelling_key(name)
         if not key or key in tried or _names_country_or_state(name, country):
             continue
         if _names_region_or_feature(name, country):
@@ -465,6 +477,18 @@ def _places_to_geocode(
         tried_others += 1
         if tried_others >= MAX_OTHER_PLACE_NAMES:
             return
+
+
+def _spelling_key(name: str) -> str:
+    """The same spelling, whatever its case, hyphens or spaces."""
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def _area_has_geometry(area_id: str) -> bool:
+    try:
+        return _area_shape(area_id) is not None
+    except Exception:  # noqa: BLE001 — unknown is "no": the answer's own name is still tried
+        return False
 
 
 class _PlaceNames(BaseModel):
@@ -592,17 +616,19 @@ def _names_region_or_feature(place_name: str, country: str) -> bool:
     fuzzily matches inside the state. Checked for the other names a post
     gives, which a model lists more loosely than the one its answer is
     based on."""
+    scoped = _country_scoped_locations(country)
+    # A district's own name is a place, whatever words it shares with a
+    # state: "Khartoum North" is a city, not the north of Khartoum state.
+    key = latin_name_key(place_name)
+    if key and any(latin_name_key(loc["name"]) == key for loc in scoped if (loc.get("level") or 0) == 2):
+        return False
     words = {w for w in re.split(r"[^a-z]+", place_name.casefold()) if w}
     if words & _FEATURE_WORDS:
         return True
     core = _region_core(place_name)
     if not core:
         return True
-    return any(
-        _region_core(loc["name"]) == core
-        for loc in _country_scoped_locations(country)
-        if (loc.get("level") or 0) <= 1
-    )
+    return any(_region_core(loc["name"]) == core for loc in scoped if (loc.get("level") or 0) <= 1)
 
 
 # locations.id → shapely geometry (None when the area has none). Cached.

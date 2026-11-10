@@ -1624,6 +1624,50 @@ def test_the_other_names_skip_repeats_region_phrases_and_natural_features():
     assert _tried(m) == ["Mazbud", "Aruri"]
 
 
+def test_a_displacement_report_tries_only_its_origins_name():
+    # People fled Mazbud for Kamo, both in North Darfur. The post is pinned to
+    # its origin; "Kamo" is where they went, and must not place it.
+    patcher, provider = _llm_with_places(
+        ["Kamo"], location_type="displacement", origin_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({"Kamo": _hit(11.5, 28.5)}) as m:
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "sd-nd"
+    assert _tried(m) == ["Mazbud"]
+    assert _place_name_calls(provider) == []
+
+
+def test_another_spelling_of_a_missed_name_is_still_tried():
+    # "Tendalti" and "Tandilti" share a consonant key, but the gazetteer can
+    # answer the two queries differently. The same spelling is tried once.
+    patcher, _ = _llm_with_places(
+        ["Tandilti", "TENDALTI", "Tendal-ti"], location_type="general", location_id="sd-nd", place_name="Tendalti")
+    with patcher, _north_darfur({"Tandilti": _hit(11.5, 28.5)}) as m:
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "l4-tandilti"
+    assert _tried(m) == ["Tendalti", "Tandilti"]
+
+
+def test_no_other_names_are_bought_for_a_state_with_no_outline():
+    patcher, provider = _llm_with_places(
+        ["Aruri"], location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with (
+        patcher,
+        _north_darfur({"Aruri": _hit(11.5, 28.5)}),
+        patch.object(location, "get_location_with_geometry", return_value={"id": "sd-nd", "geometry": None}),
+    ):
+        location.invalidate_locations_cache()
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "sd-nd"
+    assert _place_name_calls(provider) == []
+
+
+def test_a_districts_own_name_is_a_place_even_with_a_region_word():
+    khartoum_north = {"id": "sd-kh-north", "name": "Khartoum North", "level": 2, "parent": {"id": "sd-kh"}}
+    with patch.object(location, "get_locations", return_value=[*LOCATIONS, khartoum_north]):
+        location.invalidate_locations_cache()
+        assert location._names_region_or_feature("Khartoum North", "Sudan") is False
+        # The north of Khartoum state, with no district of that name, is still a region.
+        assert location._names_region_or_feature("Northern Khartoum", "Sudan") is True
+    location.invalidate_locations_cache()
+
+
 def test_at_most_four_other_names_are_tried():
     names = ["Birka", "Tabit", "Korma", "Mellit", "Kutum", "Shangil", "Saraf"]
     patcher, _ = _llm_with_places(names, location_type="general", location_id="sd-nd", place_name="Mazbud")
