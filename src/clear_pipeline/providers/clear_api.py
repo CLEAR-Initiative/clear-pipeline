@@ -386,6 +386,7 @@ def _execute(
     *,
     retries: int = 3,
     api_key: str | None = None,
+    timeout: float = 60,
 ) -> dict[str, Any]:
     """POST a GraphQL operation with the same retry semantics
     clear-pipeline uses.
@@ -414,7 +415,7 @@ def _execute(
 
     for attempt in range(1, retries + 1):
         try:
-            resp = httpx.post(url, json=payload, headers=headers, timeout=60)
+            resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
 
             if 400 <= resp.status_code < 500:
                 snippet = resp.text[:500] if resp.text else "(empty)"
@@ -1984,6 +1985,80 @@ def update_signal_location(signal_id: str, location_id: str) -> dict:
         {"id": signal_id, "locationId": location_id},
     )
     return result["updateSignalLocation"]
+
+
+RECORD_UNRESOLVED_PLACE_NAME = """
+mutation RecordUnresolvedPlaceName($input: RecordUnresolvedPlaceNameInput!) {
+  recordUnresolvedPlaceName(input: $input) {
+    id
+    status
+    signalCount
+  }
+}
+"""
+
+# Flipped off for the process when clear-api does not have the mutation yet
+# (a clear-api without #1307), so each miss isn't paid for with a failed call.
+_record_unresolved_supported = True
+
+# Seconds. The record is a side note to the drain: it must not hold a signal up.
+_RECORD_UNRESOLVED_TIMEOUT = 10
+
+
+def record_unresolved_place_name(
+    *,
+    signal_id: str,
+    name: str,
+    country_code: str,
+    area_location_id: str,
+    name_ar: str | None = None,
+    reason: str = "NO_MATCH",
+    seen_at: str | None = None,
+) -> dict | None:
+    """Record a place name that geocoding could not place inside the signal's
+    area, in clear-api's unresolved place-name queue. clear-api counts a
+    signal once per row, so a repeat is harmless.
+
+    ``reason`` is ``NO_MATCH`` or ``OUTSIDE_AREA``. ``seen_at`` (ISO-8601) is
+    for a backfill; omitted, clear-api uses now.
+
+    Returns ``{id, status, signalCount}``, or None once clear-api is known
+    not to have the mutation. One attempt with a short timeout; any other
+    failure raises, and the caller decides (the drain logs and carries on).
+    """
+    global _record_unresolved_supported
+    if not _record_unresolved_supported:
+        return None
+    payload: dict = {
+        "signalId": signal_id,
+        "name": name,
+        "countryCode": country_code.upper(),
+        "areaLocationId": area_location_id,
+        "reason": reason,
+    }
+    if name_ar:
+        payload["nameAr"] = name_ar
+    if seen_at:
+        payload["seenAt"] = seen_at
+    try:
+        data = _execute(
+            RECORD_UNRESOLVED_PLACE_NAME,
+            {"input": payload},
+            retries=1,
+            timeout=_RECORD_UNRESOLVED_TIMEOUT,
+        )
+    except ClearApiError as exc:
+        text = str(exc)
+        unknown = any(m in text for m in ("Cannot query field", "Unknown type", "Unknown argument"))
+        if not (unknown and "ecordUnresolvedPlaceName" in text):
+            raise
+        _record_unresolved_supported = False
+        logger.warning(
+            "clear-api has no recordUnresolvedPlaceName — deploy clear-api #1307; "
+            "geocode misses are not recorded for this process"
+        )
+        return None
+    return data["recordUnresolvedPlaceName"]
 
 
 def create_event(input_data: dict) -> dict:

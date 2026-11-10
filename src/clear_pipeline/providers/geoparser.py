@@ -227,6 +227,16 @@ class GeoparseResult:
     raw: dict = field(default_factory=dict)  # the raw Nominatim result for callers that want more
 
 
+@dataclass
+class GeocodeTrace:
+    """What a `geocode_place_name` call met on the way to a miss, for a caller
+    that records misses (the unresolved place-name queue)."""
+    #: A lookup found a candidate, and the caller's `accept` refused it.
+    outside: bool = False
+    #: A lookup tier failed (clear-api or LocationIQ), so the miss proves nothing.
+    failed: bool = False
+
+
 # ─── Extraction ───────────────────────────────────────────────────────────
 
 
@@ -398,6 +408,7 @@ def _pick_best_nominatim_result(
     results: list[dict],
     expected_country_codes: set[str],
     accept: AcceptPoint | None = None,
+    trace: GeocodeTrace | None = None,
 ) -> dict | None:
     """Pick the highest-importance Nominatim result for a candidate, after
     filtering for country and class.
@@ -436,6 +447,8 @@ def _pick_best_nominatim_result(
             except (KeyError, TypeError, ValueError):
                 continue
             if not inside:
+                if trace is not None:
+                    trace.outside = True
                 continue
         if importance > best_importance:
             best_importance = importance
@@ -585,7 +598,10 @@ def country_from_coords(lat: float | None, lng: float | None) -> str | None:
 
 
 def _resolve_via_gazetteer(
-    top: Candidate, expected: set[str], within_location_id: str | None = None
+    top: Candidate,
+    expected: set[str],
+    within_location_id: str | None = None,
+    trace: GeocodeTrace | None = None,
 ) -> GeoparseResult | None:
     """Hybrid tier 1: look the top candidate up in clear-api's offline
     GeoNames gazetteer. Returns a GeoparseResult on a confident hit, else
@@ -608,6 +624,8 @@ def _resolve_via_gazetteer(
             "[geoparser] gazetteer lookup failed for %r (%s) — trying LocationIQ",
             top.name, exc,
         )
+        if trace is not None:
+            trace.failed = True
         return None
 
     if not hit:
@@ -742,6 +760,7 @@ def _resolve_arabic(
     expected: set[str],
     accept: AcceptPoint | None,
     within_location_id: str | None = None,
+    trace: GeocodeTrace | None = None,
 ) -> GeoparseResult | None:
     """Exact gazetteer match on a place's Arabic spelling (GeoNames' Arabic
     alternate names), tried before the Latin tiers: it skips transliteration,
@@ -760,6 +779,8 @@ def _resolve_arabic(
             )
         except Exception as exc:  # noqa: BLE001 — best-effort, the Latin tiers follow
             logger.warning("[geoparser] Arabic gazetteer lookup failed for %r (%s)", query, exc)
+            if trace is not None:
+                trace.failed = True
             return None
         if not hit:
             continue
@@ -786,6 +807,8 @@ def _resolve_arabic(
             continue
         if accept is not None and not accept(lat, lng):
             logger.info("[geoparser] Arabic %r matched %r outside the caller's area", query, hit.get("name"))
+            if trace is not None:
+                trace.outside = True
             continue
         logger.info("[geoparser] Arabic %r resolved to %r (%s)", query, hit.get("name"), country)
         return GeoparseResult(
@@ -818,6 +841,7 @@ def geocode_place_name(
     accept: AcceptPoint | None = None,
     arabic_name: str | None = None,
     within_location_id: str | None = None,
+    trace: GeocodeTrace | None = None,
 ) -> GeoparseResult | None:
     """Geocode a place name that was already extracted elsewhere — e.g. by
     Claude reading an Arabic X post, which the regex extraction stages above
@@ -834,7 +858,11 @@ def geocode_place_name(
 
     `within_location_id` (a CLEAR location id, usually the area `accept`
     tests) lets the gazetteer itself choose among same-named places by area,
-    instead of returning the most populous one; `accept` stays as the check."""
+    instead of returning the most populous one; `accept` stays as the check.
+
+    `trace`, when given, is filled in on the way: a candidate that `accept`
+    refused, or a lookup tier that failed. It tells a real miss from an
+    outage, and "no candidate" from "a candidate outside the area"."""
     if not name or not name.strip():
         return None
     name = name.strip()
@@ -847,10 +875,31 @@ def geocode_place_name(
     )
     expected = expected_country_codes or _configured_country_codes()
     if arabic_name and arabic_name.strip() and arabic_lookup_applies(name):
-        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept, within_location_id)
+        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept, within_location_id, trace)
         if hit is not None:
             return hit
-    return _resolve_candidate(top, expected, accept, within_location_id)
+    return _resolve_candidate(top, expected, accept, within_location_id, trace)
+
+
+def gazetteer_knows(names: list[str | None], country_code: str) -> bool:
+    """True when the gazetteer holds an exact match for one of `names`
+    anywhere in the country. Asked after a miss inside an area: the gazetteer
+    filters by area on the server, so a same-named place elsewhere is
+    invisible to the area lookup. Exact matches only: a fuzzy hit elsewhere
+    is usually another place. False when the gazetteer is off or fails."""
+    if not settings.geoparser_use_gazetteer:
+        return False
+    for name in names:
+        if not name or not name.strip():
+            continue
+        try:
+            hit = graphql.resolve_gazetteer_location(name.strip(), country_code=country_code.upper())
+        except Exception as exc:  # noqa: BLE001 — only a hint for the review queue
+            logger.info("[geoparser] gazetteer check for %r failed: %s", name, exc)
+            return False
+        if hit and hit.get("exact"):
+            return True
+    return False
 
 
 def _resolve_candidate(
@@ -858,6 +907,7 @@ def _resolve_candidate(
     expected: set[str],
     accept: AcceptPoint | None = None,
     within_location_id: str | None = None,
+    trace: GeocodeTrace | None = None,
 ) -> GeoparseResult | None:
     """Resolve one ranked candidate to coordinates: the offline gazetteer
     first, then LocationIQ with transliteration variants. `accept` (see
@@ -873,10 +923,12 @@ def _resolve_candidate(
     # a permanently wrong landmark L4. Landmarks go straight to LocationIQ
     # tier 2, which does resolve aerodromes / hospitals / camps.
     if settings.geoparser_use_gazetteer and top.kind != "landmark":
-        gaz = _resolve_via_gazetteer(top, expected, within_location_id)
+        gaz = _resolve_via_gazetteer(top, expected, within_location_id, trace)
         if gaz is not None:
             if accept is None or accept(gaz.lat, gaz.lng):
                 return gaz
+            if trace is not None:
+                trace.outside = True
             # The gazetteer returns one row (best score / most populous), so a
             # same-named place elsewhere hides the right one: ask LocationIQ.
             logger.info(
@@ -898,13 +950,18 @@ def _resolve_candidate(
     # message and every failed lookup looks like an OSM data gap — even
     # when the real cause is our class-filter (highway/railway/waterway).
     per_variant_counts: list[tuple[str, int, int]] = []  # (variant, raw, kept)
+    # Only a caller that traces asks the search to report a failure.
+    outcome: dict = {}
+    search_extra = {"outcome": outcome} if trace is not None else {}
     for variant in variants:
-        results = nominatim.search(variant, country_codes=country_codes_param, limit=5)
+        results = nominatim.search(variant, country_codes=country_codes_param, limit=5, **search_extra)
+        if trace is not None and outcome.get("failed"):
+            trace.failed = True
         raw = len(results or [])
         if not results:
             per_variant_counts.append((variant, 0, 0))
             continue
-        candidate_best = _pick_best_nominatim_result(results, expected, accept)
+        candidate_best = _pick_best_nominatim_result(results, expected, accept, trace)
         # kept ≈ 1 if the picker returned anything post-filter, else 0.
         # (`raw - kept` is the count filtered out — usually class-rejected.)
         kept = 1 if candidate_best else 0

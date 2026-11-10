@@ -50,6 +50,10 @@ _Avoid_: Event, disaster, hazard (reserve Hazard for the forward-looking risk co
 Ambiguous across the CLEAR system — avoid it unqualified. In the alerts/signals system it is a ranked, clustered record built from **event-driven** sources (ACLED, GDACS, Dataminr), carrying its own `populationAffected`. That is a different population, measured a different way, over event types that may not correspond to those an analytical Report covers. It has no counterpart in this pipeline: Reports give totals over a Figure Scope, not per-event records. The two are not comparable today — see `docs/adr/0001-affected-extracted-not-sourced-from-events.md`.
 _Avoid_: using bare "event" in any field name, prompt, or dashboard label
 
+**Geocode miss**:
+A place name that the text locator (`locate_in_country`) could not place inside the area the model chose: no lookup tier found a point inside the area, or the L4 promote gave no location. The drain records each miss in clear-api's unresolved place-name queue (`recordUnresolvedPlaceName`) with the signal id, the name, its Arabic spelling, the area and a reason: `NO_MATCH`, or `OUTSIDE_AREA` when the name exists elsewhere in the country. Not a miss: a failed lookup (an outage proves nothing), an area with no geometry, and a name that is the country's or a state's own. See clear-api ADR-0019.
+_Avoid_: failed geocode (an outage is not a miss)
+
 ### Aggregation
 
 **Additive Count**:
