@@ -54,6 +54,9 @@ _Avoid_: using bare "event" in any field name, prompt, or dashboard label
 A place name that the text locator (`locate_in_country`) could not place inside the area the model chose: no lookup tier found a point inside the area, or the L4 promote gave no location. The drain records each miss in clear-api's unresolved place-name queue (`recordUnresolvedPlaceName`) with the signal id, the name, its Arabic spelling, the area and a reason: `NO_MATCH`, or `OUTSIDE_AREA` when the name exists elsewhere in the country. Not a miss: a failed lookup (an outage proves nothing), an area with no geometry, and a name that is the country's or a state's own. See clear-api ADR-0019.
 _Avoid_: failed geocode (an outage is not a miss)
 
+**Named places** (of a post):
+Every specific place a post names as a site of what it reports, from a separate model call (`named_places`, prompt `place-names-v1`). The location prompt gives one `place_name` and is left unchanged: its wording is fragile. The locator tries the answer's own name first, then the other named places, and only when the model placed the post in a state: a name must geocode inside that state. The first hit places the signal; each name that does not is a **Geocode miss**. Region phrases ("South Blue Nile", "Kordofan") and natural features (a river, a plain) are not tried.
+
 **Place alias hit**:
 A gazetteer answer that came from one of clear-api's place aliases (`source: ALIAS`, with a `locationId`), not from GeoNames. A person mapped the spelling to a CLEAR location, so the locator uses that location as it is: no L4 promote, and no Latin-name check on an Arabic hit. The area check still applies. A landmark name (a facility) takes only an alias hit from the gazetteer; GeoNames answers those with the nearest town. See clear-api ADR-0019.
 

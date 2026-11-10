@@ -1500,3 +1500,246 @@ def test_the_signal_location_client_reads_the_general_location():
     assert ex.call_args.args[1] == {"id": "s"}
     with patch.object(clear_api, "_execute", return_value={"signal": None}):
         assert clear_api.get_signal_location("gone") is None
+
+
+# ── every place a post names, not only the first (#1315) ─────────────────────
+
+NORTH_DARFUR = {"id": "sd-nd", "name": "North Darfur", "level": 1, "parent": {"id": "sd"}}
+VILLAGES_POST = "قوات الدعم السريع تسيطر على مناطق مزبد وأروري وكامو بولاية شمال دارفور"
+
+
+def _llm_with_places(places, **location_fields):
+    """Fake LLM: the location call answers `location_fields`, the place-names
+    call answers `places`, any other call (the Arabic spelling) its defaults."""
+    provider = MagicMock()
+
+    def answer(*, system, user, schema):
+        if schema is location._LocationResolution:
+            return schema(**location_fields)
+        if schema is location._PlaceNames:
+            return schema(place_names=places)
+        return schema()
+
+    provider.complete_structured.side_effect = answer
+    return patch.object(location, "make_llm_provider", return_value=provider), provider
+
+
+def _place_name_calls(provider):
+    return [c for c in provider.complete_structured.call_args_list
+            if c.kwargs["schema"] is location._PlaceNames]
+
+
+@contextmanager
+def _north_darfur(hits):
+    """Geocoding inside North Darfur: `hits` maps a name to its point; any
+    other name is a miss."""
+    def fake_geocode(name, *, expected_country_codes=None, accept=None, arabic_name=None,
+                     within_location_id=None, trace=None):
+        return hits.get(name)
+
+    geocode = MagicMock(side_effect=fake_geocode)
+    promote = MagicMock(side_effect=lambda *, name, lat, lng, kind: {
+        "locationId": f"l4-{name.lower()}", "reused": False, "abortedReason": None})
+    geometry = {"type": "Polygon", "coordinates": [list(WK_SHAPE.exterior.coords)]}
+    with (
+        patch.object(location, "get_locations", return_value=[*LOCATIONS, NORTH_DARFUR]),
+        patch.object(location, "geocode_place_name", geocode),
+        patch.object(location, "gazetteer_knows", return_value=False),
+        patch.object(location, "find_or_create_landmark_l4", promote),
+        patch.object(location, "get_location_with_geometry", return_value={"id": "sd-nd", "geometry": geometry}),
+    ):
+        location.invalidate_locations_cache()
+        yield {"geocode": geocode, "promote": promote}
+    location.invalidate_locations_cache()
+
+
+def _tried(m):
+    return [c.args[0] for c in m["geocode"].call_args_list]
+
+
+def test_a_three_village_post_tries_each_name_and_queues_each_miss():
+    # The answer is based on Mazbud. It misses, and so does Aruri: Kamo places the post.
+    patcher, provider = _llm_with_places(
+        ["Mazbud", "Aruri", "Kamo"], location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({"Kamo": _hit(11.5, 28.5)}) as m, location.collect_geocode_misses() as misses:
+        located = location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd")
+
+    assert located == "l4-kamo"
+    assert _tried(m) == ["Mazbud", "Aruri", "Kamo"]
+    assert [(miss.name, miss.area_id, miss.reason) for miss in misses] == [
+        ("Mazbud", "sd-nd", "NO_MATCH"), ("Aruri", "sd-nd", "NO_MATCH")]
+    assert len(_place_name_calls(provider)) == 1
+
+
+def test_when_every_village_misses_each_is_queued_and_the_state_stands():
+    patcher, _ = _llm_with_places(
+        ["Mazbud", "Aruri", "Kamo"], location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({}), location.collect_geocode_misses() as misses:
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "sd-nd"
+    assert [miss.name for miss in misses] == ["Mazbud", "Aruri", "Kamo"]
+
+
+def test_the_first_name_that_geocodes_ends_the_search_and_costs_no_second_call():
+    patcher, provider = _llm_with_places(
+        ["Aruri", "Kamo"], location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({"Mazbud": _hit(11.5, 28.5)}) as m, location.collect_geocode_misses() as misses:
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "l4-mazbud"
+    assert _tried(m) == ["Mazbud"]
+    assert misses == []
+    assert _place_name_calls(provider) == []
+
+
+def test_a_facility_only_post_is_placed_by_the_facility_it_names():
+    # The location answer names no place for a post that names only a facility.
+    post = "المليشيا تستهدف محطة كهرباء أم دباكر بولاية شمال دارفور"
+    patcher, provider = _llm_with_places(
+        ["Um Dabakir Power Station"], location_type="general", location_id="sd-nd", place_name=None)
+    with patcher, _north_darfur({"Um Dabakir Power Station": _hit(11.5, 28.5, kind="landmark")}) as m:
+        located = location.locate_in_country(post, post, "Sudan", country_code="sd")
+    assert located == "l4-um dabakir power station"
+    assert _tried(m) == ["Um Dabakir Power Station"]
+    # The post, title and description, goes to the separate call under its own prompt.
+    call = _place_name_calls(provider)[0]
+    assert "POST:" in call.kwargs["user"] and "أم دباكر" in call.kwargs["user"]
+    assert "named facilities" in call.kwargs["system"] and "Sudan" in call.kwargs["system"]
+
+
+def test_a_state_only_post_stays_at_the_state():
+    post = "تدهور الأوضاع الإنسانية في ولاية شمال دارفور"
+    for places in ([], ["North Darfur"], ["Darfur", "North Darfur State", "Sudan"]):
+        patcher, _ = _llm_with_places(places, location_type="general", location_id="sd-nd", place_name=None)
+        with patcher, _north_darfur({"Darfur": _hit(11.5, 28.5)}) as m, location.collect_geocode_misses() as misses:
+            assert location.locate_in_country(post, post, "Sudan", country_code="sd") == "sd-nd"
+        m["geocode"].assert_not_called()
+        assert misses == []
+
+
+def test_the_other_names_skip_repeats_region_phrases_and_natural_features():
+    patcher, _ = _llm_with_places(
+        ["mazbud", "South North Darfur", "North Darfur axis", "Kordofan", "Wadi Howar River",
+         "Butana Plain", "Aruri", "", "Aruri"],
+        location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({}) as m:
+        location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd")
+    assert _tried(m) == ["Mazbud", "Aruri"]
+
+
+def test_a_displacement_report_tries_only_its_origins_name():
+    # People fled Mazbud for Kamo, both in North Darfur. The post is pinned to
+    # its origin; "Kamo" is where they went, and must not place it.
+    patcher, provider = _llm_with_places(
+        ["Kamo"], location_type="displacement", origin_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({"Kamo": _hit(11.5, 28.5)}) as m:
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "sd-nd"
+    assert _tried(m) == ["Mazbud"]
+    assert _place_name_calls(provider) == []
+
+
+def test_another_spelling_of_a_missed_name_is_still_tried():
+    # "Tendalti" and "Tandilti" share a consonant key, but the gazetteer can
+    # answer the two queries differently. The same spelling is tried once.
+    patcher, _ = _llm_with_places(
+        ["Tandilti", "TENDALTI", "Tendal-ti"], location_type="general", location_id="sd-nd", place_name="Tendalti")
+    with patcher, _north_darfur({"Tandilti": _hit(11.5, 28.5)}) as m:
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "l4-tandilti"
+    assert _tried(m) == ["Tendalti", "Tandilti"]
+
+
+def test_no_other_names_are_bought_for_a_state_with_no_outline():
+    patcher, provider = _llm_with_places(
+        ["Aruri"], location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with (
+        patcher,
+        _north_darfur({"Aruri": _hit(11.5, 28.5)}),
+        patch.object(location, "get_location_with_geometry", return_value={"id": "sd-nd", "geometry": None}),
+    ):
+        location.invalidate_locations_cache()
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "sd-nd"
+    assert _place_name_calls(provider) == []
+
+
+def test_a_districts_own_name_is_a_place_even_with_a_region_word():
+    khartoum_north = {"id": "sd-kh-north", "name": "Khartoum North", "level": 2, "parent": {"id": "sd-kh"}}
+    with patch.object(location, "get_locations", return_value=[*LOCATIONS, khartoum_north]):
+        location.invalidate_locations_cache()
+        assert location._names_region_or_feature("Khartoum North", "Sudan") is False
+        # The north of Khartoum state, with no district of that name, is still a region.
+        assert location._names_region_or_feature("Northern Khartoum", "Sudan") is True
+    location.invalidate_locations_cache()
+
+
+def test_at_most_four_other_names_are_tried():
+    names = ["Birka", "Tabit", "Korma", "Mellit", "Kutum", "Shangil", "Saraf"]
+    patcher, _ = _llm_with_places(names, location_type="general", location_id="sd-nd", place_name="Mazbud")
+    with patcher, _north_darfur({}) as m:
+        location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd")
+    assert _tried(m) == ["Mazbud", *names[: location.MAX_OTHER_PLACE_NAMES]]
+
+
+@pytest.mark.parametrize("fields", [
+    {"location_id": "sd-wk-dibab", "place_name": "Mazbud"},   # a district: already as fine as grouping needs
+    {"location_id": None, "place_name": "Mazbud"},            # no area matched: nothing to check a name against
+    {"location_id": "sd", "place_name": "Mazbud"},            # the country itself: several places, none geocoded
+])
+def test_other_names_are_asked_for_only_when_the_post_sits_in_a_state(fields):
+    patcher, provider = _llm_with_places(["Aruri", "Kamo"], location_type="general", **fields)
+    with patcher, _north_darfur({"Kamo": _hit(11.5, 28.5)}) as m:
+        location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd")
+    assert _place_name_calls(provider) == []
+    assert "Aruri" not in _tried(m) and "Kamo" not in _tried(m)
+
+
+def test_a_failed_place_names_call_keeps_the_state_and_an_outage_defers_the_post():
+    def provider_raising(error):
+        provider = MagicMock()
+
+        def answer(*, system, user, schema):
+            if schema is location._LocationResolution:
+                return schema(location_type="general", location_id="sd-nd", place_name=None)
+            raise error
+
+        provider.complete_structured.side_effect = answer
+        return patch.object(location, "make_llm_provider", return_value=provider)
+
+    with provider_raising(ValueError("bad JSON")), _north_darfur({}):
+        assert location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd") == "sd-nd"
+    outage = RuntimeError("credit balance is too low")
+    with (
+        provider_raising(outage),
+        patch.object(location, "is_llm_unavailable", side_effect=lambda exc: exc is outage),
+        _north_darfur({}),
+        pytest.raises(LLMUnavailableError),
+    ):
+        location.locate_in_country(VILLAGES_POST, VILLAGES_POST, "Sudan", country_code="sd")
+
+
+def test_named_places_cleans_the_list_and_skips_an_empty_post():
+    patcher, provider = _llm_with_places([" Kamo ", "Kamo", "", "Aruri"], location_type="general")
+    with patcher:
+        assert location.named_places("عنوان", "نص", "Sudan") == ["Kamo", "Aruri"]
+        assert location.named_places(None, "  ", "Sudan") == []
+    assert len(_place_name_calls(provider)) == 1
+
+
+@pytest.mark.parametrize(("name", "region"), [
+    ("South Blue Nile", False),          # Blue Nile is not a state in this fixture
+    ("West Kordofan axis", True),
+    ("Kordofan", True),
+    ("the North", True),
+    ("Southern Khartoum", True),
+    ("Atbara River", True),
+    ("Butana Plain", True),
+    ("Kadugli", False),
+    ("Um Dabakir Power Station", False),
+    ("Wadi Howar", False),
+])
+def test_region_phrases_and_natural_features_are_told_from_places(name, region):
+    assert location._names_region_or_feature(name, "Sudan") is region
+
+
+def test_the_location_prompt_is_unchanged_by_the_place_names_call():
+    # Its wording is fragile: the new output is a separate call, and the
+    # location prompt keeps its version.
+    assert location.LOCATION_PROMPT_VERSION == "location-v4"
+    assert location.PLACE_NAMES_PROMPT_VERSION == "place-names-v1"
+    assert "place_names" not in location.system_prompt("Sudan")

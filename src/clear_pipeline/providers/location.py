@@ -365,6 +365,15 @@ def locate_in_country(
     reaches district level. When Claude answers the country itself, nothing is
     geocoded: the post describes several places, and one place name (even a
     facility's) says nothing about the others.
+
+    When Claude placed the post in a state, every place the post names is
+    tried, not only the one the answer is based on: that one first, then the
+    others (`named_places`, a separate model call, made only when the first
+    gives no point). The first name that geocodes inside the state places the
+    signal. Each name that does not is a geocode miss (see
+    `collect_geocode_misses`). Elsewhere only the answer's own name is tried:
+    with no area matched there is no area to check a name against (see
+    `_tries_other_names`).
     """
     try:
         resolved = resolve_signal_location(title, description, None, country=country)
@@ -379,7 +388,6 @@ def locate_in_country(
     place_name = resolved.get("place_name")
     if (
         country_code
-        and place_name
         and area_id
         # Claude chose the country itself: the places span several states, so
         # one place's point would pull the whole report into its district. That
@@ -387,14 +395,143 @@ def locate_in_country(
         # Merowe Dam names one of them as place_name and describes both states.
         # (No match at all still falls back to the country and is geocoded.)
         and not (matched_id and matched_id == country_id)
-        and not _names_country_or_state(place_name, country)
     ):
-        point_id = _geocode_within(
-            place_name, area_id, country_code, text=description or title or ""
+        other_names = (
+            # A displacement report is pinned to its origin, and the answer's
+            # own name is the origin's. The other names of the post include
+            # where people fled to, which can lie in the same state.
+            resolved.get("location_type") != "displacement"
+            and _tries_other_names(matched_id, country)
+            # Without the state's outline no name can be confirmed inside it.
+            and _area_has_geometry(area_id)
         )
-        if point_id:
-            return point_id
+        for name in _places_to_geocode(place_name, title, description, country, others=other_names):
+            point_id = _geocode_within(
+                name, area_id, country_code, text=description or title or ""
+            )
+            if point_id:
+                return point_id
     return area_id
+
+
+# The most names tried for one post: the answer's own, plus these.
+MAX_OTHER_PLACE_NAMES = 4
+
+
+def _tries_other_names(matched_id: str | None, country: str) -> bool:
+    """Whether the other places a post names are tried after the answer's own:
+    only when Claude placed the post in a state.
+
+    - A state is where another name helps (it can take the post to district
+      level, which grouping needs) and where it is safe (a name must geocode
+      inside the state, so a same-named village elsewhere, or a name the model
+      spelled like another town, is refused).
+    - With no area matched, the area is the whole country: nothing refuses a
+      wrong name. The 20–27 Oct dry run pinned a post about a camp in Chad to
+      a Sudanese village called Chad, and a post about الضعين (Ed Daein), read
+      as "Damazin", to Ed Damazin, 900 km away.
+    - A district is already as fine as grouping needs. A less specific name
+      (the district's own town) would only move the pin to a town centre the
+      post is not about."""
+    if not matched_id:
+        return False
+    return any(
+        loc["id"] == matched_id and (loc.get("level") or 0) == 1
+        for loc in _country_scoped_locations(country)
+    )
+
+
+def _places_to_geocode(
+    place_name: str | None,
+    title: str | None,
+    description: str | None,
+    country: str,
+    *,
+    others: bool = True,
+):
+    """The place names to geocode for a post, in order: the one the location
+    answer is based on, then (with ``others``) the other places the post
+    names. The others cost a model call, so they are asked for only when the
+    caller comes back for more: the first name gave no point, or there was
+    none. The country's and the states' own names are left out (see
+    `_names_country_or_state`)."""
+    # Repeats are told by spelling, not by `latin_name_key`: that key drops
+    # vowels to compare two spellings of one place, so it would also skip
+    # "Tandilti" after "Tendalti" missed, and the gazetteer can answer those
+    # two queries differently. Another spelling is another chance.
+    tried: set[str] = set()
+    if place_name and not _names_country_or_state(place_name, country):
+        tried.add(_spelling_key(place_name))
+        yield place_name
+    if not others:
+        return
+    tried_others = 0
+    for name in named_places(title, description, country):
+        key = _spelling_key(name)
+        if not key or key in tried or _names_country_or_state(name, country):
+            continue
+        if _names_region_or_feature(name, country):
+            continue
+        tried.add(key)
+        yield name
+        tried_others += 1
+        if tried_others >= MAX_OTHER_PLACE_NAMES:
+            return
+
+
+def _spelling_key(name: str) -> str:
+    """The same spelling, whatever its case, hyphens or spaces."""
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def _area_has_geometry(area_id: str) -> bool:
+    try:
+        return _area_shape(area_id) is not None
+    except Exception:  # noqa: BLE001 — unknown is "no": the answer's own name is still tried
+        return False
+
+
+class _PlaceNames(BaseModel):
+    place_names: list[str] = []
+
+
+# Bump whenever PLACE_NAMES_SYSTEM changes (see LOCATION_PROMPT_VERSION).
+PLACE_NAMES_PROMPT_VERSION = "place-names-v1"
+
+# A separate call, like the Arabic spelling: a new field on the location
+# prompt made Haiku return all-null answers for about half of the Arabic posts
+# (20–27 Oct dry run), so that prompt is left exactly as it is.
+PLACE_NAMES_SYSTEM = """You list the places where the events in a post about {country} happened. Return every specific place in {country} that the post names as a site of what it reports: towns, villages, neighbourhoods, camps and named facilities (a hospital, a dam, a power station, an airport, a bridge, a market, a refinery). Give each in its usual English spelling, most specific first. Do not list {country} itself, its states or regions, other countries or places in them, rivers, roads, plains, mountains or deserts, or places that are only mentioned in passing (where a speaker is from, where a statement was made). Return an empty list when the post names no such place.
+
+Respond with valid JSON only: {{"place_names": ["<name>", ...]}}"""
+
+
+def named_places(title: str | None, description: str | None, country: str) -> list[str]:
+    """Every specific place a post names as a site of what it reports, in
+    English spelling, most specific first. Empty when it names none, for an
+    empty post, and on any failure but an LLM outage: this is an enrichment,
+    and the area the location answer chose stands without it."""
+    text = "\n".join(part.strip() for part in (title, description) if part and part.strip())
+    if not text:
+        return []
+    llm = _signal_llm()
+    try:
+        result = llm.complete_structured(
+            system=PLACE_NAMES_SYSTEM.format(country=country),
+            user=f"POST:\n{text}",
+            schema=_PlaceNames,
+        )
+    except Exception as exc:  # noqa: BLE001 — an enrichment; the area stands
+        if is_llm_unavailable(exc):
+            raise LLMUnavailableError(f"Place names: {exc}") from exc
+        logger.warning("[locate] listing the places of a post failed: %s", exc)
+        return []
+    names: list[str] = []
+    for name in result.place_names or []:
+        cleaned = (name or "").strip() if isinstance(name, str) else ""
+        if cleaned and cleaned not in names:
+            names.append(cleaned)
+    return names
 
 
 class _ArabicSpelling(BaseModel):
@@ -451,6 +588,48 @@ def _names_country_or_state(place_name: str, country: str) -> bool:
         for loc in _country_scoped_locations(country)
         if (loc.get("level") or 0) <= 1
     )
+
+# Words that turn a state's name into a region phrase ("South Blue Nile",
+# "Blue Nile axis"), or stand alone for one ("the east").
+_REGION_WORDS = frozenset({
+    "north", "south", "east", "west", "central", "northern", "southern", "eastern", "western",
+    "axis", "region", "state", "area", "province", "front", "sector", "the", "of",
+})
+# A river, a plain or a road is not a place a point can stand for.
+_FEATURE_WORDS = frozenset({
+    "river", "plain", "plains", "desert", "mountain", "mountains", "road", "highway", "border",
+})
+
+
+def _region_core(name: str) -> str:
+    """``name`` without its region words, as a spelling key: "South Blue
+    Nile" and "Blue Nile axis" both give the key of "Blue Nile"."""
+    words = [w for w in re.split(r"[^a-z]+", name.casefold()) if w and w not in _REGION_WORDS]
+    return latin_name_key(" ".join(words))
+
+
+def _names_region_or_feature(place_name: str, country: str) -> bool:
+    """True when ``place_name`` is a region phrase or a natural feature, not a
+    place: a state's name with region words ("South Blue Nile", "Blue Nile
+    axis"), the part that states share ("Kordofan", "Darfur"), or a river, a
+    plain, a road. The gazetteer answers such a name with whatever village
+    fuzzily matches inside the state. Checked for the other names a post
+    gives, which a model lists more loosely than the one its answer is
+    based on."""
+    scoped = _country_scoped_locations(country)
+    # A district's own name is a place, whatever words it shares with a
+    # state: "Khartoum North" is a city, not the north of Khartoum state.
+    key = latin_name_key(place_name)
+    if key and any(latin_name_key(loc["name"]) == key for loc in scoped if (loc.get("level") or 0) == 2):
+        return False
+    words = {w for w in re.split(r"[^a-z]+", place_name.casefold()) if w}
+    if words & _FEATURE_WORDS:
+        return True
+    core = _region_core(place_name)
+    if not core:
+        return True
+    return any(_region_core(loc["name"]) == core for loc in scoped if (loc.get("level") or 0) <= 1)
+
 
 # locations.id → shapely geometry (None when the area has none). Cached.
 _area_shapes_cache: dict[str, object | None] = {}
