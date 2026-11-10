@@ -19,10 +19,13 @@ Env vars:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -1801,6 +1804,19 @@ query PendingRecomputes($first: Int) {{
 """
 
 MARK_SIGNALS_PROCESSED = """
+mutation MarkSignalsProcessed(
+  $items: [SignalRevisionInput!]!, $status: SignalStatus,
+  $runKind: LocationRunKind, $pipelineVersion: String, $runId: String
+) {
+  markSignalsProcessed(
+    items: $items, status: $status,
+    runKind: $runKind, pipelineVersion: $pipelineVersion, runId: $runId
+  )
+}
+"""
+
+# For a clear-api older than the location Outcome log (clear-api ADR-0020).
+MARK_SIGNALS_PROCESSED_LEGACY = """
 mutation MarkSignalsProcessed($items: [SignalRevisionInput!]!, $status: SignalStatus) {
   markSignalsProcessed(items: $items, status: $status)
 }
@@ -1866,19 +1882,105 @@ mutation SetEventAggregates(
 """
 
 
+# ─── Pipeline run (location Outcome log) ──────────────────────────────────────
+#
+# clear-api keeps an append-only log of where each pipeline run placed each
+# signal (clear-api ADR-0020). It writes a row on createSignal and on
+# markSignalsProcessed. The pipeline says which run did the work: the run kind,
+# the pipeline git SHA and the Dagster run id.
+
+RUN_KIND_LIVE = "LIVE"
+RUN_KIND_REPLAY = "REPLAY"
+
+_run_kind: contextvars.ContextVar[str] = contextvars.ContextVar("clear_api_run_kind", default=RUN_KIND_LIVE)
+_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("clear_api_run_id", default=None)
+
+# False once clear-api rejects the run inputs: it is older than the Outcome
+# log. The process then sends the old mutations. A restart checks again.
+_run_inputs_supported = True
+
+_RUN_INPUT_NAMES = ("runKind", "pipelineVersion", "runId", "LocationRunKind")
+
+
+@contextlib.contextmanager
+def pipeline_run(run_kind: str = RUN_KIND_LIVE, run_id: str | None = None) -> Iterator[None]:
+    """Name the run that the signal writes inside this block belong to.
+
+    ``run_kind`` is ``RUN_KIND_LIVE`` for the first processing of a signal and
+    ``RUN_KIND_REPLAY`` for a job that re-processes signals. ``run_id`` is the
+    Dagster run id; inside a nested block it defaults to the outer one."""
+    kind_token = _run_kind.set(run_kind)
+    id_token = _run_id.set(run_id if run_id is not None else _run_id.get())
+    try:
+        yield
+    finally:
+        _run_kind.reset(kind_token)
+        _run_id.reset(id_token)
+
+
+def dagster_run_id(context: Any) -> str | None:
+    """The run id of a Dagster execution context; None for a test double."""
+    run_id = getattr(getattr(context, "run", None), "run_id", None)
+    return run_id if isinstance(run_id, str) else None
+
+
+def pipeline_version() -> str | None:
+    """The git SHA of the running pipeline (``PIPELINE_VERSION``, set when the
+    image is built); None on a machine that does not set it."""
+    return os.environ.get("PIPELINE_VERSION", "").strip() or None
+
+
+def _run_fields() -> dict[str, str]:
+    """``pipelineVersion`` and ``runId`` of the current run, without empty values."""
+    fields = {"pipelineVersion": pipeline_version(), "runId": _run_id.get()}
+    return {k: v for k, v in fields.items() if v}
+
+
+def _rejects_run_inputs(exc: ClearApiError) -> bool:
+    """True when clear-api refused a request because it does not know the run
+    inputs (it is older than the Outcome log)."""
+    text = str(exc)
+    return any(name in text for name in _RUN_INPUT_NAMES)
+
+
+def _execute_with_run(query: str, variables: dict, legacy_query: str, legacy_variables: dict) -> dict[str, Any]:
+    """Send ``query`` with the run inputs. If clear-api does not know them yet,
+    send ``legacy_query`` instead, now and for the rest of the process, so a
+    pipeline deployed before clear-api keeps draining."""
+    global _run_inputs_supported
+    if _run_inputs_supported:
+        try:
+            return _execute(query, variables)
+        except GraphQLErrors:
+            raise
+        except ClearApiError as exc:
+            if not _rejects_run_inputs(exc):
+                raise
+            _run_inputs_supported = False
+            logger.warning(
+                "clear-api does not accept the location Outcome run inputs yet; "
+                "sending signal writes without them until restart"
+            )
+    return _execute(legacy_query, legacy_variables)
+
+
+def _create_signal(query: str, input_data: dict) -> dict:
+    with_run = {**input_data, **_run_fields()}
+    result = _execute_with_run(query, {"input": with_run}, query, {"input": input_data})
+    return result["createSignal"]
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 
 def create_signal(input_data: dict) -> dict:
-    result = _execute(CREATE_SIGNAL, {"input": input_data})
-    return result["createSignal"]
+    return _create_signal(CREATE_SIGNAL, input_data)
 
 
 def create_signal_for_sync(input_data: dict) -> dict:
     """gx's get-or-create: also returns ``contentHash``/``retracted`` so the
     caller can tell an existing, out-of-date row from the one it sent."""
-    result = _execute(CREATE_SIGNAL_FOR_SYNC, {"input": input_data})
-    return result["createSignal"]
+    return _create_signal(CREATE_SIGNAL_FOR_SYNC, input_data)
 
 
 def update_signal_content(input_data: dict) -> dict:
@@ -1904,10 +2006,13 @@ def mark_signals_processed(items: list[dict], status: str = "PROCESSED") -> int:
     """Mark signals done for the drain — PROCESSED (default) or FAILED.
     ``items`` are ``{"id", "revision"}`` as fetched: a row whose revision moved
     since (revised or retracted meanwhile) is left for the next run. Returns
-    the number of rows updated."""
+    the number of rows updated. Sends the run named by ``pipeline_run``."""
     if not items:
         return 0
-    result = _execute(MARK_SIGNALS_PROCESSED, {"items": items, "status": status})
+    legacy = {"items": items, "status": status}
+    # clear-api logs where this run left each signal (see ``pipeline_run``).
+    variables = {**legacy, "runKind": _run_kind.get(), **_run_fields()}
+    result = _execute_with_run(MARK_SIGNALS_PROCESSED, variables, MARK_SIGNALS_PROCESSED_LEGACY, legacy)
     return result["markSignalsProcessed"]
 
 

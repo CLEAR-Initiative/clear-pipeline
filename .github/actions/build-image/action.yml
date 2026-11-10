@@ -46,6 +46,8 @@ runs:
         context: .
         platforms: linux/amd64
         push: true
+        build-args: |
+          GIT_SHA=${{ github.sha }}
         tags: |
           ${{ steps.meta.outputs.image }}:${{ inputs.environment }}
           ${{ steps.meta.outputs.image }}:${{ inputs.environment }}-${{ inputs.version }}

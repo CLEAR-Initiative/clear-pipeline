@@ -26,7 +26,7 @@ from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.connectors import SignalSource
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
-from clear_pipeline.providers.clear_api import create_signal, update_signal_content
+from clear_pipeline.providers.clear_api import create_signal, dagster_run_id, pipeline_run, update_signal_content
 from clear_pipeline.signals.config import settings
 
 
@@ -82,7 +82,8 @@ def build_source_assets(connector: SignalSource) -> list:
                 lake.write_raw(s3, bucket, key, connector.raw_bytes(record))
                 input_data = connector.to_signal_input(record, api_source_id)
                 input_data["rawS3Key"] = key
-                created_signal = create_signal(input_data)
+                with pipeline_run(run_id=dagster_run_id(context)):
+                    created_signal = create_signal(input_data)
                 # Every connector implements to_content_update_input — one that
                 # doesn't revise records in place returns None explicitly (its own
                 # implementation, not a fallback), so the update call below never
