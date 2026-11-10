@@ -477,6 +477,9 @@ def _geocode_within(
     Best-effort: any failure returns None and the caller keeps the area,
     except an LLM outage, which the caller defers on.
 
+    A place-alias hit (clear-api ADR-0019) already is a CLEAR location: it is
+    returned as it is, after the same area check, with no L4 promote.
+
     A miss goes to the open collector (`collect_geocode_misses`): every tier
     found nothing inside the area, or the L4 promote gave no location. Not a
     miss: an area with no geometry, and a lookup that failed (an outage
@@ -519,6 +522,14 @@ def _geocode_within(
                 _note_miss(place_name, arabic_name, country_code, area_id,
                            "OUTSIDE_AREA" if outside else "NO_MATCH")
             return None
+
+        if geo.location_id:
+            # A place alias: a person already mapped this spelling to a CLEAR
+            # location, and its point passed the area check. Use it as it is;
+            # promoting the point would create a second landmark beside it.
+            logger.info("[locate] %r → alias location %s inside area %s",
+                        place_name, geo.location_id, area_id)
+            return geo.location_id
 
         promo = find_or_create_landmark_l4(
             name=place_name, lat=geo.lat, lng=geo.lng, kind=geo.kind,

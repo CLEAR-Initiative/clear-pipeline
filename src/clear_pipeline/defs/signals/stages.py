@@ -195,11 +195,16 @@ def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
         return created
     with collect_geocode_misses() as misses:
         location_id = connector.locate(view)
-    _record_geocode_misses(created["id"], misses)
     if not location_id:
+        _record_geocode_misses(created["id"], misses)
         logger.info("[classify_group] signal %s: no location resolved", created["id"])
         return created
     updated = update_signal_location(created["id"], location_id)
+    # After the location is saved: when the name was resolved in the meantime,
+    # clear-api moves the signal from its saved location to the alias location
+    # as it records the miss. A failed save leaves the signal NEW, and the
+    # next drain locates it and records the miss again.
+    _record_geocode_misses(created["id"], misses)
     logger.info(
         "[classify_group] signal %s: located → %s",
         created["id"], (updated.get("generalLocation") or {}).get("name") or location_id,

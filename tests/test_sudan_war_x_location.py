@@ -416,15 +416,21 @@ def test_geocode_place_name_tries_the_gazetteer_first():
 def test_geocode_place_name_sends_landmarks_to_locationiq():
     row = {"lat": "11.0", "lon": "29.7", "class": "power", "importance": 0.1,
            "address": {"country_code": "sd"}, "display_name": "Kadugli power station"}
+    # GeoNames answers a landmark name with the town ("Kadugli"): that hit is
+    # dropped. The gazetteer is still asked, because a place alias may hold
+    # the facility itself.
+    town = {"name": "Kadugli", "latitude": "11.01", "longitude": "29.72", "countryCode": "SD",
+            "featureClass": "P", "score": 0.6, "source": "GEONAMES", "locationId": None}
     with (
         patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
-        patch.object(geoparser.graphql, "resolve_gazetteer_location") as gaz,
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", return_value=town) as gaz,
         patch.object(geoparser.nominatim, "search", return_value=[row]),
     ):
         result = geoparser.geocode_place_name("Kadugli Airport", expected_country_codes={"sd"})
 
-    gaz.assert_not_called()
+    gaz.assert_called_once()
     assert result.kind == "landmark" and (result.lat, result.lng) == (11.0, 29.7)
+    assert result.location_id is None
 
 
 def test_geocode_place_name_ignores_blank_names():
@@ -544,7 +550,7 @@ def test_locate_passes_the_posts_arabic_spelling_to_the_geocoder():
 
 @pytest.mark.parametrize("gazetteer, place, shape", [
     (False, "Al Dibab", WK_SHAPE),       # gazetteer off: the Arabic lookup never runs
-    (True, "Al Dibab Airport", WK_SHAPE),  # landmarks skip the gazetteer
+    (False, "Al Dibab Airport", WK_SHAPE),
     (True, "Al Dibab", None),            # area without geometry: no geocoding at all
 ])
 def test_the_arabic_spelling_is_not_bought_when_it_cannot_be_used(gazetteer, place, shape):
@@ -1209,3 +1215,227 @@ def test_gazetteer_knows_is_false_when_the_lookup_fails():
         patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=RuntimeError("502")),
     ):
         assert geoparser.gazetteer_knows("Al Dibab", "SD") is False
+
+
+# ── place aliases: use the alias's CLEAR location directly (#1311) ───────────
+
+def _alias(lat, lng, *, location_id="loc-um-dabakir", name="Um Dabakir power station"):
+    """A gazetteer hit that came from one of CLEAR's place aliases."""
+    return {"geonamesId": 0, "name": name, "latitude": lat, "longitude": lng, "countryCode": "SD",
+            "featureClass": None, "featureCode": None, "population": 0, "score": 1, "exact": True,
+            "source": "ALIAS", "locationId": location_id}
+
+
+def _alias_hit(lat, lng, **kwargs) -> GeoparseResult:
+    hit = _hit(lat, lng)
+    hit.location_id = kwargs.get("location_id", "loc-um-dabakir")
+    return hit
+
+
+def test_an_alias_hit_is_used_as_the_signals_location_with_no_promote():
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Um Dabakir")
+    with patcher, _geocoding(hit=_alias_hit(11.5, 28.5)) as m, location.collect_geocode_misses() as misses:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "loc-um-dabakir"
+    m["promote"].assert_not_called()
+    assert misses == []
+
+
+def test_an_alias_location_outside_the_area_is_rejected():
+    # The same area check as for any hit: the alias's point is outside West Kordofan.
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Um Dabakir")
+    with patcher, _geocoding(hit=_alias_hit(15.6, 32.5)) as m, location.collect_geocode_misses() as misses:
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-wk"
+    m["promote"].assert_not_called()
+    assert [m.reason for m in misses] == ["OUTSIDE_AREA"]
+
+
+def test_the_latin_tier_returns_an_alias_hit_with_its_location():
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", return_value=_alias(11.5, 28.5)),
+        patch.object(geoparser.nominatim, "search") as search,
+    ):
+        result = geoparser.geocode_place_name("Um Dabakir", expected_country_codes={"sd"},
+                                              accept=lambda lat, lng: True)
+    assert (result.location_id, result.lat, result.lng) == ("loc-um-dabakir", 11.5, 28.5)
+    search.assert_not_called()
+
+
+def test_an_alias_hit_the_area_check_rejects_falls_through_to_the_next_tier():
+    row = {"lat": "11.9", "lon": "28.2", "class": "place", "importance": 0.01,
+           "address": {"country_code": "sd"}, "display_name": "Um Dabakir"}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", return_value=_alias(15.6, 32.5)),
+        patch.object(geoparser.nominatim, "search", return_value=[row]) as search,
+    ):
+        result = geoparser.geocode_place_name(
+            "Um Dabakir", expected_country_codes={"sd"},
+            accept=lambda lat, lng: WK_SHAPE.contains(Point(lng, lat)),
+        )
+    assert search.called
+    assert result.location_id is None and (result.lat, result.lng) == (11.9, 28.2)
+
+
+def test_a_landmark_name_uses_an_alias_and_skips_locationiq():
+    # GeoNames holds few facilities, so a landmark name skips its GeoNames
+    # hits. A place alias is a person's answer for the facility itself.
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", return_value=_alias(11.5, 28.5)),
+        patch.object(geoparser.nominatim, "search") as search,
+    ):
+        result = geoparser.geocode_place_name("Um Dabakir Power Station", expected_country_codes={"sd"})
+    assert result.kind == "landmark" and result.location_id == "loc-um-dabakir"
+    search.assert_not_called()
+
+
+def test_the_arabic_tier_uses_an_alias_whatever_its_latin_name():
+    # The Latin-name check guards against GeoNames' own errors. An alias is a
+    # person's mapping of this Arabic spelling, so it needs no such check.
+    table = {"أم دباكر": _alias(13.1, 32.1, name="Kosti thermal plant")}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)),
+        patch.object(geoparser.nominatim, "search") as search,
+    ):
+        result = geoparser.geocode_place_name(
+            "Um Dabakir", expected_country_codes={"sd"}, arabic_name="أم دباكر",
+            accept=lambda lat, lng: WHITE_NILE.contains(Point(lng, lat)),
+        )
+    assert result.location_id == "loc-um-dabakir"
+    search.assert_not_called()
+
+
+def test_the_arabic_tier_rejects_an_alias_outside_the_area():
+    table = {"أم دباكر": _alias(11.5, 28.5)}  # in West Kordofan, not White Nile
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)),
+        patch.object(geoparser.nominatim, "search", return_value=None),
+    ):
+        trace = geoparser.GeocodeTrace()
+        result = geoparser.geocode_place_name(
+            "Um Dabakir", expected_country_codes={"sd"}, arabic_name="أم دباكر",
+            accept=lambda lat, lng: WHITE_NILE.contains(Point(lng, lat)), trace=trace,
+        )
+    assert result is None and trace.outside
+
+
+def test_a_landmarks_arabic_name_uses_an_alias_only():
+    # "محطة أم دباكر": a facility the post names in Arabic.
+    alias = {"محطة أم دباكر": _alias(13.1, 32.1)}
+    geonames = {"محطة أم دباكر": _gaz("Um Dabakir", 13.1, 32.1)}
+    for table, expected in ((alias, "loc-um-dabakir"), (geonames, None)):
+        with (
+            patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+            patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=_arabic_lookup(table)),
+            patch.object(geoparser.nominatim, "search", return_value=None),
+        ):
+            result = geoparser.geocode_place_name(
+                "Um Dabakir Power Station", expected_country_codes={"sd"}, arabic_name="محطة أم دباكر",
+            )
+        assert (result.location_id if result else None) == expected
+
+
+def test_the_arabic_spelling_is_bought_for_a_landmark_name():
+    # A place alias can hold a facility's Arabic name, so the spelling is worth asking for.
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab Airport")
+    with (
+        patcher,
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(location, "arabic_spelling", return_value="مطار الدبيب") as spelling,
+        _geocoding(hit=_alias_hit(11.5, 28.5)) as m,
+    ):
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "loc-um-dabakir"
+    spelling.assert_called_once()
+    assert m["geocode"].call_args.kwargs["arabic_name"] == "مطار الدبيب"
+
+
+def test_the_gazetteer_client_asks_for_the_alias_fields():
+    from clear_pipeline.providers import clear_api
+
+    with (
+        patch.object(clear_api, "_gazetteer_within_supported", True),
+        patch.object(clear_api, "_gazetteer_alias_fields_supported", True),
+        patch.object(clear_api, "_execute", return_value={"resolveGazetteerLocation": _alias(1, 2)}) as ex,
+    ):
+        hit = clear_api.resolve_gazetteer_location("Um Dabakir", country_code="SD", within_location_id="sd-wk")
+    query = ex.call_args.args[0]
+    assert "locationId" in query and "source" in query and "withinLocationId: $withinLocationId" in query
+    assert (hit["source"], hit["locationId"]) == ("ALIAS", "loc-um-dabakir")
+
+
+def test_the_gazetteer_client_drops_the_alias_fields_on_an_older_clear_api():
+    from clear_pipeline.providers import clear_api
+
+    hit = {"name": "Ad Dibab"}
+    queries = []
+
+    def fake_execute(query, variables, retries=1):
+        queries.append(query)
+        if "locationId" in query:
+            raise clear_api.ClearApiError(
+                'clear-api 400 (non-retryable): Cannot query field \\"locationId\\" on type \\"GazetteerHit\\".'
+            )
+        return {"resolveGazetteerLocation": hit}
+
+    with (
+        patch.object(clear_api, "_gazetteer_within_supported", True),
+        patch.object(clear_api, "_gazetteer_alias_fields_supported", True),
+        patch.object(clear_api, "_execute", side_effect=fake_execute),
+    ):
+        assert clear_api.resolve_gazetteer_location("Al Dibab", within_location_id="sd-wk") == hit
+        assert clear_api.resolve_gazetteer_location("Al Dibab") == hit
+    # One rejected attempt, then the fields aren't asked for again in this
+    # process. The area argument is kept: it is a different feature.
+    assert ["locationId" in q for q in queries] == [True, False, False]
+    assert "withinLocationId" in queries[1] and "withinLocationId" not in queries[2]
+    # Without the fields, a hit is a GeoNames hit.
+    assert geoparser._alias_location_id(hit) is None
+
+
+def test_the_gazetteer_client_raises_other_errors_and_keeps_the_alias_fields():
+    from clear_pipeline.providers import clear_api
+
+    with (
+        patch.object(clear_api, "_gazetteer_alias_fields_supported", True),
+        patch.object(clear_api, "_execute", side_effect=clear_api.ClearApiError("clear-api 403: forbidden")),
+    ):
+        with pytest.raises(clear_api.ClearApiError):
+            clear_api.resolve_gazetteer_location("Al Dibab")
+        assert clear_api._gazetteer_alias_fields_supported is True
+
+
+def test_drain_records_a_miss_after_it_saves_the_location():
+    # clear-api moves a miss on a name that was resolved in the meantime from
+    # the signal's saved location, so the location is saved first.
+    order = []
+    with _drain_with_misses([_miss("NO_MATCH")]) as m:
+        m["update"].side_effect = lambda *a, **k: order.append("save") or {"id": "sig-x-1", "generalLocation": None}
+        m["record"].side_effect = lambda **k: order.append("record")
+        stages._drain_signals_locked(MagicMock())
+    assert order == ["save", "record"]
+
+
+def test_drain_records_a_miss_when_no_location_resolves():
+    def locate(_view):
+        location._note_miss("Kamo", None, "SD", "sd", "NO_MATCH")
+        return None
+
+    with (
+        _drain([_x_row()]) as m,
+        patch.object(SudanWarXConnector, "locate", side_effect=locate),
+        patch.object(stages, "record_unresolved_place_name") as record,
+    ):
+        stages._drain_signals_locked(MagicMock())
+    record.assert_called_once()
+    m["update"].assert_not_called()
+
+
+def test_a_failed_save_records_nothing_and_leaves_the_post_new():
+    with _drain_with_misses([_miss("NO_MATCH")]) as m:
+        m["update"].side_effect = RuntimeError("clear-api 502")
+        stages._drain_signals_locked(MagicMock())
+    m["record"].assert_not_called()
+    assert all(not ids for _, ids in m["marked"])
