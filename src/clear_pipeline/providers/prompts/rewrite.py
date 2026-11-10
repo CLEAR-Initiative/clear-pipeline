@@ -195,6 +195,9 @@ def clean_event_title(title: str, signals: list[dict], location_name: str | None
         spelling = _plain_arabic(match.group(1)).strip()
         return match.group(0) if spelling and spelling in text else ""
 
+    # The prompt's own label, copied into the title: "…, Um Rawaba Location".
+    # Removed first: the two checks below read the end of the title.
+    title = re.sub(r"[\s,]+Location\s*$", "", title)
     if location_name and location_name.strip():
         after_location = re.compile(
             rf"(?<![\w-])({re.escape(location_name.strip())})\s*\([^()]*[\u0621-\u064A][^()]*\)\s*$",
@@ -205,8 +208,6 @@ def clean_event_title(title: str, signals: list[dict], location_name: str | None
     title = _ARABIC_PARENS.sub(keep_if_written, title)
     if len(title) > TITLE_MAX_CHARS:
         title = _ARABIC_PARENS.sub("", title)
-    # The prompt's own label, copied into the title: "…, Um Rawaba Location".
-    title = re.sub(r"[\s,]+Location\s*$", "", title)
     # Tidy what a removal leaves behind: "Al-Kanabi , Northern" → "Al-Kanabi, Northern".
     title = re.sub(r"\s+([,.;:])", r"\1", title)
     return re.sub(r"\s{2,}", " ", title).strip()
