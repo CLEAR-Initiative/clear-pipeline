@@ -508,10 +508,14 @@ def _geocode_within(
         if geo is None:
             logger.info("[locate] %r has no match inside area %s — keeping the area",
                         place_name, area_id)
-            if not trace.failed:
+            # Only for an open collector: a dry run or an evaluation records
+            # nothing, so it must not pay for the extra lookup below.
+            if not trace.failed and _geocode_misses.get() is not None:
                 # The gazetteer filters by area on the server, so ask it once
                 # more whether the name exists elsewhere in the country.
-                outside = trace.outside or gazetteer_knows([arabic_name, place_name], country_code)
+                outside = trace.outside or gazetteer_knows(
+                    place_name, country_code, arabic_name=arabic_name
+                )
                 _note_miss(place_name, arabic_name, country_code, area_id,
                            "OUTSIDE_AREA" if outside else "NO_MATCH")
             return None
