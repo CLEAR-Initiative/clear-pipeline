@@ -940,6 +940,10 @@ def gazetteer_knows(name: str, country_code: str, *, arabic_name: str | None = N
             return False
         if not hit or not hit.get("exact"):
             continue
+        # A place alias is a person's answer for this spelling: it needs none
+        # of the checks below, which guard against GeoNames' own errors.
+        if _alias_location_id(hit):
+            return True
         if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
             continue
         if is_arabic and not _spellings_agree(hit.get("name") or "", name):

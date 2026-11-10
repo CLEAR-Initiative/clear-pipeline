@@ -66,6 +66,7 @@ from clear_pipeline.providers.clear_api import (
     pending_recomputes,
     pending_signals,
     pending_translations,
+    get_signal_location,
     record_unresolved_place_name,
     sync_event_cards,
     update_signal_location,
@@ -160,14 +161,18 @@ def _pending(source: str | None) -> list[dict]:
     return pending_signals(first=_BATCH_SIZE, source=source)
 
 
-def _record_geocode_misses(signal_id: str, misses: list[GeocodeMiss]) -> None:
+def _record_geocode_misses(signal_id: str, misses: list[GeocodeMiss]) -> bool:
     """Send each place name the locator could not geocode to clear-api's
     unresolved place-name queue, where a person can resolve it. Best-effort: a
     clear-api error or timeout is logged and never fails the signal's drain.
-    clear-api counts a signal once per row, so a re-drained signal is safe."""
+    clear-api counts a signal once per row, so a re-drained signal is safe.
+
+    Returns True when a name was resolved already: clear-api applies its
+    alias as it records the miss, so the signal may have moved."""
+    resolved = False
     for miss in misses:
         try:
-            record_unresolved_place_name(
+            row = record_unresolved_place_name(
                 signal_id=signal_id,
                 name=miss.name,
                 name_ar=miss.name_ar,
@@ -175,11 +180,13 @@ def _record_geocode_misses(signal_id: str, misses: list[GeocodeMiss]) -> None:
                 area_location_id=miss.area_id,
                 reason=miss.reason,
             )
+            resolved = resolved or (row or {}).get("status") == "RESOLVED"
         except Exception as exc:  # noqa: BLE001 — a side note; the drain carries on
             logger.warning(
                 "[classify_group] signal %s: could not record unresolved place name %r: %s",
                 signal_id, miss.name, exc,
             )
+    return resolved
 
 
 def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
@@ -204,12 +211,22 @@ def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     # clear-api moves the signal from its saved location to the alias location
     # as it records the miss. A failed save leaves the signal NEW, and the
     # next drain locates it and records the miss again.
-    _record_geocode_misses(created["id"], misses)
+    general_location = updated.get("generalLocation")
+    if _record_geocode_misses(created["id"], misses):
+        # The signal may now be at the alias location: group on where it is,
+        # not on the location saved a moment ago.
+        try:
+            general_location = get_signal_location(created["id"]) or general_location
+        except Exception as exc:  # noqa: BLE001 — keep the saved location; grouping still works
+            logger.warning(
+                "[classify_group] signal %s: could not re-read its location after a late alias: %s",
+                created["id"], exc,
+            )
     logger.info(
         "[classify_group] signal %s: located → %s",
-        created["id"], (updated.get("generalLocation") or {}).get("name") or location_id,
+        created["id"], (general_location or {}).get("name") or location_id,
     )
-    return {**created, "generalLocation": updated.get("generalLocation")}
+    return {**created, "generalLocation": general_location}
 
 
 def _enqueue_translations(entity_type: str, entity_id: str) -> None:

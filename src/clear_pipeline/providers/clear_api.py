@@ -1412,6 +1412,15 @@ mutation UpdateSignalLocation($id: String!, $locationId: String!) {
 }
 """
 
+GET_SIGNAL_LOCATION = """
+query SignalLocation($id: String!) {
+  signal(id: $id) {
+    id
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
 CREATE_EVENT = """
 mutation CreateEvent($input: CreateEventInput!) {
   createEvent(input: $input) {
@@ -2059,6 +2068,15 @@ def record_unresolved_place_name(
         )
         return None
     return data["recordUnresolvedPlaceName"]
+
+
+def get_signal_location(signal_id: str) -> dict | None:
+    """A signal's `generalLocation` as clear-api holds it now, in the shape
+    ``update_signal_location`` returns (``{id, name, level, ancestorIds}``),
+    or None. For the drain, after a write that can move the signal on the
+    server (a geocode miss recorded on a name that is resolved already)."""
+    data = _execute(GET_SIGNAL_LOCATION, {"id": signal_id}, retries=1, timeout=_RECORD_UNRESOLVED_TIMEOUT)
+    return (data.get("signal") or {}).get("generalLocation")
 
 
 def create_event(input_data: dict) -> dict:

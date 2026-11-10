@@ -1439,3 +1439,64 @@ def test_a_failed_save_records_nothing_and_leaves_the_post_new():
         stages._drain_signals_locked(MagicMock())
     m["record"].assert_not_called()
     assert all(not ids for _, ids in m["marked"])
+
+
+def test_gazetteer_knows_counts_an_alias_whatever_its_saved_name():
+    # An Arabic-only alias outside the area: the scoped lookup hides it, and
+    # its location's name need not agree with the model's English name.
+    alias = {"الدبيب": _alias(15.6, 32.5, name="Kosti thermal plant")}
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location",
+                     side_effect=lambda name, *, country_code=None: alias.get(name)),
+    ):
+        assert geoparser.gazetteer_knows("Al Dibab", "SD", arabic_name="الدبيب") is True
+
+
+@contextmanager
+def _drain_with_a_late_alias(*, row_status, moved_to=None, reread_error=None):
+    """The drain when clear-api answers a recorded miss with `row_status`."""
+    moved = {"id": "l4-alias", "name": "Um Dabakir", "level": 4, "ancestorIds": ["sd", "sd-wk", "sd-wk-dibab"]}
+    with (
+        _drain_with_misses([_miss("NO_MATCH")]) as m,
+        patch.object(stages, "get_signal_location", return_value=moved_to and moved,
+                     side_effect=reread_error) as reread,
+    ):
+        m["record"].side_effect = None
+        m["record"].return_value = {"id": "row-1", "status": row_status, "signalCount": 3}
+        yield {**m, "reread": reread, "moved": moved}
+
+
+def test_a_miss_on_a_name_resolved_meanwhile_groups_on_the_alias_location():
+    # clear-api moved the signal as it recorded the miss: the event must be
+    # keyed on where the signal is now, not on the state saved a moment ago.
+    with _drain_with_a_late_alias(row_status="RESOLVED", moved_to=True) as m:
+        stages._drain_signals_locked(MagicMock())
+    m["reread"].assert_called_once_with("sig-x-1")
+    assert m["group"].call_args.kwargs["created_signal"]["generalLocation"] == m["moved"]
+
+
+def test_an_open_name_needs_no_second_read():
+    with _drain_with_a_late_alias(row_status="OPEN") as m:
+        stages._drain_signals_locked(MagicMock())
+    m["reread"].assert_not_called()
+    assert m["group"].call_args.kwargs["created_signal"]["generalLocation"]["id"] == "sd-wk"
+
+
+@pytest.mark.parametrize("case", [{"reread_error": RuntimeError("clear-api 502")}, {"moved_to": None}])
+def test_a_failed_second_read_keeps_the_saved_location(case):
+    with _drain_with_a_late_alias(row_status="RESOLVED", **case) as m:
+        stages._drain_signals_locked(MagicMock())
+    assert m["group"].call_args.kwargs["created_signal"]["generalLocation"]["id"] == "sd-wk"
+    assert ("PROCESSED", ["sig-x-1"]) in m["marked"]
+
+
+def test_the_signal_location_client_reads_the_general_location():
+    from clear_pipeline.providers import clear_api
+
+    loc = {"id": "l4", "name": "Um Dabakir", "level": 4, "ancestorIds": ["sd"]}
+    with patch.object(clear_api, "_execute", return_value={"signal": {"id": "s", "generalLocation": loc}}) as ex:
+        assert clear_api.get_signal_location("s") == loc
+    assert ex.call_args.args[1] == {"id": "s"}
+    with patch.object(clear_api, "_execute", return_value={"signal": None}):
+        assert clear_api.get_signal_location("gone") is None
