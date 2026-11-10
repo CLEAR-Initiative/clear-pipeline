@@ -41,7 +41,7 @@ def signal(title: str, description: str, published: str, source: str = "sudan-wa
 
 
 # must: every one of these (case-insensitive regex) is in the title.
-# never: none of these is. arabic: the Arabic spellings the title must carry
+# never: none of these is. all_or_none: all of these are, or none is. arabic: the Arabic spellings the title must carry
 # in parentheses ([] = no Arabic at all).
 CASES = [
     dict(
@@ -98,27 +98,86 @@ CASES = [
         never=[r"\("],
         arabic=[],
     ),
+    # The cases below are the grouping path: an event with a district holds
+    # signals from several places, and `group_signal` passes the DISTRICT as
+    # Location (`_event_area_name`), never the place one signal names.
     dict(
-        id="two-signals-different-villages",
-        note="authored: two signals in one event name different villages and share none",
-        location="South Kordofan", type="battles",
+        id="two-towns-one-district",
+        note="authored: two signals in one district event name different villages and share none",
+        location="Um Rawaba", type="battles",
         signals=[
-            signal("اشتباكات عنيفة في منطقة الدبيبات بجنوب كردفان",
-                   "اندلعت اشتباكات عنيفة بين الجيش وقوات الدعم السريع في منطقة الدبيبات بولاية جنوب كردفان.",
+            signal("اشتباكات عنيفة في منطقة ود عشانا بشمال كردفان",
+                   "اندلعت اشتباكات عنيفة بين الجيش وقوات الدعم السريع في منطقة ود عشانا بمحلية أم روابة.",
                    "2026-10-21T09:00:00.000Z"),
-            signal("قصف مدفعي على مدينة الدلنج",
-                   "تعرضت مدينة الدلنج بولاية جنوب كردفان لقصف مدفعي عنيف صباح اليوم.",
+            signal("قصف مدفعي على قرية السميح",
+                   "تعرضت قرية السميح بمحلية أم روابة بولاية شمال كردفان لقصف مدفعي عنيف صباح اليوم.",
                    "2026-10-21T13:00:00.000Z"),
         ],
-        must=[r"south kordofan"],
-        # The signals share no place: the area alone.
-        never=[r"d[aei]b+[aei]*b[aei]t", r"d[aei]l+[aei]n[gj]", r"dalong", r"\("],
-        arabic=[],
+        must=[r"um+ r[au]wab[ae]"],
+        never=[],
+        # Both villages or neither: never the event titled after one of them.
+        all_or_none=[r"wad[- ][aeiou]?sh+a'?a?na", r"s[aeiu]?m[aeiu]+h"],
+        arabic=None,  # follows from which places the title names
+    ),
+    dict(
+        id="five-villages-one-district",
+        note="authored: five signals in one district event, each names a different village",
+        location="Um Rawaba", type="battles",
+        signals=[
+            signal("اشتباكات عنيفة في منطقة ود عشانا بشمال كردفان",
+                   "اندلعت اشتباكات عنيفة بين الجيش وقوات الدعم السريع في منطقة ود عشانا بمحلية أم روابة.",
+                   "2026-10-21T09:00:00.000Z"),
+            signal("قصف مدفعي على قرية السميح",
+                   "تعرضت قرية السميح بمحلية أم روابة بولاية شمال كردفان لقصف مدفعي عنيف صباح اليوم.",
+                   "2026-10-21T13:00:00.000Z"),
+            signal("هجوم على قرية شركيلا",
+                   "هاجمت قوة مسلحة قرية شركيلا بمحلية أم روابة وأحرقت عدداً من المنازل.",
+                   "2026-10-22T07:30:00.000Z"),
+            signal("معارك في منطقة الله كريم",
+                   "دارت معارك بين الجيش وقوات الدعم السريع في منطقة الله كريم شرق أم روابة.",
+                   "2026-10-22T11:00:00.000Z"),
+            signal("اشتباكات في الغبشة",
+                   "تجددت الاشتباكات في قرية الغبشة بمحلية أم روابة مساء اليوم.",
+                   "2026-10-22T18:00:00.000Z"),
+        ],
+        must=[r"um+ r[au]wab[ae]"],
+        # Five places: the district alone, not the latest village.
+        never=[r"wad", r"sh+ana", r"s[aeiu]?m[aeiu]+h", r"sh[aie]rk", r"kar[ie]+m", r"gh?[aeiu]b+[aei]?sh"],
+        arabic=None,
+    ),
+    dict(
+        id="one-town-in-a-district",
+        note="authored: the first signal of a district event names a village",
+        location="Um Rawaba", type="battles",
+        signals=[
+            signal("اشتباكات عنيفة في منطقة ود عشانا بشمال كردفان",
+                   "اندلعت اشتباكات عنيفة بين الجيش وقوات الدعم السريع في منطقة ود عشانا بمحلية أم روابة.",
+                   "2026-10-21T09:00:00.000Z"),
+        ],
+        must=[r"wad[- ][aeiou]?sh+a'?a?na", r"um+ r[au]wab[ae]"],
+        never=[],
+        arabic=["ود عشانا"],
     ),
     dict(
         id="two-signals-same-town",
-        note="authored: two signals in one event both name the town",
-        location="South Kordofan", type="battles",
+        note="authored: two signals in one district event both name the same village",
+        location="Um Rawaba", type="battles",
+        signals=[
+            signal("قصف مدفعي على قرية السميح",
+                   "تعرضت قرية السميح بمحلية أم روابة بولاية شمال كردفان لقصف مدفعي عنيف صباح اليوم.",
+                   "2026-10-21T13:00:00.000Z"),
+            signal("مقتل 6 مدنيين في السميح",
+                   "قُتل 6 مدنيين وأصيب آخرون جراء تجدد القصف على قرية السميح.",
+                   "2026-10-21T17:00:00.000Z"),
+        ],
+        must=[r"s[aeiu]?m[aeiu]+h", r"um+ r[au]wab[ae]"],
+        never=[],
+        arabic=["السميح"],
+    ),
+    dict(
+        id="town-with-the-name-of-its-district",
+        note="authored: both signals name the town the district is named after",
+        location="Dilling", type="battles",
         signals=[
             signal("قصف مدفعي على مدينة الدلنج",
                    "تعرضت مدينة الدلنج بولاية جنوب كردفان لقصف مدفعي عنيف صباح اليوم.",
@@ -127,9 +186,9 @@ CASES = [
                    "قُتل 6 مدنيين وأصيب آخرون جراء تجدد القصف على أحياء مدينة الدلنج.",
                    "2026-10-21T17:00:00.000Z"),
         ],
-        must=[r"d[aei]l+[aei]n[gj]|dilling|dalong", r"south kordofan"],
-        never=[],
-        arabic=["الدلنج"],
+        must=[r"dilling"],
+        never=[r"dilling.*dilling"],  # the name once, not "Dilling, Dilling"
+        arabic=None,  # the place is Location itself: the spelling is optional
     ),
 ]
 
@@ -143,6 +202,9 @@ def check(case: dict, title: str) -> list[str]:
     for pattern in case["never"]:
         if re.search(pattern, title, re.I):
             problems.append(f"has /{pattern}/")
+    named = [bool(re.search(pattern, title, re.I)) for pattern in case.get("all_or_none", [])]
+    if any(named) and not all(named):
+        problems.append("names the place of one signal and not of the other")
     spellings = [m.strip() for m in ARABIC_PARENS.findall(title)]
     for spelling in spellings:
         if spelling not in text:
@@ -165,7 +227,7 @@ def main() -> int:
         prompt = build_rewrite_prompt(case["location"], case["type"], case["signals"])
         for run in range(1, runs + 1):
             raw = llm.complete_structured(system=REWRITE_SYSTEM, user=prompt, schema=EventRewrite).title
-            title = clean_event_title(raw, case["signals"])
+            title = clean_event_title(raw, case["signals"], case["location"])
             problems = check(case, title)
             failed += bool(problems)
             cleaned = "" if raw == title else f"   (model wrote: {raw})"

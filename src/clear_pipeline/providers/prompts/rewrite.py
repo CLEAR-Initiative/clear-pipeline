@@ -17,6 +17,10 @@ import re
 #     not only the admin area the event was geocoded to.
 REWRITE_PROMPT_VERSION = "rewrite-v4"
 
+# The most places a title names before Location. An event with more is in
+# many places: its title is the area alone.
+TITLE_MAX_PLACES = 3
+
 # The longest title kept with its Arabic spellings. The prompt asks for 80
 # characters of English; the spellings in parentheses come on top of that.
 TITLE_MAX_CHARS = 100
@@ -43,16 +47,25 @@ Signals:
 
 Guidelines:
 - title: human-readable, no emojis, no quotes. Lead with the event type, then
-  the place. At most 80 characters, not counting Arabic spellings in
-  parentheses.
-    * When the signals name a place more specific than Location (a town, a
+  the place. The last place in the title is the area on the Location line
+  above. At most 80 characters, not counting Arabic spellings in parentheses.
+    * The area on the Location line is where the whole event is (a district,
+      a state or a country). Write its name as it is given. Do not leave it
+      out, and do not write a wider area (the state, the country) in its
+      place or after it. Never write the word "Location" in the title.
+    * When the signals name a place more specific than that area (a town, a
       village, a neighbourhood, a camp, a facility), name that place, then
-      Location for context: "Battles in Mazbud, Aruri and Kamo, North Darfur".
-    * Use Location alone only when the signals name nothing more specific:
+      the area: "Clashes in Tawila (طويلة), El Fasher" and "Battles in
+      Mazbud, Aruri and Kamo, North Darfur".
+    * Use Location alone when the signals name nothing more specific:
       "Armed clash in East Darfur".
-    * With several signals, name a place only when every signal names it.
-      When the signals name different places, use Location alone: "Battles
-      in South Kordofan", not "Battles in Dibeibat and Dilling".
+    * With several signals, compare them before you write. The title is
+      about the whole event: name the places of ALL the signals (three
+      places at most), or name none and use Location alone. Never name the
+      place of one signal and leave out the place of another. With one
+      village in signal 1 and another in signal 2, write "Battles in Fata
+      Borno and Kassab, Kutum" or "Battles in Kutum", never "Battles in
+      Kassab, Kutum".
     * Name only places that are written in the signals. Never add a place,
       and never correct or complete a place name.
     * When the signals write a place in Arabic script, ALWAYS put that
@@ -62,7 +75,8 @@ Guidelines:
       (مزبد) and Kamo (كامو), North Darfur". A reader checks your English
       spelling against it. Use no parentheses for a place the signals write
       only in Latin script, and none for Location.
-    * If the places do not fit, keep the most-mentioned place and Location.
+    * If the signals name more than three places, or the places do not
+      fit, use Location alone.
 - description: 1-2 sentences. What happened, where, scale if known, key
   humanitarian implication.
 - severity (integer 1-5 or null):
@@ -125,7 +139,7 @@ _ARABIC_LETTER = re.compile(r"[\u0621-\u064A]")
 _ARABIC_PARENS = re.compile(r"\s*\(([^()]*[\u0621-\u064A][^()]*)\)")
 # Marks that change the direction of the text around them. A title is stored
 # as plain text; the page that shows it handles direction.
-_BIDI_CONTROLS = re.compile(r"[\u200E\u200F\u202A-\u202E\u2066-\u2069]")
+_BIDI_CONTROLS = re.compile(r"[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]")
 # Vowel marks and tatweel: a post may write them, a model may drop them.
 _ARABIC_MARKS = re.compile(r"[\u064B-\u065F\u0670\u0640]")
 
@@ -134,9 +148,33 @@ def _plain_arabic(text: str) -> str:
     return _ARABIC_MARKS.sub("", text)
 
 
-def clean_event_title(title: str, signals: list[dict]) -> str:
+def _area_alone_when_too_many_places(title: str, location: str) -> str:
+    """"Battles in A, B, C and D, Um Rawaba" → "Battles in Um Rawaba".
+
+    The prompt asks for three places at most; a model lists more. Read only a
+    title of the shape the prompt asks for: "<what> in <places>, <Location>".
+    """
+    match = re.match(
+        rf"^(?P<what>.+)\s+in\s+(?P<places>.+?),\s*{re.escape(location)}\s*$", title, re.IGNORECASE,
+    )
+    if not match:
+        return title
+    places = re.split(r"\s*,\s*|\s+and\s+", _ARABIC_PARENS.sub("", match.group("places")))
+    if len([p for p in places if p.strip()]) <= TITLE_MAX_PLACES:
+        return title
+    return f"{match.group('what')} in {location}"
+
+
+def clean_event_title(title: str, signals: list[dict], location_name: str | None = None) -> str:
     """The model's title, with what must not be stored taken out:
 
+    - an Arabic spelling in parentheses after `location_name` at the end of
+      the title. Location is CLEAR's own name for the area, not a spelling to
+      check. Only at the end, where the prompt puts Location: a town with the
+      name of its district keeps its spelling;
+
+    - the places, when the title names more than `TITLE_MAX_PLACES` before
+      `location_name`: the event is in many places, the area alone says so;
     - an Arabic spelling in parentheses that occurs in no signal's text. The
       model copies a place's spelling from the post; one it made up, or
       "corrected", must not reach a reader as if the source had written it;
@@ -157,9 +195,18 @@ def clean_event_title(title: str, signals: list[dict]) -> str:
         spelling = _plain_arabic(match.group(1)).strip()
         return match.group(0) if spelling and spelling in text else ""
 
+    if location_name and location_name.strip():
+        after_location = re.compile(
+            rf"(?<![\w-])({re.escape(location_name.strip())})\s*\([^()]*[\u0621-\u064A][^()]*\)\s*$",
+            re.IGNORECASE,
+        )
+        title = after_location.sub(r"\1", title)
+        title = _area_alone_when_too_many_places(title, location_name.strip())
     title = _ARABIC_PARENS.sub(keep_if_written, title)
     if len(title) > TITLE_MAX_CHARS:
         title = _ARABIC_PARENS.sub("", title)
+    # The prompt's own label, copied into the title: "…, Um Rawaba Location".
+    title = re.sub(r"[\s,]+Location\s*$", "", title)
     # Tidy what a removal leaves behind: "Al-Kanabi , Northern" → "Al-Kanabi, Northern".
     title = re.sub(r"\s+([,.;:])", r"\1", title)
     return re.sub(r"\s{2,}", " ", title).strip()

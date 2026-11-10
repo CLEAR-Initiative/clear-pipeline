@@ -214,6 +214,36 @@ def _find_level2_among(ids: list[str]) -> str | None:
     return None
 
 
+# location_id → name, for the districts grouping keys on.
+_area_name_cache: dict[str, str] = {}
+
+
+def _event_area_name(admin2_id: str | None, primary: dict[str, Any] | None) -> str | None:
+    """The name of the area an event covers, for the rewrite prompt.
+
+    With a district, the event's location IS that district, so its name is the
+    answer: never the finer place (a town, a landmark) one signal was geocoded
+    to. Without a district, the event takes the signal's own location (a state,
+    a country), and so does the name. None when the district's name cannot be
+    read: the prompt then says the location is unknown, which is better than a
+    wrong town.
+    """
+    if not admin2_id:
+        return primary.get("name") if primary else None
+    if primary and primary.get("id") == admin2_id:
+        return primary.get("name")
+    if admin2_id in _area_name_cache:
+        return _area_name_cache[admin2_id]
+    try:
+        name = (graphql.get_location_canonical(admin2_id) or {}).get("name")
+    except Exception as e:  # noqa: BLE001 — a title without a place beats a lost signal
+        logger.warning("[GROUPING] Could not read the name of district %s: %s", admin2_id, e)
+        return None
+    if name:
+        _area_name_cache[admin2_id] = name
+    return name
+
+
 def pick_primary_location(signal: dict[str, Any]) -> dict[str, Any] | None:
     """From a signal dict (result of createSignal), pick the single most
     specific resolved location to use for clustering. Priority:
@@ -523,7 +553,7 @@ def _rewrite_event(
             system=REWRITE_SYSTEM, user=prompt, schema=EventRewrite
         )
         # An Arabic spelling the signals do not write never reaches the event.
-        result.title = clean_event_title(result.title, signals)
+        result.title = clean_event_title(result.title, signals, location_name)
         return result, signals
     except Exception as e:
         if raise_errors:
@@ -709,13 +739,16 @@ def group_signal(
     now_iso = datetime.now(UTC).isoformat()
     ts = signal_timestamp or now_iso
 
-    # Pick the primary location name for the rewrite prompt
+    # The rewrite prompt's Location is the area the EVENT covers (the district
+    # grouping keys on), not the place this one signal names. An event collects
+    # signals from several towns of one district: with the signal's own place
+    # as Location, the title named the whole event after the latest town.
     primary = None
     for key in ("originLocation", "generalLocation", "destinationLocation"):
         if created_signal.get(key):
             primary = created_signal[key]
             break
-    location_name = primary.get("name") if primary else None
+    location_name = _event_area_name(admin2_id, primary)
 
     # Resolve the per-signal stats once. Casualties priority:
     #   1. Source-shipped structured field (signal.casualties — ACLED's
