@@ -210,13 +210,24 @@ def _cache_write(
 # ─── Public API ───────────────────────────────────────────────────────────
 
 
+def _mark_failed(outcome: dict | None) -> None:
+    if outcome is not None:
+        outcome["failed"] = True
+
+
 def search(
     query: str,
     *,
     country_codes: str | None = "sd",
     limit: int = 5,
+    outcome: dict | None = None,
 ) -> list[dict] | None:
     """Forward geocoding — name → ranked list of candidates.
+
+    None means "no results" and also "the geocoder failed". A caller that
+    must tell them apart passes ``outcome`` (a dict): a failed search (network
+    error, HTTP 429 / 5xx, open circuit, a cached error) sets
+    ``outcome["failed"] = True``. An empty answer does not.
 
     Returns the raw Nominatim result array (list of dicts with `lat`, `lon`,
     `display_name`, `class`, `type`, `importance`, etc.) on success.
@@ -251,11 +262,14 @@ def search(
             "[nominatim] cached negative short-circuit: query=%r status=%s (hash=%s)",
             query, cached["status"], qhash[:8],
         )
+        if cached["status"] != "no_result":
+            _mark_failed(outcome)
         return None
 
     # 2. Circuit breaker
     if _is_circuit_open():
         logger.warning("[nominatim] circuit open, skipping search for %r", query)
+        _mark_failed(outcome)
         return None
 
     # 3. Outbound call
@@ -281,6 +295,7 @@ def search(
     except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPError) as exc:
         logger.warning("[nominatim] network error for %r: %s", query, exc)
         _record_failure()
+        _mark_failed(outcome)
         return None
 
     if resp.status_code == 200:
@@ -289,6 +304,7 @@ def search(
         except json.JSONDecodeError:
             logger.warning("[nominatim] unparseable 200 response for %r", query)
             _record_failure()
+            _mark_failed(outcome)
             return None
         if not isinstance(results, list) or not results:
             _cache_write(query_hash=qhash, query=query, endpoint="search",
@@ -313,6 +329,7 @@ def search(
                  response_json={"http_status": resp.status_code, "body_snippet": resp.text[:500]},
                  status="error")
     _record_failure()
+    _mark_failed(outcome)
     return None
 
 

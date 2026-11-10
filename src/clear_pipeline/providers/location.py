@@ -2,6 +2,10 @@
 
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 
 from pydantic import BaseModel
 
@@ -17,12 +21,53 @@ from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
 )
 from clear_pipeline.providers.geoparser import (
+    GeocodeTrace,
     arabic_lookup_applies,
+    gazetteer_knows,
     geocode_place_name,
     latin_name_key,
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── Geocode misses (the unresolved place-name queue) ─────────────────────────
+
+@dataclass(frozen=True)
+class GeocodeMiss:
+    """A place name that `_geocode_within` could not place inside its area."""
+
+    name: str
+    name_ar: str | None
+    country_code: str
+    area_id: str
+    #: "NO_MATCH": no candidate. "OUTSIDE_AREA": a candidate exists, but it
+    #: lies outside the area.
+    reason: str
+
+
+# The open collector of the current call, or None. The locator knows nothing
+# about signals: a caller that owns a signal id (the drain) opens a collector
+# around `locate` and records what it finds. With no collector (a dry run, an
+# evaluation, a test) a miss is only logged, as before.
+_geocode_misses: ContextVar[list[GeocodeMiss] | None] = ContextVar("geocode_misses", default=None)
+
+
+@contextmanager
+def collect_geocode_misses() -> Iterator[list[GeocodeMiss]]:
+    """Collect the geocode misses of the locate calls made inside the block."""
+    misses: list[GeocodeMiss] = []
+    token = _geocode_misses.set(misses)
+    try:
+        yield misses
+    finally:
+        _geocode_misses.reset(token)
+
+
+def _note_miss(name: str, name_ar: str | None, country_code: str, area_id: str, reason: str) -> None:
+    misses = _geocode_misses.get()
+    if misses is not None:
+        misses.append(GeocodeMiss(name, name_ar, country_code.upper(), area_id, reason))
 
 
 class _LocationResolution(BaseModel):
@@ -430,7 +475,12 @@ def _geocode_within(
     area Claude read from the text is the wrong village, so each lookup tier
     is asked for a point inside it, and with none the area wins.
     Best-effort: any failure returns None and the caller keeps the area,
-    except an LLM outage, which the caller defers on."""
+    except an LLM outage, which the caller defers on.
+
+    A miss goes to the open collector (`collect_geocode_misses`): every tier
+    found nothing inside the area, or the L4 promote gave no location. Not a
+    miss: an area with no geometry, and a lookup that failed (an outage
+    proves nothing about the name)."""
     try:
         area = _area_shape(area_id)
         if area is None:
@@ -446,22 +496,32 @@ def _geocode_within(
         # line can be parented to the neighbouring area's district. Passed
         # into the lookups, so a same-named place elsewhere is a miss and the
         # next tier is tried.
+        trace = GeocodeTrace()
         geo = geocode_place_name(
             place_name,
             expected_country_codes={country_code.lower()},
             accept=lambda lat, lng: area.contains(Point(lng, lat)),
             arabic_name=arabic_name,
             within_location_id=area_id,
+            trace=trace,
         )
         if geo is None:
             logger.info("[locate] %r has no match inside area %s — keeping the area",
                         place_name, area_id)
+            if not trace.failed:
+                # The gazetteer filters by area on the server, so ask it once
+                # more whether the name exists elsewhere in the country.
+                outside = trace.outside or gazetteer_knows([arabic_name, place_name], country_code)
+                _note_miss(place_name, arabic_name, country_code, area_id,
+                           "OUTSIDE_AREA" if outside else "NO_MATCH")
             return None
 
         promo = find_or_create_landmark_l4(
             name=place_name, lat=geo.lat, lng=geo.lng, kind=geo.kind,
         )
         if promo.get("abortedReason") or not promo.get("locationId"):
+            # A point was found inside the area, but it gave no location.
+            _note_miss(place_name, arabic_name, country_code, area_id, "NO_MATCH")
             return None
         logger.info(
             "[locate] %r → L4 %s (reused=%s) inside area %s",

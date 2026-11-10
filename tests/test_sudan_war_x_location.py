@@ -250,13 +250,22 @@ def _hit(lat: float, lng: float, *, kind: str = "admin") -> GeoparseResult:
 
 
 @contextmanager
-def _geocoding(*, hit=None, shape=WK_SHAPE, promo=None, geocode_error=None):
-    # Like the real lookups: a hit the caller's area test rejects is a miss.
+def _geocoding(*, hit=None, shape=WK_SHAPE, promo=None, geocode_error=None,
+               tier_failed=False, known_elsewhere=False):
+    # Like the real lookups: a hit the caller's area test rejects is a miss,
+    # and the trace says why.
     def fake_geocode(name, *, expected_country_codes=None, accept=None, arabic_name=None,
-                     within_location_id=None):
+                     within_location_id=None, trace=None):
         if geocode_error:
             raise geocode_error
-        return hit if hit and (accept is None or accept(hit.lat, hit.lng)) else None
+        if tier_failed:
+            trace.failed = True
+            return None
+        if hit and (accept is None or accept(hit.lat, hit.lng)):
+            return hit
+        if hit:
+            trace.outside = True
+        return None
 
     geocode = MagicMock(side_effect=fake_geocode)
     promote = MagicMock(return_value=promo or {"locationId": "l4-dibab", "reused": False,
@@ -264,6 +273,7 @@ def _geocoding(*, hit=None, shape=WK_SHAPE, promo=None, geocode_error=None):
     geometry = {"type": "Polygon", "coordinates": [list(shape.exterior.coords)]} if shape else None
     with (
         patch.object(location, "geocode_place_name", geocode),
+        patch.object(location, "gazetteer_knows", return_value=known_elsewhere),
         patch.object(location, "find_or_create_landmark_l4", promote),
         patch.object(location, "get_location_with_geometry",
                      return_value={"id": "sd-wk", "geometry": geometry}),
@@ -850,3 +860,335 @@ def test_a_failed_arabic_spelling_still_geocodes_the_latin_name():
     ):
         assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "l4-dibab"
     assert m["geocode"].call_args.kwargs["arabic_name"] is None
+
+
+# ── geocode misses go to the unresolved place-name queue (#1308) ─────────────
+
+def _locate_collecting(*, llm=None, country_code="sd", **geocoding):
+    """Run locate_in_country inside a miss collector; returns (location, misses)."""
+    fields = {"location_type": "general", "location_id": "sd-wk", "place_name": "Al Dibab"}
+    patcher, _ = _llm_returning(**(llm or fields))
+    with patcher, _geocoding(**geocoding), location.collect_geocode_misses() as misses:
+        located = location.locate_in_country(POST, POST, "Sudan", country_code=country_code)
+    return located, misses
+
+
+def _miss(reason, name_ar=None):
+    return location.GeocodeMiss("Al Dibab", name_ar, "SD", "sd-wk", reason)
+
+
+def test_a_name_no_tier_can_place_is_a_miss():
+    located, misses = _locate_collecting(hit=None)
+    assert located == "sd-wk"
+    assert misses == [_miss("NO_MATCH")]
+
+
+def test_a_match_the_area_check_rejects_is_a_miss_outside_the_area():
+    located, misses = _locate_collecting(hit=_hit(15.6, 32.5))
+    assert located == "sd-wk"
+    assert misses == [_miss("OUTSIDE_AREA")]
+
+
+def test_a_name_the_gazetteer_knows_elsewhere_is_a_miss_outside_the_area():
+    # The gazetteer filters by area on the server, so its own lookup shows nothing.
+    _, misses = _locate_collecting(hit=None, known_elsewhere=True)
+    assert misses == [_miss("OUTSIDE_AREA")]
+
+
+@pytest.mark.parametrize("promo", [
+    {"locationId": None, "abortedReason": "different_a2"},   # promote aborted
+    {"locationId": None, "abortedReason": None},             # promote returned no id
+])
+def test_a_promote_that_gives_no_location_is_a_miss(promo):
+    located, misses = _locate_collecting(hit=_hit(11.5, 28.5), promo=promo)
+    assert located == "sd-wk"
+    assert misses == [_miss("NO_MATCH")]
+
+
+def test_a_miss_carries_the_posts_arabic_spelling():
+    provider = MagicMock()
+    provider.complete_structured.side_effect = lambda *, system, user, schema: (
+        schema(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+        if schema is location._LocationResolution else schema(place_name_ar="الدبيب")
+    )
+    with (
+        patch.object(location, "make_llm_provider", return_value=provider),
+        patch.object(location, "arabic_lookup_applies", return_value=True),
+        _geocoding(hit=None),
+        location.collect_geocode_misses() as misses,
+    ):
+        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
+    assert misses == [_miss("NO_MATCH", "الدبيب")]
+
+
+@pytest.mark.parametrize("case", [
+    {"hit": _hit(11.5, 28.5)},                                   # geocoded: no miss
+    {"hit": _hit(11.5, 28.5), "shape": None},                    # the area has no geometry
+    {"tier_failed": True},                                       # a lookup tier failed
+    {"geocode_error": RuntimeError("clear-api 502")},            # the geocoder blew up
+    {"hit": None, "country_code": None},                         # no country code: not geocoded
+    {"hit": None, "llm": {"location_type": "general", "location_id": "sd-wk"}},           # no place name
+    {"hit": None, "llm": {"location_type": "general", "location_id": "sd-kh",
+                          "place_name": "Khartoum"}},                                     # a state's own name
+    {"hit": None, "llm": {"location_type": "general", "location_id": "sd-wk",
+                          "place_name": "Sudan"}},                                        # the country's own name
+    {"hit": None, "llm": {"location_type": "general", "location_id": "sd",
+                          "place_name": "Al Dibab"}},                                     # the LLM chose the country
+])
+def test_these_exits_are_not_misses(case):
+    _, misses = _locate_collecting(**case)
+    assert misses == []
+
+
+def test_without_a_collector_a_miss_is_only_logged():
+    # A dry run or an evaluation calls locate_in_country with no drain around it.
+    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
+    with patcher, _geocoding(hit=None):
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-wk"
+    assert location._geocode_misses.get() is None
+
+
+def test_a_collector_closes_with_its_block():
+    with location.collect_geocode_misses() as outer:
+        with location.collect_geocode_misses() as inner:
+            location._note_miss("Kamo", None, "sd", "sd-wk", "NO_MATCH")
+        location._note_miss("Aruri", None, "sd", "sd-wk", "NO_MATCH")
+    assert [m.name for m in inner] == ["Kamo"]
+    assert [m.name for m in outer] == ["Aruri"]
+
+
+@contextmanager
+def _drain_with_misses(misses, *, record_side_effect=None):
+    """The drain with a connector whose locate reports `misses`."""
+    def locate(_view):
+        for miss in misses:
+            location._note_miss(miss.name, miss.name_ar, miss.country_code, miss.area_id, miss.reason)
+        return "sd-wk"
+
+    with (
+        _drain([_x_row()]) as m,
+        patch.object(SudanWarXConnector, "locate", side_effect=locate),
+        patch.object(stages, "record_unresolved_place_name", side_effect=record_side_effect) as record,
+    ):
+        yield {**m, "record": record}
+
+
+def test_drain_records_each_miss_with_the_signal_id():
+    with _drain_with_misses([_miss("OUTSIDE_AREA", "الدبيب")]) as m:
+        stages._drain_signals_locked(MagicMock())
+
+    m["record"].assert_called_once_with(
+        signal_id="sig-x-1", name="Al Dibab", name_ar="الدبيب", country_code="SD",
+        area_location_id="sd-wk", reason="OUTSIDE_AREA",
+    )
+    m["update"].assert_called_once_with("sig-x-1", "sd-wk")
+    assert ("PROCESSED", ["sig-x-1"]) in m["marked"]
+
+
+def test_drain_records_nothing_when_the_place_was_geocoded():
+    with _drain_with_misses([]) as m:
+        stages._drain_signals_locked(MagicMock())
+    m["record"].assert_not_called()
+
+
+@pytest.mark.parametrize("error", [RuntimeError("clear-api 502"), TimeoutError("timed out")])
+def test_a_failed_record_never_fails_the_drain(error):
+    with _drain_with_misses([_miss("NO_MATCH")], record_side_effect=error) as m:
+        stages._drain_signals_locked(MagicMock())
+
+    m["record"].assert_called_once()
+    m["update"].assert_called_once_with("sig-x-1", "sd-wk")
+    assert m["group"].called
+    assert ("PROCESSED", ["sig-x-1"]) in m["marked"]
+
+
+def test_the_record_client_sends_the_miss():
+    from clear_pipeline.providers import clear_api
+
+    row = {"id": "row-1", "status": "OPEN", "signalCount": 1}
+    with (
+        patch.object(clear_api, "_record_unresolved_supported", True),
+        patch.object(clear_api, "_execute", return_value={"recordUnresolvedPlaceName": row}) as ex,
+    ):
+        result = clear_api.record_unresolved_place_name(
+            signal_id="sig-x-1", name="Al Dibab", name_ar="الدبيب", country_code="sd",
+            area_location_id="sd-wk", reason="OUTSIDE_AREA",
+        )
+    assert result == row
+    query, variables = ex.call_args.args
+    assert "recordUnresolvedPlaceName(input: $input)" in query
+    assert variables == {"input": {
+        "signalId": "sig-x-1", "name": "Al Dibab", "nameAr": "الدبيب", "countryCode": "SD",
+        "areaLocationId": "sd-wk", "reason": "OUTSIDE_AREA",
+    }}
+    # One attempt, short timeout: the record must not hold the drain up.
+    assert ex.call_args.kwargs == {"retries": 1, "timeout": clear_api._RECORD_UNRESOLVED_TIMEOUT}
+    assert clear_api._RECORD_UNRESOLVED_TIMEOUT <= 10
+
+
+def test_the_record_client_sends_seen_at_for_a_backfill():
+    from clear_pipeline.providers import clear_api
+
+    with (
+        patch.object(clear_api, "_record_unresolved_supported", True),
+        patch.object(clear_api, "_execute", return_value={"recordUnresolvedPlaceName": {}}) as ex,
+    ):
+        clear_api.record_unresolved_place_name(
+            signal_id="s", name="Kamo", country_code="SD", area_location_id="sd-nd",
+            seen_at="2026-08-03T10:00:00Z",
+        )
+    assert ex.call_args.args[1]["input"] == {
+        "signalId": "s", "name": "Kamo", "countryCode": "SD", "areaLocationId": "sd-nd",
+        "reason": "NO_MATCH", "seenAt": "2026-08-03T10:00:00Z",
+    }
+
+
+@pytest.mark.parametrize("message", [
+    'clear-api 400 (non-retryable): Cannot query field "recordUnresolvedPlaceName" on type "Mutation".',
+    'clear-api 400 (non-retryable): Unknown type "RecordUnresolvedPlaceNameInput".',
+])
+def test_the_record_client_stops_calling_an_older_clear_api(message):
+    from clear_pipeline.providers import clear_api
+
+    kwargs = {"signal_id": "s", "name": "Kamo", "country_code": "SD", "area_location_id": "sd-nd"}
+    with (
+        patch.object(clear_api, "_record_unresolved_supported", True),
+        patch.object(clear_api, "_execute", side_effect=clear_api.ClearApiError(message)) as ex,
+    ):
+        assert clear_api.record_unresolved_place_name(**kwargs) is None
+        assert clear_api.record_unresolved_place_name(**kwargs) is None
+    # One rejected attempt, then no call for the rest of the process.
+    assert ex.call_count == 1
+
+
+def test_the_record_client_raises_other_errors_and_keeps_calling():
+    from clear_pipeline.providers import clear_api
+
+    kwargs = {"signal_id": "s", "name": "Kamo", "country_code": "SD", "area_location_id": "sd-nd"}
+    with (
+        patch.object(clear_api, "_record_unresolved_supported", True),
+        patch.object(clear_api, "_execute", side_effect=clear_api.ClearApiError("clear-api 403: forbidden")) as ex,
+    ):
+        for _ in range(2):
+            with pytest.raises(clear_api.ClearApiError):
+                clear_api.record_unresolved_place_name(**kwargs)
+    assert ex.call_count == 2
+
+
+# ── the geocoder's trace: why a lookup found nothing ─────────────────────────
+
+def _trace(name="X", *, gazetteer=None, gazetteer_error=None, search=None, accept=None,
+           arabic_name=None, use_gazetteer=True):
+    trace = geoparser.GeocodeTrace()
+    gaz = MagicMock(return_value=gazetteer, side_effect=gazetteer_error)
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", use_gazetteer),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", gaz),
+        patch.object(geoparser.nominatim, "search", search or MagicMock(return_value=None)),
+    ):
+        result = geoparser.geocode_place_name(
+            name, expected_country_codes={"sd"}, accept=accept, arabic_name=arabic_name, trace=trace,
+        )
+    return result, trace
+
+
+def test_trace_of_a_plain_miss_is_empty():
+    result, trace = _trace()
+    assert result is None
+    assert (trace.outside, trace.failed) == (False, False)
+
+
+def test_trace_marks_a_gazetteer_hit_the_caller_rejects():
+    hit = {"name": "X", "latitude": "15", "longitude": "32", "countryCode": "SD", "featureClass": "P", "score": 1}
+    _, trace = _trace(gazetteer=hit, accept=lambda lat, lng: False)
+    assert (trace.outside, trace.failed) == (True, False)
+
+
+def test_trace_marks_a_locationiq_result_the_caller_rejects():
+    row = {"lat": "15", "lon": "32", "class": "place", "importance": 0.1, "address": {"country_code": "sd"}}
+    _, trace = _trace(search=MagicMock(return_value=[row]), accept=lambda lat, lng: False, use_gazetteer=False)
+    assert (trace.outside, trace.failed) == (True, False)
+
+
+def test_trace_marks_an_arabic_match_outside_the_area():
+    _, trace = _trace("Tendalti", gazetteer=_gaz("Tendalti", 13.12, 32.06), arabic_name="تندلتي",
+                      accept=lambda lat, lng: False)
+    assert trace.outside
+
+
+def test_trace_marks_a_failed_gazetteer_lookup():
+    _, trace = _trace(gazetteer_error=RuntimeError("clear-api 502"))
+    assert trace.failed
+    _, trace = _trace("Tendalti", gazetteer_error=RuntimeError("clear-api 502"), arabic_name="تندلتي")
+    assert trace.failed
+
+
+def test_trace_marks_a_failed_locationiq_search():
+    def search(query, *, country_codes=None, limit=5, outcome=None):
+        outcome["failed"] = True
+        return None
+
+    _, trace = _trace(search=MagicMock(side_effect=search))
+    assert trace.failed
+
+
+def test_an_untraced_lookup_calls_locationiq_as_before():
+    search = MagicMock(return_value=None)
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
+        patch.object(geoparser.nominatim, "search", search),
+    ):
+        geoparser.geocode_place_name("X", expected_country_codes={"sd"})
+    assert "outcome" not in search.call_args.kwargs
+
+
+@pytest.mark.parametrize(("status", "failed"), [("error", True), ("no_result", False)])
+def test_nominatim_reports_a_cached_error_as_failed_and_an_empty_answer_as_not(status, failed):
+    from clear_pipeline.providers import nominatim
+
+    outcome: dict = {}
+    with (
+        patch.object(nominatim.settings, "locationiq_api_key", "k"),
+        patch.object(nominatim, "_cache_lookup", return_value={"status": status}),
+    ):
+        assert nominatim.search("Kamo", outcome=outcome) is None
+    assert bool(outcome.get("failed")) is failed
+
+
+def test_nominatim_reports_an_open_circuit_as_failed():
+    from clear_pipeline.providers import nominatim
+
+    outcome: dict = {}
+    with (
+        patch.object(nominatim.settings, "locationiq_api_key", "k"),
+        patch.object(nominatim, "_cache_lookup", return_value=None),
+        patch.object(nominatim, "_is_circuit_open", return_value=True),
+    ):
+        assert nominatim.search("Kamo", outcome=outcome) is None
+    assert outcome == {"failed": True}
+
+
+@pytest.mark.parametrize(("hits", "use_gazetteer", "known"), [
+    ({"الدبيب": {"name": "Ad Dibab", "exact": True}}, True, True),    # an exact Arabic match
+    ({"Al Dibab": {"name": "Ad Dibab", "exact": True}}, True, True),  # an exact Latin match
+    ({"Al Dibab": {"name": "El Fasher", "exact": False}}, True, False),  # a fuzzy hit is another place
+    ({}, True, False),
+    ({"Al Dibab": {"name": "Ad Dibab", "exact": True}}, False, False),   # the gazetteer is off
+])
+def test_gazetteer_knows_counts_exact_matches_only(hits, use_gazetteer, known):
+    gaz = MagicMock(side_effect=lambda name, *, country_code=None: hits.get(name))
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", use_gazetteer),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", gaz),
+    ):
+        assert geoparser.gazetteer_knows(["الدبيب", None, "Al Dibab"], "sd") is known
+    if use_gazetteer and gaz.called:
+        assert gaz.call_args.kwargs == {"country_code": "SD"}
+
+
+def test_gazetteer_knows_is_false_when_the_lookup_fails():
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=RuntimeError("502")),
+    ):
+        assert geoparser.gazetteer_knows(["Al Dibab"], "SD") is False

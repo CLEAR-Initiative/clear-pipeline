@@ -41,7 +41,11 @@ from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
 from clear_pipeline.providers.jev import JevError
 from clear_pipeline.providers.llm import LLMUnavailableError
-from clear_pipeline.providers.location import LocationsUnavailableError
+from clear_pipeline.providers.location import (
+    GeocodeMiss,
+    LocationsUnavailableError,
+    collect_geocode_misses,
+)
 from clear_pipeline.providers.signal_classifier import (
     classifier_stats_snapshot,
     classify_signal,
@@ -62,6 +66,7 @@ from clear_pipeline.providers.clear_api import (
     pending_recomputes,
     pending_signals,
     pending_translations,
+    record_unresolved_place_name,
     sync_event_cards,
     update_signal_location,
     update_signal_severity,
@@ -155,6 +160,28 @@ def _pending(source: str | None) -> list[dict]:
     return pending_signals(first=_BATCH_SIZE, source=source)
 
 
+def _record_geocode_misses(signal_id: str, misses: list[GeocodeMiss]) -> None:
+    """Send each place name the locator could not geocode to clear-api's
+    unresolved place-name queue, where a person can resolve it. Best-effort: a
+    clear-api error or timeout is logged and never fails the signal's drain.
+    clear-api counts a signal once per row, so a re-drained signal is safe."""
+    for miss in misses:
+        try:
+            record_unresolved_place_name(
+                signal_id=signal_id,
+                name=miss.name,
+                name_ar=miss.name_ar,
+                country_code=miss.country_code,
+                area_location_id=miss.area_id,
+                reason=miss.reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — a side note; the drain carries on
+            logger.warning(
+                "[classify_group] signal %s: could not record unresolved place name %r: %s",
+                signal_id, miss.name, exc,
+            )
+
+
 def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     """For a connector that can locate its own signals (``LocatingSource`` —
     push feeds that arrive with no location), resolve and persist a location
@@ -166,7 +193,9 @@ def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     retry leaves the signal NEW rather than grouping it location-less."""
     if _event_location_id(created) or not isinstance(connector, LocatingSource):
         return created
-    location_id = connector.locate(view)
+    with collect_geocode_misses() as misses:
+        location_id = connector.locate(view)
+    _record_geocode_misses(created["id"], misses)
     if not location_id:
         logger.info("[classify_group] signal %s: no location resolved", created["id"])
         return created
