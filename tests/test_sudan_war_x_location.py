@@ -943,9 +943,11 @@ def test_these_exits_are_not_misses(case):
 def test_without_a_collector_a_miss_is_only_logged():
     # A dry run or an evaluation calls locate_in_country with no drain around it.
     patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
-    with patcher, _geocoding(hit=None):
+    with patcher, _geocoding(hit=None), patch.object(location, "gazetteer_knows") as knows:
         assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "sd-wk"
     assert location._geocode_misses.get() is None
+    # Nothing is recorded, so the lookup that only sets the reason is not made.
+    knows.assert_not_called()
 
 
 def test_a_collector_closes_with_its_block():
@@ -1174,16 +1176,31 @@ def test_nominatim_reports_an_open_circuit_as_failed():
     ({"Al Dibab": {"name": "El Fasher", "exact": False}}, True, False),  # a fuzzy hit is another place
     ({}, True, False),
     ({"Al Dibab": {"name": "Ad Dibab", "exact": True}}, False, False),   # the gazetteer is off
+    # GeoNames gives Kosti the Arabic name of another town: the Latin names disagree.
+    ({"الدبيب": {"name": "Kosti", "exact": True}}, True, False),
+    # A river or a road is not a place a point can stand for.
+    ({"Al Dibab": {"name": "Ad Dibab", "exact": True, "featureClass": "H"}}, True, False),
+    ({"الدبيب": {"name": "Ad Dibab", "exact": True, "featureClass": "R"}}, True, False),
 ])
-def test_gazetteer_knows_counts_exact_matches_only(hits, use_gazetteer, known):
+def test_gazetteer_knows_counts_what_the_lookups_would_accept(hits, use_gazetteer, known):
     gaz = MagicMock(side_effect=lambda name, *, country_code=None: hits.get(name))
     with (
         patch.object(geoparser.settings, "geoparser_use_gazetteer", use_gazetteer),
         patch.object(geoparser.graphql, "resolve_gazetteer_location", gaz),
     ):
-        assert geoparser.gazetteer_knows(["الدبيب", None, "Al Dibab"], "sd") is known
+        assert geoparser.gazetteer_knows("Al Dibab", "sd", arabic_name="الدبيب") is known
     if use_gazetteer and gaz.called:
         assert gaz.call_args.kwargs == {"country_code": "SD"}
+
+
+def test_gazetteer_knows_asks_for_the_latin_name_alone_without_an_arabic_one():
+    gaz = MagicMock(return_value=None)
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", gaz),
+    ):
+        assert geoparser.gazetteer_knows("Al Dibab", "SD") is False
+    assert [c.args[0] for c in gaz.call_args_list] == ["Al Dibab"]
 
 
 def test_gazetteer_knows_is_false_when_the_lookup_fails():
@@ -1191,4 +1208,4 @@ def test_gazetteer_knows_is_false_when_the_lookup_fails():
         patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
         patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=RuntimeError("502")),
     ):
-        assert geoparser.gazetteer_knows(["Al Dibab"], "SD") is False
+        assert geoparser.gazetteer_knows("Al Dibab", "SD") is False

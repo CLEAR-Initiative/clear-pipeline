@@ -881,24 +881,35 @@ def geocode_place_name(
     return _resolve_candidate(top, expected, accept, within_location_id, trace)
 
 
-def gazetteer_knows(names: list[str | None], country_code: str) -> bool:
-    """True when the gazetteer holds an exact match for one of `names`
-    anywhere in the country. Asked after a miss inside an area: the gazetteer
+def gazetteer_knows(name: str, country_code: str, *, arabic_name: str | None = None) -> bool:
+    """True when the gazetteer holds an exact match for the place anywhere in
+    the country: for `name`, or for `arabic_name`, the same place as the text
+    writes it in Arabic. Asked after a miss inside an area: the gazetteer
     filters by area on the server, so a same-named place elsewhere is
-    invisible to the area lookup. Exact matches only: a fuzzy hit elsewhere
-    is usually another place. False when the gazetteer is off or fails."""
+    invisible to the area lookup.
+
+    A hit counts under the rules the lookups themselves apply. Exact matches
+    only: a fuzzy hit elsewhere is usually another place. Not a river or a
+    road. An Arabic hit must agree with `name` in Latin script: GeoNames
+    gives Kosti the Arabic name of Rabak. False when the gazetteer is off or
+    fails."""
     if not settings.geoparser_use_gazetteer:
         return False
-    for name in names:
-        if not name or not name.strip():
+    for query, is_arabic in ((arabic_name, True), (name, False)):
+        if not query or not query.strip():
             continue
         try:
-            hit = graphql.resolve_gazetteer_location(name.strip(), country_code=country_code.upper())
+            hit = graphql.resolve_gazetteer_location(query.strip(), country_code=country_code.upper())
         except Exception as exc:  # noqa: BLE001 — only a hint for the review queue
-            logger.info("[geoparser] gazetteer check for %r failed: %s", name, exc)
+            logger.info("[geoparser] gazetteer check for %r failed: %s", query, exc)
             return False
-        if hit and hit.get("exact"):
-            return True
+        if not hit or not hit.get("exact"):
+            continue
+        if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+            continue
+        if is_arabic and not _spellings_agree(hit.get("name") or "", name):
+            continue
+        return True
     return False
 
 
