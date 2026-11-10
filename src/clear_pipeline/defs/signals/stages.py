@@ -70,6 +70,7 @@ from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import extract_population_affected_from_text
 from clear_pipeline.providers.translate import (
     LOCKED,
+    RETRY,
     TRANSLATED,
     configured_target_locales,
     translate_and_upsert,
@@ -728,8 +729,10 @@ def _drain_translations(context) -> dg.MaterializeResult:
                 context.log.exception("[translate] %s %s failed", entity_type, entity_id)
                 failed += 1
                 continue
-            if outcome == LOCKED:
-                requeued += 1  # a peer holds it — rows stay queued, NOT progress
+            if outcome in (LOCKED, RETRY):
+                # LOCKED: a peer holds it. RETRY: some fields failed and attempts
+                # remain. Either way the rows stay queued — NOT progress.
+                requeued += 1
             else:
                 # TRANSLATED / NOOP / UNPARSEABLE all cleared the rows.
                 if outcome == TRANSLATED:
@@ -737,8 +740,8 @@ def _drain_translations(context) -> dg.MaterializeResult:
                 else:
                     cleared += 1
                 made_progress = True
-        # Stop only when a batch cleared nothing — every entity was locked
-        # (transient) or already seen this run.
+        # Stop only when a batch cleared nothing — every entity was locked or
+        # left for a retry (both transient), or already seen this run.
         if not made_progress:
             break
 

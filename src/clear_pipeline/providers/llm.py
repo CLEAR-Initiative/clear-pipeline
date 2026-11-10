@@ -78,6 +78,18 @@ LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", 
 DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("LLM_TIMEOUT_SECONDS", "90"))
 
 
+#: Normalised ``last_stop_reason`` for "the reply hit max_tokens and is cut
+#: off" — OpenAI-compatible ``finish_reason == "length"`` and Anthropic
+#: ``stop_reason == "max_tokens"`` both map to it.
+STOP_LENGTH = "length"
+
+
+def _normalise_stop_reason(reason: Any) -> str | None:
+    if not isinstance(reason, str) or not reason:
+        return None
+    return STOP_LENGTH if reason in ("length", "max_tokens") else reason
+
+
 class EmptyResponseError(RuntimeError):
     """A provider returned an empty/whitespace body (or no choices). Treated as
     a failure — not a successful empty string — so a configured fallback
@@ -179,6 +191,13 @@ class LLMProvider(Protocol):
     #: the last call that finished, so keep one provider per sequential job
     #: when spend is recorded (the Task Worker does).
     last_usage: dict[str, int] | None
+    #: Why the most recent ``complete_text`` call stopped. ``STOP_LENGTH`` means
+    #: the reply hit ``max_tokens`` and is cut off; any other value is the
+    #: provider's own reason; ``None`` before the first call. Same "last call
+    #: that finished" caveat as ``last_usage``. Truncation is recorded, not
+    #: raised: a short free-text reply (the context prefix) is still usable when
+    #: cut off, so the caller decides (the translator must not parse one).
+    last_stop_reason: str | None
 
     def complete_structured(
         self,
@@ -260,6 +279,7 @@ class AnthropicProvider:
         self.role = role
         self.model = model
         self.last_usage: dict[str, int] | None = None
+        self.last_stop_reason: str | None = None
         self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
     def _note_usage(self, response: Any) -> None:
@@ -365,6 +385,7 @@ class AnthropicProvider:
             messages=[{"role": "user", "content": _anthropic_user_content(user, images)}],
         )
         self._note_usage(response)
+        self.last_stop_reason = _normalise_stop_reason(getattr(response, "stop_reason", None))
         text = _strip_code_fence("".join(getattr(b, "text", "") for b in response.content))
         if not text:
             raise EmptyResponseError(f"empty text response from {self.model}")
@@ -508,6 +529,7 @@ class OpenAICompatibleProvider:
         self.role = role
         self.model = model
         self.last_usage: dict[str, int] | None = None
+        self.last_stop_reason: str | None = None
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         # Non-standard request-body fields sent via the OpenAI `extra_body`:
@@ -524,14 +546,30 @@ class OpenAICompatibleProvider:
         #    backends; only some honour `response_format`. This forces routing to a
         #    backend that supports every requested param, so structured output is
         #    actually enforced (not silently dropped → free-form → truncation).
+        #    Applied ONLY to complete_structured (see `_request_extra_kwargs`): it
+        #    is meaningful only when `response_format` is sent. On a plain
+        #    complete_text call it would make OpenRouter ALSO require support for
+        #    every other body field — notably the `reasoning` off-switch above —
+        #    and a non-reasoning model's endpoints don't advertise `reasoning`, so
+        #    the whole request 404s ("Filter by Parameters"). Keeping it off the
+        #    text path is what lets a non-reasoning model (e.g. the qwen translate
+        #    primary) route while reasoning is still being disabled.
         # No-ops on providers that ignore unknown body fields.
-        extra_body: dict[str, Any] = {}
+        base_extra_body: dict[str, Any] = {}
         if disable_thinking:
-            extra_body["think"] = False
-            extra_body["reasoning"] = {"enabled": False}
-        if require_parameters:
-            extra_body["provider"] = {"require_parameters": True}
-        self._extra_kwargs: dict[str, Any] = {"extra_body": extra_body} if extra_body else {}
+            base_extra_body["think"] = False
+            base_extra_body["reasoning"] = {"enabled": False}
+        self._base_extra_body = base_extra_body
+        self._require_parameters = require_parameters
+
+    def _request_extra_kwargs(self, *, structured: bool) -> dict[str, Any]:
+        """Per-call ``extra_body``: the shared think/reasoning switches always,
+        plus ``provider.require_parameters`` ONLY on a structured (response_format)
+        call — never on complete_text (see __init__ for why)."""
+        body = dict(self._base_extra_body)
+        if structured and self._require_parameters:
+            body["provider"] = {"require_parameters": True}
+        return {"extra_body": body} if body else {}
 
     @retry(
         retry=retry_if_exception_type(
@@ -588,7 +626,7 @@ class OpenAICompatibleProvider:
                 {"role": "user", "content": user},
             ],
             response_format=response_format,  # type: ignore[arg-type]
-            **self._extra_kwargs,
+            **self._request_extra_kwargs(structured=True),
         )
         self.last_usage = _openai_usage(raw)
         if not raw.choices:
@@ -620,6 +658,7 @@ class OpenAICompatibleProvider:
                     },
                 ],
                 response_format=response_format,  # type: ignore[arg-type]
+                **self._request_extra_kwargs(structured=True),
             )
             self.last_usage = _add_usage(self.last_usage, _openai_usage(repair))
             repaired_text = _strip_code_fence(repair.choices[0].message.content or "")
@@ -661,11 +700,14 @@ class OpenAICompatibleProvider:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            **self._extra_kwargs,
+            **self._request_extra_kwargs(structured=False),
         )
         self.last_usage = _openai_usage(raw)
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
+        self.last_stop_reason = _normalise_stop_reason(
+            getattr(raw.choices[0], "finish_reason", None),
+        )
         # Cheap OSS models wrap free text in ```fences``` (the same reason
         # complete_structured strips them). And an empty/whitespace body is a
         # FAILURE, not a successful "" — returning it would silently poison this
@@ -724,6 +766,14 @@ class FallbackProvider:
         with self._lock:
             served = self._fallback if self._served_model == self._fallback.model else self._primary
         return getattr(served, "last_usage", None)
+
+    @property
+    def last_stop_reason(self) -> str | None:
+        """Stop reason of the most recent ``complete_text`` call, from whichever
+        provider served it."""
+        with self._lock:
+            served = self._fallback if self._served_model == self._fallback.model else self._primary
+        return getattr(served, "last_stop_reason", None)
 
     @property
     def model(self) -> str:
@@ -889,7 +939,7 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         fb_provider = (_env("FALLBACK_PROVIDER", required=False) or "anthropic").strip().lower()
         fallback = _construct(
             fb_provider, fb_model, fb_key, _env("FALLBACK_BASE_URL", required=False),
-            disable_thinking=no_think,
+            disable_thinking=no_think, require_parameters=require_params,
         )
         logger.info(
             "[LLM] role=%s primary=%s with fallback=%s", role, model, fb_model,
