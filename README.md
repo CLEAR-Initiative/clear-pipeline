@@ -120,6 +120,7 @@ src/clear_pipeline/
   providers/            Clients and shared logic: clear-api, LLM, embeddings, S3, Redis lock,
                         source APIs (dataminr.py, acled.py, gdacs.py, hapi.py, ...)
   signals/config.py     Settings for the signal pipeline
+  backfill/             One-off commands run by hand (place_names.py: see docs/place-name-backfill.md)
 tests/                  pytest suite (run by CI)
 evals/                  Model-replacement eval (see evals/README.md)
 deploy/                 dagster.yaml and workspace.yaml baked into the Docker image

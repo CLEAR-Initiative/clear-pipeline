@@ -2070,6 +2070,66 @@ def record_unresolved_place_name(
     return data["recordUnresolvedPlaceName"]
 
 
+# The place-name backfill (clear_pipeline.backfill.place_names). clear-api has
+# no signal query with a date or a source filter, so the backfill lists every
+# signal inside a country with few fields, filters them itself, and reads each
+# candidate in full.
+SIGNALS_IN_LOCATION = """
+query BackfillSignalsInLocation($locationId: String!) {
+  signalsByLocation(locationId: $locationId) {
+    id
+    publishedAt
+    retracted
+    locationCorrectedAt
+    source { name }
+    originLocation { id }
+    destinationLocation { id }
+    generalLocation { id name level }
+  }
+}
+"""
+
+SIGNAL_FOR_RELOCATE = """
+query BackfillSignal($id: String!) {
+  signal(id: $id) {
+    id
+    externalId
+    title
+    description
+    publishedAt
+    url
+    rawS3Key
+    retracted
+    locationCorrectedAt
+    locationChallenge { id }
+    source { id name }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
+# Seconds. One answer holds every signal of a country.
+_SIGNALS_IN_LOCATION_TIMEOUT = 600
+
+
+def signals_in_location(location_id: str) -> list[dict]:
+    """Every signal whose location is ``location_id`` or inside it, with the
+    few fields a caller needs to choose among them."""
+    data = _execute(
+        SIGNALS_IN_LOCATION, {"locationId": location_id}, timeout=_SIGNALS_IN_LOCATION_TIMEOUT,
+    )
+    return data.get("signalsByLocation") or []
+
+
+def get_signal_for_relocate(signal_id: str) -> dict | None:
+    """One signal as it is now, with what a re-locate reads before it writes:
+    the text, the three locations, ``locationCorrectedAt`` (a person corrected
+    the location) and the open Location challenge."""
+    return _execute(SIGNAL_FOR_RELOCATE, {"id": signal_id}).get("signal")
+
+
 def get_signal_location(signal_id: str) -> dict | None:
     """A signal's `generalLocation` as clear-api holds it now, in the shape
     ``update_signal_location`` returns (``{id, name, level, ancestorIds}``),
