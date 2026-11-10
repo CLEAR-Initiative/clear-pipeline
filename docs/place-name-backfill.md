@@ -48,6 +48,8 @@ When the locator now reads another state, the signal stays. The plan marks it `d
 
 clear-api applies a resolved name to each signal it records. When a reviewer resolved the name already, the signal moves to the alias location. This is the rule of the queue, in the drain too. `apply` cannot record a name and switch that rule off, so it has no "names only" option.
 
+`apply` tells clear-api that each move is a replay. clear-api then adds a `REPLAY` row to its location Outcome log (clear-api ADR-0020). The row holds the pipeline version and the run id `place-names-backfill:<plan file name>`. The location precision chart on `/metrics` keeps its history: a move does not change the week or the level a signal had.
+
 ## What it does not do
 
 - It does not re-group events. A moved signal stays in its event (ticket #1316).
