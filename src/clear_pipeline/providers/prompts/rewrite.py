@@ -9,9 +9,17 @@ when structured source data is available.
 Claude no longer makes clustering decisions.
 """
 
+import re
+
 # Bump whenever the prompt text changes.
 # v3: added `start_date` (event onset) — the LLM fallback for events.startedAt.
-REWRITE_PROMPT_VERSION = "rewrite-v3"
+# v4: the title names the places the signals name (with their Arabic spelling),
+#     not only the admin area the event was geocoded to.
+REWRITE_PROMPT_VERSION = "rewrite-v4"
+
+# The longest title kept with its Arabic spellings. The prompt asks for 80
+# characters of English; the spellings in parentheses come on top of that.
+TITLE_MAX_CHARS = 100
 
 SYSTEM_PROMPT = """\
 You are a humanitarian intelligence analyst for the CLEAR early warning system.
@@ -34,8 +42,27 @@ Signals:
 {signals_block}
 
 Guidelines:
-- title: <=80 chars, human-readable, no emojis, no quotes/brackets. Lead with
-  the event type and location (e.g. "Armed clash in East Darfur").
+- title: human-readable, no emojis, no quotes. Lead with the event type, then
+  the place. At most 80 characters, not counting Arabic spellings in
+  parentheses.
+    * When the signals name a place more specific than Location (a town, a
+      village, a neighbourhood, a camp, a facility), name that place, then
+      Location for context: "Battles in Mazbud, Aruri and Kamo, North Darfur".
+    * Use Location alone only when the signals name nothing more specific:
+      "Armed clash in East Darfur".
+    * With several signals, name a place only when every signal names it.
+      When the signals name different places, use Location alone: "Battles
+      in South Kordofan", not "Battles in Dibeibat and Dilling".
+    * Name only places that are written in the signals. Never add a place,
+      and never correct or complete a place name.
+    * When the signals write a place in Arabic script, ALWAYS put that
+      Arabic spelling in parentheses after its English spelling, copied
+      letter for letter from the signal text, for each place you name:
+      "Clashes in Al-Kanabi (الكنابي), Northern" and "Battles in Mazbud
+      (مزبد) and Kamo (كامو), North Darfur". A reader checks your English
+      spelling against it. Use no parentheses for a place the signals write
+      only in Latin script, and none for Location.
+    * If the places do not fit, keep the most-mentioned place and Location.
 - description: 1-2 sentences. What happened, where, scale if known, key
   humanitarian implication.
 - severity (integer 1-5 or null):
@@ -89,3 +116,50 @@ def build_rewrite_prompt(
         signal_count=len(signals),
         signals_block=signals_block,
     )
+
+
+# ── The title, checked in code after the model call ──────────────────────────
+
+_ARABIC_LETTER = re.compile(r"[\u0621-\u064A]")
+# A parenthetical that holds Arabic script: "(الكنابي)".
+_ARABIC_PARENS = re.compile(r"\s*\(([^()]*[\u0621-\u064A][^()]*)\)")
+# Marks that change the direction of the text around them. A title is stored
+# as plain text; the page that shows it handles direction.
+_BIDI_CONTROLS = re.compile(r"[\u200E\u200F\u202A-\u202E\u2066-\u2069]")
+# Vowel marks and tatweel: a post may write them, a model may drop them.
+_ARABIC_MARKS = re.compile(r"[\u064B-\u065F\u0670\u0640]")
+
+
+def _plain_arabic(text: str) -> str:
+    return _ARABIC_MARKS.sub("", text)
+
+
+def clean_event_title(title: str, signals: list[dict]) -> str:
+    """The model's title, with what must not be stored taken out:
+
+    - an Arabic spelling in parentheses that occurs in no signal's text. The
+      model copies a place's spelling from the post; one it made up, or
+      "corrected", must not reach a reader as if the source had written it;
+    - every Arabic spelling, when the title is longer than `TITLE_MAX_CHARS`
+      with them: the English title is what a list has room for;
+    - invisible direction marks.
+
+    English place names are not checked here: a transliteration cannot be
+    matched to the text by code. The prompt forbids added places, and the
+    eval cases in `evals/event_title/` check it.
+    """
+    title = _BIDI_CONTROLS.sub("", title or "")
+    text = _plain_arabic(" ".join(
+        f"{s.get('title') or ''} {s.get('description') or ''}" for s in signals
+    ))
+
+    def keep_if_written(match: re.Match) -> str:
+        spelling = _plain_arabic(match.group(1)).strip()
+        return match.group(0) if spelling and spelling in text else ""
+
+    title = _ARABIC_PARENS.sub(keep_if_written, title)
+    if len(title) > TITLE_MAX_CHARS:
+        title = _ARABIC_PARENS.sub("", title)
+    # Tidy what a removal leaves behind: "Al-Kanabi , Northern" → "Al-Kanabi, Northern".
+    title = re.sub(r"\s+([,.;:])", r"\1", title)
+    return re.sub(r"\s{2,}", " ", title).strip()

@@ -32,7 +32,7 @@ from clear_pipeline.providers.llm import make_llm_provider
 from clear_pipeline.providers.prompts.rewrite import (
     SYSTEM_PROMPT as REWRITE_SYSTEM,
 )
-from clear_pipeline.providers.prompts.rewrite import build_rewrite_prompt
+from clear_pipeline.providers.prompts.rewrite import build_rewrite_prompt, clean_event_title
 from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import (
     earliest_onset_iso,
@@ -522,6 +522,8 @@ def _rewrite_event(
         result = make_llm_provider("signal").complete_structured(
             system=REWRITE_SYSTEM, user=prompt, schema=EventRewrite
         )
+        # An Arabic spelling the signals do not write never reaches the event.
+        result.title = clean_event_title(result.title, signals)
         return result, signals
     except Exception as e:
         if raise_errors:
