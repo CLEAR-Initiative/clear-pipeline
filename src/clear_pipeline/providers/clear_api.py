@@ -1412,6 +1412,15 @@ mutation UpdateSignalLocation($id: String!, $locationId: String!) {
 }
 """
 
+GET_SIGNAL_LOCATION = """
+query SignalLocation($id: String!) {
+  signal(id: $id) {
+    id
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
 CREATE_EVENT = """
 mutation CreateEvent($input: CreateEventInput!) {
   createEvent(input: $input) {
@@ -2061,6 +2070,15 @@ def record_unresolved_place_name(
     return data["recordUnresolvedPlaceName"]
 
 
+def get_signal_location(signal_id: str) -> dict | None:
+    """A signal's `generalLocation` as clear-api holds it now, in the shape
+    ``update_signal_location`` returns (``{id, name, level, ancestorIds}``),
+    or None. For the drain, after a write that can move the signal on the
+    server (a geocode miss recorded on a name that is resolved already)."""
+    data = _execute(GET_SIGNAL_LOCATION, {"id": signal_id}, retries=1, timeout=_RECORD_UNRESOLVED_TIMEOUT)
+    return (data.get("signal") or {}).get("generalLocation")
+
+
 def create_event(input_data: dict) -> dict:
     # retries=1: createEvent has no idempotency key (unlike createSignal's
     # (sourceId, externalId)), so a retry after a timeout that actually committed
@@ -2465,9 +2483,49 @@ RESOLVE_GAZETTEER_LOCATION_WITHIN = RESOLVE_GAZETTEER_LOCATION.replace(
     "minSimilarity: $minSimilarity)", "minSimilarity: $minSimilarity, withinLocationId: $withinLocationId)"
 )
 
+# The place-alias fields (clear-api #1309): `source` says whether the hit is
+# one of CLEAR's own aliases, and `locationId` is the CLEAR location an alias
+# points at.
+_GAZETTEER_ALIAS_FIELDS = "    exact\n    locationId\n    source\n"
+
+
+def _with_alias_fields(query: str) -> str:
+    return query.replace("    exact\n", _GAZETTEER_ALIAS_FIELDS)
+
+
 # Flipped off for the process when clear-api rejects `withinLocationId` (a
 # clear-api without #1207), so each lookup isn't paid for twice.
 _gazetteer_within_supported = True
+
+# Flipped off for the process when clear-api rejects `locationId` / `source`
+# (a clear-api without #1309). Hits then carry neither, and every hit is
+# treated as a GeoNames hit, as before.
+_gazetteer_alias_fields_supported = True
+
+
+def _gazetteer_query(query: str, variables: dict) -> dict | None:
+    """Run one gazetteer query, asking for the alias fields while clear-api
+    has them. A rejection of those fields drops them for the process (logged
+    once) and the query runs again without them."""
+    global _gazetteer_alias_fields_supported
+    # retries=1 (single attempt, no backoff): this tier is best-effort with a
+    # LocationIQ fallback, so a transient clear-api error must not stall the
+    # worker through ~6s of retry sleeps before the fallback runs.
+    if _gazetteer_alias_fields_supported:
+        try:
+            data = _execute(_with_alias_fields(query), variables, retries=1)
+            return data.get("resolveGazetteerLocation")
+        except ClearApiError as exc:
+            text = str(exc)
+            if not ("Cannot query field" in text and "GazetteerHit" in text):
+                raise
+            _gazetteer_alias_fields_supported = False
+            logger.warning(
+                "clear-api has no GazetteerHit.locationId / source — deploy clear-api #1309; "
+                "place aliases are not used for this process"
+            )
+    data = _execute(query, variables, retries=1)
+    return data.get("resolveGazetteerLocation")
 
 
 def resolve_gazetteer_location(
@@ -2483,6 +2541,11 @@ def resolve_gazetteer_location(
     exact, …) or None when nothing matches. The hybrid geoparser's first,
     offline tier; LocationIQ is the fallback for landmarks/POIs it lacks.
 
+    clear-api checks its own place aliases before GeoNames. An alias hit has
+    ``source == "ALIAS"`` and a ``locationId``: the CLEAR location to use
+    directly. Against a clear-api without those fields, they are dropped
+    (logged once) and every hit is a GeoNames hit.
+
     `within_location_id` keeps only matches inside that location. Against a
     clear-api that doesn't know the argument yet, it's dropped (logged once)
     and the caller's own area check is what remains.
@@ -2493,17 +2556,12 @@ def resolve_gazetteer_location(
         variables["countryCode"] = country_code
     if min_similarity is not None:
         variables["minSimilarity"] = min_similarity
-    # retries=1 (single attempt, no backoff): this tier is best-effort with a
-    # LocationIQ fallback, so a transient clear-api error must not stall the
-    # Celery worker through ~6s of retry sleeps before the fallback runs.
     if within_location_id and _gazetteer_within_supported:
         try:
-            data = _execute(
+            return _gazetteer_query(
                 RESOLVE_GAZETTEER_LOCATION_WITHIN,
                 {**variables, "withinLocationId": within_location_id},
-                retries=1,
             )
-            return data.get("resolveGazetteerLocation")
         except ClearApiError as exc:
             if "withinLocationId" not in str(exc):
                 raise
@@ -2512,8 +2570,7 @@ def resolve_gazetteer_location(
                 "clear-api rejects resolveGazetteerLocation(withinLocationId) — "
                 "deploy clear-api #1207; querying without it for this process"
             )
-    data = _execute(RESOLVE_GAZETTEER_LOCATION, variables, retries=1)
-    return data.get("resolveGazetteerLocation")
+    return _gazetteer_query(RESOLVE_GAZETTEER_LOCATION, variables)
 
 
 GET_CRISIS_CANONICAL = """

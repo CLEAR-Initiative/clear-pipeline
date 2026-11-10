@@ -225,6 +225,11 @@ class GeoparseResult:
     importance: float                    # Nominatim's importance score
     display_name: str                    # full address-style label from Nominatim
     raw: dict = field(default_factory=dict)  # the raw Nominatim result for callers that want more
+    #: The CLEAR location of a place-alias hit (clear-api ADR-0019). Set only
+    #: when the gazetteer answered from CLEAR's own aliases: use it as the
+    #: signal's location directly, with no landmark promote. `lat` / `lng`
+    #: are then that location's point.
+    location_id: str | None = None
 
 
 @dataclass
@@ -597,15 +602,29 @@ def country_from_coords(lat: float | None, lng: float | None) -> str | None:
     return None
 
 
+def _alias_location_id(hit: dict) -> str | None:
+    """The CLEAR location of a gazetteer hit that came from a place alias,
+    else None (a GeoNames hit, or a clear-api without the alias fields)."""
+    if hit.get("source") == "ALIAS" and hit.get("locationId"):
+        return str(hit["locationId"])
+    return None
+
+
 def _resolve_via_gazetteer(
     top: Candidate,
     expected: set[str],
     within_location_id: str | None = None,
     trace: GeocodeTrace | None = None,
+    alias_only: bool = False,
 ) -> GeoparseResult | None:
-    """Hybrid tier 1: look the top candidate up in clear-api's offline
-    GeoNames gazetteer. Returns a GeoparseResult on a confident hit, else
-    None so the caller falls back to LocationIQ.
+    """Hybrid tier 1: look the top candidate up in clear-api's gazetteer:
+    CLEAR's place aliases first, then the offline GeoNames copy. Returns a
+    GeoparseResult on a confident hit, else None so the caller falls back to
+    LocationIQ. An alias hit carries `location_id`.
+
+    `alias_only` keeps an alias hit and drops a GeoNames hit: for landmark
+    names, which GeoNames answers with the wrong place (see
+    `_resolve_candidate`), but which a person may have aliased.
 
     Country scope: pin the lookup to the one expected country when
     unambiguous; otherwise search every loaded country and drop a hit
@@ -629,6 +648,9 @@ def _resolve_via_gazetteer(
         return None
 
     if not hit:
+        return None
+    alias_location_id = _alias_location_id(hit)
+    if alias_only and not alias_location_id:
         return None
 
     # Country guard. Reject a hit outside the expected set — and, when an
@@ -676,6 +698,7 @@ def _resolve_via_gazetteer(
         importance=float(hit.get("score") or 0.0),
         display_name=hit.get("name") or top.name,
         raw=hit,
+        location_id=alias_location_id,
     )
 
 
@@ -767,7 +790,13 @@ def _resolve_arabic(
     where "Tendalti" fuzzy-matched El Fasher. A hit counts only when its Latin
     name agrees with `latin_name` — GeoNames is volunteer-edited, and Kosti
     carries Rabak's Arabic name (ربك) — and `accept` takes it. Also tries the
-    name without a leading ال, which posts and GeoNames attach inconsistently."""
+    name without a leading ال, which posts and GeoNames attach inconsistently.
+
+    A place-alias hit (a person mapped this Arabic spelling to a CLEAR
+    location) skips the Latin-name and feature-class checks, which guard
+    against GeoNames' own errors; `accept` still applies. For a landmark name
+    only an alias hit counts: GeoNames holds few facilities."""
+    alias_only = _is_landmark(latin_name)
     cc = next(iter(expected)).upper() if len(expected) == 1 else None
     queries = [arabic_name]
     if arabic_name.startswith("ال") and len(arabic_name) > 4:
@@ -787,15 +816,18 @@ def _resolve_arabic(
         country = (hit.get("countryCode") or "").lower()
         if expected and country not in expected:
             continue
+        alias_location_id = _alias_location_id(hit)
+        if alias_only and not alias_location_id:
+            continue
         # Same guard as the Latin gazetteer tier: a river or road ("النيل
         # الأبيض") would become a point at an arbitrary spot along it.
-        if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+        if not alias_location_id and (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
             logger.info(
                 "[geoparser] Arabic %r matched %r, feature class %s (linear/zonal) — skipping",
                 query, hit.get("name"), hit.get("featureClass"),
             )
             continue
-        if not _spellings_agree(hit.get("name") or "", latin_name):
+        if not alias_location_id and not _spellings_agree(hit.get("name") or "", latin_name):
             logger.info(
                 "[geoparser] Arabic %r matched %r, which disagrees with %r — skipping",
                 query, hit.get("name"), latin_name,
@@ -823,15 +855,18 @@ def _resolve_arabic(
             importance=float(hit.get("score") or 0.0),
             display_name=hit.get("name") or latin_name,
             raw=hit,
+            location_id=alias_location_id,
         )
     return None
 
 
 def arabic_lookup_applies(name: str) -> bool:
     """Whether `geocode_place_name` would try an Arabic spelling of `name`:
-    only with the gazetteer on, and not for landmarks (it holds few POIs).
-    Callers check this before paying to obtain the spelling."""
-    return settings.geoparser_use_gazetteer and not _is_landmark(name.strip())
+    only with the gazetteer on. Landmark names are tried too: GeoNames holds
+    few facilities, but a place alias can map a facility's Arabic name
+    ("محطة أم دباكر") to its CLEAR location. Callers check this before paying
+    to obtain the spelling."""
+    return bool(name.strip()) and settings.geoparser_use_gazetteer
 
 
 def geocode_place_name(
@@ -905,6 +940,10 @@ def gazetteer_knows(name: str, country_code: str, *, arabic_name: str | None = N
             return False
         if not hit or not hit.get("exact"):
             continue
+        # A place alias is a person's answer for this spelling: it needs none
+        # of the checks below, which guard against GeoNames' own errors.
+        if _alias_location_id(hit):
+            return True
         if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
             continue
         if is_arabic and not _spellings_agree(hit.get("name") or "", name):
@@ -933,8 +972,14 @@ def _resolve_candidate(
     # can't reject (it's in the same district as the airport), which would pin
     # a permanently wrong landmark L4. Landmarks go straight to LocationIQ
     # tier 2, which does resolve aerodromes / hospitals / camps.
-    if settings.geoparser_use_gazetteer and top.kind != "landmark":
-        gaz = _resolve_via_gazetteer(top, expected, within_location_id, trace)
+    #
+    # A landmark still asks for a place alias (`alias_only`): a person may have
+    # mapped the facility's name to its CLEAR location, and that answer is
+    # exact, unlike a fuzzy GeoNames match.
+    if settings.geoparser_use_gazetteer:
+        gaz = _resolve_via_gazetteer(
+            top, expected, within_location_id, trace, alias_only=top.kind == "landmark"
+        )
         if gaz is not None:
             if accept is None or accept(gaz.lat, gaz.lng):
                 return gaz
