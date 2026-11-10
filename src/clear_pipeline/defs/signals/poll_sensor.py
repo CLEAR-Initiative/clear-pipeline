@@ -12,6 +12,13 @@ poll cadence) and launches the ingest job once the configured interval has
 elapsed since the last launch — both values live in the cursor JSON
 (``{"interval_minutes": N, "last_run": <epoch>}``).
 
+A due poll launches nothing while a run of the same job is still waiting to
+start. A run carries no work of its own — it means "run this job now" — so the
+waiting run already covers whatever is pending. Without this check the sensors
+kept adding one run a minute to a queue that was not moving: prod reached
+19,500 queued runs in November 2026, and the run coordinator, which sorts the
+whole queue on every pass, slowed to one launch every ~78 seconds.
+
 No ``from __future__ import annotations`` here — Dagster inspects the sensor's
 ``context`` annotation, and stringifying it trips validation (same reason the
 asset modules omit it).
@@ -22,6 +29,16 @@ import time
 from collections.abc import Callable
 
 import dagster as dg
+
+# A run in one of these states has been asked for and has not begun. One of
+# them is enough: another would only wait behind it. A STARTED run does NOT
+# block a new one — it may be busy for minutes (a large translation), and a
+# fresh run alongside it is what serves a request that arrives meanwhile.
+_WAITING_STATUSES = [
+    dg.DagsterRunStatus.QUEUED,
+    dg.DagsterRunStatus.NOT_STARTED,
+    dg.DagsterRunStatus.STARTING,
+]
 
 # How often the daemon evaluates the sensor. This bounds how promptly a due poll
 # fires and how quickly a cursor edit takes effect — it is NOT the poll interval.
@@ -45,7 +62,10 @@ def build_poll_sensor(
     ``skip_when``, checked every tick, returns a reason to launch nothing (the
     job would have no work at all) or ``None`` to poll as usual. A skipped
     tick leaves the cursor alone, so polling resumes on the next tick after
-    the reason clears."""
+    the reason clears.
+
+    A due poll is also skipped while a run of ``job`` is waiting to start (see
+    the module docstring). So each job has at most one run in the queue."""
 
     @dg.sensor(
         name=name,
@@ -71,6 +91,21 @@ def build_poll_sensor(
             # value is swallowed as StopIteration instead of surfacing the skip.
             yield dg.SkipReason(
                 f"{int(wait)}s until next poll (interval={interval_minutes}m)"
+            )
+            return
+
+        # Due — but never queue a second run behind one that has not started.
+        # The cursor is left alone, so the next tick after that run starts
+        # launches at once.
+        waiting = context.instance.get_run_records(
+            filters=dg.RunsFilter(job_name=job.name, statuses=_WAITING_STATUSES),
+            limit=1,
+        )
+        if waiting:
+            run = waiting[0].dagster_run
+            yield dg.SkipReason(
+                f"run {run.run_id[:8]} of {job.name} is still {run.status.value.lower()} "
+                "— not queueing another"
             )
             return
 
