@@ -1936,11 +1936,14 @@ def _run_fields() -> dict[str, str]:
     return {k: v for k, v in fields.items() if v}
 
 
-def _rejects_run_inputs(exc: ClearApiError) -> bool:
+def _rejects_run_inputs(exc: Exception) -> bool:
     """True when clear-api refused a request because it does not know the run
-    inputs (it is older than the Outcome log)."""
+    inputs (it is older than the Outcome log). The refusal is a 400 for an
+    unknown argument or type (``ClearApiError``), or a 200 with a GraphQL
+    error for an unknown input field (``GraphQLErrors``)."""
     text = str(exc)
-    return any(name in text for name in _RUN_INPUT_NAMES)
+    unknown = ("Unknown argument", "Unknown type", "is not defined by type")
+    return any(m in text for m in unknown) and any(name in text for name in _RUN_INPUT_NAMES)
 
 
 def _execute_with_run(query: str, variables: dict, legacy_query: str, legacy_variables: dict) -> dict[str, Any]:
@@ -1951,9 +1954,7 @@ def _execute_with_run(query: str, variables: dict, legacy_query: str, legacy_var
     if _run_inputs_supported:
         try:
             return _execute(query, variables)
-        except GraphQLErrors:
-            raise
-        except ClearApiError as exc:
+        except (ClearApiError, GraphQLErrors) as exc:
             if not _rejects_run_inputs(exc):
                 raise
             _run_inputs_supported = False

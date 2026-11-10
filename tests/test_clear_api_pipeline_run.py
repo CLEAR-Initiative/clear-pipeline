@@ -96,6 +96,60 @@ def test_an_older_clear_api_gets_the_old_mutations_from_then_on():
     assert _calls(execute)[1] == (clear_api.CREATE_SIGNAL, {"input": {"sourceId": "src"}})
 
 
+class _Response:
+    def __init__(self, status_code: int, body: dict):
+        self.status_code = status_code
+        self._body = body
+        self.text = str(body)
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+@pytest.mark.parametrize("refusal", [
+    # An unknown input field: HTTP 200 with a GraphQL error.
+    _Response(200, {"errors": [{
+        "message": 'Variable "$input" got invalid value { sourceId: "src", runId: "run-1" }; '
+                   'Field "runId" is not defined by type "CreateSignalInput".',
+        "extensions": {"code": "BAD_USER_INPUT"},
+    }]}),
+    # A validation failure: HTTP 400.
+    _Response(400, {"errors": [{"message": 'Field "pipelineVersion" is not defined by type "CreateSignalInput".'}]}),
+])
+def test_the_fallback_reads_the_refusal_of_a_real_response(refusal, monkeypatch):
+    monkeypatch.setenv("CLEAR_API_URL", "http://clear-api.test/graphql")
+    monkeypatch.setenv("CLEAR_API_KEY", "key")
+    monkeypatch.setattr(clear_api.time, "sleep", lambda _s: None)
+    sent: list[dict] = []
+
+    def post(_url, json, **_kwargs):
+        sent.append(json["variables"]["input"])
+        if "runId" in json["variables"]["input"]:
+            return refusal
+        return _Response(200, {"data": {"createSignal": {"id": "s1"}}})
+
+    with patch.object(clear_api.httpx, "post", side_effect=post):
+        with pipeline_run(run_id="run-1"):
+            assert create_signal({"sourceId": "src"}) == {"id": "s1"}
+            assert create_signal({"sourceId": "src"}) == {"id": "s1"}
+    assert sent[-2:] == [{"sourceId": "src"}, {"sourceId": "src"}]
+    assert clear_api._run_inputs_supported is False
+
+
+def test_a_graphql_error_about_something_else_is_raised(monkeypatch):
+    monkeypatch.setenv("CLEAR_API_URL", "http://clear-api.test/graphql")
+    monkeypatch.setenv("CLEAR_API_KEY", "key")
+    monkeypatch.setattr(clear_api.time, "sleep", lambda _s: None)
+    not_found = _Response(200, {"errors": [{"message": "DataSource not found", "extensions": {"code": "NOT_FOUND"}}]})
+    with patch.object(clear_api.httpx, "post", return_value=not_found):
+        with pytest.raises(clear_api.ClearApiNotFound):
+            create_signal({"sourceId": "src"})
+    assert clear_api._run_inputs_supported is True
+
+
 def test_another_clear_api_error_is_not_a_reason_to_fall_back():
     with patch.object(clear_api, "_execute", side_effect=ClearApiError("clear-api 401 (non-retryable)")):
         with pytest.raises(ClearApiError):
