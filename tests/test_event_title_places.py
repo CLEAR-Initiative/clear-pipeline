@@ -118,6 +118,10 @@ def test_a_title_names_three_places_at_most(title, cleaned):
     assert clean_event_title(title, [VILLAGES], "Um Rawaba") == cleaned
 
 
+def test_the_label_goes_when_a_removed_spelling_uncovers_it():
+    assert clean_event_title("Battles in Um Rawaba Location (أم روابة)", [], "Um Rawaba") == "Battles in Um Rawaba"
+
+
 def test_location_carries_no_arabic_spelling():
     # Location is CLEAR's own name for the area: nothing to check it against.
     state = {"title": "ارتفاع حالات الكوليرا في ولاية شمال كردفان", "description": None}

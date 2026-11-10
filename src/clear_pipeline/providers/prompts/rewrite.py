@@ -208,6 +208,8 @@ def clean_event_title(title: str, signals: list[dict], location_name: str | None
     title = _ARABIC_PARENS.sub(keep_if_written, title)
     if len(title) > TITLE_MAX_CHARS:
         title = _ARABIC_PARENS.sub("", title)
+    # Again: a spelling removed above can leave the label at the end.
+    title = re.sub(r"[\s,]+Location\s*$", "", title)
     # Tidy what a removal leaves behind: "Al-Kanabi , Northern" → "Al-Kanabi, Northern".
     title = re.sub(r"\s+([,.;:])", r"\1", title)
     return re.sub(r"\s{2,}", " ", title).strip()
