@@ -61,7 +61,11 @@ from clear_pipeline.providers.clear_api import (
     get_ground_message_canonical,
     get_location_canonical,
     get_situation_canonical,
+    dagster_run_id,
     mark_signals_processed,
+    pipeline_run,
+    RUN_KIND_LIVE,
+    RUN_KIND_REPLAY,
     mark_translated,
     pending_recomputes,
     pending_signals,
@@ -400,7 +404,9 @@ def _drain_signals(context) -> dg.MaterializeResult:
         if not acquired:
             context.log.info("[classify_group] another drain holds the lock — skipping this run")
             return dg.MaterializeResult(metadata={"skipped_concurrent": True})
-        return _drain_signals_locked(context)
+        # clear-api logs where this run placed each signal (clear-api ADR-0020).
+        with pipeline_run(RUN_KIND_LIVE, run_id=dagster_run_id(context)):
+            return _drain_signals_locked(context)
 
 
 # Chunk the sync so a cutover/backfill (touched_events in the hundreds–thousands)
@@ -683,7 +689,9 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
                 if attempts >= _MAX_SIGNAL_ATTEMPTS:
                     failed.append(_item(row))
                     counts["recompute_failed"] += 1
-        counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
+        # A recompute re-processes signals that a run already finished: a replay.
+        with pipeline_run(RUN_KIND_REPLAY):
+            counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
         if deferred:
             break
     return counts
