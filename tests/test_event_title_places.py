@@ -103,6 +103,9 @@ def test_the_prompt_label_is_never_stored_in_the_title():
     ("Battles in Wad Ashana, Al-Sumayh, Sharkila, Allah Karim and Al-Ghubsha, Um Rawaba", "Battles in Um Rawaba"),
     ("Battles in Wad Ushana, Al Kharim, Sherkila and other locations, Um Rawaba (أم روابة)", "Battles in Um Rawaba"),
     ("Battles in Mazbud (مزبد), Aruri (عروري), Kamo (كامو) and Kutum, Um Rawaba", "Battles in Um Rawaba"),
+    # The prompt's label at the end does not hide a long list, or a spelling after Location.
+    ("Battles in Wad Ashana, Al-Sumayh, Sharkila and Allah Karim, Um Rawaba Location", "Battles in Um Rawaba"),
+    ("Battles in Mazbud (مزبد), Um Rawaba (أم روابة) Location", "Battles in Mazbud (مزبد), Um Rawaba"),
     # Three or fewer stay.
     ("Battles in Mazbud (مزبد), Aruri (عروري) and Kamo (كامو), Um Rawaba", "Battles in Mazbud (مزبد), Aruri (عروري) and Kamo (كامو), Um Rawaba"),
     ("Battles in Wad Ashana and Al-Sumaih, Um Rawaba", "Battles in Wad Ashana and Al-Sumaih, Um Rawaba"),
