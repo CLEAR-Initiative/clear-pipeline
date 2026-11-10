@@ -1415,6 +1415,24 @@ mutation UpdateSignalLocation($id: String!, $locationId: String!) {
 }
 """
 
+# A replay job's move: clear-api writes a REPLAY location Outcome with it
+# (clear-api ADR-0020). The drain uses UPDATE_SIGNAL_LOCATION: its mark writes
+# the Outcome.
+UPDATE_SIGNAL_LOCATION_REPLAY = """
+mutation UpdateSignalLocation(
+  $id: String!, $locationId: String!,
+  $runKind: LocationRunKind, $pipelineVersion: String, $runId: String
+) {
+  updateSignalLocation(
+    id: $id, locationId: $locationId,
+    runKind: $runKind, pipelineVersion: $pipelineVersion, runId: $runId
+  ) {
+    id
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
 GET_SIGNAL_LOCATION = """
 query SignalLocation($id: String!) {
   signal(id: $id) {
@@ -2094,11 +2112,15 @@ def update_signal_location(signal_id: str, location_id: str) -> dict:
     generalLocation}`` with the location in the same shape ``pendingSignals``
     selects, so the drain can patch its row and group on the new district.
     Used by the drain for push feeds that arrive without a location
-    (``LocatingSource``)."""
-    result = _execute(
-        UPDATE_SIGNAL_LOCATION,
-        {"id": signal_id, "locationId": location_id},
-    )
+    (``LocatingSource``), and by replay jobs that move a signal without the
+    drain. Inside ``pipeline_run(RUN_KIND_REPLAY)`` the move tells clear-api
+    that it is a replay, so clear-api logs it."""
+    legacy = {"id": signal_id, "locationId": location_id}
+    if _run_kind.get() == RUN_KIND_REPLAY:
+        variables = {**legacy, "runKind": RUN_KIND_REPLAY, **_run_fields()}
+        result = _execute_with_run(UPDATE_SIGNAL_LOCATION_REPLAY, variables, UPDATE_SIGNAL_LOCATION, legacy)
+    else:
+        result = _execute(UPDATE_SIGNAL_LOCATION, legacy)
     return result["updateSignalLocation"]
 
 

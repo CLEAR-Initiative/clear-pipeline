@@ -74,9 +74,11 @@ from clear_pipeline.defs.signals.connectors import LocatingSource
 from clear_pipeline.defs.signals.stages import _project
 from clear_pipeline.providers import location
 from clear_pipeline.providers.clear_api import (
+    RUN_KIND_REPLAY,
     find_or_create_landmark_l4,
     get_locations,
     get_signal_for_relocate,
+    pipeline_run,
     record_unresolved_place_name,
     signals_in_location,
     update_signal_location,
@@ -615,9 +617,13 @@ def run_apply(args: argparse.Namespace) -> int:
     moves: Counter = Counter()
     statuses: Counter = Counter()
     failed = 0
+    # A replay: clear-api logs each move as one (clear-api ADR-0020). The run
+    # id is the plan's file name, so a plan applied in several goes is one run.
+    run_id = f"place-names-backfill:{plan.name}"
     for number, (entry, move, misses) in enumerate(work, 1):
         try:
-            result = apply_entry(entry, move=move, misses=misses)
+            with pipeline_run(RUN_KIND_REPLAY, run_id=run_id):
+                result = apply_entry(entry, move=move, misses=misses)
         except Exception as exc:  # noqa: BLE001 — one signal; run again to try it again
             failed += 1
             logger.warning("signal %s failed: %s", entry["signalId"], exc)
