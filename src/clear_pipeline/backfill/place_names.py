@@ -26,6 +26,10 @@ names would enter the queue. It reads only the file.
   name enters the queue only when ``--min-signals`` signals of the plan name
   it (default 2), so that one-off spellings do not fill the queue.
 
+clear-api applies a resolved name to each signal it records, here as in the
+drain: when a reviewer resolved the name already, the signal moves to the
+alias location. ``apply`` cannot record a name and switch that rule off.
+
 Which signals ``plan`` takes: those of ``--source`` (default sudan-war-x)
 published in the date range, not retracted, located at a state or a country,
 with no origin or destination location, and not corrected by a person.
@@ -40,6 +44,9 @@ A moved signal stays in its event. Events are not re-grouped here (ticket
 A plan belongs to one clear-api: location ids differ between dev and prod.
 ``apply`` refuses a plan made against another host. Both ``plan`` and ``apply``
 can be stopped and run again: each continues after the last line it wrote.
+``apply`` keeps a log beside the plan of each move it made and each name it
+recorded, so a later run with a lower ``--min-signals`` records only the names
+that are new.
 """
 
 from __future__ import annotations
@@ -321,19 +328,47 @@ def api_host() -> str:
     return urlparse(os.environ.get("CLEAR_API_URL") or settings.clear_api_url).hostname or ""
 
 
-def read_plan(path: Path) -> tuple[dict, dict[str, dict]]:
+def read_lines(path: Path, *, repair: bool = False) -> list[dict]:
+    """The JSON lines of a file this command wrote.
+
+    A stop in the middle of a write leaves a last line with no newline. That
+    line is left out when it is cut short, and kept when it is whole. With
+    ``repair`` the file is also put right, so the next line appended starts on
+    a line of its own. A bad line anywhere else is damage: the command stops."""
+    raw = path.read_bytes()
+    whole, _, tail = raw.rpartition(b"\n")
+    records: list[dict] = []
+    for number, line in enumerate(whole.split(b"\n") if whole else [], 1):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            raise SystemExit(f"{path}, line {number}: not valid JSON. The file is damaged.") from None
+    if tail.strip():
+        try:
+            records.append(json.loads(tail))
+            cut_short = False
+        except ValueError:
+            cut_short = True
+        if repair and cut_short:
+            with path.open("r+b") as handle:
+                handle.truncate(len(raw) - len(tail))
+        elif repair:
+            with path.open("ab") as handle:
+                handle.write(b"\n")
+    return records
+
+
+def read_plan(path: Path, *, repair: bool = False) -> tuple[dict, dict[str, dict]]:
     """The header and the last line written for each signal."""
     header: dict = {}
     entries: dict[str, dict] = {}
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            if item.get("type") == "header":
-                header = item
-            elif item.get("signalId"):
-                entries[item["signalId"]] = item
+    for item in read_lines(path, repair=repair):
+        if item.get("type") == "header":
+            header = item
+        elif item.get("signalId"):
+            entries[item["signalId"]] = item
     if not header:
         raise SystemExit(f"{path} has no header line: it is not a plan file")
     return header, entries
@@ -364,15 +399,17 @@ def run_plan(args: argparse.Namespace) -> int:
     }
 
     done: set[str] = set()
-    if out.exists():
-        old_header, entries = read_plan(out)
+    # An empty file is a run that stopped before its first line.
+    continues = out.exists() and out.stat().st_size > 0
+    if continues:
+        old_header, entries = read_plan(out, repair=True)
         same = all(old_header.get(k) == header[k] for k in ("host", "country", "sources", "since", "until"))
         if not same:
             raise SystemExit(f"{out} is a plan for other signals or another host. Use another --out.")
         # A signal that failed is tried again.
         done = {i for i, e in entries.items() if e.get("outcome") != "error"}
     lines = _Lines(out)
-    if not out.exists():
+    if not continues:
         lines.write({**header, "createdAt": datetime.now(timezone.utc).isoformat()})
 
     country_id = location.resolve_country_only_location(args.country)
@@ -500,14 +537,15 @@ def apply_move(entry: dict) -> str:
     return "moved"
 
 
-def apply_entry(entry: dict, named: dict[tuple, set[str]], *, min_signals: int, moves: bool) -> dict:
+def apply_entry(entry: dict, *, move: bool, misses: list[dict]) -> dict:
+    """Write one signal: its move when ``move``, then each of ``misses``.
+    The result is the line for the log: what was done, so that the next run
+    does not do it again."""
     result: dict = {"type": "applied", "signalId": entry["signalId"]}
-    if moves and entry.get("outcome") == "move":
+    if move:
         result["move"] = apply_move(entry)
     recorded = []
-    for miss in entry.get("misses") or []:
-        if len(named[queue_key(miss)]) < min_signals:
-            continue
+    for miss in misses:
         row = record_unresolved_place_name(
             signal_id=entry["signalId"],
             name=miss["name"],
@@ -520,10 +558,24 @@ def apply_entry(entry: dict, named: dict[tuple, set[str]], *, min_signals: int, 
         )
         if row is None:
             raise SystemExit("clear-api has no recordUnresolvedPlaceName. Deploy clear-api #1307 first.")
-        recorded.append({"name": miss["name"], "status": row.get("status")})
+        recorded.append({"name": miss["name"], "key": list(queue_key(miss)), "status": row.get("status")})
     if recorded:
         result["recorded"] = recorded
     return result
+
+
+def read_applied(log_path: Path) -> tuple[set[str], set[tuple[str, tuple]]]:
+    """What earlier runs did: the signals whose move was tried, and the names
+    recorded for each signal."""
+    moved: set[str] = set()
+    recorded: set[tuple[str, tuple]] = set()
+    if log_path.exists():
+        for line in read_lines(log_path, repair=True):
+            if "move" in line:
+                moved.add(line["signalId"])
+            for item in line.get("recorded") or []:
+                recorded.add((line["signalId"], tuple(item["key"])))
+    return moved, recorded
 
 
 def run_apply(args: argparse.Namespace) -> int:
@@ -535,31 +587,37 @@ def run_apply(args: argparse.Namespace) -> int:
             "Location ids differ between hosts: make a plan against this host."
         )
     log_path = plan.with_suffix(plan.suffix + ".applied")
-    done: set[str] = set()
-    if log_path.exists():
-        with log_path.open(encoding="utf-8") as handle:
-            done = {json.loads(line)["signalId"] for line in handle if line.strip()}
+    moved, recorded = read_applied(log_path)
     log = _Lines(log_path)
 
+    # What is left for each signal: its move, and the names that pass the
+    # threshold and are not recorded yet. A name counts once per signal.
     named = signals_per_name(entries)
-    work = [
-        e for e in entries.values()
-        if e["signalId"] not in done
-        and (
-            (not args.skip_moves and e.get("outcome") == "move")
-            or any(len(named[queue_key(m)]) >= args.min_signals for m in e.get("misses") or [])
-        )
-    ]
+    work: list[tuple[dict, bool, list[dict]]] = []
+    for entry in entries.values():
+        move = entry.get("outcome") == "move" and entry["signalId"] not in moved
+        misses = list({
+            queue_key(m): m
+            for m in entry.get("misses") or []
+            if len(named[queue_key(m)]) >= args.min_signals
+            and (entry["signalId"], queue_key(m)) not in recorded
+        }.values())
+        if move or misses:
+            work.append((entry, move, misses))
     if args.limit is not None:
         work = work[: args.limit]
-    print(f"Applying {len(work)} signals to {header['host']} ({len(done)} done before).", flush=True)
+    print(
+        f"Applying {len(work)} signals to {header['host']} "
+        f"({len(moved)} moves and {len(recorded)} names done before).",
+        flush=True,
+    )
 
     moves: Counter = Counter()
     statuses: Counter = Counter()
     failed = 0
-    for number, entry in enumerate(work, 1):
+    for number, (entry, move, misses) in enumerate(work, 1):
         try:
-            result = apply_entry(entry, named, min_signals=args.min_signals, moves=not args.skip_moves)
+            result = apply_entry(entry, move=move, misses=misses)
         except Exception as exc:  # noqa: BLE001 — one signal; run again to try it again
             failed += 1
             logger.warning("signal %s failed: %s", entry["signalId"], exc)
@@ -577,6 +635,8 @@ def run_apply(args: argparse.Namespace) -> int:
     print(f"Names recorded: {sum(statuses.values())}")
     for status, count in statuses.most_common():
         print(f"  on a row that is {status}: {count}")
+    if statuses.get("RESOLVED"):
+        print("  clear-api applies a resolved name to the signal: it may have moved to the alias location.")
     if failed:
         print(f"\n{failed} signals failed. Run the same command again to try them again.")
     return 1 if failed else 0
@@ -621,7 +681,6 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--plan", required=True)
     apply.add_argument("--min-signals", type=int, default=DEFAULT_MIN_SIGNALS,
                        help="a name enters the queue when this many signals name it (default 2)")
-    apply.add_argument("--skip-moves", action="store_true", help="record the names only; move no signal")
     apply.add_argument("--limit", type=int, help="apply this many signals at most")
     apply.set_defaults(run=run_apply)
     return parser

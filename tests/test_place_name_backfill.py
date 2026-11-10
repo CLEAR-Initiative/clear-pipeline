@@ -341,31 +341,19 @@ def test_apply_leaves_the_signal_when_the_point_gives_no_location():
     api["update"].assert_not_called()
 
 
-def test_apply_records_a_name_with_the_date_of_the_post_when_enough_signals_name_it():
-    entries = {e["signalId"]: e for e in [
-        planned("a", misses=[miss("Azwag Tibba", name_ar="ازوق تبة"), miss("Once Only")]),
-        planned("b", misses=[miss("Azwag Tibba")]),
-    ]}
-    named = backfill.signals_per_name(entries)
+def test_apply_records_a_name_with_the_date_of_the_post():
+    entry = planned("a", misses=[miss("Azwag Tibba", name_ar="ازوق تبة")])
     with clear_api(signal("a")) as api:
-        result = backfill.apply_entry(entries["a"], named, min_signals=2, moves=True)
+        result = backfill.apply_entry(entry, move=False, misses=entry["misses"])
 
     api["record"].assert_called_once_with(
         signal_id="a", name="Azwag Tibba", name_ar="ازوق تبة", country_code="SD",
         area_location_id="sd-wk", reason="NO_MATCH", seen_at="2026-09-10T08:00:00+00:00",
     )
-    assert result == {"type": "applied", "signalId": "a",
-                      "recorded": [{"name": "Azwag Tibba", "status": "OPEN"}]}
-    api["update"].assert_not_called()  # outcome "same": nothing to move
-
-
-def test_apply_can_record_names_and_move_nothing():
-    entry = {**POINT_MOVE, "misses": [miss("Azwag Tibba")]}
-    named = backfill.signals_per_name({"s1": entry})
-    with clear_api(signal()) as api:
-        result = backfill.apply_entry(entry, named, min_signals=1, moves=False)
-    api["update"].assert_not_called()
-    assert "move" not in result and result["recorded"][0]["name"] == "Azwag Tibba"
+    assert result == {"type": "applied", "signalId": "a", "recorded": [
+        {"name": "Azwag Tibba", "key": ["SD", "azwag tibba", "sd-wk"], "status": "OPEN"},
+    ]}
+    api["update"].assert_not_called()  # no move was asked for
 
 
 # ── the files ────────────────────────────────────────────────────────────────
@@ -408,9 +396,69 @@ def test_apply_writes_each_signal_once_across_two_runs(tmp_path, monkeypatch, ca
         assert backfill.main(["apply", "--plan", str(plan)]) == 0
 
     api["update"].assert_called_once_with("s1", "sd-wk-dibab")
+    # "Once Only" has one signal: under the threshold of two.
     assert [c.kwargs["signal_id"] for c in api["record"].call_args_list] == ["s1", "s2"]
     out = capsys.readouterr().out
-    assert "Applying 2 signals" in out and "Applying 0 signals" in out and "moved: 1" in out
+    assert "Applying 2 signals" in out and "moved: 1" in out
+    assert "Applying 0 signals to dev-api.example (1 moves and 2 names done before)" in out
+
+
+def test_a_lower_threshold_later_records_only_the_new_names(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.jsonl"
+    write_plan(plan, [
+        {**AREA_MOVE, "misses": [miss("Azwag Tibba"), miss("Once Only")]},
+        planned("s2", misses=[miss("Azwag Tibba")]),
+    ])
+    monkeypatch.setenv("CLEAR_API_URL", "https://dev-api.example/graphql")
+    with clear_api(signal()) as api:
+        assert backfill.main(["apply", "--plan", str(plan)]) == 0
+        assert backfill.main(["apply", "--plan", str(plan), "--min-signals", "1"]) == 0
+
+    # The move is not tried again, and no name is recorded twice.
+    api["update"].assert_called_once_with("s1", "sd-wk-dibab")
+    assert [(c.kwargs["signal_id"], c.kwargs["name"]) for c in api["record"].call_args_list] == [
+        ("s1", "Azwag Tibba"), ("s2", "Azwag Tibba"), ("s1", "Once Only"),
+    ]
+
+
+def test_a_signal_that_fails_is_tried_again_on_the_next_run(tmp_path, monkeypatch, capsys):
+    plan = tmp_path / "plan.jsonl"
+    write_plan(plan, [AREA_MOVE])
+    monkeypatch.setenv("CLEAR_API_URL", "https://dev-api.example/graphql")
+    with clear_api(signal()) as api:
+        api["update"].side_effect = [RuntimeError("clear-api 502"), None]
+        assert backfill.main(["apply", "--plan", str(plan)]) == 1
+        assert backfill.main(["apply", "--plan", str(plan)]) == 0
+    assert api["update"].call_count == 2
+    assert "1 signals failed" in capsys.readouterr().out
+
+
+def test_a_last_line_cut_short_is_removed_before_the_next_write(tmp_path):
+    log = tmp_path / "plan.jsonl.applied"
+    log.write_bytes(b'{"signalId": "a", "move": "moved"}\n{"signalId": "b", "mo')
+
+    assert backfill.read_lines(log) == [{"signalId": "a", "move": "moved"}]
+    assert log.read_bytes().endswith(b'"mo')  # reading alone changes nothing
+    assert backfill.read_lines(log, repair=True) == [{"signalId": "a", "move": "moved"}]
+    backfill._Lines(log).write({"signalId": "b", "move": "moved"})
+    assert [line["signalId"] for line in backfill.read_lines(log)] == ["a", "b"]
+
+
+def test_a_whole_last_line_with_no_newline_is_kept(tmp_path):
+    log = tmp_path / "plan.jsonl.applied"
+    log.write_bytes(b'{"signalId": "a"}\n{"signalId": "b"}')
+
+    assert [line["signalId"] for line in backfill.read_lines(log, repair=True)] == ["a", "b"]
+    backfill._Lines(log).write({"signalId": "c"})
+    assert [line["signalId"] for line in backfill.read_lines(log)] == ["a", "b", "c"]
+
+
+def test_a_bad_line_in_the_middle_stops_the_command(tmp_path):
+    plan = tmp_path / "plan.jsonl"
+    plan.write_bytes(b'{"type": "header"}\n{"signalId": "a", "outc\n{"signalId": "b"}\n')
+    with pytest.raises(SystemExit, match="line 2: not valid JSON"):
+        backfill.read_lines(plan, repair=True)
+    assert plan.read_bytes().count(b"\n") == 3  # left as it was
 
 
 def test_summary_counts_moves_and_the_names_that_enter_the_queue(tmp_path, capsys):

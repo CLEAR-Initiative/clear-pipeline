@@ -46,6 +46,8 @@ When the locator now reads another state, the signal stays. The plan marks it `d
 
 `apply` records an unplaced name with the date of the post. The queue then shows when the name was first and last seen.
 
+clear-api applies a resolved name to each signal it records. When a reviewer resolved the name already, the signal moves to the alias location. This is the rule of the queue, in the drain too. `apply` cannot record a name and switch that rule off, so it has no "names only" option.
+
 ## What it does not do
 
 - It does not re-group events. A moved signal stays in its event (ticket #1316).
@@ -99,7 +101,6 @@ Run on dev first. A plan belongs to one clear-api: `apply` refuses a plan made a
 
 Options:
 
-- `apply --skip-moves` records the names and moves no signal.
 - `plan --limit N` and `apply --limit N` take N signals at most.
 - `plan --source NAME` takes another source. Repeat it for more sources.
 
@@ -108,9 +109,10 @@ Options:
 Both `plan` and `apply` continue where they stopped. Run the same command again.
 
 - `plan` skips the signals that the plan file holds. It tries a failed signal again.
-- `apply` keeps a log beside the plan (`<plan>.applied`) and skips the signals in it.
+- `apply` keeps a log beside the plan (`<plan>.applied`). The log holds each move it tried and each name it recorded. The next run does only what is left.
+- A stop in the middle of a write leaves a last line that is cut short. The next run removes that line and continues.
 
-A second `apply` of a whole plan changes nothing: a moved signal is no longer where the plan saw it, and clear-api counts a signal once per queue row.
+A second `apply` of a whole plan changes nothing. A later `apply` with a lower `--min-signals` records only the names that are new.
 
 ## Cost
 
