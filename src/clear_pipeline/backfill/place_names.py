@@ -41,6 +41,10 @@ When the locator now reads another state, the signal stays (outcome
 A moved signal stays in its event. Events are not re-grouped here (ticket
 #1316).
 
+A person can hold a move back before ``apply``: change the ``outcome`` of its
+line in the plan file from ``move`` to ``held``. ``apply`` moves only the lines
+that say ``move``; it still records the names of a held line.
+
 A plan belongs to one clear-api: location ids differ between dev and prod.
 ``apply`` refuses a plan made against another host. Both ``plan`` and ``apply``
 can be stopped and run again: each continues after the last line it wrote.
@@ -483,7 +487,7 @@ def print_summary(header: dict, entries: dict[str, dict], *, min_signals: int, t
           f"from {(header.get('since') or '')[:10]}"
           + (f" to {header['until'][:10]}" if header.get("until") else "")
           + f". {len(entries)} signals.")
-    for outcome in ("move", "same", "differs", "no_location", "skipped", "error"):
+    for outcome in ("move", "held", "same", "differs", "no_location", "skipped", "error"):
         if outcomes.get(outcome):
             print(f"  {outcome}: {outcomes[outcome]}")
 
