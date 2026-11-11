@@ -873,6 +873,20 @@ def _names_arabic_region(place_name: str) -> bool:
     return not core or core in regions
 
 
+_ARABIC_DIRECTIONS = frozenset({"شمال", "جنوب", "شرق", "غرب", "وسط"})
+
+
+def _after_arabic_direction(place_name: str) -> str | None:
+    """The rest of an Arabic name that starts with a direction: "النيل
+    الأزرق" for "جنوب النيل الأزرق". None for any other name. The rest decides
+    what the name is: a state's name makes a region phrase, and "النيل" (the
+    river) leaves "شرق النيل", a district, a place."""
+    words = [w for w in re.split(r"[\s_]+", place_name.strip()) if w]
+    if len(words) < 2 or words[0] not in _ARABIC_DIRECTIONS or re.search(r"[a-z]", place_name.casefold()):
+        return None
+    return " ".join(words[1:])
+
+
 def _names_a_place(place_name: str, country: str, country_code: str | None = None) -> bool:
     """False for a name that no point stands for: the country's or a state's
     own name, a region phrase, a natural feature. The check is the same for
@@ -884,11 +898,19 @@ def _names_a_place(place_name: str, country: str, country_code: str | None = Non
     A name that reads as a region phrase is still a place when the gazetteer
     knows a town by exactly that name: "Khartoum North" is a city (Bahri),
     and its district has another name, so `_names_region_or_feature` cannot
-    tell. Asked only for such a name, and only with ``country_code``."""
+    tell. Asked only for such a name, and only with ``country_code``.
+
+    An Arabic name that is a direction and a state's name is a region phrase
+    too. The gazetteer is asked about the rest of the name, only for a name
+    that starts with a direction."""
     if _names_country_or_state(place_name, country):
         return False
     if not _names_region_or_feature(place_name, country):
-        return True
+        # An Arabic direction and a state's name ("جنوب النيل الأزرق", South
+        # Blue Nile). The states' Arabic names are not known here, so the
+        # gazetteer says whether the rest of the name is a state.
+        rest = _after_arabic_direction(place_name)
+        return not (rest and country_code and gazetteer_names_area(rest, country_code))
     return bool(country_code) and gazetteer_names_town(place_name, country_code)
 
 

@@ -102,11 +102,41 @@ def test_a_region_phrase_that_is_a_towns_exact_name_is_a_place():
             assert not location._names_a_place("East Khartoum", "Sudan", "sd")
 
 
+def test_an_arabic_direction_and_a_states_name_is_a_region_phrase():
+    # "جنوب النيل الأزرق" is South Blue Nile. The rest of the name is a state.
+    with patch.object(location, "gazetteer_names_area", return_value=True) as asked:
+        assert not location._names_a_place("جنوب النيل الأزرق", "Sudan", "sd")
+    asked.assert_called_once_with("النيل الأزرق", "sd")
+
+    # "شرق النيل" is the district Sharg An Neel: the rest is a river, no state.
+    with patch.object(location, "gazetteer_names_area", return_value=False) as asked:
+        assert location._names_a_place("شرق النيل", "Sudan", "sd")
+    asked.assert_called_once_with("النيل", "sd")
+
+    # No country code: no lookup, and the name stays a place.
+    with patch.object(location, "gazetteer_names_area") as asked:
+        assert location._names_a_place("جنوب النيل الأزرق", "Sudan")
+    asked.assert_not_called()
+
+
+@pytest.mark.parametrize(("name", "rest"), [
+    ("جنوب النيل الأزرق", "النيل الأزرق"), ("شرق_النيل", "النيل"), ("وسط دارفور", "دارفور"),
+    ("طويلة", None), ("النيل الأزرق", None), ("شرق", None), ("South Blue Nile", None), ("جنوب Darfur", None),
+])
+def test_the_rest_of_an_arabic_name_after_its_direction(name, rest):
+    assert location._after_arabic_direction(name) == rest
+
+
 def test_the_gazetteer_is_not_asked_about_a_plain_place_or_a_state():
-    with patch.object(location, "gazetteer_names_town") as asked:
+    with (
+        patch.object(location, "gazetteer_names_town") as asked,
+        patch.object(location, "gazetteer_names_area") as asked_area,
+    ):
         assert location._names_a_place("Tawila", "Sudan", "sd")
+        assert location._names_a_place("طويلة", "Sudan", "sd")
         assert not location._names_a_place("North Darfur", "Sudan", "sd")
     asked.assert_not_called()
+    asked_area.assert_not_called()
 
 
 def test_the_gazetteer_knows_a_town_by_its_exact_name():
