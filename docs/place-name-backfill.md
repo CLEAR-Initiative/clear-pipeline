@@ -99,7 +99,7 @@ Run on dev first. A plan belongs to one clear-api: `apply` refuses a plan made a
    python -m clear_pipeline.backfill.place_names apply --plan /tmp/place-names.jsonl --min-signals 2
    ```
 
-7. Add a metric annotation on `/metrics`. The location precision series of past weeks changes.
+7. Look at the result on `/metrics`. Choose "At district or finer", then choose the run in "Replay run". The run id is `place-names-backfill:<plan file name>`. The dashed line shows what the backfill did with the signals it moved. The other lines do not change: past weeks keep what the pipeline delivered at the time. Do not add a metric annotation for the backfill.
 
 Options:
 
