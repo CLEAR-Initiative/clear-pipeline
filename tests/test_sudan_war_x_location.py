@@ -2182,10 +2182,39 @@ def test_a_post_that_names_the_models_state_in_arabic_keeps_it():
 
 
 def test_a_region_state_named_with_its_direction_keeps_the_post():
-    places = {"Kazgeil": [_place("sd-nk-sheikan", population=0)]}
-    with _elsewhere(places):
+    # An eligible town with the post's own spelling: only the state's name
+    # in the post stands in the way.
+    places = {"كازقيل": [_place("sd-nk-sheikan", code="PPLA", population=9000)]}
+    with _elsewhere(places, arabic="كازقيل"):
         located, _ = _locate_elsewhere(SOUTH_KORDOFAN_POST, location_id="sd-sk", place_name="Kazgeil")
+        assert located == "sd-sk"
+        # The same post with no direction is moved.
+        located, _ = _locate_elsewhere(KORDOFAN_POST, location_id="sd-sk", place_name="Kazgeil")
+        assert located == "l4-kazgeil"
+
+
+def test_an_ambiguous_arabic_name_is_not_rescued_by_the_latin_spelling():
+    # The post's spelling names places in two states of the region. The
+    # model's Latin spelling fits one of them only: still ambiguous.
+    places = {"كازقيل": [_place("sd-nk-sheikan"), _place("sd-wk-dibab")],
+              "Kazgeil": [_place("sd-nk-sheikan")]}
+    with _elsewhere(places, arabic="كازقيل") as m:
+        located, _ = _locate_elsewhere(KORDOFAN_POST, location_id="sd-sk", place_name="Kazgeil")
     assert located == "sd-sk"
+    assert all(c.kwargs["arabic_name"] == "كازقيل" for c in m["exact"].call_args_list)
+
+
+def test_a_failed_lookup_abandons_the_move():
+    # One state does not answer: it could hold a second match.
+    def exact(name, country_code, *, arabic_name=None, within_location_id, **_):
+        if within_location_id == "sd-nk":
+            raise RuntimeError("gazetteer timed out")
+        return _hit(14.4, 33.5) if within_location_id in ("sd-gz", "sd-gz-medani") else None
+
+    with _elsewhere(WAD_MADANI, arabic="ود مدني"), patch.object(location, "exact_gazetteer_match", side_effect=exact):
+        located, misses = _locate_elsewhere(MADANI_POST, location_id="sd-wn", place_name="Wad Madani")
+    assert located == "sd-wn"
+    assert [m.reason for m in misses] == ["OUTSIDE_AREA"]
 
 
 def test_a_kordofan_post_finds_kazgeil_in_north_kordofan():
@@ -2308,11 +2337,13 @@ def test_exact_gazetteer_match_takes_an_alias_and_only_an_alias_for_a_landmark()
     assert _exact(_gaz_hit(), name="Wad Madani Airport")[0] is None
 
 
-def test_exact_gazetteer_match_is_none_when_the_lookup_fails_or_the_gazetteer_is_off():
+def test_exact_gazetteer_match_raises_when_the_lookup_fails_and_is_none_with_the_gazetteer_off():
+    # "No answer" must not look like "no match": the caller counts matches.
     with (
         patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
         patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=RuntimeError("down")),
+        pytest.raises(RuntimeError),
     ):
-        assert geoparser.exact_gazetteer_match("Wad Madani", "sd", within_location_id="sd-gz") is None
+        geoparser.exact_gazetteer_match("Wad Madani", "sd", within_location_id="sd-gz")
     with patch.object(geoparser.settings, "geoparser_use_gazetteer", False):
         assert geoparser.exact_gazetteer_match("Wad Madani", "sd", within_location_id="sd-gz") is None

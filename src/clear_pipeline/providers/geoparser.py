@@ -974,8 +974,11 @@ def exact_gazetteer_match(
     ``name`` in Latin script. A place alias needs none of these.
 
     ``min_population`` limits a match to a place of that many people, or one
-    whose feature code is in ``feature_codes``. None: no limit. Raises
-    nothing: a failed lookup is no match."""
+    whose feature code is in ``feature_codes``. None: no limit.
+
+    A lookup that fails raises. The caller counts the locations that hold the
+    name: "no match here" and "no answer" must not look the same, or a failed
+    request would hide a second match and make the first look unique."""
     if not settings.geoparser_use_gazetteer or not name or not name.strip():
         return None
     name = name.strip()
@@ -988,13 +991,9 @@ def exact_gazetteer_match(
     else:
         queries = [name]
     for query in queries:
-        try:
-            hit = graphql.resolve_gazetteer_location(
-                query, country_code=country_code.upper(), within_location_id=within_location_id
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort: no match
-            logger.info("[geoparser] exact gazetteer lookup for %r failed: %s", query, exc)
-            return None
+        hit = graphql.resolve_gazetteer_location(
+            query, country_code=country_code.upper(), within_location_id=within_location_id
+        )
         if not hit or not hit.get("exact"):
             continue
         if (hit.get("countryCode") or "").lower() != country_code.lower():

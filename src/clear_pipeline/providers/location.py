@@ -931,32 +931,38 @@ def _exact_match_elsewhere(
             feature_codes=_ARABIC_CODES if arabic else _SEAT_CODES,
         )
 
-    def only_one(candidates: list[dict], arabic: str | None):
-        holders = [c for c in candidates if match_in(c["id"], arabic, any_size=True) is not None]
-        return holders[0] if len(holders) == 1 else None
+    # A lookup that fails raises (see `exact_gazetteer_match`), and the
+    # caller gives up: one unanswered state could hold a second match.
+    def holders(candidates: list[dict], arabic: str | None) -> list[dict]:
+        return [c for c in candidates if match_in(c["id"], arabic, any_size=True) is not None]
 
     def unique_match(candidates: list[dict], arabic: str | None, *, any_size: bool):
-        """The match, when one state of ``candidates`` holds the name, and
-        one district of that state."""
-        state = only_one(candidates, arabic)
-        if state is None:
-            return None
+        """(match, ambiguous). The match, when one state of ``candidates``
+        holds the name, and one district of that state. ``ambiguous``: more
+        than one state, or more than one district, holds it."""
+        in_states = holders(candidates, arabic)
+        if len(in_states) != 1:
+            return None, len(in_states) > 1
         districts = [
             loc for loc in scoped
-            if (loc.get("level") or 0) == 2 and (loc.get("parent") or {}).get("id") == state["id"]
+            if (loc.get("level") or 0) == 2 and (loc.get("parent") or {}).get("id") == in_states[0]["id"]
         ]
-        district = only_one(districts, arabic)
-        return match_in(district["id"], arabic, any_size=any_size) if district else None
+        in_districts = holders(districts, arabic)
+        if len(in_districts) != 1:
+            return None, len(in_districts) > 1
+        return match_in(in_districts[0]["id"], arabic, any_size=any_size), False
 
     hit = None
     if region and _names_bare_region(text, region[0]):
         for arabic in ([arabic_name, None] if arabic_name and not unchecked else [arabic_name or None]):
-            hit = unique_match(region[1], arabic, any_size=not unchecked)
-            if hit is not None:
+            hit, ambiguous = unique_match(region[1], arabic, any_size=not unchecked)
+            # The Latin spelling is for an Arabic one that matches nothing.
+            # One that matches several places is ambiguous, and stays so.
+            if hit is not None or ambiguous:
                 break
     if hit is None:
         others = [s for s in states if s["id"] != area_id]
-        hit = unique_match(others, arabic_name or None, any_size=False)
+        hit, _ = unique_match(others, arabic_name or None, any_size=False)
     # Asked last: for a state outside a region it costs a model call.
     if hit is None or _text_names_state(text, area, region):
         return None
