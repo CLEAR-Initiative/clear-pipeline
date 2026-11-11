@@ -952,6 +952,88 @@ def gazetteer_knows(name: str, country_code: str, *, arabic_name: str | None = N
     return False
 
 
+def exact_gazetteer_match(
+    name: str,
+    country_code: str,
+    *,
+    arabic_name: str | None = None,
+    within_location_id: str,
+    min_population: int | None = None,
+    feature_codes: frozenset[str] = frozenset(),
+) -> GeoparseResult | None:
+    """The gazetteer's exact match for a place inside one CLEAR location, or
+    None. For a caller that looks for a place outside the area a lookup was
+    made in, one location at a time.
+
+    With ``arabic_name`` (the place as the text writes it in Arabic) only
+    that spelling is asked, with and without a leading ال; else ``name``.
+    A ``name`` that is itself in Arabic script (the model copied it from the
+    post) is asked the same way, and has no Latin name to agree with.
+    The hit counts under the rules of the lookups themselves: exact only, in
+    the country, not a river or a road, and an Arabic hit must agree with
+    ``name`` in Latin script. A place alias needs none of these.
+
+    ``min_population`` limits a match to a place of that many people, or one
+    whose feature code is in ``feature_codes``. None: no limit. Raises
+    nothing: a failed lookup is no match."""
+    if not settings.geoparser_use_gazetteer or not name or not name.strip():
+        return None
+    name = name.strip()
+    arabic = (arabic_name or "").strip()
+    latin = latin_name_key(name)
+    if not arabic and not latin:
+        arabic = name
+    if arabic:
+        queries = [arabic] + ([arabic[2:]] if arabic.startswith("ال") and len(arabic) > 4 else [])
+    else:
+        queries = [name]
+    for query in queries:
+        try:
+            hit = graphql.resolve_gazetteer_location(
+                query, country_code=country_code.upper(), within_location_id=within_location_id
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort: no match
+            logger.info("[geoparser] exact gazetteer lookup for %r failed: %s", query, exc)
+            return None
+        if not hit or not hit.get("exact"):
+            continue
+        if (hit.get("countryCode") or "").lower() != country_code.lower():
+            continue
+        alias_location_id = _alias_location_id(hit)
+        if not alias_location_id:
+            # GeoNames answers a facility's name with the wrong place (see
+            # `_resolve_candidate`): for a landmark only an alias counts.
+            if _is_landmark(name):
+                continue
+            if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+                continue
+            if arabic and latin and not _spellings_agree(hit.get("name") or "", name):
+                continue
+            if min_population is not None:
+                listed = (hit.get("featureCode") or "").upper() in feature_codes
+                if not listed and float(hit.get("population") or 0) < min_population:
+                    continue
+        try:
+            lat, lng = float(hit["latitude"]), float(hit["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        return GeoparseResult(
+            candidate=name,
+            kind="landmark" if _is_landmark(name) else "admin",
+            field="body",
+            lat=lat,
+            lng=lng,
+            country_code=country_code.lower(),
+            osm_class=None,
+            osm_type=f"geonames:{hit.get('featureCode') or ''}",
+            importance=float(hit.get("score") or 0.0),
+            display_name=hit.get("name") or name,
+            raw=hit,
+            location_id=alias_location_id,
+        )
+    return None
+
+
 def _resolve_candidate(
     top: Candidate,
     expected: set[str],
