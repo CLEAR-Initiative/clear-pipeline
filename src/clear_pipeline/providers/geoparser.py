@@ -1052,6 +1052,26 @@ def gazetteer_names_area(name: str, country_code: str, *, arabic_name: str | Non
     return False
 
 
+def gazetteer_names_town(name: str, country_code: str) -> bool:
+    """True when the gazetteer's exact match for ``name`` in the country is a
+    populated place (GeoNames class P), or a place alias: a person's answer.
+
+    For a name that reads as a region phrase. "Khartoum North" looks like the
+    north of Khartoum state and is a city of a million people; "East
+    Khartoum" matches only the state, loosely. False when the gazetteer is
+    off or fails: the name then stays a region phrase."""
+    if not settings.geoparser_use_gazetteer or not name or not name.strip():
+        return False
+    try:
+        hit = graphql.resolve_gazetteer_location(name.strip(), country_code=country_code.upper())
+    except Exception as exc:  # noqa: BLE001 — the name keeps the reading its words give it
+        logger.info("[geoparser] gazetteer town check for %r failed: %s", name, exc)
+        return False
+    if not hit or not hit.get("exact"):
+        return False
+    return bool(_alias_location_id(hit)) or (hit.get("featureClass") or "").upper() == "P"
+
+
 def exact_gazetteer_match(
     name: str,
     country_code: str,
