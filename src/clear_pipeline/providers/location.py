@@ -25,6 +25,7 @@ from clear_pipeline.providers.geoparser import (
     arabic_lookup_applies,
     exact_gazetteer_match,
     gazetteer_knows,
+    gazetteer_names_area,
     geocode_place_name,
     latin_name_key,
 )
@@ -510,7 +511,7 @@ def _confirm_district(
     if not place_name:
         return None
     own_name = latin_name_key(place_name) == latin_name_key(district.get("name") or "")
-    if country_code and not _names_country_or_state(place_name, country):
+    if country_code and _names_a_place(place_name, country):
         outer = _geocode_misses.get()
         if outer is None:
             point_id = _geocode_within(
@@ -569,14 +570,14 @@ def _places_to_geocode(
     answer is based on, then (with ``others``) the other places the post
     names. The others cost a model call, so they are asked for only when the
     caller comes back for more: the first name gave no point, or there was
-    none. The country's and the states' own names are left out (see
-    `_names_country_or_state`)."""
+    none. The country's and the states' own names are left out, and so is a
+    region phrase or a natural feature (see `_names_a_place`)."""
     # Repeats are told by spelling, not by `latin_name_key`: that key drops
     # vowels to compare two spellings of one place, so it would also skip
     # "Tandilti" after "Tendalti" missed, and the gazetteer can answer those
     # two queries differently. Another spelling is another chance.
     tried: set[str] = set()
-    if place_name and not _names_country_or_state(place_name, country):
+    if place_name and _names_a_place(place_name, country):
         tried.add(_spelling_key(place_name))
         yield place_name
     if not others:
@@ -584,9 +585,7 @@ def _places_to_geocode(
     tried_others = 0
     for name in named_places(title, description, country):
         key = _spelling_key(name)
-        if not key or key in tried or _names_country_or_state(name, country):
-            continue
-        if _names_region_or_feature(name, country):
+        if not key or key in tried or not _names_a_place(name, country):
             continue
         tried.add(key)
         yield name
@@ -709,11 +708,17 @@ def _names_country_or_state(place_name: str, country: str) -> bool:
 # "Blue Nile axis"), or stand alone for one ("the east").
 _REGION_WORDS = frozenset({
     "north", "south", "east", "west", "central", "northern", "southern", "eastern", "western",
-    "axis", "region", "state", "area", "province", "front", "sector", "the", "of",
+    "n", "s", "e", "w",  # "N. Kordofan"
+    "axis", "region", "state", "area", "province", "front", "sector", "the", "of", "and",
 })
 # A river, a plain or a road is not a place a point can stand for.
 _FEATURE_WORDS = frozenset({
-    "river", "plain", "plains", "desert", "mountain", "mountains", "road", "highway", "border",
+    "river", "plain", "plains", "desert", "mountain", "mountains", "hills", "road", "highway", "border",
+})
+# The same in Arabic, for a name the model copied from the post: a direction,
+# or a word for a region ("ولاية" state, "إقليم" region, "محور" axis).
+_ARABIC_REGION_WORDS = frozenset({
+    "شمال", "جنوب", "شرق", "غرب", "وسط", "ولاية", "إقليم", "اقليم", "منطقة", "محور",
 })
 
 
@@ -729,9 +734,9 @@ def _names_region_or_feature(place_name: str, country: str) -> bool:
     place: a state's name with region words ("South Blue Nile", "Blue Nile
     axis"), the part that states share ("Kordofan", "Darfur"), or a river, a
     plain, a road. The gazetteer answers such a name with whatever village
-    fuzzily matches inside the state. Checked for the other names a post
-    gives, which a model lists more loosely than the one its answer is
-    based on."""
+    fuzzily matches inside the state, or with the region's centre point."""
+    if not re.search(r"[a-z]", place_name.casefold()):
+        return _names_arabic_region(place_name)
     scoped = _country_scoped_locations(country)
     # A district's own name is a place, whatever words it shares with a
     # state: "Khartoum North" is a city, not the north of Khartoum state.
@@ -745,6 +750,33 @@ def _names_region_or_feature(place_name: str, country: str) -> bool:
     if not core:
         return True
     return any(_region_core(loc["name"]) == core for loc in scoped if (loc.get("level") or 0) <= 1)
+
+
+def _names_arabic_region(place_name: str) -> bool:
+    """`_names_region_or_feature` for a name with no Latin letters. True for
+    a direction alone ("شرق"), and for a region several states share, with or
+    without a direction ("دارفور", "وسط دارفور", "ولاية شمال كردفان").
+
+    Any other Arabic name is a place as far as code can tell: the states'
+    Arabic names are not known here, and many districts are a direction and
+    a name ("شرق النيل" is Sharg An Neel). The gazetteer tells those apart:
+    it refuses a match that is a state (`geoparser._names_an_area`)."""
+    words = [w for w in re.split(r"[\s_]+", place_name.strip()) if w]
+    if not any(_ARABIC_LETTER.search(w) for w in words):
+        return True  # no letters at all: nothing to look up
+    core = " ".join(w for w in words if w not in _ARABIC_REGION_WORDS)
+    regions = {s for spellings in _REGION_SPELLINGS.values() for s in spellings if _ARABIC_LETTER.search(s)}
+    return not core or core in regions
+
+
+def _names_a_place(place_name: str, country: str) -> bool:
+    """False for a name that no point stands for: the country's or a state's
+    own name, a region phrase, a natural feature. The check is the same for
+    the name the location answer is based on and for the other names of the
+    post. Until #1429 the answer's own name was only checked against the
+    states' names, and "Darfur" was geocoded: the gazetteer holds a region of
+    that name, with a centre point inside North Darfur."""
+    return not _names_country_or_state(place_name, country) and not _names_region_or_feature(place_name, country)
 
 
 # ── an exact match outside the model's area (#1414) ──────────────────────────
@@ -1004,8 +1036,9 @@ def _geocode_within(
 
     A miss goes to the open collector (`collect_geocode_misses`): every tier
     found nothing inside the area, or the L4 promote gave no location. Not a
-    miss: an area with no geometry, and a lookup that failed (an outage
-    proves nothing about the name)."""
+    miss: an area with no geometry, a lookup that failed (an outage proves
+    nothing about the name), and a name that is an area's own (a state, a
+    region, a mountain range: `GeocodeTrace.area`)."""
     try:
         area = _area_shape(area_id)
         if area is None:
@@ -1044,7 +1077,16 @@ def _geocode_within(
                         place_name, area_id)
             # Only for an open collector: a dry run or an evaluation records
             # nothing, so it must not pay for the extra lookup below.
-            if not trace.failed and _geocode_misses.get() is not None:
+            # A name the gazetteer knows as a state or a region is not a
+            # miss either: a reviewer has no place to give it.
+            if (
+                not trace.failed
+                and not trace.area
+                and _geocode_misses.get() is not None
+                # The area lookup can miss a state's own name: its centre
+                # point lies outside a district that was searched.
+                and not gazetteer_names_area(place_name, country_code, arabic_name=arabic_name)
+            ):
                 # The gazetteer filters by area on the server, so ask it once
                 # more whether the name exists elsewhere in the country.
                 outside = trace.outside or gazetteer_knows(
