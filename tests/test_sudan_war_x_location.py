@@ -87,7 +87,9 @@ def test_unscoped_resolution_still_offers_every_location():
 # ── locate_in_country ────────────────────────────────────────────────────────
 
 def test_locate_in_country_returns_the_matched_district():
-    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk-dibab")
+    # The answer names the district's own town: the district is confirmed.
+    patcher, _ = _llm_returning(
+        location_type="general", location_id="sd-wk-dibab", place_name="Al Dibab")
     with patcher:
         assert location.locate_in_country(POST, POST, "Sudan") == "sd-wk-dibab"
 
@@ -95,6 +97,7 @@ def test_locate_in_country_returns_the_matched_district():
 def test_locate_in_country_pins_displacement_to_its_origin():
     patcher, _ = _llm_returning(
         location_type="displacement", origin_id="sd-wk-dibab", destination_id="sd-kh",
+        place_name="Al Dibab",
     )
     with patcher:
         assert location.locate_in_country(POST, POST, "Sudan") == "sd-wk-dibab"
@@ -703,7 +706,7 @@ def test_the_gazetteer_client_drops_the_argument_on_an_older_clear_api():
 # ── incident site over impact area (location-v3), country-scoped (location-v4) ─
 
 def test_prompt_prefers_the_incident_site_over_the_impact_area():
-    assert location.LOCATION_PROMPT_VERSION == "location-v4"
+    assert location.LOCATION_PROMPT_VERSION == "location-v5"
     assert "belongs to the site's district, not the country" in location.SYSTEM_PROMPT
     assert "or the places named span several states, use the country-level Sudan entry" in location.SYSTEM_PROMPT
 
@@ -1677,7 +1680,8 @@ def test_at_most_four_other_names_are_tried():
 
 
 @pytest.mark.parametrize("fields", [
-    {"location_id": "sd-wk-dibab", "place_name": "Mazbud"},   # a district: already as fine as grouping needs
+    # a confirmed district: already as fine as grouping needs
+    {"location_id": "sd-wk-dibab", "place_name": "Al Dibab"},
     {"location_id": None, "place_name": "Mazbud"},            # no area matched: nothing to check a name against
     {"location_id": "sd", "place_name": "Mazbud"},            # the country itself: several places, none geocoded
 ])
@@ -1738,8 +1742,232 @@ def test_region_phrases_and_natural_features_are_told_from_places(name, region):
 
 
 def test_the_location_prompt_is_unchanged_by_the_place_names_call():
-    # Its wording is fragile: the new output is a separate call, and the
-    # location prompt keeps its version.
-    assert location.LOCATION_PROMPT_VERSION == "location-v4"
+    # Its wording is fragile: the new output is a separate call, with its own
+    # version. (location-v5 took the district examples out of rule 3, #1412.)
+    assert location.LOCATION_PROMPT_VERSION == "location-v5"
     assert location.PLACE_NAMES_PROMPT_VERSION == "place-names-v1"
     assert "place_names" not in location.system_prompt("Sudan")
+
+
+# ── a district from the model is kept only when code confirms it (#1412) ─────
+
+WN_STATE = {"id": "sd-wn", "name": "White Nile", "level": 1, "parent": {"id": "sd"}}
+TENDALTI = {"id": "sd-wn-tendalti", "name": "Tendalti", "level": 2, "parent": {"id": "sd-wn"}}
+KHARTOUM_DISTRICT = {"id": "sd-kh-kh", "name": "Khartoum", "level": 2, "parent": {"id": "sd-kh"}}
+KAZGEIL_POST = "قصف مدفعي على منطقة كازقيل جنوب الأبيض"
+
+# Tendalti district as a small box inside White Nile; both far from Kazgeil.
+TENDALTI_SHAPE = box(31.5, 12.8, 32.5, 13.5)
+WN_STATE_SHAPE = box(31.0, 11.5, 33.5, 15.0)
+SHAPES = {"sd-wn-tendalti": TENDALTI_SHAPE, "sd-wn": WN_STATE_SHAPE, "sd-wk": WK_SHAPE,
+          "sd-wk-dibab": box(28.0, 11.0, 29.0, 12.0)}
+
+
+@contextmanager
+def _white_nile(hits=None, *, known_elsewhere=False):
+    """Geocoding with one outline per area. `hits` maps a name to its point;
+    a point outside the area asked about is a miss, as in the real lookups."""
+    def fake_geocode(name, *, expected_country_codes=None, accept=None, arabic_name=None,
+                     within_location_id=None, trace=None):
+        hit = (hits or {}).get(name)
+        if hit and accept(hit.lat, hit.lng):
+            return hit
+        if hit:
+            trace.outside = True
+        return None
+
+    def geometry(location_id):
+        shape = SHAPES[location_id]
+        return {"id": location_id,
+                "geometry": {"type": "Polygon", "coordinates": [list(shape.exterior.coords)]}}
+
+    geocode = MagicMock(side_effect=fake_geocode)
+    promote = MagicMock(side_effect=lambda *, name, lat, lng, kind: {
+        "locationId": f"l4-{name.lower()}", "reused": False, "abortedReason": None})
+    with (
+        patch.object(location, "get_locations",
+                     return_value=[*LOCATIONS, WN_STATE, TENDALTI, KHARTOUM_DISTRICT]),
+        patch.object(location, "geocode_place_name", geocode),
+        patch.object(location, "gazetteer_knows", return_value=known_elsewhere),
+        patch.object(location, "find_or_create_landmark_l4", promote),
+        patch.object(location, "get_location_with_geometry", side_effect=geometry),
+    ):
+        location.invalidate_locations_cache()
+        yield {"geocode": geocode, "promote": promote}
+    location.invalidate_locations_cache()
+
+
+def _areas_asked(m):
+    return [(c.args[0], c.kwargs["within_location_id"]) for c in m["geocode"].call_args_list]
+
+
+def test_rule_3_names_no_real_district():
+    prompt = location.system_prompt("Sudan")
+    assert "Many districts share their main town's name." in prompt
+    assert "Kadugli" not in prompt and "Shendi" not in prompt
+    rule_3 = prompt[prompt.index("3. Match locations"):prompt.index("4. Set \"place_name\"")]
+    assert "Tendalti" not in rule_3
+
+
+def test_a_kazgeil_post_answered_with_tendalti_does_not_land_in_tendalti():
+    # The model guessed a district the post does not name. Kazgeil is not in
+    # Tendalti, and not in White Nile: the post stays at the state.
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Kazgeil")
+    with patcher, _white_nile({"Kazgeil": _hit(12.75, 30.25)}) as m:
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "sd-wn"
+    # Tried inside the district first, then inside its state.
+    assert _areas_asked(m) == [("Kazgeil", "sd-wn-tendalti"), ("Kazgeil", "sd-wn")]
+
+
+def test_an_unconfirmed_district_is_geocoded_inside_its_state():
+    # Rabak is in White Nile, outside Tendalti district: the point is kept,
+    # and clear-api files it under the district that holds it.
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Rabak")
+    with patcher, _white_nile({"Rabak": _hit(13.18, 32.74)}) as m:
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "l4-rabak"
+    assert _areas_asked(m) == [("Rabak", "sd-wn-tendalti"), ("Rabak", "sd-wn")]
+
+
+def test_an_unconfirmed_district_tries_the_posts_other_places_in_its_state():
+    patcher, provider = _llm_with_places(
+        ["Kosti"], location_type="general", location_id="sd-wn-tendalti", place_name="Kazgeil")
+    with patcher, _white_nile({"Kosti": _hit(13.16, 32.66)}) as m:
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "l4-kosti"
+    assert len(_place_name_calls(provider)) == 1
+    assert _areas_asked(m)[-1] == ("Kosti", "sd-wn")
+
+
+def test_a_district_is_confirmed_by_a_place_geocoded_inside_it():
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Um Sufaifa")
+    with patcher, _white_nile({"Um Sufaifa": _hit(13.1, 32.0)}) as m:
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "l4-um sufaifa"
+    assert _areas_asked(m) == [("Um Sufaifa", "sd-wn-tendalti")]
+
+
+@pytest.mark.parametrize("place", ["Tendalti", "tendalti", "Tandalti", "Al Tendalti"])
+def test_a_district_is_confirmed_by_its_own_name(place):
+    # No point for the town, but the answer names the district itself.
+    patcher, provider = _llm_with_places(
+        ["Kosti"], location_type="general", location_id="sd-wn-tendalti", place_name=place)
+    with patcher, _white_nile({}) as m:
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "sd-wn-tendalti"
+    assert _areas_asked(m) == [(place, "sd-wn-tendalti")]
+    assert _place_name_calls(provider) == []
+
+
+def test_a_district_is_confirmed_by_its_own_name_without_a_country_code():
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Tendalti")
+    with patcher, _white_nile({}) as m:
+        assert location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan") == "sd-wn-tendalti"
+    m["geocode"].assert_not_called()
+
+
+@pytest.mark.parametrize("place", [None, "White Nile", "Sudan"])
+def test_a_district_with_no_place_to_check_falls_back_to_its_state(place):
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name=place)
+    with patcher, _white_nile({}):
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "sd-wn"
+
+
+def test_an_unconfirmed_displacement_origin_falls_back_to_its_state():
+    patcher, provider = _llm_with_places(
+        ["Kosti"], location_type="displacement", origin_id="sd-wn-tendalti",
+        destination_id="sd-kh", place_name="Kazgeil")
+    with patcher, _white_nile({"Kosti": _hit(13.16, 32.66)}):
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    # The other names of a displacement post are not tried (where people fled to).
+    assert located == "sd-wn"
+    assert _place_name_calls(provider) == []
+
+
+def test_the_arabic_spelling_is_bought_once_for_a_name_tried_in_two_areas():
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Kazgeil")
+    with (
+        patcher,
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(location, "arabic_spelling", return_value="كازقيل") as spelling,
+        _white_nile({}) as m,
+    ):
+        location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    spelling.assert_called_once_with(KAZGEIL_POST, "Kazgeil")
+    assert [c.kwargs["arabic_name"] for c in m["geocode"].call_args_list] == ["كازقيل", "كازقيل"]
+
+
+def test_an_unconfirmed_district_records_one_miss_under_its_state():
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Kazgeil")
+    with (
+        patcher,
+        _white_nile({"Kazgeil": _hit(12.75, 30.25)}),
+        location.collect_geocode_misses() as misses,
+    ):
+        location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert misses == [location.GeocodeMiss("Kazgeil", None, "SD", "sd-wn", "OUTSIDE_AREA")]
+
+
+def test_a_district_confirmed_by_its_name_records_the_miss_inside_it():
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="sd-wn-tendalti", place_name="Tendalti")
+    with patcher, _white_nile({}), location.collect_geocode_misses() as misses:
+        location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert misses == [location.GeocodeMiss("Tendalti", None, "SD", "sd-wn-tendalti", "NO_MATCH")]
+
+
+# ── a name returned in place of an id (#1412) ────────────────────────────────
+
+def _resolve_with(**fields):
+    patcher, _ = _llm_returning(location_type="general", **fields)
+    with (
+        patcher,
+        patch.object(location, "get_locations",
+                     return_value=[*LOCATIONS, WN_STATE, TENDALTI, KHARTOUM_DISTRICT]),
+    ):
+        location.invalidate_locations_cache()
+        result = location.resolve_signal_location(POST, POST, None, country="Sudan")
+    location.invalidate_locations_cache()
+    return result
+
+
+@pytest.mark.parametrize("answer, expected", [
+    ("Tendalti", "sd-wn-tendalti"),       # a district's name
+    ("tendalti ", "sd-wn-tendalti"),      # case and spaces ignored
+    ("White Nile", "sd-wn"),              # a state's name
+    ("Sudan", "sd"),                      # the country's name
+    ("Khartoum", "sd-kh"),                # a state and a district share it: the state
+    ("sd-wn-tendalti", "sd-wn-tendalti"), # a real id is kept as it is
+])
+def test_a_name_returned_in_place_of_an_id_is_mapped_to_its_id(answer, expected):
+    assert _resolve_with(location_id=answer)["location_id"] == expected
+
+
+@pytest.mark.parametrize("answer", ["Kazgeil", "Tendalt", "Ouaddai", "Point 12.89, 23.47"])
+def test_a_name_that_is_no_location_of_the_country_is_still_dropped(answer, caplog):
+    with caplog.at_level("WARNING"):
+        assert _resolve_with(location_id=answer)["location_id"] is None
+    assert f"Claude returned unknown location_id: {answer}" in caplog.text
+
+
+def test_names_are_mapped_for_origin_and_destination_too():
+    result = _resolve_with(origin_id="Tendalti", destination_id="White Nile")
+    assert (result["origin_id"], result["destination_id"]) == ("sd-wn-tendalti", "sd-wn")
+
+
+def test_a_name_in_place_of_an_id_then_goes_through_the_district_check():
+    # "Tendalti" as the id, for a post about Kazgeil: mapped, then not confirmed.
+    patcher, _ = _llm_with_places(
+        [], location_type="general", location_id="Tendalti", place_name="Kazgeil")
+    with patcher, _white_nile({}):
+        located = location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
+    assert located == "sd-wn"

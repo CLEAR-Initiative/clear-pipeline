@@ -180,7 +180,7 @@ def resolve_country_only_location(name: str | None) -> str | None:
 
 
 # Bump whenever SYSTEM_PROMPT below changes (see CLASSIFY_PROMPT_VERSION for rationale).
-LOCATION_PROMPT_VERSION = "location-v4"
+LOCATION_PROMPT_VERSION = "location-v5"
 
 _SYSTEM_PROMPT_TEMPLATE = """You are a geolocation extraction assistant for a humanitarian crisis monitoring system focused on {country}.
 
@@ -200,7 +200,7 @@ IMPORTANT RULES:
 
 3. Match locations to the provided location list by name. Return the exact location ID from the list.
    - Prefer the most granular match (district > state > country)
-   - If a city, town, village, neighbourhood or named facility is mentioned, return the district that contains it, even when a state name appears first (as a headline, hashtag or dateline). Many districts share their main town's name (Kadugli, Tendalti, Shendi).
+   - If a city, town, village, neighbourhood or named facility is mentioned, return the district that contains it, even when a state name appears first (as a headline, hashtag or dateline). Many districts share their main town's name.
    - An incident at one site whose consequences reach several states (a strike on a power station that cuts electricity in four states) belongs to the site's district, not the country
    - Use a state only when no place inside it is named
    - If no specific location in {country} is mentioned, or the places named span several states, use the country-level {country} entry
@@ -315,15 +315,9 @@ def resolve_signal_location(
         destination_id = result.destination_id
         location_id = result.location_id
 
-        if origin_id and origin_id not in known_ids:
-            logger.warning("Claude returned unknown origin_id: %s", origin_id)
-            origin_id = None
-        if destination_id and destination_id not in known_ids:
-            logger.warning("Claude returned unknown destination_id: %s", destination_id)
-            destination_id = None
-        if location_id and location_id not in known_ids:
-            logger.warning("Claude returned unknown location_id: %s", location_id)
-            location_id = None
+        origin_id = _known_id("origin_id", origin_id, known_ids, locations)
+        destination_id = _known_id("destination_id", destination_id, known_ids, locations)
+        location_id = _known_id("location_id", location_id, known_ids, locations)
 
         return {
             "location_type": result.location_type,
@@ -340,6 +334,31 @@ def resolve_signal_location(
         logger.error("Location resolution failed: %s", e)
         return {"location_type": "general", "origin_id": None, "destination_id": None,
                 "location_id": None, "place_name": None}
+
+
+def _known_id(field: str, value: str | None, known_ids: set[str], locations: list[dict]) -> str | None:
+    """``value`` when it is an id from the list. A model sometimes answers
+    with a location's name where the prompt asks for its id ("Tendalti",
+    "Al Khiwai"): that name is mapped to its id, by exact match with case
+    ignored, among countries, states and districts. When a state and a
+    district share the name (Khartoum, Kassala), the state is taken: a
+    district has to be confirmed by a named place anyway (see
+    `locate_in_country`). Anything else is dropped, as before."""
+    if not value or value in known_ids:
+        return value or None
+    key = value.strip().casefold()
+    named = [
+        loc for loc in locations
+        if (loc.get("level") or 0) <= SCOPED_MAX_LEVEL and (loc.get("name") or "").strip().casefold() == key
+    ]
+    if named:
+        top_level = min((loc.get("level") or 0) for loc in named)
+        top = [loc for loc in named if (loc.get("level") or 0) == top_level]
+        if len(top) == 1:
+            logger.info("Claude returned the name %r as %s: mapped to %s", value, field, top[0]["id"])
+            return top[0]["id"]
+    logger.warning("Claude returned unknown %s: %s", field, value)
+    return None
 
 
 def locate_in_country(
@@ -386,6 +405,26 @@ def locate_in_country(
     )
     area_id = matched_id or country_id
     place_name = resolved.get("place_name")
+    text = description or title or ""
+    arabic_names: dict[str, str | None] = {}
+    district = _scoped_location(matched_id, country, level=2)
+    if district is not None:
+        # The model often answers with a district the post does not name.
+        # Grouping keys on the district, so a guessed one splits an incident.
+        # Keep it only when code confirms it.
+        confirmed = _confirm_district(
+            district, place_name, country, country_code, text=text, arabic_names=arabic_names
+        )
+        if confirmed:
+            return confirmed
+        state_id = (district.get("parent") or {}).get("id")
+        if not state_id:
+            return matched_id
+        logger.info(
+            "[locate] district %r is not confirmed by place %r: falling back to its state",
+            district.get("name"), place_name,
+        )
+        matched_id = area_id = state_id
     if (
         country_code
         and area_id
@@ -407,11 +446,69 @@ def locate_in_country(
         )
         for name in _places_to_geocode(place_name, title, description, country, others=other_names):
             point_id = _geocode_within(
-                name, area_id, country_code, text=description or title or ""
+                name, area_id, country_code, text=text, arabic_names=arabic_names
             )
             if point_id:
                 return point_id
     return area_id
+
+
+def _scoped_location(location_id: str | None, country: str, *, level: int) -> dict | None:
+    """The country's location with this id, when it is at ``level``."""
+    if not location_id:
+        return None
+    return next(
+        (loc for loc in _country_scoped_locations(country)
+         if loc["id"] == location_id and (loc.get("level") or 0) == level),
+        None,
+    )
+
+
+def _confirm_district(
+    district: dict,
+    place_name: str | None,
+    country: str,
+    country_code: str | None,
+    *,
+    text: str,
+    arabic_names: dict[str, str | None],
+) -> str | None:
+    """The location to store for a district the model chose, or None when
+    nothing in code confirms the district.
+
+    Two things confirm it:
+
+    - The place the answer names geocodes inside the district. The point is
+      returned (an L4 inside the district, or a place alias's location).
+    - The place the answer names is the district's own name ("Kadugli" for
+      Kadugli district; `latin_name_key` forgives the spelling). The district
+      is returned. An Arabic spelling reaches the district on the first path:
+      the gazetteer matches the post's own spelling.
+
+    The 3–10 Nov posts stored in Tendalti, Kadugli and Shendi named Kazgeil,
+    Wad Madani, El Obeid, Kutum: places the model's district does not hold.
+    A district with no place name has nothing to check and is not kept."""
+    if not place_name:
+        return None
+    own_name = latin_name_key(place_name) == latin_name_key(district.get("name") or "")
+    if country_code and not _names_country_or_state(place_name, country):
+        outer = _geocode_misses.get()
+        if outer is None:
+            point_id = _geocode_within(
+                place_name, district["id"], country_code, text=text, arabic_names=arabic_names
+            )
+        else:
+            # A miss inside a district that is then dropped is not a miss:
+            # the name is tried again inside the state, which records its own.
+            with collect_geocode_misses() as held:
+                point_id = _geocode_within(
+                    place_name, district["id"], country_code, text=text, arabic_names=arabic_names
+                )
+            if own_name and not point_id:
+                outer.extend(held)
+        if point_id:
+            return point_id
+    return district["id"] if own_name else None
 
 
 # The most names tried for one post: the answer's own, plus these.
@@ -646,7 +743,12 @@ def _area_shape(location_id: str):
 
 
 def _geocode_within(
-    place_name: str, area_id: str, country_code: str, *, text: str = ""
+    place_name: str,
+    area_id: str,
+    country_code: str,
+    *,
+    text: str = "",
+    arabic_names: dict[str, str | None] | None = None,
 ) -> str | None:
     """Geocode ``place_name`` inside ``country_code`` and promote it to an L4
     point, but only when the point lies inside ``area_id`` — the admin area
@@ -673,7 +775,16 @@ def _geocode_within(
 
         # The post's Arabic spelling costs a model call, so ask only once the
         # area is usable and the Arabic lookup would actually run.
-        arabic_name = arabic_spelling(text, place_name) if arabic_lookup_applies(place_name) else None
+        # `arabic_names` keeps the answer for a name that is tried in a second
+        # area (a district, then its state).
+        if not arabic_lookup_applies(place_name):
+            arabic_name = None
+        elif arabic_names is not None and place_name in arabic_names:
+            arabic_name = arabic_names[place_name]
+        else:
+            arabic_name = arabic_spelling(text, place_name)
+            if arabic_names is not None:
+                arabic_names[place_name] = arabic_name
         # Strictly inside (`contains`, not `covers`): a point on or over the
         # line can be parented to the neighbouring area's district. Passed
         # into the lookups, so a same-named place elsewhere is a miss and the
