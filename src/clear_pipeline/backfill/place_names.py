@@ -225,8 +225,9 @@ def planning():
         points[point_id] = {"name": name, "lat": lat, "lng": lng, "kind": kind}
         return {"locationId": point_id, "reused": False}
 
-    def traced_geocode(place_name: str, area_id: str, country_code: str, *, text: str = ""):
-        found = real_geocode(place_name, area_id, country_code, text=text)
+    def traced_geocode(place_name: str, area_id: str, country_code: str, **kwargs: Any):
+        # The locator's own keyword arguments pass through as they are.
+        found = real_geocode(place_name, area_id, country_code, **kwargs)
         hits = _geocode_hits.get()
         if found and hits is not None:
             hits.append(_Hit(found, area_id, place_name))
