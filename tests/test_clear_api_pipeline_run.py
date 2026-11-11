@@ -11,10 +11,12 @@ from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.clear_api import (
     RUN_KIND_REPLAY,
     ClearApiError,
+    create_event,
     create_signal,
     create_signal_for_sync,
     mark_signals_processed,
     pipeline_run,
+    update_event,
     update_signal_location,
 )
 
@@ -24,6 +26,7 @@ ITEMS = [{"id": "s1", "revision": 0}]
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(clear_api, "_run_inputs_supported", True)
+    monkeypatch.setattr(clear_api, "_event_run_inputs_supported", True)
     monkeypatch.setenv("PIPELINE_VERSION", "abc123")
 
 
@@ -181,3 +184,52 @@ def test_another_clear_api_error_is_not_a_reason_to_fall_back():
         with pytest.raises(ClearApiError):
             mark_signals_processed(ITEMS)
     assert clear_api._run_inputs_supported is True
+
+
+# ── The grouping log (clear-api ADR-0021): the event mutations ───────────────
+
+EVENT_REFUSAL = ClearApiError(
+    'clear-api HTTP 400: {"errors":[{"message":"Variable \\"$input\\" got invalid value; '
+    'Field \\"runKind\\" is not defined by type \\"CreateEventInput\\"."}]}'
+)
+
+
+def test_create_event_sends_the_run_in_its_input_and_does_not_retry():
+    with patch.object(clear_api, "_execute", return_value={"createEvent": {"id": "e1"}}) as execute:
+        with pipeline_run(run_id="run-1"):
+            assert create_event({"signalIds": ["s1"]}) == {"id": "e1"}
+    assert _calls(execute) == [(
+        clear_api.CREATE_EVENT,
+        {"input": {"signalIds": ["s1"], "runKind": "LIVE", "pipelineVersion": "abc123", "runId": "run-1"}},
+    )]
+    assert execute.call_args.kwargs == {"retries": 1}
+
+
+def test_update_event_sends_replay_inside_a_replay_block():
+    with patch.object(clear_api, "_execute", return_value={"updateEvent": {"id": "e1"}}) as execute:
+        with pipeline_run(RUN_KIND_REPLAY, run_id="replay-1"):
+            update_event("e1", {"signalIds": ["s2"]})
+    assert _calls(execute) == [(
+        clear_api.UPDATE_EVENT,
+        {"id": "e1", "input": {"signalIds": ["s2"], "runKind": "REPLAY", "pipelineVersion": "abc123", "runId": "replay-1"}},
+    )]
+
+
+def test_an_older_clear_api_gets_the_event_input_without_the_run_from_then_on():
+    answers = [EVENT_REFUSAL, {"createEvent": {"id": "e1"}}, {"updateEvent": {"id": "e1"}}]
+    with patch.object(clear_api, "_execute", side_effect=answers) as execute:
+        assert create_event({"signalIds": ["s1"]}) == {"id": "e1"}
+        update_event("e1", {"signalIds": ["s2"]})
+    sent = [variables for _query, variables in _calls(execute)]
+    assert "runKind" in sent[0]["input"]
+    assert sent[1:] == [{"input": {"signalIds": ["s1"]}}, {"id": "e1", "input": {"signalIds": ["s2"]}}]
+    assert clear_api._event_run_inputs_supported is False
+    # The signal writes keep their run inputs: clear-api may know the Outcome log.
+    assert clear_api._run_inputs_supported is True
+
+
+def test_another_error_on_an_event_write_is_raised():
+    with patch.object(clear_api, "_execute", side_effect=ClearApiError("clear-api HTTP 500: boom")):
+        with pytest.raises(ClearApiError):
+            create_event({"signalIds": ["s1"]})
+    assert clear_api._event_run_inputs_supported is True
