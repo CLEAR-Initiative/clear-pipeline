@@ -308,6 +308,39 @@ def test_a_result_that_is_a_whole_state_is_refused():
     assert geoparser._pick_best_nominatim_result(results, {"sd"}) is None
 
 
+def test_a_name_that_locationiq_knows_only_as_a_state_is_not_a_miss():
+    # With the gazetteer off, "الخرطوم" passes the name check and reaches
+    # LocationIQ. Its only answer is the state: the trace says so, and the
+    # locator records no miss for it.
+    state_only = [row("15.87", "32.99", {"state": "Al Khartum State", "country": "Sudan"})]
+    trace = GeocodeTrace()
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
+        patch.object(geoparser.nominatim, "search", return_value=state_only),
+    ):
+        assert geoparser.geocode_place_name("الخرطوم", expected_country_codes={"sd"}, trace=trace) is None
+    assert trace.area
+
+    # A place among the states is still the answer, and the name is no area.
+    mixed = [*state_only, row("15.56", "32.53", {"city": "Khartoum", "state": "Al Khartum State", "country": "Sudan"})]
+    trace = GeocodeTrace()
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
+        patch.object(geoparser.nominatim, "search", return_value=mixed),
+    ):
+        assert geoparser.geocode_place_name("الخرطوم", expected_country_codes={"sd"}, trace=trace).lat == 15.56
+
+
+def test_a_name_with_no_answer_at_all_is_still_a_miss():
+    trace = GeocodeTrace()
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
+        patch.object(geoparser.nominatim, "search", return_value=[]),
+    ):
+        assert geoparser.geocode_place_name("Azwag Tibba", expected_country_codes={"sd"}, trace=trace) is None
+    assert not trace.area
+
+
 def test_the_country_itself_is_refused():
     assert geoparser._pick_best_nominatim_result([row("15.0", "30.0", {"country": "Sudan"})], {"sd"}) is None
 

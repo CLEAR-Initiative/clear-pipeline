@@ -240,9 +240,10 @@ class GeocodeTrace:
     outside: bool = False
     #: A lookup tier failed (clear-api or LocationIQ), so the miss proves nothing.
     failed: bool = False
-    #: The gazetteer knows the name exactly, as an area no point stands for
-    #: (a state, a region, a mountain range). The name is that area's: no
-    #: later tier is asked, and a caller that records misses records none.
+    #: A lookup knows the name as an area no point stands for, and as nothing
+    #: else: the gazetteer matched it exactly to a state, a region or a
+    #: mountain range (no later tier is then asked), or LocationIQ answered
+    #: with whole states only. A caller that records misses records none.
     area: bool = False
 
 
@@ -489,6 +490,7 @@ def _pick_best_nominatim_result(
 
     best: dict | None = None
     best_importance = -1.0  # accept 0-importance hits (real places in low-density OSM regions)
+    refused_an_area = False
     for r in results:
         try:
             importance = float(r.get("importance", 0))
@@ -498,6 +500,7 @@ def _pick_best_nominatim_result(
         if isinstance(cls, str) and cls.lower() in _REJECTED_CLASSES:
             continue
         if _is_state_or_country(r):
+            refused_an_area = True
             continue
         country = _extract_country_code(r)
         if expected_country_codes and country and country not in expected_country_codes:
@@ -514,6 +517,10 @@ def _pick_best_nominatim_result(
         if importance > best_importance:
             best_importance = importance
             best = r
+    if best is None and refused_an_area and trace is not None:
+        # Every usable answer was a whole state: the name is an area's, with
+        # the gazetteer off too ("الخرطوم" passes the name check).
+        trace.area = True
     return best
 
 
