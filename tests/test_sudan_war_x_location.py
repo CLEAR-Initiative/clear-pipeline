@@ -1902,7 +1902,9 @@ def test_the_arabic_spelling_is_bought_once_for_a_name_tried_in_two_areas():
         _white_nile({}) as m,
     ):
         location.locate_in_country(KAZGEIL_POST, KAZGEIL_POST, "Sudan", country_code="sd")
-    spelling.assert_called_once_with(KAZGEIL_POST, "Kazgeil")
+    # Once for the place, tried in the district and in the state. (The other
+    # call asks whether the post names the district itself, #1417.)
+    assert [c.args for c in spelling.call_args_list].count((KAZGEIL_POST, "Kazgeil")) == 1
     assert [c.kwargs["arabic_name"] for c in m["geocode"].call_args_list] == ["كازقيل", "كازقيل"]
 
 
@@ -2347,3 +2349,146 @@ def test_exact_gazetteer_match_raises_when_the_lookup_fails_and_is_none_with_the
         geoparser.exact_gazetteer_match("Wad Madani", "sd", within_location_id="sd-gz")
     with patch.object(geoparser.settings, "geoparser_use_gazetteer", False):
         assert geoparser.exact_gazetteer_match("Wad Madani", "sd", within_location_id="sd-gz") is None
+
+
+# ── a district the post itself names is kept (#1417) ─────────────────────────
+
+TENDALTI_POST = "اشتباكات في قرية أم صفيفة بمحلية تندلتي"
+
+
+@contextmanager
+def _district_named(*, arabic="تندلتي", match="geonames", lookup_error=None):
+    """The post's Arabic spelling of the district, and what the gazetteer
+    holds for it inside the district: a GeoNames match, a place alias (the id
+    of the location it points at), or nothing."""
+    def exact(name, country_code, *, arabic_name=None, within_location_id, **_):
+        if lookup_error:
+            raise lookup_error
+        if match is None or arabic_name != arabic:
+            return None
+        hit = _hit(13.1, 32.0)
+        hit.location_id = None if match == "geonames" else match
+        return hit
+
+    exact_mock = MagicMock(side_effect=exact)
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(location, "arabic_spelling",
+                     side_effect=lambda text, name: arabic if name == "Tendalti" else None) as spelling,
+        patch.object(location, "exact_gazetteer_match", exact_mock),
+    ):
+        yield {"exact": exact_mock, "spelling": spelling}
+
+
+def _locate_named(post=TENDALTI_POST, *, places=(), hits=None, place_name="Um Sufaifa", **named):
+    patcher, _ = _llm_with_places(list(places), location_type="general",
+                                  location_id="sd-wn-tendalti", place_name=place_name)
+    with patcher, _white_nile(hits or {}), _district_named(**named) as m:
+        return location.locate_in_country(post, post, "Sudan", country_code="sd"), m
+
+
+def test_a_district_the_post_names_in_arabic_is_kept():
+    # The village is unknown to the gazetteer, but the post says "محلية تندلتي".
+    located, m = _locate_named()
+    assert located == "sd-wn-tendalti"
+    assert m["exact"].call_args.kwargs == {"arabic_name": "تندلتي", "within_location_id": "sd-wn-tendalti"}
+    assert m["exact"].call_args.args == ("Tendalti", "sd")
+
+
+def test_a_district_the_post_names_through_a_place_alias_is_kept():
+    assert _locate_named(match="sd-wn-tendalti")[0] == "sd-wn-tendalti"
+    # An alias is returned whatever area was asked about: one that points at
+    # another location says nothing about this district.
+    assert _locate_named(match="sd-nk-sheikan")[0] == "sd-wn"
+
+
+@pytest.mark.parametrize("named", [
+    {"arabic": None},                             # the post does not write the district's name
+    {"match": None},                              # the gazetteer does not hold that spelling for it
+    {"lookup_error": RuntimeError("timed out")},  # a failed lookup confirms nothing
+])
+def test_a_district_the_post_does_not_verifiably_name_falls_back_to_its_state(named):
+    assert _locate_named(**named)[0] == "sd-wn"
+
+
+def test_a_district_named_in_latin_script_is_kept_without_a_lookup():
+    post = "Clashes in Um Sufaifa village, Tendalti locality."
+    located, m = _locate_named(post)
+    assert located == "sd-wn-tendalti"
+    # No model call for the district's name, and no gazetteer lookup.
+    assert all(c.args[1] != "Tendalti" for c in m["spelling"].call_args_list)
+    m["exact"].assert_not_called()
+    # A longer word that only starts like it is not the district's name.
+    assert _locate_named("Clashes in Tendaltiya village.", arabic=None)[0] == "sd-wn"
+
+
+def test_a_point_in_the_state_wins_over_a_district_the_post_names():
+    # The model chose Tendalti, the post names it, but its place is in Rabak:
+    # the point is the better answer.
+    located, m = _locate_named(place_name="Rabak", hits={"Rabak": _hit(13.18, 32.74)})
+    assert located == "l4-rabak"
+    m["exact"].assert_not_called()
+
+
+def test_a_district_the_post_names_wins_over_a_match_in_another_state():
+    patcher, _ = _llm_with_places([], location_type="general", location_id="sd-wn-tendalti",
+                                  place_name="Wad Madani")
+    with (
+        patcher, _white_nile({}), _district_named(),
+        patch.object(location, "_place_elsewhere") as elsewhere,
+    ):
+        located = location.locate_in_country(TENDALTI_POST, TENDALTI_POST, "Sudan", country_code="sd")
+    assert located == "sd-wn-tendalti"
+    elsewhere.assert_not_called()
+
+
+def test_a_district_with_no_place_name_is_kept_when_the_post_names_it():
+    assert _locate_named(place_name=None)[0] == "sd-wn-tendalti"
+    assert _locate_named(place_name=None, arabic=None)[0] == "sd-wn"
+
+
+@pytest.mark.parametrize("name, core", [
+    ("Madeinat Kassala", "Kassala"),
+    ("Reifi Khashm Elgirba", "Khashm Elgirba"),
+    ("At Tadamon - SK", "At Tadamon"),
+    ("Tendalti", "Tendalti"),
+    ("Reifi", "Reifi"),
+])
+def test_a_districts_name_as_a_post_writes_it(name, core):
+    assert location._district_core_name(name) == core
+
+
+@pytest.mark.parametrize("post, kept", [
+    ("فيضانات في ولاية الخرطوم", False),                 # the state
+    ("أزمة الخبز في الخرطوم", False),                      # bare: could be the state
+    ("أقرت لجنة أمن محلية الخرطوم إجراءات مشددة", True),   # the district
+    ("انفجارات في مدينة الخرطوم", True),                   # the city
+    ("Flooding across Khartoum state", False),
+    ("Explosions in Khartoum city", True),
+    ("Explosions in the locality of Khartoum", True),
+])
+def test_a_district_that_shares_its_states_name_needs_a_word_that_says_district(post, kept):
+    # Khartoum is a state and a district. The bare name does not say which.
+    patcher, _ = _llm_with_places([], location_type="general", location_id="sd-kh-kh", place_name=None)
+    shapes = {**SHAPES, "sd-kh-kh": box(32.4, 15.4, 32.7, 15.7), "sd-kh": box(31.5, 15.0, 34.5, 16.7)}
+    hit = _hit(15.55, 32.53)
+    with (
+        patcher, _white_nile({}), patch.dict(SHAPES, shapes),
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(location, "arabic_spelling",
+                     side_effect=lambda text, name: "الخرطوم" if name == "Khartoum" and "الخرطوم" in text else None),
+        patch.object(location, "exact_gazetteer_match", return_value=hit),
+    ):
+        located = location.locate_in_country(post, post, "Sudan", country_code="sd")
+    assert located == ("sd-kh-kh" if kept else "sd-kh")
+
+
+def test_a_district_named_in_the_title_only_is_kept():
+    # Some sources send a title and a separate description.
+    patcher, _ = _llm_with_places([], location_type="general", location_id="sd-wn-tendalti",
+                                  place_name="Um Sufaifa")
+    with patcher, _white_nile({}), _district_named() as m:
+        located = location.locate_in_country(
+            "محلية تندلتي: اشتباكات", "اشتباكات في قرية أم صفيفة", "Sudan", country_code="sd")
+    assert located == "sd-wn-tendalti"
+    assert "محلية تندلتي" in m["spelling"].call_args_list[-1].args[0]

@@ -409,6 +409,7 @@ def locate_in_country(
     text = description or title or ""
     arabic_names: dict[str, str | None] = {}
     district = _scoped_location(matched_id, country, level=2)
+    unconfirmed_district: dict | None = None
     if district is not None:
         # The model often answers with a district the post does not name.
         # Grouping keys on the district, so a guessed one splits an incident.
@@ -426,6 +427,7 @@ def locate_in_country(
             district.get("name"), place_name,
         )
         matched_id = area_id = state_id
+        unconfirmed_district = district
     if (
         country_code
         and area_id
@@ -453,6 +455,18 @@ def locate_in_country(
             )
             if point_id:
                 return point_id
+        # No place of the post gave a point inside the state. A district the
+        # model chose is still kept when the post itself names it: "محلية
+        # الخوي" with a village the gazetteer does not hold is a post about
+        # Al Khiwai. Asked only now: a point in the state is the better answer.
+        # The whole post is read, title and description: a source can name
+        # the district in the title only.
+        whole_post = "\n".join(part.strip() for part in (title, description) if part and part.strip())
+        if unconfirmed_district is not None and _post_names_district(
+            unconfirmed_district, whole_post, country, country_code, arabic_names
+        ):
+            logger.info("[locate] the post names district %r: keeping it", unconfirmed_district.get("name"))
+            return unconfirmed_district["id"]
         # No name of the post is inside the area. An exact match outside it is
         # accepted only for a state the model chose (never for the country),
         # and only for the place the answer is based on: the other names of a
@@ -506,7 +520,10 @@ def _confirm_district(
 
     The 3–10 Nov posts stored in Tendalti, Kadugli and Shendi named Kazgeil,
     Wad Madani, El Obeid, Kutum: places the model's district does not hold.
-    A district with no place name has nothing to check and is not kept."""
+    A district with no place name has nothing to check and is not kept.
+
+    (A district that the post itself names is kept too, but only after the
+    post's places were tried inside the state: see `locate_in_country`.)"""
     if not place_name:
         return None
     own_name = latin_name_key(place_name) == latin_name_key(district.get("name") or "")
@@ -528,6 +545,89 @@ def _confirm_district(
         if point_id:
             return point_id
     return district["id"] if own_name else None
+
+
+# Words in a district's name that say what kind of area it is, or which state
+# it is in: "Madeinat Kassala" (Kassala town), "Reifi Aroma" (rural Aroma),
+# "At Tadamon - SK". A post writes the name without them.
+_DISTRICT_KIND_WORDS = frozenset({"madeinat", "reifi"})
+
+
+def _district_core_name(name: str) -> str:
+    """A district's name as a post writes it: no state suffix, no kind word."""
+    core = re.sub(r"\s+-\s+.*$", "", name.strip())
+    words = core.split()
+    if len(words) > 1 and words[0].casefold() in _DISTRICT_KIND_WORDS:
+        core = " ".join(words[1:])
+    return core
+
+
+# What a post writes before or after a name to say it means the town or the
+# district, not the state of the same name: "مدينة كسلا", "محلية الخرطوم",
+# "Kassala town".
+_DISTRICT_MARK_AR = r"(?:محلية|مدينة|بمحلية|بمدينة|ومحلية|ومدينة|لمحلية|لمدينة)"
+_DISTRICT_MARK_LATIN = r"(?:city|town|locality|district)"
+
+
+def _post_names_district(
+    district: dict,
+    text: str,
+    country: str,
+    country_code: str | None,
+    arabic_names: dict[str, str | None],
+) -> bool:
+    """True when the post itself names the district the model chose.
+
+    - In Latin script: the district's name is in the text, as a whole word.
+    - In Arabic: the post writes the district's name (`arabic_spelling`, a
+      model call that only copies from the text), and the gazetteer holds
+      that spelling as an exact match for this district: a place alias that
+      points at the district, or a GeoNames match inside it whose Latin name
+      agrees with the district's. Without the gazetteer's word a spelling
+      the model picked from the text proves nothing.
+
+    A district that shares its name with a state (Khartoum, Kassala, Sennar)
+    needs more: "flooding across Khartoum state" names the state. The name
+    then counts only with a word that says it means the town or the district
+    ("مدينة كسلا", "محلية الخرطوم", "Kassala town").
+
+    False on any failure but an LLM outage: an unconfirmed district falls
+    back to its state, which is the safe side."""
+    name = _district_core_name(district.get("name") or "")
+    if not text or len(latin_name_key(name)) < 3:
+        return False
+    shared = _names_country_or_state(name, country)
+    folded = text.casefold()
+    latin = re.escape(name.casefold())
+    if shared:
+        if re.search(rf"(?<![a-z]){latin}\s+{_DISTRICT_MARK_LATIN}(?![a-z])", folded) or re.search(
+            rf"(?<![a-z]){_DISTRICT_MARK_LATIN}\s+of\s+{latin}(?![a-z])", folded
+        ):
+            return True
+    elif re.search(rf"(?<![a-z]){latin}(?![a-z])", folded):
+        return True
+    if not country_code or not arabic_lookup_applies(name):
+        return False
+    try:
+        if name not in arabic_names:
+            arabic_names[name] = arabic_spelling(text, name)
+        arabic_name = arabic_names[name]
+        if not arabic_name:
+            return False
+        if shared and not re.search(rf"{_DISTRICT_MARK_AR}\s+{re.escape(arabic_name)}", text):
+            return False
+        hit = exact_gazetteer_match(
+            name, country_code, arabic_name=arabic_name, within_location_id=district["id"]
+        )
+    except LLMUnavailableError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a failed lookup confirms nothing
+        logger.info("[locate] checking that the post names %r failed: %s", name, exc)
+        return False
+    if hit is None:
+        return False
+    # An alias is returned whatever area was asked about: it must be this district's.
+    return hit.location_id is None or hit.location_id == district["id"]
 
 
 # The most names tried for one post: the answer's own, plus these.
