@@ -491,3 +491,17 @@ def test_apply_moves_signals_inside_one_replay_run(tmp_path, monkeypatch):
         assert backfill.main(["apply", "--plan", str(plan)]) == 0
     assert seen == [("REPLAY", "place-names-backfill:plan.jsonl")]
     assert client._run_kind.get() == "LIVE"  # the block ends with the run
+
+
+def test_a_move_that_a_person_held_back_is_not_applied(tmp_path, monkeypatch, capsys):
+    plan = tmp_path / "plan.jsonl"
+    write_plan(plan, [{**AREA_MOVE, "outcome": "held", "misses": [miss("Azwag Tibba")]},
+                      planned("s2", misses=[miss("Azwag Tibba")])])
+    monkeypatch.setenv("CLEAR_API_URL", "https://dev-api.example/graphql")
+    with clear_api(signal()) as api:
+        assert backfill.main(["apply", "--plan", str(plan)]) == 0
+        assert backfill.main(["summary", "--plan", str(plan)]) == 0
+
+    api["update"].assert_not_called()
+    assert api["record"].call_count == 2  # its name is still recorded
+    assert "held: 1" in capsys.readouterr().out

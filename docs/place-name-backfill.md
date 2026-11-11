@@ -58,48 +58,59 @@ clear-api applies a resolved name to each signal it records. When a reviewer res
 
 ## Run it
 
-Run it where the pipeline's settings are: inside a Dagster container. The plan must come from the same settings as the drain (model, gazetteer, LocationIQ). A plan made on a laptop without LocationIQ records names that the drain would place.
+Run it on the Dagster VM, in a container of its own. Two reasons:
+
+- The plan must come from the same settings as the drain (model, gazetteer, LocationIQ). A plan made on a laptop without LocationIQ records names that the drain would place.
+- Watchtower replaces the Dagster containers on each deploy. A run inside one of them (`docker exec`) stops, and its files in `/tmp` go with it. A container that you start yourself has no Watchtower label, so a deploy leaves it alone.
 
 Run on dev first. A plan belongs to one clear-api: `apply` refuses a plan made against another host.
 
-1. Open a shell in the container.
+The commands below run on the VM (`ssh dev-dagster`). They keep the files in `~/backfill`.
+
+1. Set the command once for this shell.
 
    ```bash
-   ssh dev-dagster
-   docker exec -it app-dagster-webserver-1 bash
+   mkdir -p ~/backfill
+   run() { docker run --rm --network clear --env-file /srv/app/dagster.env -v "$HOME/backfill:/work" --memory 2g ghcr.io/clear-initiative/clear-pipeline:dev python -m clear_pipeline.backfill.place_names "$@"; }
    ```
 
 2. Count the signals. This calls no model.
 
    ```bash
-   python -m clear_pipeline.backfill.place_names plan --since 2026-08-01 --out /tmp/place-names.jsonl --count-only
+   run plan --since 2026-08-01 --out /work/count.jsonl --count-only
    ```
 
-3. Make the plan.
+3. Make the plan. Put the date in the file name: the file name is the id of the replay run in clear-api, and each plan must be a run of its own. It takes about 25 minutes for 2,000 signals. Use `tmux`, or add `-d` to the `docker run`, so that a lost SSH connection does not stop it.
 
    ```bash
-   python -m clear_pipeline.backfill.place_names plan --since 2026-08-01 --out /tmp/place-names.jsonl
+   run plan --since 2026-08-01 --out /work/plan-2026-11-11.jsonl
    ```
 
-4. Copy the plan out of the container. Watchtower replaces the container on each deploy, and `/tmp` goes with it. Run this on the VM, not in the container.
+4. Read the summary. Change `--min-signals` to see how the threshold changes the queue.
 
    ```bash
-   docker cp app-dagster-webserver-1:/tmp/place-names.jsonl ~/place-names.jsonl
+   run summary --plan /work/plan-2026-11-11.jsonl --min-signals 2
    ```
 
-5. Read the summary. Change `--min-signals` to see how the threshold changes the queue.
+5. Read the moves before you apply them. Look for a name that is a region, not a place ("Darfur", "Kordofan"): the locator gives it the region's centre point (ticket #1429). To hold a move back, change its `outcome` in the plan file from `move` to `held`.
 
    ```bash
-   python -m clear_pipeline.backfill.place_names summary --plan /tmp/place-names.jsonl --min-signals 2
+   jq -r 'select(.outcome=="move") | .proposed.name' ~/backfill/plan-2026-11-11.jsonl | sort | uniq -c | sort -rn | less
    ```
 
-6. Apply the plan.
+6. Apply 5 signals, and check them in CLEAR.
 
    ```bash
-   python -m clear_pipeline.backfill.place_names apply --plan /tmp/place-names.jsonl --min-signals 2
+   run apply --plan /work/plan-2026-11-11.jsonl --limit 5
    ```
 
-7. Look at the result on `/metrics`. Choose "At district or finer", then choose the run in "Replay run". The run id is `place-names-backfill:<plan file name>`. The dashed line shows what the backfill did with the signals it moved. The other lines do not change: past weeks keep what the pipeline delivered at the time. Do not add a metric annotation for the backfill.
+7. Apply the rest.
+
+   ```bash
+   run apply --plan /work/plan-2026-11-11.jsonl
+   ```
+
+8. Look at the result on `/metrics`. Choose "At district or finer", then choose the run in "Replay run". The run id is `place-names-backfill:<plan file name>`. The dashed line shows what the backfill did with the signals it moved. The other lines do not change: past weeks keep what the pipeline delivered at the time. Do not add a metric annotation for the backfill.
 
 Options:
 
@@ -125,6 +136,7 @@ A second `apply` of a whole plan changes nothing. A later `apply` with a lower `
 | Outcome | Meaning |
 |---|---|
 | `move` | The locator gives a finer place inside the present location. |
+| `held` | A person held the move back in the plan file. `apply` does not move the signal. |
 | `same` | The locator gives the present location again. |
 | `differs` | The locator gives a place outside the present location, or a coarser one. Nothing moves. |
 | `no_location` | The locator gives nothing. |
