@@ -459,8 +459,11 @@ def locate_in_country(
         # model chose is still kept when the post itself names it: "محلية
         # الخوي" with a village the gazetteer does not hold is a post about
         # Al Khiwai. Asked only now: a point in the state is the better answer.
+        # The whole post is read, title and description: a source can name
+        # the district in the title only.
+        whole_post = "\n".join(part.strip() for part in (title, description) if part and part.strip())
         if unconfirmed_district is not None and _post_names_district(
-            unconfirmed_district, text, country_code, arabic_names
+            unconfirmed_district, whole_post, country, country_code, arabic_names
         ):
             logger.info("[locate] the post names district %r: keeping it", unconfirmed_district.get("name"))
             return unconfirmed_district["id"]
@@ -559,9 +562,17 @@ def _district_core_name(name: str) -> str:
     return core
 
 
+# What a post writes before or after a name to say it means the town or the
+# district, not the state of the same name: "مدينة كسلا", "محلية الخرطوم",
+# "Kassala town".
+_DISTRICT_MARK_AR = r"(?:محلية|مدينة|بمحلية|بمدينة|ومحلية|ومدينة|لمحلية|لمدينة)"
+_DISTRICT_MARK_LATIN = r"(?:city|town|locality|district)"
+
+
 def _post_names_district(
     district: dict,
     text: str,
+    country: str,
     country_code: str | None,
     arabic_names: dict[str, str | None],
 ) -> bool:
@@ -575,12 +586,25 @@ def _post_names_district(
       agrees with the district's. Without the gazetteer's word a spelling
       the model picked from the text proves nothing.
 
+    A district that shares its name with a state (Khartoum, Kassala, Sennar)
+    needs more: "flooding across Khartoum state" names the state. The name
+    then counts only with a word that says it means the town or the district
+    ("مدينة كسلا", "محلية الخرطوم", "Kassala town").
+
     False on any failure but an LLM outage: an unconfirmed district falls
     back to its state, which is the safe side."""
     name = _district_core_name(district.get("name") or "")
     if not text or len(latin_name_key(name)) < 3:
         return False
-    if re.search(rf"(?<![a-z]){re.escape(name.casefold())}(?![a-z])", text.casefold()):
+    shared = _names_country_or_state(name, country)
+    folded = text.casefold()
+    latin = re.escape(name.casefold())
+    if shared:
+        if re.search(rf"(?<![a-z]){latin}\s+{_DISTRICT_MARK_LATIN}(?![a-z])", folded) or re.search(
+            rf"(?<![a-z]){_DISTRICT_MARK_LATIN}\s+of\s+{latin}(?![a-z])", folded
+        ):
+            return True
+    elif re.search(rf"(?<![a-z]){latin}(?![a-z])", folded):
         return True
     if not country_code or not arabic_lookup_applies(name):
         return False
@@ -589,6 +613,8 @@ def _post_names_district(
             arabic_names[name] = arabic_spelling(text, name)
         arabic_name = arabic_names[name]
         if not arabic_name:
+            return False
+        if shared and not re.search(rf"{_DISTRICT_MARK_AR}\s+{re.escape(arabic_name)}", text):
             return False
         hit = exact_gazetteer_match(
             name, country_code, arabic_name=arabic_name, within_location_id=district["id"]

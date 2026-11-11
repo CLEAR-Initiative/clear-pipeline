@@ -2456,3 +2456,39 @@ def test_a_district_with_no_place_name_is_kept_when_the_post_names_it():
 ])
 def test_a_districts_name_as_a_post_writes_it(name, core):
     assert location._district_core_name(name) == core
+
+
+@pytest.mark.parametrize("post, kept", [
+    ("فيضانات في ولاية الخرطوم", False),                 # the state
+    ("أزمة الخبز في الخرطوم", False),                      # bare: could be the state
+    ("أقرت لجنة أمن محلية الخرطوم إجراءات مشددة", True),   # the district
+    ("انفجارات في مدينة الخرطوم", True),                   # the city
+    ("Flooding across Khartoum state", False),
+    ("Explosions in Khartoum city", True),
+    ("Explosions in the locality of Khartoum", True),
+])
+def test_a_district_that_shares_its_states_name_needs_a_word_that_says_district(post, kept):
+    # Khartoum is a state and a district. The bare name does not say which.
+    patcher, _ = _llm_with_places([], location_type="general", location_id="sd-kh-kh", place_name=None)
+    shapes = {**SHAPES, "sd-kh-kh": box(32.4, 15.4, 32.7, 15.7), "sd-kh": box(31.5, 15.0, 34.5, 16.7)}
+    hit = _hit(15.55, 32.53)
+    with (
+        patcher, _white_nile({}), patch.dict(SHAPES, shapes),
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(location, "arabic_spelling",
+                     side_effect=lambda text, name: "الخرطوم" if name == "Khartoum" and "الخرطوم" in text else None),
+        patch.object(location, "exact_gazetteer_match", return_value=hit),
+    ):
+        located = location.locate_in_country(post, post, "Sudan", country_code="sd")
+    assert located == ("sd-kh-kh" if kept else "sd-kh")
+
+
+def test_a_district_named_in_the_title_only_is_kept():
+    # Some sources send a title and a separate description.
+    patcher, _ = _llm_with_places([], location_type="general", location_id="sd-wn-tendalti",
+                                  place_name="Um Sufaifa")
+    with patcher, _white_nile({}), _district_named() as m:
+        located = location.locate_in_country(
+            "محلية تندلتي: اشتباكات", "اشتباكات في قرية أم صفيفة", "Sudan", country_code="sd")
+    assert located == "sd-wn-tendalti"
+    assert "محلية تندلتي" in m["spelling"].call_args_list[-1].args[0]
