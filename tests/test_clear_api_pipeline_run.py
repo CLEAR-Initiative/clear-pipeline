@@ -11,11 +11,13 @@ from clear_pipeline.providers import clear_api
 from clear_pipeline.providers.clear_api import (
     RUN_KIND_REPLAY,
     ClearApiError,
+    create_alert,
     create_event,
     create_signal,
     create_signal_for_sync,
     mark_signals_processed,
     pipeline_run,
+    set_event_aggregates,
     update_event,
     update_signal_location,
 )
@@ -27,6 +29,7 @@ ITEMS = [{"id": "s1", "revision": 0}]
 def _fresh(monkeypatch):
     monkeypatch.setattr(clear_api, "_run_inputs_supported", True)
     monkeypatch.setattr(clear_api, "_event_run_inputs_supported", True)
+    monkeypatch.setattr(clear_api, "_facts_run_inputs_supported", True)
     monkeypatch.setenv("PIPELINE_VERSION", "abc123")
 
 
@@ -233,3 +236,61 @@ def test_another_error_on_an_event_write_is_raised():
         with pytest.raises(ClearApiError):
             create_event({"signalIds": ["s1"]})
     assert clear_api._event_run_inputs_supported is True
+
+
+# ── The Event facts log (clear-api ADR-0021): alerts and aggregates ──────────
+
+MEMBERS = [{"id": "s1", "revision": 2, "severity": 4}]
+SNAPSHOT = [{"id": "s1", "revision": 2}]
+
+
+def test_create_alert_sends_the_run_in_its_input():
+    with patch.object(clear_api, "_execute", return_value={"createAlert": {"id": "a1"}}) as execute:
+        with pipeline_run(run_id="run-1"):
+            assert create_alert({"eventId": "e1", "status": "published"}) == {"id": "a1"}
+    assert _calls(execute) == [(
+        clear_api.CREATE_ALERT,
+        {"input": {"eventId": "e1", "status": "published", "runKind": "LIVE", "pipelineVersion": "abc123", "runId": "run-1"}},
+    )]
+
+
+def test_set_event_aggregates_sends_the_run_as_arguments():
+    with patch.object(clear_api, "_execute", return_value={"setEventAggregates": {"id": "e1"}}) as execute:
+        with pipeline_run(RUN_KIND_REPLAY, run_id="replay-1"):
+            set_event_aggregates("e1", {"rank": 1.0}, MEMBERS)
+    assert _calls(execute) == [(
+        clear_api.SET_EVENT_AGGREGATES_WITH_RUN,
+        {
+            "id": "e1", "input": {"rank": 1.0}, "members": SNAPSHOT,
+            "runKind": "REPLAY", "pipelineVersion": "abc123", "runId": "replay-1",
+        },
+    )]
+
+
+def test_an_older_clear_api_gets_alert_and_aggregate_writes_without_the_run_from_then_on():
+    refusal = ClearApiError(
+        'clear-api HTTP 400: {"errors":[{"message":"Unknown argument \\"runKind\\" on field '
+        '\\"Mutation.setEventAggregates\\"."}]}'
+    )
+    answers = [refusal, {"setEventAggregates": {"id": "e1"}}, {"createAlert": None}]
+    with patch.object(clear_api, "_execute", side_effect=answers) as execute:
+        set_event_aggregates("e1", {"rank": 1.0}, MEMBERS)
+        assert create_alert({"eventId": "e1"}) is None
+    assert _calls(execute) == [
+        (clear_api.SET_EVENT_AGGREGATES_WITH_RUN, {
+            "id": "e1", "input": {"rank": 1.0}, "members": SNAPSHOT, "runKind": "LIVE", "pipelineVersion": "abc123",
+        }),
+        (clear_api.SET_EVENT_AGGREGATES, {"id": "e1", "input": {"rank": 1.0}, "members": SNAPSHOT}),
+        (clear_api.CREATE_ALERT, {"input": {"eventId": "e1"}}),
+    ]
+    assert clear_api._facts_run_inputs_supported is False
+    # The other writes keep their run inputs.
+    assert clear_api._event_run_inputs_supported is True
+    assert clear_api._run_inputs_supported is True
+
+
+def test_stale_members_are_raised_and_are_not_a_reason_to_fall_back():
+    with patch.object(clear_api, "_execute", side_effect=clear_api.ClearApiStaleMembers("stale")):
+        with pytest.raises(clear_api.ClearApiStaleMembers):
+            set_event_aggregates("e1", {"rank": 1.0}, MEMBERS)
+    assert clear_api._facts_run_inputs_supported is True

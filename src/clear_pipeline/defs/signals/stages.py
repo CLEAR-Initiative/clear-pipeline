@@ -727,27 +727,29 @@ def alert(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     # this returns is recent + severe → publish an alert. No archived-suppression
     # path (creating an alert row, even archived, still fanned out emails).
     alerted = failed = 0
-    for _ in range(_MAX_BATCHES):
-        events = events_pending_alert(
-            first=_BATCH_SIZE,
-            min_severity=_ALERT_MIN_SEVERITY,
-            max_age_hours=settings.alert_max_signal_age_hours,
-        )
-        if not events:
-            break
-        made_progress = False
-        for event in events:
-            try:
-                escalate_to_alert(event)  # published
-            except Exception:  # noqa: BLE001 — isolate one event's failure
-                context.log.exception("[alert] event %s failed", event.get("id"))
-                failed += 1
-                continue
-            alerted += 1
-            made_progress = True  # this event now has an alert → leaves the queue
-        # Terminate when a batch produced no new alerts (every event errored).
-        if not made_progress:
-            break
+    # clear-api records that a Live run raised each alert (clear-api ADR-0021).
+    with pipeline_run(RUN_KIND_LIVE, run_id=dagster_run_id(context)):
+        for _ in range(_MAX_BATCHES):
+            events = events_pending_alert(
+                first=_BATCH_SIZE,
+                min_severity=_ALERT_MIN_SEVERITY,
+                max_age_hours=settings.alert_max_signal_age_hours,
+            )
+            if not events:
+                break
+            made_progress = False
+            for event in events:
+                try:
+                    escalate_to_alert(event)  # published
+                except Exception:  # noqa: BLE001 — isolate one event's failure
+                    context.log.exception("[alert] event %s failed", event.get("id"))
+                    failed += 1
+                    continue
+                alerted += 1
+                made_progress = True  # this event now has an alert → leaves the queue
+            # Terminate when a batch produced no new alerts (every event errored).
+            if not made_progress:
+                break
 
     context.log.info("[alert] alerted=%d failed=%d", alerted, failed)
     return dg.MaterializeResult(metadata={"alerted": alerted, "failed": failed})

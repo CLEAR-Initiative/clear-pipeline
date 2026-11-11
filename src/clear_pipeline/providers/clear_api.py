@@ -1899,6 +1899,21 @@ mutation SetEventAggregates(
 }
 """
 
+# With the run that recomputes the event, for the Event facts log (clear-api ADR-0021).
+SET_EVENT_AGGREGATES_WITH_RUN = """
+mutation SetEventAggregates(
+  $id: String!, $input: EventAggregatesInput!, $members: [SignalRevisionInput!]!,
+  $runKind: LocationRunKind, $pipelineVersion: String, $runId: String
+) {
+  setEventAggregates(
+    id: $id, input: $input, members: $members,
+    runKind: $runKind, pipelineVersion: $pipelineVersion, runId: $runId
+  ) {
+    id
+  }
+}
+"""
+
 
 # ─── Pipeline run (location Outcome log) ──────────────────────────────────────
 #
@@ -2068,9 +2083,10 @@ def set_event_aggregates(event_id: str, input_data: dict, members: list[dict]) -
     were computed from: if they changed since, nothing is written and
     ``ClearApiStaleMembers`` is raised (a newer recompute supersedes this one)."""
     snapshot = [{"id": m["id"], "revision": m["revision"]} for m in members]
-    result = _execute(
-        SET_EVENT_AGGREGATES, {"id": event_id, "input": input_data, "members": snapshot},
-    )
+    legacy = {"id": event_id, "input": input_data, "members": snapshot}
+    # clear-api logs the facts this run gave the event (see ``pipeline_run``).
+    variables = {**legacy, "runKind": _run_kind.get(), **_run_fields()}
+    result = _execute_facts_with_run(SET_EVENT_AGGREGATES_WITH_RUN, variables, SET_EVENT_AGGREGATES, legacy)
     return result["setEventAggregates"]
 
 
@@ -2297,6 +2313,33 @@ def _execute_event_with_run(query: str, variables: dict, input_data: dict, **kwa
     return _execute(query, {**variables, "input": input_data}, **kwargs)
 
 
+# False once clear-api rejects the run inputs on ``createAlert`` or
+# ``setEventAggregates``: it is older than the Event facts log. One flag for
+# both, because one clear-api release added both. A restart checks again.
+_facts_run_inputs_supported = True
+
+
+def _execute_facts_with_run(query: str, variables: dict, legacy_query: str, legacy_variables: dict) -> dict[str, Any]:
+    """Send ``query`` with the run named by ``pipeline_run``, for the Event
+    facts log and the run kind of an alert (clear-api ADR-0021). If clear-api
+    does not know the run inputs yet, send ``legacy_query`` instead, now and
+    for the rest of the process. clear-api refuses an unknown argument or
+    input field before it writes, so the second send never writes twice."""
+    global _facts_run_inputs_supported
+    if _facts_run_inputs_supported:
+        try:
+            return _execute(query, variables)
+        except (ClearApiError, GraphQLErrors) as exc:
+            if not _rejects_run_inputs(exc):
+                raise
+            _facts_run_inputs_supported = False
+            logger.warning(
+                "clear-api does not accept the Event facts log run inputs yet; "
+                "sending alert and aggregate writes without them until restart"
+            )
+    return _execute(legacy_query, legacy_variables)
+
+
 def create_event(input_data: dict) -> dict:
     # retries=1: createEvent has no idempotency key (unlike createSignal's
     # (sourceId, externalId)), so a retry after a timeout that actually committed
@@ -2321,7 +2364,10 @@ def escalate_event(event_id: str, user_id: str) -> dict:
 def create_alert(input_data: dict) -> dict | None:
     # `createAlert` returns null (no error) when the event's types are all
     # NRC-irrelevant — callers treat None as "no alert raised", not a failure.
-    result = _execute(CREATE_ALERT, {"input": input_data})
+    # clear-api records the kind of run that raises the alert: an alert from a
+    # replay is not part of the metric history (clear-api ADR-0021).
+    with_run = {**input_data, "runKind": _run_kind.get(), **_run_fields()}
+    result = _execute_facts_with_run(CREATE_ALERT, {"input": with_run}, CREATE_ALERT, {"input": input_data})
     return result["createAlert"]
 
 
