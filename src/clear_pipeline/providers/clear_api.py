@@ -2267,18 +2267,48 @@ def get_signal_location(signal_id: str) -> dict | None:
     return (data.get("signal") or {}).get("generalLocation")
 
 
+# False once clear-api rejects the run inputs on the event mutations: it is
+# older than the grouping log. Kept apart from ``_run_inputs_supported``, so a
+# clear-api that knows the Outcome log and not the grouping log still gets
+# the run inputs on signal writes. A restart checks again.
+_event_run_inputs_supported = True
+
+
+def _execute_event_with_run(query: str, variables: dict, input_data: dict, **kwargs: Any) -> dict[str, Any]:
+    """Send an event mutation with the run named by ``pipeline_run`` in its
+    input, so clear-api logs each new signal link with the run that made it
+    (the grouping log, clear-api ADR-0021). If clear-api does not know the
+    run inputs yet, send the input without them, now and for the rest of the
+    process. clear-api refuses an unknown input field before it writes, so
+    the second send never makes a second event."""
+    global _event_run_inputs_supported
+    if _event_run_inputs_supported:
+        with_run = {**input_data, "runKind": _run_kind.get(), **_run_fields()}
+        try:
+            return _execute(query, {**variables, "input": with_run}, **kwargs)
+        except (ClearApiError, GraphQLErrors) as exc:
+            if not _rejects_run_inputs(exc):
+                raise
+            _event_run_inputs_supported = False
+            logger.warning(
+                "clear-api does not accept the grouping log run inputs yet; "
+                "sending event writes without them until restart"
+            )
+    return _execute(query, {**variables, "input": input_data}, **kwargs)
+
+
 def create_event(input_data: dict) -> dict:
     # retries=1: createEvent has no idempotency key (unlike createSignal's
     # (sourceId, externalId)), so a retry after a timeout that actually committed
     # would mint a duplicate event. Fail fast instead — the drain re-processes the
     # signal on the next run, and group_signal's "already linked" short-circuit
     # dedups once the link is visible.
-    result = _execute(CREATE_EVENT, {"input": input_data}, retries=1)
+    result = _execute_event_with_run(CREATE_EVENT, {}, input_data, retries=1)
     return result["createEvent"]
 
 
 def update_event(event_id: str, input_data: dict) -> dict:
-    result = _execute(UPDATE_EVENT, {"id": event_id, "input": input_data})
+    result = _execute_event_with_run(UPDATE_EVENT, {"id": event_id}, input_data)
     return result["updateEvent"]
 
 
