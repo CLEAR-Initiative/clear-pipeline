@@ -960,18 +960,6 @@ def test_without_a_collector_a_miss_is_only_logged():
     knows.assert_called_once()
 
 
-def test_a_recorded_miss_reuses_the_lookup_made_for_the_match_elsewhere():
-    patcher, _ = _llm_returning(location_type="general", location_id="sd-wk", place_name="Al Dibab")
-    with (
-        patcher, _geocoding(hit=None),
-        patch.object(location, "gazetteer_knows", return_value=False) as knows,
-        location.collect_geocode_misses() as misses,
-    ):
-        location.locate_in_country(POST, POST, "Sudan", country_code="sd")
-    knows.assert_called_once()
-    assert [m.reason for m in misses] == ["NO_MATCH"]
-
-
 def test_a_collector_closes_with_its_block():
     with location.collect_geocode_misses() as outer:
         with location.collect_geocode_misses() as inner:
@@ -2213,12 +2201,42 @@ def test_a_kordofan_post_finds_kazgeil_in_north_kordofan():
 def test_a_kordofan_post_is_checked_in_the_region_before_the_country():
     # A same-named hamlet in Gezira does not make the Kordofan one ambiguous.
     places = {"Kazgeil": [_place("sd-nk-sheikan", population=0), _place("sd-gz-medani", population=0)]}
-    with _elsewhere(places):
+    with _elsewhere(places, arabic="كازقيل"):
         assert _locate_elsewhere(KORDOFAN_POST, location_id="sd-sk", place_name="Kazgeil")[0] == "l4-kazgeil"
     # Two states of the region hold it: refused.
     places = {"Kazgeil": [_place("sd-nk-sheikan", population=0), _place("sd-wk-dibab", population=0)]}
-    with _elsewhere(places):
+    with _elsewhere(places, arabic="كازقيل"):
         assert _locate_elsewhere(KORDOFAN_POST, location_id="sd-sk", place_name="Kazgeil")[0] == "sd-sk"
+
+
+@pytest.mark.parametrize("post", [
+    "نزوح ٥٠ أسرة إثر حريق في الضعين",        # the general rule
+    "نزوح ٥٠ أسرة إثر حريق في الضعين بكردفان",  # the region's rule
+])
+def test_a_latin_name_the_model_cannot_point_to_in_an_arabic_post_is_refused(post):
+    # الضعين (Ed Daein) read as "Ad Damazin": the post does not write Damazin,
+    # so there is no Arabic spelling, and the Latin one is a state capital.
+    places = {"Ad Damazin": [_place("sd-gz-medani", code="PPLA", population=186051)],
+              "Damazin": [_place("sd-nk-sheikan", code="PPLA", population=186051)]}
+    with _elsewhere(places, arabic=None) as m:
+        located, misses = _locate_elsewhere(post, location_id="sd-sk", place_name="Ad Damazin")
+    assert located == "sd-sk"
+    assert [x.reason for x in misses] == ["OUTSIDE_AREA"]
+    m["exact"].assert_not_called()
+
+
+def test_the_posts_other_places_inside_the_state_are_tried_before_a_match_elsewhere():
+    # "Al Dibab" has a match in West Kordofan, but the post also names
+    # Dabaibat, which is inside the model's state.
+    patcher, _ = _llm_with_places(["Dabaibat"], location_type="general", location_id="sd-sk",
+                                  place_name="Al Dibab")
+    inside = _hit(11.5, 28.5)
+    with patcher, _elsewhere({"الدبب": [_place("sd-wk-dibab", code="ADM2")]}, arabic="الدبب") as m:
+        with patch.object(location, "geocode_place_name",
+                          side_effect=lambda name, **kw: inside if name == "Dabaibat" else None):
+            located = location.locate_in_country("مسيرات في الدبيبات", None, "Sudan", country_code="sd")
+    assert located == "l4-dabaibat"
+    m["exact"].assert_not_called()
 
 
 @pytest.mark.parametrize("text, bare", [
@@ -2226,6 +2244,8 @@ def test_a_kordofan_post_is_checked_in_the_region_before_the_country():
     ("Fighting spreads across Kordofan", True),
     ("قصف في جنوب كردفان", False),
     ("قصف في ولاية شمال كردفان", False),
+    ("#غرب_كردفان : مقتل 16 مدنياً", False),          # a hashtag joins the words
+    ("#غرب_كردفان وتصاعد الغارات على #كردفان", True),
     ("Clashes in North Kordofan and West Kordofan", False),
     ("محور كردفان، وجنوب كردفان", True),
     ("قصف على الخرطوم", False),

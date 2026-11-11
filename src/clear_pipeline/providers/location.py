@@ -445,15 +445,27 @@ def locate_in_country(
             # Without the state's outline no name can be confirmed inside it.
             and _area_has_geometry(area_id)
         )
-        # An exact match outside the area is accepted only for a state the
-        # model chose (never for the country), and only for the place the
-        # answer is based on: the other names of a post are listed more
-        # loosely (see `_exact_match_elsewhere`).
-        elsewhere_in = country if _scoped_location(matched_id, country, level=1) else None
+        own_name_tried = False
         for name in _places_to_geocode(place_name, title, description, country, others=other_names):
+            own_name_tried = own_name_tried or name == place_name
             point_id = _geocode_within(
-                name, area_id, country_code, text=text, arabic_names=arabic_names,
-                elsewhere_in=elsewhere_in if name == place_name else None,
+                name, area_id, country_code, text=text, arabic_names=arabic_names
+            )
+            if point_id:
+                return point_id
+        # No name of the post is inside the area. An exact match outside it is
+        # accepted only for a state the model chose (never for the country),
+        # and only for the place the answer is based on: the other names of a
+        # post are listed more loosely (see `_exact_match_elsewhere`).
+        if (
+            own_name_tried
+            and place_name
+            and _scoped_location(matched_id, country, level=1)
+            # With no outline nothing was looked up inside the area either.
+            and _area_has_geometry(area_id)
+        ):
+            point_id = _place_elsewhere(
+                place_name, area_id, country, country_code, text=text, arabic_names=arabic_names
             )
             if point_id:
                 return point_id
@@ -769,7 +781,7 @@ def _region_mentions(text: str, region: str, directions: str) -> bool:
     """True when ``text`` names the region after one of ``directions`` (a
     regex alternation). The Arabic form may carry "ولاية" (state)."""
     return any(
-        re.search(rf"(?:{directions})\s+(?:ولاية\s+)?{spelling}", text.casefold())
+        re.search(rf"(?:{directions})[\s_]+(?:ولاية[\s_]+)?{spelling}", text.casefold())
         for spelling in _REGION_SPELLINGS[region]
     )
 
@@ -782,7 +794,7 @@ def _names_bare_region(text: str, region: str) -> bool:
     folded = text.casefold()
     for spelling in _REGION_SPELLINGS[region]:
         # Drop every mention with a direction, then see whether one is left.
-        bare = re.sub(rf"(?:{_ANY_DIRECTION})\s+(?:ولاية\s+)?{spelling}", " ", folded)
+        bare = re.sub(rf"(?:{_ANY_DIRECTION})[\s_]+(?:ولاية[\s_]+)?{spelling}", " ", folded)
         if spelling in bare:
             return True
     return False
@@ -820,6 +832,51 @@ def _text_names_state(text: str, state: dict, region: tuple[str, list[dict]] | N
     return arabic_spelling(text, name) is not None
 
 
+def _place_elsewhere(
+    place_name: str,
+    area_id: str,
+    country: str,
+    country_code: str,
+    *,
+    text: str = "",
+    arabic_names: dict[str, str | None] | None = None,
+) -> str | None:
+    """The location for a place that no lookup found inside ``area_id``, when
+    the gazetteer holds a safe exact match for it elsewhere in the country
+    (see `_exact_match_elsewhere`). None otherwise, and on any failure but an
+    LLM outage. The miss the area lookup recorded for the name is withdrawn:
+    a name placed by this rule is not a miss."""
+    try:
+        if arabic_names is not None and place_name in arabic_names:
+            arabic_name = arabic_names[place_name]
+        else:
+            arabic_name = arabic_spelling(text, place_name) if arabic_lookup_applies(place_name) else None
+        # One lookup tells whether the name exists anywhere: most misses end here.
+        if not gazetteer_knows(place_name, country_code, arabic_name=arabic_name):
+            return None
+        geo = _exact_match_elsewhere(place_name, arabic_name, area_id, country, country_code, text=text)
+        if geo is None:
+            return None
+        if geo.location_id:
+            location_id = geo.location_id
+        else:
+            promo = find_or_create_landmark_l4(name=place_name, lat=geo.lat, lng=geo.lng, kind=geo.kind)
+            if promo.get("abortedReason") or not promo.get("locationId"):
+                return None
+            location_id = promo["locationId"]
+        logger.info("[locate] %r has no match inside area %s: placed at %s by an exact match "
+                    "elsewhere in %s (%r)", place_name, area_id, location_id, country, geo.display_name)
+        misses = _geocode_misses.get()
+        if misses is not None:
+            misses[:] = [m for m in misses if not (m.name == place_name and m.area_id == area_id)]
+        return location_id
+    except LLMUnavailableError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — an enrichment: the area stands
+        logger.warning("[locate] looking for %r outside its area failed: %s", place_name, exc)
+        return None
+
+
 def _exact_match_elsewhere(
     place_name: str,
     arabic_name: str | None,
@@ -845,15 +902,16 @@ def _exact_match_elsewhere(
       toward "more than one", whatever its size.
     - It is a place of some size: `ELSEWHERE_MIN_POPULATION` people, a seat
       of government, or (Arabic only) a district by its own name.
-    - It matches the post's own Arabic spelling. The model's Latin spelling
-      is used only when the post gives no Arabic one. (An Arabic match must
-      still agree with the Latin name: الضعين read as "Damazin" is refused,
-      as inside an area.)
+    - It matches the post's own Arabic spelling, and agrees with the Latin
+      name, as inside an area. The model's Latin spelling is used alone only
+      for a post with no Arabic text. In an Arabic post a Latin name the
+      model cannot point to in the text is a reading nothing checks: الضعين
+      (Ed Daein) read as "Damazin" is refused.
 
     A post that names "Kordofan" or "Darfur" with no direction is first
     checked against the other states of that region: the region is what the
     post says, so there a match needs no size, and the Latin spelling is
-    tried when the Arabic one matches nothing."""
+    tried when the Arabic one (found in the post) matches nothing."""
     scoped = _country_scoped_locations(country)
     states = [loc for loc in scoped if (loc.get("level") or 0) == 1]
     area = next((s for s in states if s["id"] == area_id), None)
@@ -863,6 +921,8 @@ def _exact_match_elsewhere(
     # A name the model copied in Arabic script has no second reading to agree
     # with, so it always needs the size.
     unchecked = not latin_name_key(place_name)
+    if not arabic_name and not unchecked and _ARABIC_LETTER.search(text or ""):
+        return None
 
     def match_in(location_id: str, arabic: str | None, *, any_size: bool):
         return exact_gazetteer_match(
@@ -924,7 +984,6 @@ def _geocode_within(
     *,
     text: str = "",
     arabic_names: dict[str, str | None] | None = None,
-    elsewhere_in: str | None = None,
 ) -> str | None:
     """Geocode ``place_name`` inside ``country_code`` and promote it to an L4
     point, but only when the point lies inside ``area_id`` — the admin area
@@ -936,11 +995,6 @@ def _geocode_within(
 
     A place-alias hit (clear-api ADR-0019) already is a CLEAR location: it is
     returned as it is, after the same area check, with no L4 promote.
-
-    ``elsewhere_in`` (the country's name) allows one exception to the area
-    check: when no tier matches inside the area, an exact and unambiguous
-    gazetteer match elsewhere in the country places the signal (see
-    `_exact_match_elsewhere`). Such a name is not a miss.
 
     A miss goes to the open collector (`collect_geocode_misses`): every tier
     found nothing inside the area, or the L4 promote gave no location. Not a
@@ -979,18 +1033,6 @@ def _geocode_within(
             within_location_id=area_id,
             trace=trace,
         )
-        # Whether the gazetteer holds the name anywhere in the country: asked
-        # once, for the rule below and for the miss reason.
-        known_elsewhere: bool | None = None
-        if geo is None and elsewhere_in and not trace.failed:
-            known_elsewhere = gazetteer_knows(place_name, country_code, arabic_name=arabic_name)
-            if known_elsewhere:
-                geo = _exact_match_elsewhere(
-                    place_name, arabic_name, area_id, elsewhere_in, country_code, text=text
-                )
-            if geo is not None:
-                logger.info("[locate] %r has no match inside area %s: placed by an exact match "
-                            "elsewhere in %s (%r)", place_name, area_id, elsewhere_in, geo.display_name)
         if geo is None:
             logger.info("[locate] %r has no match inside area %s — keeping the area",
                         place_name, area_id)
@@ -999,9 +1041,9 @@ def _geocode_within(
             if not trace.failed and _geocode_misses.get() is not None:
                 # The gazetteer filters by area on the server, so ask it once
                 # more whether the name exists elsewhere in the country.
-                if known_elsewhere is None:
-                    known_elsewhere = gazetteer_knows(place_name, country_code, arabic_name=arabic_name)
-                outside = trace.outside or known_elsewhere
+                outside = trace.outside or gazetteer_knows(
+                    place_name, country_code, arabic_name=arabic_name
+                )
                 _note_miss(place_name, arabic_name, country_code, area_id,
                            "OUTSIDE_AREA" if outside else "NO_MATCH")
             return None
