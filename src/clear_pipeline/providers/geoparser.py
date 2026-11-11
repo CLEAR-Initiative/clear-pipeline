@@ -240,6 +240,16 @@ class GeocodeTrace:
     outside: bool = False
     #: A lookup tier failed (clear-api or LocationIQ), so the miss proves nothing.
     failed: bool = False
+    #: A lookup knows the name as an area no point stands for, and as nothing
+    #: else: the gazetteer matched it exactly to a state, a region or a
+    #: mountain range (no later tier is then asked), or LocationIQ answered
+    #: with whole states and no lookup found a place. A caller that records
+    #: misses records none.
+    area: bool = False
+    #: LocationIQ gave a whole state or country, and it was refused. Not yet
+    #: "the name is an area": a place may turn up for another spelling, or
+    #: outside the caller's area (`outside`), and that one is a real miss.
+    whole_state: bool = False
 
 
 # ─── Extraction ───────────────────────────────────────────────────────────
@@ -408,6 +418,56 @@ _REJECTED_CLASSES: frozenset[str] = frozenset({"highway", "railway", "waterway"}
 # signal to an arbitrary spot on a road or a stretch of river.
 _REJECTED_FEATURE_CLASSES: frozenset[str] = frozenset({"R", "H", "V"})
 
+# GeoNames feature codes of an area that no single point stands for: a
+# country, a state (first-order division, present or historical), a region, a
+# tribal area, a mountain range, a desert, a plain. GeoNames gives each a
+# centre point; a signal promoted to it lands in whatever district holds that
+# centre. "Darfur" (RGN) is at 13.0, 25.0, "Khartoum" (ADM1, the state) at
+# 15.8, 33.0, "Jibāl an Nūbah" (MTS) at 12.0, 30.75. A district (ADM2) is not
+# listed: its point lies inside the district it names.
+_AREA_FEATURE_CODES: frozenset[str] = frozenset({
+    "PCL", "PCLD", "PCLF", "PCLH", "PCLI", "PCLIX", "PCLS",
+    "ADM1", "ADM1H",
+    "RGN", "RGNE", "RGNH", "RGNL", "AREA", "TRB", "CONT",
+    "MTS", "DSRT", "PLN", "PLAT", "UPLD",
+})
+
+
+def _names_an_area(hit: dict) -> bool:
+    """True when a GeoNames hit is an area too large for one point (see
+    `_AREA_FEATURE_CODES`)."""
+    return (hit.get("featureCode") or "").upper() in _AREA_FEATURE_CODES
+
+
+def _not_a_point(hit: dict, trace: "GeocodeTrace | None" = None) -> bool:
+    """True when a GeoNames hit must not become a point: a road, a river or
+    a forest (`_REJECTED_FEATURE_CLASSES`), or an area (`_names_an_area`).
+    An exact match on an area is noted on ``trace``: the name is that area's
+    own, so asking another tier for a point would only find its capital or
+    a village that sounds like it."""
+    if _names_an_area(hit):
+        if trace is not None and hit.get("exact"):
+            trace.area = True
+        return True
+    return (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES
+
+
+# The parts of a Nominatim address that name no more than a state or a
+# country. A result whose address names only these is that state or country.
+_STATE_OR_COUNTRY_PARTS: frozenset[str] = frozenset({"country", "state", "region", "ISO3166-2-lvl4"})
+
+
+def _is_state_or_country(result: dict) -> bool:
+    """True when a Nominatim result is a whole state or country: its address
+    names one, and nothing finer. LocationIQ answers "Darfur" with the five
+    Darfur states, each at its centre point. A result with no address, or
+    with a country code alone, is kept: there is nothing to judge it by."""
+    address = result.get("address")
+    if not isinstance(address, dict):
+        return False
+    named = set(address) - {"country_code"}
+    return bool(named) and named <= _STATE_OR_COUNTRY_PARTS
+
 
 def _pick_best_nominatim_result(
     results: list[dict],
@@ -442,6 +502,10 @@ def _pick_best_nominatim_result(
             continue
         cls = r.get("class")
         if isinstance(cls, str) and cls.lower() in _REJECTED_CLASSES:
+            continue
+        if _is_state_or_country(r):
+            if trace is not None:
+                trace.whole_state = True
             continue
         country = _extract_country_code(r)
         if expected_country_codes and country and country not in expected_country_codes:
@@ -668,11 +732,12 @@ def _resolve_via_gazetteer(
     # Feature-class guard, mirroring `_REJECTED_CLASSES` on the LocationIQ
     # tier: reject linear/zonal GeoNames classes that can't be meaningfully
     # promoted to a point L4. The field is already selected in the query.
-    feature_class = (hit.get("featureClass") or "").upper()
-    if feature_class in _REJECTED_FEATURE_CLASSES:
+    # An area (a state, a region, a mountain range) is refused the same way.
+    # A place alias is a person's answer: it needs neither check.
+    if not alias_location_id and _not_a_point(hit, trace):
         logger.info(
-            "[geoparser] gazetteer hit %r is feature class %s (linear/zonal) — skipping",
-            hit.get("name"), feature_class,
+            "[geoparser] gazetteer hit %r is feature %s/%s (a line or an area, not a point) — skipping",
+            hit.get("name"), hit.get("featureClass"), hit.get("featureCode"),
         )
         return None
 
@@ -821,11 +886,17 @@ def _resolve_arabic(
             continue
         # Same guard as the Latin gazetteer tier: a river or road ("النيل
         # الأبيض") would become a point at an arbitrary spot along it.
-        if not alias_location_id and (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+        # An area is refused too: "الخرطوم" matches Khartoum state, and its
+        # centre point is not where the post is.
+        if not alias_location_id and _not_a_point(hit, trace):
             logger.info(
-                "[geoparser] Arabic %r matched %r, feature class %s (linear/zonal) — skipping",
-                query, hit.get("name"), hit.get("featureClass"),
+                "[geoparser] Arabic %r matched %r, feature %s/%s (a line or an area, not a point) — skipping",
+                query, hit.get("name"), hit.get("featureClass"), hit.get("featureCode"),
             )
+            if trace is not None and trace.area:
+                # The name is the area's own. The same name without its
+                # article would find the area's capital.
+                return None
             continue
         if not alias_location_id and not _spellings_agree(hit.get("name") or "", latin_name):
             logger.info(
@@ -910,9 +981,13 @@ def geocode_place_name(
     )
     expected = expected_country_codes or _configured_country_codes()
     if arabic_name and arabic_name.strip() and arabic_lookup_applies(name):
-        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept, within_location_id, trace)
+        # A trace of our own when the caller has none: `area` must be read here.
+        arabic_trace = trace if trace is not None else GeocodeTrace()
+        hit = _resolve_arabic(arabic_name.strip(), name, expected, accept, within_location_id, arabic_trace)
         if hit is not None:
             return hit
+        if arabic_trace.area:
+            return None
     return _resolve_candidate(top, expected, accept, within_location_id, trace)
 
 
@@ -944,11 +1019,36 @@ def gazetteer_knows(name: str, country_code: str, *, arabic_name: str | None = N
         # of the checks below, which guard against GeoNames' own errors.
         if _alias_location_id(hit):
             return True
-        if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+        if _not_a_point(hit):
             continue
         if is_arabic and not _spellings_agree(hit.get("name") or "", name):
             continue
         return True
+    return False
+
+
+def gazetteer_names_area(name: str, country_code: str, *, arabic_name: str | None = None) -> bool:
+    """True when the gazetteer's exact match for the name, anywhere in the
+    country, is an area no point stands for (`_names_an_area`): for `name`,
+    or for `arabic_name`, the same name as the text writes it in Arabic.
+
+    Asked after a miss inside an area. The lookup there is filtered by area
+    on the server, and a state's centre point can lie outside the district
+    that was searched: "الخرطوم" inside Bahri finds nothing, and would be
+    recorded as a place nobody could find. False when the gazetteer is off
+    or fails."""
+    if not settings.geoparser_use_gazetteer:
+        return False
+    for query in (arabic_name, name):
+        if not query or not query.strip():
+            continue
+        try:
+            hit = graphql.resolve_gazetteer_location(query.strip(), country_code=country_code.upper())
+        except Exception as exc:  # noqa: BLE001 — only keeps a name out of the review queue
+            logger.info("[geoparser] gazetteer area check for %r failed: %s", query, exc)
+            return False
+        if hit and hit.get("exact") and not _alias_location_id(hit) and _names_an_area(hit):
+            return True
     return False
 
 
@@ -1004,7 +1104,7 @@ def exact_gazetteer_match(
             # `_resolve_candidate`): for a landmark only an alias counts.
             if _is_landmark(name):
                 continue
-            if (hit.get("featureClass") or "").upper() in _REJECTED_FEATURE_CLASSES:
+            if _not_a_point(hit):
                 continue
             if arabic and latin and not _spellings_agree(hit.get("name") or "", name):
                 continue
@@ -1058,9 +1158,16 @@ def _resolve_candidate(
     # mapped the facility's name to its CLEAR location, and that answer is
     # exact, unlike a fuzzy GeoNames match.
     if settings.geoparser_use_gazetteer:
+        # A trace of our own when the caller has none: `area` must be read here.
+        gazetteer_trace = trace if trace is not None else GeocodeTrace()
         gaz = _resolve_via_gazetteer(
-            top, expected, within_location_id, trace, alias_only=top.kind == "landmark"
+            top, expected, within_location_id, gazetteer_trace, alias_only=top.kind == "landmark"
         )
+        if gaz is None and gazetteer_trace.area:
+            # The name is an area's own (a state, a region). LocationIQ would
+            # answer with the area's capital, or with the area at its centre.
+            logger.info("[geoparser] %r names an area, not a place — no point", top.name)
+            return None
         if gaz is not None:
             if accept is None or accept(gaz.lat, gaz.lng):
                 return gaz
@@ -1120,6 +1227,12 @@ def _resolve_candidate(
             "(tried %d variant(s): %s)",
             top.name, len(variants), summary,
         )
+        if trace is not None and trace.whole_state and not trace.outside:
+            # Over every spelling and both tiers, the only answer was a whole
+            # state: the name is an area's ("الخرطوم" passes the name check,
+            # and with the gazetteer off nothing else says so). A place that
+            # was found outside the caller's area is a real miss, and stays one.
+            trace.area = True
         return None
 
     if matched_variant and matched_variant != top.name:
