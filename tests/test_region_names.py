@@ -55,9 +55,20 @@ def _locations():
     with (
         patch.object(location, "get_locations", return_value=LOCATIONS),
         patch.object(location, "get_locations_by_level", return_value=[SUDAN]),
+        # Off unless a test turns it on: the name check asks the gazetteer
+        # about a region phrase, and no test here may reach a real clear-api,
+        # whatever GEOPARSER_USE_GAZETTEER says on the machine.
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
     ):
         yield
     location.invalidate_locations_cache()
+
+
+def test_no_test_here_reaches_the_gazetteer_by_default():
+    with patch.object(geoparser.graphql, "resolve_gazetteer_location") as lookup:
+        assert not location._names_a_place("Darfur", "Sudan", "sd")
+        assert location._names_a_place("جنوب النيل الأزرق", "Sudan", "sd")
+    lookup.assert_not_called()
 
 
 # ── the name ─────────────────────────────────────────────────────────────────
@@ -86,6 +97,101 @@ def test_a_region_is_not_a_place(name):
 ])
 def test_a_place_is_a_place(name):
     assert location._names_a_place(name, "Sudan")
+
+
+def test_a_region_phrase_that_is_a_towns_exact_name_is_a_place():
+    # "Khartoum North" reads as the north of Khartoum state. It is a city
+    # (Bahri), and no district carries that name here.
+    locations = [loc for loc in LOCATIONS if loc["name"] != "Khartoum North"]
+    location.invalidate_locations_cache()
+    with patch.object(location, "get_locations", return_value=locations):
+        assert not location._names_a_place("Khartoum North", "Sudan")  # no country code: no lookup
+        with patch.object(location, "gazetteer_names_town", return_value=True) as asked:
+            assert location._names_a_place("Khartoum North", "Sudan", "sd")
+        asked.assert_called_once_with("Khartoum North", "sd")
+        with patch.object(location, "gazetteer_names_town", return_value=False):
+            assert not location._names_a_place("East Khartoum", "Sudan", "sd")
+
+
+def test_an_arabic_direction_and_a_states_name_is_a_region_phrase():
+    # "جنوب النيل الأزرق" is South Blue Nile. The rest of the name is a state.
+    with patch.object(location, "gazetteer_names_area", return_value=True) as asked:
+        assert not location._names_a_place("جنوب النيل الأزرق", "Sudan", "sd")
+    asked.assert_called_once_with("النيل الأزرق", "sd")
+
+    # "شرق النيل" is the district Sharg An Neel: the rest is a river, no state.
+    with patch.object(location, "gazetteer_names_area", return_value=False) as asked:
+        assert location._names_a_place("شرق النيل", "Sudan", "sd")
+    asked.assert_called_once_with("النيل", "sd")
+
+    # No country code: no lookup, and the name stays a place.
+    with patch.object(location, "gazetteer_names_area") as asked:
+        assert location._names_a_place("جنوب النيل الأزرق", "Sudan")
+    asked.assert_not_called()
+
+
+@pytest.mark.parametrize(("name", "rest"), [
+    ("جنوب النيل الأزرق", "النيل الأزرق"), ("شرق_النيل", "النيل"), ("وسط دارفور", "دارفور"),
+    ("طويلة", None), ("النيل الأزرق", None), ("شرق", None), ("South Blue Nile", None), ("جنوب Darfur", None),
+])
+def test_the_rest_of_an_arabic_name_after_its_direction(name, rest):
+    assert location._after_arabic_direction(name) == rest
+
+
+def test_the_gazetteer_is_not_asked_about_a_plain_place_or_a_state():
+    with (
+        patch.object(location, "gazetteer_names_town") as asked,
+        patch.object(location, "gazetteer_names_area") as asked_area,
+    ):
+        assert location._names_a_place("Tawila", "Sudan", "sd")
+        assert location._names_a_place("طويلة", "Sudan", "sd")
+        assert not location._names_a_place("North Darfur", "Sudan", "sd")
+    asked.assert_not_called()
+    asked_area.assert_not_called()
+
+
+def test_the_gazetteer_knows_a_town_by_its_exact_name():
+    def town(code="PPL", **over):
+        return {"name": "Khartoum North", "latitude": "15.6", "longitude": "32.5", "countryCode": "SD",
+                "featureClass": "P", "featureCode": code, "exact": True, "score": 1.0, "source": "GEONAMES",
+                "locationId": None, **over}
+
+    for answer, expected in [
+        (town(), True),
+        (town(exact=False), False),                                    # "North Khartoum", loosely
+        (town(featureClass="A", featureCode="ADM1"), False),           # "East Khartoum" → the state
+        (town(featureClass="L", featureCode="RGN"), False),            # "Darfur"
+        (town(featureClass=None, featureCode=None, source="ALIAS", locationId="loc-1"), True),
+        (None, False),
+    ]:
+        with (
+            patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+            patch.object(geoparser.graphql, "resolve_gazetteer_location", return_value=answer) as lookup,
+        ):
+            assert geoparser.gazetteer_names_town("Khartoum North", "sd") is expected
+        assert lookup.call_args.kwargs == {"country_code": "SD"}
+
+    with patch.object(geoparser.settings, "geoparser_use_gazetteer", False):
+        assert not geoparser.gazetteer_names_town("Khartoum North", "sd")
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", True),
+        patch.object(geoparser.graphql, "resolve_gazetteer_location", side_effect=RuntimeError("502")),
+    ):
+        assert not geoparser.gazetteer_names_town("Khartoum North", "sd")
+
+
+def test_the_locator_geocodes_a_town_whose_name_reads_as_a_region_phrase():
+    locations = [loc for loc in LOCATIONS if loc["name"] != "Khartoum North"]
+    location.invalidate_locations_cache()
+    with (
+        patch.object(location, "get_locations", return_value=locations),
+        _answer(location_id="sd-kh", place_name="Khartoum North"),
+        patch.object(location, "gazetteer_names_town", return_value=True),
+        patch.object(location, "_geocode_within", return_value="l4-bahri") as geocode,
+        patch.object(location, "_area_has_geometry", return_value=True),
+    ):
+        assert location.locate_in_country(POST, POST, "Sudan", country_code="sd") == "l4-bahri"
+    assert geocode.call_args.args[0] == "Khartoum North"
 
 
 # ── the locator ──────────────────────────────────────────────────────────────
