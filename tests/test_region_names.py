@@ -331,6 +331,43 @@ def test_a_name_that_locationiq_knows_only_as_a_state_is_not_a_miss():
         assert geoparser.geocode_place_name("الخرطوم", expected_country_codes={"sd"}, trace=trace).lat == 15.56
 
 
+def test_a_place_outside_the_area_is_still_a_miss_when_a_state_was_refused_too():
+    # LocationIQ gives the state and a real town that lies outside the
+    # caller's area. The town is the miss a reviewer must see (OUTSIDE_AREA).
+    results = [
+        row("15.87", "32.99", {"state": "Al Khartum State", "country": "Sudan"}),
+        row("15.56", "32.53", {"city": "Khartoum", "state": "Al Khartum State", "country": "Sudan"}),
+    ]
+    trace = GeocodeTrace()
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
+        patch.object(geoparser.nominatim, "search", return_value=results),
+    ):
+        found = geoparser.geocode_place_name(
+            "الخرطوم", expected_country_codes={"sd"}, accept=lambda lat, lng: False, trace=trace,
+        )
+    assert found is None
+    assert trace.outside and trace.whole_state and not trace.area
+
+
+def test_a_place_found_for_a_later_spelling_outside_the_area_is_still_a_miss():
+    # The first spelling gives the state only; the second gives a town
+    # outside the area. The answer is decided over every spelling.
+    state_only = [row("15.87", "32.99", {"state": "Al Khartum State", "country": "Sudan"})]
+    town = [row("15.56", "32.53", {"city": "Khartoum", "state": "Al Khartum State", "country": "Sudan"})]
+    trace = GeocodeTrace()
+    with (
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
+        patch.object(geoparser, "_query_variants", return_value=["Al Khartum", "Khartoum"]),
+        patch.object(geoparser.nominatim, "search", side_effect=[state_only, town]),
+    ):
+        found = geoparser.geocode_place_name(
+            "Al Khartum", expected_country_codes={"sd"}, accept=lambda lat, lng: False, trace=trace,
+        )
+    assert found is None
+    assert trace.outside and not trace.area
+
+
 def test_a_name_with_no_answer_at_all_is_still_a_miss():
     trace = GeocodeTrace()
     with (
