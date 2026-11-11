@@ -55,9 +55,20 @@ def _locations():
     with (
         patch.object(location, "get_locations", return_value=LOCATIONS),
         patch.object(location, "get_locations_by_level", return_value=[SUDAN]),
+        # Off unless a test turns it on: the name check asks the gazetteer
+        # about a region phrase, and no test here may reach a real clear-api,
+        # whatever GEOPARSER_USE_GAZETTEER says on the machine.
+        patch.object(geoparser.settings, "geoparser_use_gazetteer", False),
     ):
         yield
     location.invalidate_locations_cache()
+
+
+def test_no_test_here_reaches_the_gazetteer_by_default():
+    with patch.object(geoparser.graphql, "resolve_gazetteer_location") as lookup:
+        assert not location._names_a_place("Darfur", "Sudan", "sd")
+        assert location._names_a_place("جنوب النيل الأزرق", "Sudan", "sd")
+    lookup.assert_not_called()
 
 
 # ── the name ─────────────────────────────────────────────────────────────────
