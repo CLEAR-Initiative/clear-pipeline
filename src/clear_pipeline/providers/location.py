@@ -23,6 +23,7 @@ from clear_pipeline.providers.clear_api import (
 from clear_pipeline.providers.geoparser import (
     GeocodeTrace,
     arabic_lookup_applies,
+    exact_gazetteer_match,
     gazetteer_knows,
     geocode_place_name,
     latin_name_key,
@@ -444,9 +445,27 @@ def locate_in_country(
             # Without the state's outline no name can be confirmed inside it.
             and _area_has_geometry(area_id)
         )
+        own_name_tried = False
         for name in _places_to_geocode(place_name, title, description, country, others=other_names):
+            own_name_tried = own_name_tried or name == place_name
             point_id = _geocode_within(
                 name, area_id, country_code, text=text, arabic_names=arabic_names
+            )
+            if point_id:
+                return point_id
+        # No name of the post is inside the area. An exact match outside it is
+        # accepted only for a state the model chose (never for the country),
+        # and only for the place the answer is based on: the other names of a
+        # post are listed more loosely (see `_exact_match_elsewhere`).
+        if (
+            own_name_tried
+            and place_name
+            and _scoped_location(matched_id, country, level=1)
+            # With no outline nothing was looked up inside the area either.
+            and _area_has_geometry(area_id)
+        ):
+            point_id = _place_elsewhere(
+                place_name, area_id, country, country_code, text=text, arabic_names=arabic_names
             )
             if point_id:
                 return point_id
@@ -726,6 +745,228 @@ def _names_region_or_feature(place_name: str, country: str) -> bool:
     if not core:
         return True
     return any(_region_core(loc["name"]) == core for loc in scoped if (loc.get("level") or 0) <= 1)
+
+
+# ── an exact match outside the model's area (#1414) ──────────────────────────
+
+# Outside the area a match counts only for a place that a same-named hamlet
+# or a misread name rarely lands on by chance: a town of at least this many
+# people, or a place of one of the feature codes below.
+ELSEWHERE_MIN_POPULATION = 5000
+# Seats of government. The only codes a Latin spelling may match: it comes
+# from the model, which misreads names ("Damazin" for الضعين, Ed Daein).
+_SEAT_CODES = frozenset({"PPLC", "PPLA", "PPLA2", "PPLA3", "PPLA4"})
+# The post's own Arabic spelling may also match a district by its name
+# (GeoNames lists the districts, with Arabic names): الخوي, الفاو, البرقيق.
+_ARABIC_CODES = _SEAT_CODES | {"ADM2"}
+
+# The regions several states share a name with, as posts write them. A post
+# that says "Kordofan" with no north, south or west is placed by the model in
+# one of the three states; the place it names decides which.
+_REGION_SPELLINGS = {
+    "kordofan": ("kordofan", "كردفان"),
+    "darfur": ("darfur", "دارفور"),
+}
+_DIRECTIONS = {
+    "north": ("north", "northern", "شمال"),
+    "south": ("south", "southern", "جنوب"),
+    "east": ("east", "eastern", "شرق"),
+    "west": ("west", "western", "غرب"),
+    "central": ("central", "وسط"),
+}
+_ANY_DIRECTION = "|".join(word for words in _DIRECTIONS.values() for word in words)
+
+
+def _region_mentions(text: str, region: str, directions: str) -> bool:
+    """True when ``text`` names the region after one of ``directions`` (a
+    regex alternation). The Arabic form may carry "ولاية" (state)."""
+    return any(
+        re.search(rf"(?:{directions})[\s_]+(?:ولاية[\s_]+)?{spelling}", text.casefold())
+        for spelling in _REGION_SPELLINGS[region]
+    )
+
+
+def _names_bare_region(text: str, region: str) -> bool:
+    """True when ``text`` names the region with no direction: "Kordofan",
+    "كردفان", but not only "South Kordofan" or "جنوب كردفان"."""
+    if not text:
+        return False
+    folded = text.casefold()
+    for spelling in _REGION_SPELLINGS[region]:
+        # Drop every mention with a direction, then see whether one is left.
+        bare = re.sub(rf"(?:{_ANY_DIRECTION})[\s_]+(?:ولاية[\s_]+)?{spelling}", " ", folded)
+        if spelling in bare:
+            return True
+    return False
+
+
+def _region_of_state(state: dict, states: list[dict]) -> tuple[str, list[dict]] | None:
+    """The region ``state`` shares its name with, and the other states of that
+    region: ("kordofan", [North Kordofan, West Kordofan]) for South Kordofan.
+    None for a state that shares its name with no other."""
+    core = _region_core(state.get("name") or "")
+    siblings = [s for s in states if s["id"] != state["id"] and _region_core(s.get("name") or "") == core]
+    region = next((r for r in _REGION_SPELLINGS if latin_name_key(r) == core), None)
+    return (region, siblings) if core and siblings and region else None
+
+
+def _text_names_state(text: str, state: dict, region: tuple[str, list[dict]] | None) -> bool:
+    """True when the post names the state the model chose. The model's state
+    is then what the post says, and a same-named place in another state is
+    another place: a camp called Babanusa in South Darfur is not the town in
+    West Kordofan, and Al Firdous in Khartoum is not the one in East Darfur.
+
+    - Its English name is in the text.
+    - A state of a region: the region with the state's direction is in the
+      text ("جنوب كردفان" for South Kordofan). The bare region is not enough.
+    - Any other state: the post writes its name in Arabic (`arabic_spelling`,
+      a model call; the caller asks only once a match elsewhere is found)."""
+    name = (state.get("name") or "").strip()
+    if not text or not name:
+        return False
+    if name.casefold() in text.casefold():
+        return True
+    if region is not None:
+        words = [w for w in re.split(r"[^a-z]+", name.casefold()) if w in _DIRECTIONS]
+        return bool(words) and _region_mentions(text, region[0], "|".join(_DIRECTIONS[words[0]]))
+    return arabic_spelling(text, name) is not None
+
+
+def _place_elsewhere(
+    place_name: str,
+    area_id: str,
+    country: str,
+    country_code: str,
+    *,
+    text: str = "",
+    arabic_names: dict[str, str | None] | None = None,
+) -> str | None:
+    """The location for a place that no lookup found inside ``area_id``, when
+    the gazetteer holds a safe exact match for it elsewhere in the country
+    (see `_exact_match_elsewhere`). None otherwise, and on any failure but an
+    LLM outage. The miss the area lookup recorded for the name is withdrawn:
+    a name placed by this rule is not a miss."""
+    try:
+        if arabic_names is not None and place_name in arabic_names:
+            arabic_name = arabic_names[place_name]
+        else:
+            arabic_name = arabic_spelling(text, place_name) if arabic_lookup_applies(place_name) else None
+        # One lookup tells whether the name exists anywhere: most misses end here.
+        if not gazetteer_knows(place_name, country_code, arabic_name=arabic_name):
+            return None
+        geo = _exact_match_elsewhere(place_name, arabic_name, area_id, country, country_code, text=text)
+        if geo is None:
+            return None
+        if geo.location_id:
+            location_id = geo.location_id
+        else:
+            promo = find_or_create_landmark_l4(name=place_name, lat=geo.lat, lng=geo.lng, kind=geo.kind)
+            if promo.get("abortedReason") or not promo.get("locationId"):
+                return None
+            location_id = promo["locationId"]
+        logger.info("[locate] %r has no match inside area %s: placed at %s by an exact match "
+                    "elsewhere in %s (%r)", place_name, area_id, location_id, country, geo.display_name)
+        misses = _geocode_misses.get()
+        if misses is not None:
+            misses[:] = [m for m in misses if not (m.name == place_name and m.area_id == area_id)]
+        return location_id
+    except LLMUnavailableError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — an enrichment: the area stands
+        logger.warning("[locate] looking for %r outside its area failed: %s", place_name, exc)
+        return None
+
+
+def _exact_match_elsewhere(
+    place_name: str,
+    arabic_name: str | None,
+    area_id: str,
+    country: str,
+    country_code: str,
+    *,
+    text: str = "",
+):
+    """An exact gazetteer match for the place outside ``area_id`` (a state the
+    model chose), when that match is safe to use. None otherwise.
+
+    The area check exists because village names repeat across a country. It
+    also refuses the right place when the model chose the wrong state: Wad
+    Madani, El Obeid, Al Khiwai. This rule accepts a match outside the area
+    when all of these hold:
+
+    - The post does not name the model's state itself (`_text_names_state`).
+      Checked last.
+    - The match is exact. A fuzzy match elsewhere is another place.
+    - It is unambiguous: the name has an exact match in one state only, and
+      inside that state in one district only. Every exact match counts
+      toward "more than one", whatever its size.
+    - It is a place of some size: `ELSEWHERE_MIN_POPULATION` people, a seat
+      of government, or (Arabic only) a district by its own name.
+    - It matches the post's own Arabic spelling, and agrees with the Latin
+      name, as inside an area. The model's Latin spelling is used alone only
+      for a post with no Arabic text. In an Arabic post a Latin name the
+      model cannot point to in the text is a reading nothing checks: الضعين
+      (Ed Daein) read as "Damazin" is refused.
+
+    A post that names "Kordofan" or "Darfur" with no direction is first
+    checked against the other states of that region: the region is what the
+    post says, so there a match needs no size, and the Latin spelling is
+    tried when the Arabic one (found in the post) matches nothing."""
+    scoped = _country_scoped_locations(country)
+    states = [loc for loc in scoped if (loc.get("level") or 0) == 1]
+    area = next((s for s in states if s["id"] == area_id), None)
+    if area is None:
+        return None
+    region = _region_of_state(area, states)
+    # A name the model copied in Arabic script has no second reading to agree
+    # with, so it always needs the size.
+    unchecked = not latin_name_key(place_name)
+    if not arabic_name and not unchecked and _ARABIC_LETTER.search(text or ""):
+        return None
+
+    def match_in(location_id: str, arabic: str | None, *, any_size: bool):
+        return exact_gazetteer_match(
+            place_name, country_code, arabic_name=arabic, within_location_id=location_id,
+            min_population=None if any_size else ELSEWHERE_MIN_POPULATION,
+            feature_codes=_ARABIC_CODES if arabic else _SEAT_CODES,
+        )
+
+    # A lookup that fails raises (see `exact_gazetteer_match`), and the
+    # caller gives up: one unanswered state could hold a second match.
+    def holders(candidates: list[dict], arabic: str | None) -> list[dict]:
+        return [c for c in candidates if match_in(c["id"], arabic, any_size=True) is not None]
+
+    def unique_match(candidates: list[dict], arabic: str | None, *, any_size: bool):
+        """(match, ambiguous). The match, when one state of ``candidates``
+        holds the name, and one district of that state. ``ambiguous``: more
+        than one state, or more than one district, holds it."""
+        in_states = holders(candidates, arabic)
+        if len(in_states) != 1:
+            return None, len(in_states) > 1
+        districts = [
+            loc for loc in scoped
+            if (loc.get("level") or 0) == 2 and (loc.get("parent") or {}).get("id") == in_states[0]["id"]
+        ]
+        in_districts = holders(districts, arabic)
+        if len(in_districts) != 1:
+            return None, len(in_districts) > 1
+        return match_in(in_districts[0]["id"], arabic, any_size=any_size), False
+
+    hit = None
+    if region and _names_bare_region(text, region[0]):
+        for arabic in ([arabic_name, None] if arabic_name and not unchecked else [arabic_name or None]):
+            hit, ambiguous = unique_match(region[1], arabic, any_size=not unchecked)
+            # The Latin spelling is for an Arabic one that matches nothing.
+            # One that matches several places is ambiguous, and stays so.
+            if hit is not None or ambiguous:
+                break
+    if hit is None:
+        others = [s for s in states if s["id"] != area_id]
+        hit, _ = unique_match(others, arabic_name or None, any_size=False)
+    # Asked last: for a state outside a region it costs a model call.
+    if hit is None or _text_names_state(text, area, region):
+        return None
+    return hit
 
 
 # locations.id → shapely geometry (None when the area has none). Cached.
