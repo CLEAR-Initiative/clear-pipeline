@@ -475,3 +475,19 @@ def test_summary_counts_moves_and_the_names_that_enter_the_queue(tmp_path, capsy
     assert "Unplaced names: 2, named by 3 signals." in out
     assert "named by 2 signals or more: 1 names, 2 signals" in out
     assert "   2  Azwag Tibba" in out and "Once Only" not in out
+
+
+def test_apply_moves_signals_inside_one_replay_run(tmp_path, monkeypatch):
+    """clear-api logs a move as a replay only when the client says so
+    (clear-api ADR-0020). Every move of a plan belongs to one run."""
+    from clear_pipeline.providers import clear_api as client
+
+    plan = tmp_path / "plan.jsonl"
+    write_plan(plan, [AREA_MOVE])
+    monkeypatch.setenv("CLEAR_API_URL", "https://dev-api.example/graphql")
+    seen: list[tuple[str, str | None]] = []
+    with clear_api(signal()) as api:
+        api["update"].side_effect = lambda *_a: seen.append((client._run_kind.get(), client._run_id.get()))
+        assert backfill.main(["apply", "--plan", str(plan)]) == 0
+    assert seen == [("REPLAY", "place-names-backfill:plan.jsonl")]
+    assert client._run_kind.get() == "LIVE"  # the block ends with the run

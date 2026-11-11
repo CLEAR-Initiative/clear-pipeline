@@ -15,6 +15,7 @@ from clear_pipeline.providers.clear_api import (
     create_signal_for_sync,
     mark_signals_processed,
     pipeline_run,
+    update_signal_location,
 )
 
 ITEMS = [{"id": "s1", "revision": 0}]
@@ -94,6 +95,31 @@ def test_an_older_clear_api_gets_the_old_mutations_from_then_on():
         with pipeline_run(run_id="run-1"):
             assert create_signal({"sourceId": "src"}) == {"id": "s1"}
     assert _calls(execute)[1] == (clear_api.CREATE_SIGNAL, {"input": {"sourceId": "src"}})
+
+
+def test_a_move_in_a_replay_run_says_so_and_a_move_in_the_drain_does_not():
+    moved = {"updateSignalLocation": {"id": "s1", "generalLocation": None}}
+    with patch.object(clear_api, "_execute", return_value=moved) as execute:
+        with pipeline_run(run_id="run-1"):
+            update_signal_location("s1", "loc")
+        with pipeline_run(RUN_KIND_REPLAY, run_id="backfill-1"):
+            update_signal_location("s1", "loc")
+    assert _calls(execute) == [
+        (clear_api.UPDATE_SIGNAL_LOCATION, {"id": "s1", "locationId": "loc"}),
+        (clear_api.UPDATE_SIGNAL_LOCATION_REPLAY, {
+            "id": "s1", "locationId": "loc",
+            "runKind": "REPLAY", "pipelineVersion": "abc123", "runId": "backfill-1",
+        }),
+    ]
+
+
+def test_a_replay_move_falls_back_for_an_older_clear_api():
+    refusal = ClearApiError('clear-api 400 (non-retryable): Unknown argument "runKind" on field "Mutation.updateSignalLocation".')
+    moved = {"updateSignalLocation": {"id": "s1", "generalLocation": None}}
+    with patch.object(clear_api, "_execute", side_effect=[refusal, moved]) as execute:
+        with pipeline_run(RUN_KIND_REPLAY, run_id="backfill-1"):
+            assert update_signal_location("s1", "loc") == moved["updateSignalLocation"]
+    assert _calls(execute)[1] == (clear_api.UPDATE_SIGNAL_LOCATION, {"id": "s1", "locationId": "loc"})
 
 
 class _Response:
