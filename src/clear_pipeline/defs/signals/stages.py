@@ -41,7 +41,11 @@ from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
 from clear_pipeline.providers.jev import JevError
 from clear_pipeline.providers.llm import LLMUnavailableError
-from clear_pipeline.providers.location import LocationsUnavailableError
+from clear_pipeline.providers.location import (
+    GeocodeMiss,
+    LocationsUnavailableError,
+    collect_geocode_misses,
+)
 from clear_pipeline.providers.signal_classifier import (
     classifier_stats_snapshot,
     classify_signal,
@@ -57,11 +61,17 @@ from clear_pipeline.providers.clear_api import (
     get_ground_message_canonical,
     get_location_canonical,
     get_situation_canonical,
+    dagster_run_id,
     mark_signals_processed,
+    pipeline_run,
+    RUN_KIND_LIVE,
+    RUN_KIND_REPLAY,
     mark_translated,
     pending_recomputes,
     pending_signals,
     pending_translations,
+    get_signal_location,
+    record_unresolved_place_name,
     sync_event_cards,
     update_signal_location,
     update_signal_severity,
@@ -72,6 +82,7 @@ from clear_pipeline.providers.redis_lock import redis_lock
 from clear_pipeline.providers.signal import extract_population_affected_from_text
 from clear_pipeline.providers.translate import (
     LOCKED,
+    RETRY,
     TRANSLATED,
     configured_target_locales,
     translate_and_upsert,
@@ -154,6 +165,34 @@ def _pending(source: str | None) -> list[dict]:
     return pending_signals(first=_BATCH_SIZE, source=source)
 
 
+def _record_geocode_misses(signal_id: str, misses: list[GeocodeMiss]) -> bool:
+    """Send each place name the locator could not geocode to clear-api's
+    unresolved place-name queue, where a person can resolve it. Best-effort: a
+    clear-api error or timeout is logged and never fails the signal's drain.
+    clear-api counts a signal once per row, so a re-drained signal is safe.
+
+    Returns True when a name was resolved already: clear-api applies its
+    alias as it records the miss, so the signal may have moved."""
+    resolved = False
+    for miss in misses:
+        try:
+            row = record_unresolved_place_name(
+                signal_id=signal_id,
+                name=miss.name,
+                name_ar=miss.name_ar,
+                country_code=miss.country_code,
+                area_location_id=miss.area_id,
+                reason=miss.reason,
+            )
+            resolved = resolved or (row or {}).get("status") == "RESOLVED"
+        except Exception as exc:  # noqa: BLE001 — a side note; the drain carries on
+            logger.warning(
+                "[classify_group] signal %s: could not record unresolved place name %r: %s",
+                signal_id, miss.name, exc,
+            )
+    return resolved
+
+
 def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     """For a connector that can locate its own signals (``LocatingSource`` —
     push feeds that arrive with no location), resolve and persist a location
@@ -165,16 +204,33 @@ def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     retry leaves the signal NEW rather than grouping it location-less."""
     if _event_location_id(created) or not isinstance(connector, LocatingSource):
         return created
-    location_id = connector.locate(view)
+    with collect_geocode_misses() as misses:
+        location_id = connector.locate(view)
     if not location_id:
+        _record_geocode_misses(created["id"], misses)
         logger.info("[classify_group] signal %s: no location resolved", created["id"])
         return created
     updated = update_signal_location(created["id"], location_id)
+    # After the location is saved: when the name was resolved in the meantime,
+    # clear-api moves the signal from its saved location to the alias location
+    # as it records the miss. A failed save leaves the signal NEW, and the
+    # next drain locates it and records the miss again.
+    general_location = updated.get("generalLocation")
+    if _record_geocode_misses(created["id"], misses):
+        # The signal may now be at the alias location: group on where it is,
+        # not on the location saved a moment ago.
+        try:
+            general_location = get_signal_location(created["id"]) or general_location
+        except Exception as exc:  # noqa: BLE001 — keep the saved location; grouping still works
+            logger.warning(
+                "[classify_group] signal %s: could not re-read its location after a late alias: %s",
+                created["id"], exc,
+            )
     logger.info(
         "[classify_group] signal %s: located → %s",
-        created["id"], (updated.get("generalLocation") or {}).get("name") or location_id,
+        created["id"], (general_location or {}).get("name") or location_id,
     )
-    return {**created, "generalLocation": updated.get("generalLocation")}
+    return {**created, "generalLocation": general_location}
 
 
 def _enqueue_translations(entity_type: str, entity_id: str) -> None:
@@ -348,7 +404,9 @@ def _drain_signals(context) -> dg.MaterializeResult:
         if not acquired:
             context.log.info("[classify_group] another drain holds the lock — skipping this run")
             return dg.MaterializeResult(metadata={"skipped_concurrent": True})
-        return _drain_signals_locked(context)
+        # clear-api logs where this run placed each signal (clear-api ADR-0020).
+        with pipeline_run(RUN_KIND_LIVE, run_id=dagster_run_id(context)):
+            return _drain_signals_locked(context)
 
 
 # Chunk the sync so a cutover/backfill (touched_events in the hundreds–thousands)
@@ -631,7 +689,9 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
                 if attempts >= _MAX_SIGNAL_ATTEMPTS:
                     failed.append(_item(row))
                     counts["recompute_failed"] += 1
-        counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
+        # A recompute re-processes signals that a run already finished: a replay.
+        with pipeline_run(RUN_KIND_REPLAY):
+            counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
         if deferred:
             break
     return counts
@@ -667,27 +727,29 @@ def alert(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     # this returns is recent + severe → publish an alert. No archived-suppression
     # path (creating an alert row, even archived, still fanned out emails).
     alerted = failed = 0
-    for _ in range(_MAX_BATCHES):
-        events = events_pending_alert(
-            first=_BATCH_SIZE,
-            min_severity=_ALERT_MIN_SEVERITY,
-            max_age_hours=settings.alert_max_signal_age_hours,
-        )
-        if not events:
-            break
-        made_progress = False
-        for event in events:
-            try:
-                escalate_to_alert(event)  # published
-            except Exception:  # noqa: BLE001 — isolate one event's failure
-                context.log.exception("[alert] event %s failed", event.get("id"))
-                failed += 1
-                continue
-            alerted += 1
-            made_progress = True  # this event now has an alert → leaves the queue
-        # Terminate when a batch produced no new alerts (every event errored).
-        if not made_progress:
-            break
+    # clear-api records that a Live run raised each alert (clear-api ADR-0021).
+    with pipeline_run(RUN_KIND_LIVE, run_id=dagster_run_id(context)):
+        for _ in range(_MAX_BATCHES):
+            events = events_pending_alert(
+                first=_BATCH_SIZE,
+                min_severity=_ALERT_MIN_SEVERITY,
+                max_age_hours=settings.alert_max_signal_age_hours,
+            )
+            if not events:
+                break
+            made_progress = False
+            for event in events:
+                try:
+                    escalate_to_alert(event)  # published
+                except Exception:  # noqa: BLE001 — isolate one event's failure
+                    context.log.exception("[alert] event %s failed", event.get("id"))
+                    failed += 1
+                    continue
+                alerted += 1
+                made_progress = True  # this event now has an alert → leaves the queue
+            # Terminate when a batch produced no new alerts (every event errored).
+            if not made_progress:
+                break
 
     context.log.info("[alert] alerted=%d failed=%d", alerted, failed)
     return dg.MaterializeResult(metadata={"alerted": alerted, "failed": failed})
@@ -775,8 +837,10 @@ def _drain_translations(context) -> dg.MaterializeResult:
                 context.log.exception("[translate] %s %s failed", entity_type, entity_id)
                 failed += 1
                 continue
-            if outcome == LOCKED:
-                requeued += 1  # a peer holds it — rows stay queued, NOT progress
+            if outcome in (LOCKED, RETRY):
+                # LOCKED: a peer holds it. RETRY: some fields failed and attempts
+                # remain. Either way the rows stay queued — NOT progress.
+                requeued += 1
             else:
                 # TRANSLATED / NOOP / UNPARSEABLE all cleared the rows.
                 if outcome == TRANSLATED:
@@ -784,8 +848,8 @@ def _drain_translations(context) -> dg.MaterializeResult:
                 else:
                     cleared += 1
                 made_progress = True
-        # Stop only when a batch cleared nothing — every entity was locked
-        # (transient) or already seen this run.
+        # Stop only when a batch cleared nothing — every entity was locked or
+        # left for a retry (both transient), or already seen this run.
         if not made_progress:
             break
 

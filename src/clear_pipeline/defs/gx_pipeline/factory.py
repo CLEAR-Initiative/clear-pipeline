@@ -72,6 +72,8 @@ from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ClearApiNotFound,
     create_signal_for_sync,
+    dagster_run_id,
+    pipeline_run,
     update_signal_content,
 )
 from clear_pipeline.providers.signal_classifier import classify_signal
@@ -800,7 +802,8 @@ def build_gx_source_assets(source: GXSource) -> list:
                 state = iceberg_signals.sync_state(row)
                 try:
                     if action == "create":
-                        created = create_signal_for_sync(row["signalInput"])
+                        with pipeline_run(run_id=dagster_run_id(context)):
+                            created = create_signal_for_sync(row["signalInput"])
                         sent_hash = (row["signalInput"] or {}).get("contentHash")
                         # get-or-create may return an older row (earlier half-failed
                         # push, or one production created): bring it up to date.
