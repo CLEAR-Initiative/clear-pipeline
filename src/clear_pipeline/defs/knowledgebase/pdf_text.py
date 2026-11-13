@@ -1,12 +1,18 @@
-"""Extract text from the week's ReliefWeb PDFs.
+"""Extract text from the staged KB PDFs for a country.
 
-Reads each PDF the manifest points at from S3, extracts text
-page-by-page with pdfplumber, and writes one JSONL per report back to
-S3. Downstream chunk / enrich stages read from S3 so a failure in
-either can be replayed without re-hitting the PDFs.
+Source-neutral: reads whatever any KB source has staged for this partition
+(`read_latest_staged_documents` unions the `.staged.jsonl` markers written by
+`reliefweb_fetch` on its schedule, or by the manual-upload path on demand), then
+extracts text page-by-page with pdfplumber and writes one JSONL per report back
+to S3. Downstream chunk / enrich stages read from S3 so a failure in either can
+be replayed without re-hitting the PDFs.
 
-S3 layout:
+S3 layout — text output is keyed by the partition's (ReliefWeb-named) text
+prefix + the report_id; report_ids are source-namespaced (ReliefWeb native ids,
+`manual:<sha>` for uploads) so documents from different sources never collide:
     reliefweb/kb/text/<iso3>/<format-slug>/<report_id>.jsonl
+(Per-source OUTPUT prefixes — `<source>/kb/...` — are a future cleanup; inputs
+are already fully source-neutral.)
 
 Each line is::
 
@@ -31,6 +37,7 @@ from clear_pipeline.defs.reliefweb_partitions import (
     country_partitions,
     text_prefix,
 )
+from clear_pipeline.providers.kb_sources.staging import read_latest_staged_documents
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[4] / ".env")
 
@@ -135,19 +142,18 @@ def _report_summary(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
-    # Ordering-only dep: this asset reads each PDF back from S3 (by key from
-    # the manifest), so the upload MUST finish first. Without it, pdf_text and
-    # reliefweb_weekly_pdfs_in_s3 both depend only on the manifest and run in
-    # parallel — text extraction then races ahead of the upload and hits
-    # NoSuchKey. Invisible at 7-day volume; exposed by the 90-day initial run.
-    deps=["reliefweb_weekly_pdfs_in_s3"],
+    group_name="kb",
+    # Source-neutral: this asset discovers whatever any KB source has STAGED for
+    # this country (the `.staged.jsonl` markers written by `reliefweb_fetch` on
+    # its schedule, or by the manual-upload path on demand) — see
+    # `read_latest_staged_documents`. No typed dependency on a specific fetch
+    # asset, so a manual upload to a country with no prior ReliefWeb run still
+    # works. The trigger (the fetch sensor, or clear-api's direct launch) is what
+    # orders this strictly after staging, closing the NoSuchKey race.
     partitions_def=country_partitions,
 )
-def reliefweb_weekly_pdf_text(
+def kb_pdf_text(
     context: AssetExecutionContext,
-    reliefweb_weekly_pdf_manifest: list[dict],
-    reliefweb_weekly_reports_in_s3: list[dict],
 ) -> list[dict]:
     """Per-report page text as JSONL in S3.
 
@@ -160,23 +166,47 @@ def reliefweb_weekly_pdf_text(
     bucket = os.environ["S3_BUCKET"]
     s3 = _s3_client()
 
-    # Manifest is one row per attachment; a report may have multiple
-    # PDFs. Group by report_id and process each report as a unit so
-    # chunk indices are contiguous within a report.
+    # The staged `KbRawDocument` dicts (one per PDF attachment; a report may have
+    # several) from every source that staged data for this country. Translate
+    # them into the two shapes the rest of this asset already consumes — so the
+    # per-report extraction loop and `_report_summary` stay byte-for-byte what
+    # they were under the three-asset fetch:
+    #   * `by_report`    — attachment rows ({report_id, filename, url, s3_key}),
+    #     grouped per report and processed as a unit (contiguous chunk indices).
+    #   * `reports_by_id`— one synthetic ReliefWeb-`fields`-shaped metadata record
+    #     per report, carrying the title/url/date/publisher/country the staged
+    #     doc captured, so `_report_summary` reads them exactly as before.
+    staged = read_latest_staged_documents(s3, bucket, iso3)
     by_report: dict[str, list[dict]] = {}
-    for entry in reliefweb_weekly_pdf_manifest:
-        by_report.setdefault(entry["report_id"], []).append(entry)
-
-    # Report metadata by id — pulled from the upstream report list so
-    # downstream assets have `report_title` / `published_at` without
-    # a second S3 fetch. `date.original` is the publication date the
-    # sitrep header shows; `date.created` is ReliefWeb's index time and
-    # is used as a fallback when publishers omit the original date.
     reports_by_id: dict[str, dict] = {}
-    for report in reliefweb_weekly_reports_in_s3:
-        report_id = str(report.get("id") or "")
-        if report_id:
-            reports_by_id[report_id] = report
+    for doc in staged:
+        report_id = str(doc["report_id"])
+        by_report.setdefault(report_id, []).append(
+            {
+                "report_id": report_id,
+                "filename": doc.get("filename"),
+                "url": doc.get("source_url"),
+                "s3_key": doc["pdf_s3_key"],
+            },
+        )
+        if report_id not in reports_by_id:
+            reports_by_id[report_id] = {
+                "fields": {
+                    "title": doc.get("title"),
+                    "url": doc.get("source_url"),
+                    # `_report_summary` prefers date.original, falls back to created.
+                    "date": {"original": doc.get("published_at")},
+                    # `source` is an array of publishing orgs; the connector already
+                    # resolved name/homepage, so one entry reproduces the first-org pick.
+                    "source": [
+                        {
+                            "name": doc.get("publisher_name"),
+                            "homepage": doc.get("publisher_homepage"),
+                        },
+                    ],
+                    "primary_country": {"iso3": doc.get("country_iso3")},
+                },
+            }
 
     summaries: list[dict] = []
     reused = 0
@@ -214,8 +244,8 @@ def reliefweb_weekly_pdf_text(
                 pdf_bytes = obj["Body"].read()
             except Exception as exc:  # noqa: BLE001
                 # Missing S3 objects are surfaced but don't abort the
-                # week — a re-run of `reliefweb_weekly_pdfs_in_s3` will
-                # refill them and a subsequent kb build catches up.
+                # week — a re-run of the source's fetch/upload re-stages them
+                # and a subsequent kb build catches up.
                 context.log.warning(
                     "s3 fetch failed for %s (%s) — skipping: %s",
                     entry["s3_key"], report_id, exc,

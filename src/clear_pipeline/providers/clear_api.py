@@ -19,10 +19,13 @@ Env vars:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -386,6 +389,7 @@ def _execute(
     *,
     retries: int = 3,
     api_key: str | None = None,
+    timeout: float = 60,
 ) -> dict[str, Any]:
     """POST a GraphQL operation with the same retry semantics
     clear-pipeline uses.
@@ -414,7 +418,7 @@ def _execute(
 
     for attempt in range(1, retries + 1):
         try:
-            resp = httpx.post(url, json=payload, headers=headers, timeout=60)
+            resp = httpx.post(url, json=payload, headers=headers, timeout=timeout)
 
             if 400 <= resp.status_code < 500:
                 snippet = resp.text[:500] if resp.text else "(empty)"
@@ -573,6 +577,50 @@ def upsert_report_datapoints(
     }
     result = _execute(_UPSERT_REPORT_DATAPOINTS, {"input": payload})
     return result["upsertReportDatapoints"]
+
+
+_UPSERT_ANALYSIS_DATAPOINTS = """
+mutation UpsertAnalysisDatapoints($input: UpsertAnalysisDatapointsInput!) {
+  upsertAnalysisDatapoints(input: $input) {
+    analysisId
+    schemaVersion
+    createdOrReplaced
+  }
+}
+"""
+
+
+def upsert_analysis_datapoints(
+    *,
+    analysis_id: str,
+    data: dict[str, Any],
+    contributing_report_ids: list[str],
+    schema_version: str,
+    origin: str | None = None,
+    newest_source_at: str | None = None,
+    oldest_source_at: str | None = None,
+    data_quality_score: float | None = None,
+    report_count: int | None = None,
+) -> dict[str, Any]:
+    """Upsert the analysis module's final numbers for one analysis generation
+    (clear-api ``upsertAnalysisDatapoints``), keyed on ``analysis_id``.
+
+    The ``data`` blob follows the same QualityEnvelope leaf structure as the
+    aggregated-datapoints cache. Called by the assembly/publish stage once the
+    ``analyses`` row for the generation exists (the FK is non-null)."""
+    payload = {
+        "analysisId": analysis_id,
+        "data": data,
+        "contributingReportIds": contributing_report_ids,
+        "origin": origin,
+        "newestSourceAt": newest_source_at,
+        "oldestSourceAt": oldest_source_at,
+        "dataQualityScore": data_quality_score,
+        "reportCount": report_count,
+        "schemaVersion": schema_version,
+    }
+    result = _execute(_UPSERT_ANALYSIS_DATAPOINTS, {"input": payload})
+    return result["upsertAnalysisDatapoints"]
 
 
 def upsert_report_figures(
@@ -1061,6 +1109,8 @@ def upsert_analysis(
     source_report_ids: list[str],
     generated_by_model: str,
     generation_cost_usd: float | None,
+    generation_input_tokens: int | None = None,
+    generation_output_tokens: int | None = None,
     schema_version: str,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -1087,6 +1137,8 @@ def upsert_analysis(
         "sourceReportIds": source_report_ids,
         "generatedByModel": generated_by_model,
         "generationCostUsd": generation_cost_usd,
+        "generationInputTokens": generation_input_tokens,
+        "generationOutputTokens": generation_output_tokens,
         "schemaVersion": schema_version,
         "force": force,
     }
@@ -1357,6 +1409,33 @@ mutation UpdateSignalGeoparsedData($id: String!, $geoparsedData: JSON!) {
 UPDATE_SIGNAL_LOCATION = """
 mutation UpdateSignalLocation($id: String!, $locationId: String!) {
   updateSignalLocation(id: $id, locationId: $locationId) {
+    id
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
+# A replay job's move: clear-api writes a REPLAY location Outcome with it
+# (clear-api ADR-0020). The drain uses UPDATE_SIGNAL_LOCATION: its mark writes
+# the Outcome.
+UPDATE_SIGNAL_LOCATION_REPLAY = """
+mutation UpdateSignalLocation(
+  $id: String!, $locationId: String!,
+  $runKind: LocationRunKind, $pipelineVersion: String, $runId: String
+) {
+  updateSignalLocation(
+    id: $id, locationId: $locationId,
+    runKind: $runKind, pipelineVersion: $pipelineVersion, runId: $runId
+  ) {
+    id
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
+GET_SIGNAL_LOCATION = """
+query SignalLocation($id: String!) {
+  signal(id: $id) {
     id
     generalLocation { id name level ancestorIds }
   }
@@ -1743,6 +1822,19 @@ query PendingRecomputes($first: Int) {{
 """
 
 MARK_SIGNALS_PROCESSED = """
+mutation MarkSignalsProcessed(
+  $items: [SignalRevisionInput!]!, $status: SignalStatus,
+  $runKind: LocationRunKind, $pipelineVersion: String, $runId: String
+) {
+  markSignalsProcessed(
+    items: $items, status: $status,
+    runKind: $runKind, pipelineVersion: $pipelineVersion, runId: $runId
+  )
+}
+"""
+
+# For a clear-api older than the location Outcome log (clear-api ADR-0020).
+MARK_SIGNALS_PROCESSED_LEGACY = """
 mutation MarkSignalsProcessed($items: [SignalRevisionInput!]!, $status: SignalStatus) {
   markSignalsProcessed(items: $items, status: $status)
 }
@@ -1807,20 +1899,122 @@ mutation SetEventAggregates(
 }
 """
 
+# With the run that recomputes the event, for the Event facts log (clear-api ADR-0021).
+SET_EVENT_AGGREGATES_WITH_RUN = """
+mutation SetEventAggregates(
+  $id: String!, $input: EventAggregatesInput!, $members: [SignalRevisionInput!]!,
+  $runKind: LocationRunKind, $pipelineVersion: String, $runId: String
+) {
+  setEventAggregates(
+    id: $id, input: $input, members: $members,
+    runKind: $runKind, pipelineVersion: $pipelineVersion, runId: $runId
+  ) {
+    id
+  }
+}
+"""
+
+
+# ─── Pipeline run (location Outcome log) ──────────────────────────────────────
+#
+# clear-api keeps an append-only log of where each pipeline run placed each
+# signal (clear-api ADR-0020). It writes a row on createSignal and on
+# markSignalsProcessed. The pipeline says which run did the work: the run kind,
+# the pipeline git SHA and the Dagster run id.
+
+RUN_KIND_LIVE = "LIVE"
+RUN_KIND_REPLAY = "REPLAY"
+
+_run_kind: contextvars.ContextVar[str] = contextvars.ContextVar("clear_api_run_kind", default=RUN_KIND_LIVE)
+_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("clear_api_run_id", default=None)
+
+# False once clear-api rejects the run inputs: it is older than the Outcome
+# log. The process then sends the old mutations. A restart checks again.
+_run_inputs_supported = True
+
+_RUN_INPUT_NAMES = ("runKind", "pipelineVersion", "runId", "LocationRunKind")
+
+
+@contextlib.contextmanager
+def pipeline_run(run_kind: str = RUN_KIND_LIVE, run_id: str | None = None) -> Iterator[None]:
+    """Name the run that the signal writes inside this block belong to.
+
+    ``run_kind`` is ``RUN_KIND_LIVE`` for the first processing of a signal and
+    ``RUN_KIND_REPLAY`` for a job that re-processes signals. ``run_id`` is the
+    Dagster run id; inside a nested block it defaults to the outer one."""
+    kind_token = _run_kind.set(run_kind)
+    id_token = _run_id.set(run_id if run_id is not None else _run_id.get())
+    try:
+        yield
+    finally:
+        _run_kind.reset(kind_token)
+        _run_id.reset(id_token)
+
+
+def dagster_run_id(context: Any) -> str | None:
+    """The run id of a Dagster execution context; None for a test double."""
+    run_id = getattr(getattr(context, "run", None), "run_id", None)
+    return run_id if isinstance(run_id, str) else None
+
+
+def pipeline_version() -> str | None:
+    """The git SHA of the running pipeline (``PIPELINE_VERSION``, set when the
+    image is built); None on a machine that does not set it."""
+    return os.environ.get("PIPELINE_VERSION", "").strip() or None
+
+
+def _run_fields() -> dict[str, str]:
+    """``pipelineVersion`` and ``runId`` of the current run, without empty values."""
+    fields = {"pipelineVersion": pipeline_version(), "runId": _run_id.get()}
+    return {k: v for k, v in fields.items() if v}
+
+
+def _rejects_run_inputs(exc: Exception) -> bool:
+    """True when clear-api refused a request because it does not know the run
+    inputs (it is older than the Outcome log). The refusal is a 400 for an
+    unknown argument or type (``ClearApiError``), or a 200 with a GraphQL
+    error for an unknown input field (``GraphQLErrors``)."""
+    text = str(exc)
+    unknown = ("Unknown argument", "Unknown type", "is not defined by type")
+    return any(m in text for m in unknown) and any(name in text for name in _RUN_INPUT_NAMES)
+
+
+def _execute_with_run(query: str, variables: dict, legacy_query: str, legacy_variables: dict) -> dict[str, Any]:
+    """Send ``query`` with the run inputs. If clear-api does not know them yet,
+    send ``legacy_query`` instead, now and for the rest of the process, so a
+    pipeline deployed before clear-api keeps draining."""
+    global _run_inputs_supported
+    if _run_inputs_supported:
+        try:
+            return _execute(query, variables)
+        except (ClearApiError, GraphQLErrors) as exc:
+            if not _rejects_run_inputs(exc):
+                raise
+            _run_inputs_supported = False
+            logger.warning(
+                "clear-api does not accept the location Outcome run inputs yet; "
+                "sending signal writes without them until restart"
+            )
+    return _execute(legacy_query, legacy_variables)
+
+
+def _create_signal(query: str, input_data: dict) -> dict:
+    with_run = {**input_data, **_run_fields()}
+    result = _execute_with_run(query, {"input": with_run}, query, {"input": input_data})
+    return result["createSignal"]
+
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 
 def create_signal(input_data: dict) -> dict:
-    result = _execute(CREATE_SIGNAL, {"input": input_data})
-    return result["createSignal"]
+    return _create_signal(CREATE_SIGNAL, input_data)
 
 
 def create_signal_for_sync(input_data: dict) -> dict:
     """gx's get-or-create: also returns ``contentHash``/``retracted`` so the
     caller can tell an existing, out-of-date row from the one it sent."""
-    result = _execute(CREATE_SIGNAL_FOR_SYNC, {"input": input_data})
-    return result["createSignal"]
+    return _create_signal(CREATE_SIGNAL_FOR_SYNC, input_data)
 
 
 def update_signal_content(input_data: dict) -> dict:
@@ -1846,10 +2040,13 @@ def mark_signals_processed(items: list[dict], status: str = "PROCESSED") -> int:
     """Mark signals done for the drain — PROCESSED (default) or FAILED.
     ``items`` are ``{"id", "revision"}`` as fetched: a row whose revision moved
     since (revised or retracted meanwhile) is left for the next run. Returns
-    the number of rows updated."""
+    the number of rows updated. Sends the run named by ``pipeline_run``."""
     if not items:
         return 0
-    result = _execute(MARK_SIGNALS_PROCESSED, {"items": items, "status": status})
+    legacy = {"items": items, "status": status}
+    # clear-api logs where this run left each signal (see ``pipeline_run``).
+    variables = {**legacy, "runKind": _run_kind.get(), **_run_fields()}
+    result = _execute_with_run(MARK_SIGNALS_PROCESSED, variables, MARK_SIGNALS_PROCESSED_LEGACY, legacy)
     return result["markSignalsProcessed"]
 
 
@@ -1886,9 +2083,10 @@ def set_event_aggregates(event_id: str, input_data: dict, members: list[dict]) -
     were computed from: if they changed since, nothing is written and
     ``ClearApiStaleMembers`` is raised (a newer recompute supersedes this one)."""
     snapshot = [{"id": m["id"], "revision": m["revision"]} for m in members]
-    result = _execute(
-        SET_EVENT_AGGREGATES, {"id": event_id, "input": input_data, "members": snapshot},
-    )
+    legacy = {"id": event_id, "input": input_data, "members": snapshot}
+    # clear-api logs the facts this run gave the event (see ``pipeline_run``).
+    variables = {**legacy, "runKind": _run_kind.get(), **_run_fields()}
+    result = _execute_facts_with_run(SET_EVENT_AGGREGATES_WITH_RUN, variables, SET_EVENT_AGGREGATES, legacy)
     return result["setEventAggregates"]
 
 
@@ -1930,12 +2128,216 @@ def update_signal_location(signal_id: str, location_id: str) -> dict:
     generalLocation}`` with the location in the same shape ``pendingSignals``
     selects, so the drain can patch its row and group on the new district.
     Used by the drain for push feeds that arrive without a location
-    (``LocatingSource``)."""
-    result = _execute(
-        UPDATE_SIGNAL_LOCATION,
-        {"id": signal_id, "locationId": location_id},
-    )
+    (``LocatingSource``), and by replay jobs that move a signal without the
+    drain. Inside ``pipeline_run(RUN_KIND_REPLAY)`` the move tells clear-api
+    that it is a replay, so clear-api logs it."""
+    legacy = {"id": signal_id, "locationId": location_id}
+    if _run_kind.get() == RUN_KIND_REPLAY:
+        variables = {**legacy, "runKind": RUN_KIND_REPLAY, **_run_fields()}
+        result = _execute_with_run(UPDATE_SIGNAL_LOCATION_REPLAY, variables, UPDATE_SIGNAL_LOCATION, legacy)
+    else:
+        result = _execute(UPDATE_SIGNAL_LOCATION, legacy)
     return result["updateSignalLocation"]
+
+
+RECORD_UNRESOLVED_PLACE_NAME = """
+mutation RecordUnresolvedPlaceName($input: RecordUnresolvedPlaceNameInput!) {
+  recordUnresolvedPlaceName(input: $input) {
+    id
+    status
+    signalCount
+  }
+}
+"""
+
+# Flipped off for the process when clear-api does not have the mutation yet
+# (a clear-api without #1307), so each miss isn't paid for with a failed call.
+_record_unresolved_supported = True
+
+# Seconds. The record is a side note to the drain: it must not hold a signal up.
+_RECORD_UNRESOLVED_TIMEOUT = 10
+
+
+def record_unresolved_place_name(
+    *,
+    signal_id: str,
+    name: str,
+    country_code: str,
+    area_location_id: str,
+    name_ar: str | None = None,
+    reason: str = "NO_MATCH",
+    seen_at: str | None = None,
+) -> dict | None:
+    """Record a place name that geocoding could not place inside the signal's
+    area, in clear-api's unresolved place-name queue. clear-api counts a
+    signal once per row, so a repeat is harmless.
+
+    ``reason`` is ``NO_MATCH`` or ``OUTSIDE_AREA``. ``seen_at`` (ISO-8601) is
+    for a backfill; omitted, clear-api uses now.
+
+    Returns ``{id, status, signalCount}``, or None once clear-api is known
+    not to have the mutation. One attempt with a short timeout; any other
+    failure raises, and the caller decides (the drain logs and carries on).
+    """
+    global _record_unresolved_supported
+    if not _record_unresolved_supported:
+        return None
+    payload: dict = {
+        "signalId": signal_id,
+        "name": name,
+        "countryCode": country_code.upper(),
+        "areaLocationId": area_location_id,
+        "reason": reason,
+    }
+    if name_ar:
+        payload["nameAr"] = name_ar
+    if seen_at:
+        payload["seenAt"] = seen_at
+    try:
+        data = _execute(
+            RECORD_UNRESOLVED_PLACE_NAME,
+            {"input": payload},
+            retries=1,
+            timeout=_RECORD_UNRESOLVED_TIMEOUT,
+        )
+    except ClearApiError as exc:
+        text = str(exc)
+        unknown = any(m in text for m in ("Cannot query field", "Unknown type", "Unknown argument"))
+        if not (unknown and "ecordUnresolvedPlaceName" in text):
+            raise
+        _record_unresolved_supported = False
+        logger.warning(
+            "clear-api has no recordUnresolvedPlaceName — deploy clear-api #1307; "
+            "geocode misses are not recorded for this process"
+        )
+        return None
+    return data["recordUnresolvedPlaceName"]
+
+
+# The place-name backfill (clear_pipeline.backfill.place_names). clear-api has
+# no signal query with a date or a source filter, so the backfill lists every
+# signal inside a country with few fields, filters them itself, and reads each
+# candidate in full.
+SIGNALS_IN_LOCATION = """
+query BackfillSignalsInLocation($locationId: String!) {
+  signalsByLocation(locationId: $locationId) {
+    id
+    publishedAt
+    retracted
+    locationCorrectedAt
+    source { name }
+    originLocation { id }
+    destinationLocation { id }
+    generalLocation { id name level }
+  }
+}
+"""
+
+SIGNAL_FOR_RELOCATE = """
+query BackfillSignal($id: String!) {
+  signal(id: $id) {
+    id
+    externalId
+    title
+    description
+    publishedAt
+    url
+    rawS3Key
+    retracted
+    locationCorrectedAt
+    locationChallenge { id }
+    source { id name }
+    originLocation { id name level ancestorIds }
+    destinationLocation { id name level ancestorIds }
+    generalLocation { id name level ancestorIds }
+  }
+}
+"""
+
+# Seconds. One answer holds every signal of a country.
+_SIGNALS_IN_LOCATION_TIMEOUT = 600
+
+
+def signals_in_location(location_id: str) -> list[dict]:
+    """Every signal whose location is ``location_id`` or inside it, with the
+    few fields a caller needs to choose among them."""
+    data = _execute(
+        SIGNALS_IN_LOCATION, {"locationId": location_id}, timeout=_SIGNALS_IN_LOCATION_TIMEOUT,
+    )
+    return data.get("signalsByLocation") or []
+
+
+def get_signal_for_relocate(signal_id: str) -> dict | None:
+    """One signal as it is now, with what a re-locate reads before it writes:
+    the text, the three locations, ``locationCorrectedAt`` (a person corrected
+    the location) and the open Location challenge."""
+    return _execute(SIGNAL_FOR_RELOCATE, {"id": signal_id}).get("signal")
+
+
+def get_signal_location(signal_id: str) -> dict | None:
+    """A signal's `generalLocation` as clear-api holds it now, in the shape
+    ``update_signal_location`` returns (``{id, name, level, ancestorIds}``),
+    or None. For the drain, after a write that can move the signal on the
+    server (a geocode miss recorded on a name that is resolved already)."""
+    data = _execute(GET_SIGNAL_LOCATION, {"id": signal_id}, retries=1, timeout=_RECORD_UNRESOLVED_TIMEOUT)
+    return (data.get("signal") or {}).get("generalLocation")
+
+
+# False once clear-api rejects the run inputs on the event mutations: it is
+# older than the grouping log. Kept apart from ``_run_inputs_supported``, so a
+# clear-api that knows the Outcome log and not the grouping log still gets
+# the run inputs on signal writes. A restart checks again.
+_event_run_inputs_supported = True
+
+
+def _execute_event_with_run(query: str, variables: dict, input_data: dict, **kwargs: Any) -> dict[str, Any]:
+    """Send an event mutation with the run named by ``pipeline_run`` in its
+    input, so clear-api logs each new signal link with the run that made it
+    (the grouping log, clear-api ADR-0021). If clear-api does not know the
+    run inputs yet, send the input without them, now and for the rest of the
+    process. clear-api refuses an unknown input field before it writes, so
+    the second send never makes a second event."""
+    global _event_run_inputs_supported
+    if _event_run_inputs_supported:
+        with_run = {**input_data, "runKind": _run_kind.get(), **_run_fields()}
+        try:
+            return _execute(query, {**variables, "input": with_run}, **kwargs)
+        except (ClearApiError, GraphQLErrors) as exc:
+            if not _rejects_run_inputs(exc):
+                raise
+            _event_run_inputs_supported = False
+            logger.warning(
+                "clear-api does not accept the grouping log run inputs yet; "
+                "sending event writes without them until restart"
+            )
+    return _execute(query, {**variables, "input": input_data}, **kwargs)
+
+
+# False once clear-api rejects the run inputs on ``createAlert`` or
+# ``setEventAggregates``: it is older than the Event facts log. One flag for
+# both, because one clear-api release added both. A restart checks again.
+_facts_run_inputs_supported = True
+
+
+def _execute_facts_with_run(query: str, variables: dict, legacy_query: str, legacy_variables: dict) -> dict[str, Any]:
+    """Send ``query`` with the run named by ``pipeline_run``, for the Event
+    facts log and the run kind of an alert (clear-api ADR-0021). If clear-api
+    does not know the run inputs yet, send ``legacy_query`` instead, now and
+    for the rest of the process. clear-api refuses an unknown argument or
+    input field before it writes, so the second send never writes twice."""
+    global _facts_run_inputs_supported
+    if _facts_run_inputs_supported:
+        try:
+            return _execute(query, variables)
+        except (ClearApiError, GraphQLErrors) as exc:
+            if not _rejects_run_inputs(exc):
+                raise
+            _facts_run_inputs_supported = False
+            logger.warning(
+                "clear-api does not accept the Event facts log run inputs yet; "
+                "sending alert and aggregate writes without them until restart"
+            )
+    return _execute(legacy_query, legacy_variables)
 
 
 def create_event(input_data: dict) -> dict:
@@ -1944,12 +2346,12 @@ def create_event(input_data: dict) -> dict:
     # would mint a duplicate event. Fail fast instead — the drain re-processes the
     # signal on the next run, and group_signal's "already linked" short-circuit
     # dedups once the link is visible.
-    result = _execute(CREATE_EVENT, {"input": input_data}, retries=1)
+    result = _execute_event_with_run(CREATE_EVENT, {}, input_data, retries=1)
     return result["createEvent"]
 
 
 def update_event(event_id: str, input_data: dict) -> dict:
-    result = _execute(UPDATE_EVENT, {"id": event_id, "input": input_data})
+    result = _execute_event_with_run(UPDATE_EVENT, {"id": event_id}, input_data)
     return result["updateEvent"]
 
 
@@ -1962,7 +2364,10 @@ def escalate_event(event_id: str, user_id: str) -> dict:
 def create_alert(input_data: dict) -> dict | None:
     # `createAlert` returns null (no error) when the event's types are all
     # NRC-irrelevant — callers treat None as "no alert raised", not a failure.
-    result = _execute(CREATE_ALERT, {"input": input_data})
+    # clear-api records the kind of run that raises the alert: an alert from a
+    # replay is not part of the metric history (clear-api ADR-0021).
+    with_run = {**input_data, "runKind": _run_kind.get(), **_run_fields()}
+    result = _execute_facts_with_run(CREATE_ALERT, {"input": with_run}, CREATE_ALERT, {"input": input_data})
     return result["createAlert"]
 
 
@@ -2342,9 +2747,49 @@ RESOLVE_GAZETTEER_LOCATION_WITHIN = RESOLVE_GAZETTEER_LOCATION.replace(
     "minSimilarity: $minSimilarity)", "minSimilarity: $minSimilarity, withinLocationId: $withinLocationId)"
 )
 
+# The place-alias fields (clear-api #1309): `source` says whether the hit is
+# one of CLEAR's own aliases, and `locationId` is the CLEAR location an alias
+# points at.
+_GAZETTEER_ALIAS_FIELDS = "    exact\n    locationId\n    source\n"
+
+
+def _with_alias_fields(query: str) -> str:
+    return query.replace("    exact\n", _GAZETTEER_ALIAS_FIELDS)
+
+
 # Flipped off for the process when clear-api rejects `withinLocationId` (a
 # clear-api without #1207), so each lookup isn't paid for twice.
 _gazetteer_within_supported = True
+
+# Flipped off for the process when clear-api rejects `locationId` / `source`
+# (a clear-api without #1309). Hits then carry neither, and every hit is
+# treated as a GeoNames hit, as before.
+_gazetteer_alias_fields_supported = True
+
+
+def _gazetteer_query(query: str, variables: dict) -> dict | None:
+    """Run one gazetteer query, asking for the alias fields while clear-api
+    has them. A rejection of those fields drops them for the process (logged
+    once) and the query runs again without them."""
+    global _gazetteer_alias_fields_supported
+    # retries=1 (single attempt, no backoff): this tier is best-effort with a
+    # LocationIQ fallback, so a transient clear-api error must not stall the
+    # worker through ~6s of retry sleeps before the fallback runs.
+    if _gazetteer_alias_fields_supported:
+        try:
+            data = _execute(_with_alias_fields(query), variables, retries=1)
+            return data.get("resolveGazetteerLocation")
+        except ClearApiError as exc:
+            text = str(exc)
+            if not ("Cannot query field" in text and "GazetteerHit" in text):
+                raise
+            _gazetteer_alias_fields_supported = False
+            logger.warning(
+                "clear-api has no GazetteerHit.locationId / source — deploy clear-api #1309; "
+                "place aliases are not used for this process"
+            )
+    data = _execute(query, variables, retries=1)
+    return data.get("resolveGazetteerLocation")
 
 
 def resolve_gazetteer_location(
@@ -2360,6 +2805,11 @@ def resolve_gazetteer_location(
     exact, …) or None when nothing matches. The hybrid geoparser's first,
     offline tier; LocationIQ is the fallback for landmarks/POIs it lacks.
 
+    clear-api checks its own place aliases before GeoNames. An alias hit has
+    ``source == "ALIAS"`` and a ``locationId``: the CLEAR location to use
+    directly. Against a clear-api without those fields, they are dropped
+    (logged once) and every hit is a GeoNames hit.
+
     `within_location_id` keeps only matches inside that location. Against a
     clear-api that doesn't know the argument yet, it's dropped (logged once)
     and the caller's own area check is what remains.
@@ -2370,17 +2820,12 @@ def resolve_gazetteer_location(
         variables["countryCode"] = country_code
     if min_similarity is not None:
         variables["minSimilarity"] = min_similarity
-    # retries=1 (single attempt, no backoff): this tier is best-effort with a
-    # LocationIQ fallback, so a transient clear-api error must not stall the
-    # Celery worker through ~6s of retry sleeps before the fallback runs.
     if within_location_id and _gazetteer_within_supported:
         try:
-            data = _execute(
+            return _gazetteer_query(
                 RESOLVE_GAZETTEER_LOCATION_WITHIN,
                 {**variables, "withinLocationId": within_location_id},
-                retries=1,
             )
-            return data.get("resolveGazetteerLocation")
         except ClearApiError as exc:
             if "withinLocationId" not in str(exc):
                 raise
@@ -2389,8 +2834,7 @@ def resolve_gazetteer_location(
                 "clear-api rejects resolveGazetteerLocation(withinLocationId) — "
                 "deploy clear-api #1207; querying without it for this process"
             )
-    data = _execute(RESOLVE_GAZETTEER_LOCATION, variables, retries=1)
-    return data.get("resolveGazetteerLocation")
+    return _gazetteer_query(RESOLVE_GAZETTEER_LOCATION, variables)
 
 
 GET_CRISIS_CANONICAL = """

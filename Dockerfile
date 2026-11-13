@@ -51,6 +51,14 @@ ENV DAGSTER_HOME=/opt/dagster
 RUN mkdir -p /opt/dagster
 COPY deploy/dagster.yaml deploy/workspace.yaml /opt/dagster/
 
+# The git SHA of this build. The pipeline sends it to clear-api with each
+# signal write, so clear-api can record which pipeline version placed a
+# signal (clear-api ADR-0020). Set last: the value changes on every build,
+# and a layer above would lose its cache.
+ARG GIT_SHA=""
+ENV PIPELINE_VERSION=$GIT_SHA
+LABEL org.opencontainers.image.revision=$GIT_SHA
+
 # No ENTRYPOINT — compose supplies the full command per service. If we
 # left `ENTRYPOINT ["bash", "-lc"]` here (as an earlier version did),
 # compose's tokenised `command:` would collapse into positional params

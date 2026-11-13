@@ -1,28 +1,21 @@
-"""Weekly ReliefWeb -> S3 ingest, split into three assets.
+"""Weekly ReliefWeb -> S3 ingest (ADR-0013 multi-source KB).
 
-  1. ``reliefweb_weekly_reports_in_s3`` — pull the last 7 days of report
-     *metadata* for ``COUNTRY_ISO3``, write as JSONL, and pass the report
-     list downstream.
-  2. ``reliefweb_weekly_pdf_manifest`` — derive the flat list of
-     ``(report_id, filename, url, s3_key)`` entries for every PDF
-     attached to those reports, and write the manifest as a JSONL object
-     in S3 so PDFs can be re-downloaded later without re-fetching
-     metadata.
-  3. ``reliefweb_weekly_pdfs_in_s3`` — consume the manifest, HEAD each
-     planned key, and stream-upload only the missing PDFs to S3. Pure
-     side effect.
+ReliefWeb is a KB *source*: the ``ReliefWebConnector`` (providers/kb_sources)
+owns the API query + PDF download, and the ``reliefweb_fetch`` asset here wraps
+it — computing the rolling window (first-ingest 90d backfill vs 7d weekly delta)
+and staging each PDF to S3. The shared helpers the connector reuses
+(``_fetch_window``, ``_upload_pdf``, ``_s3_object_exists``, ``_is_first_ingest``)
+live in this module.
 
-Why the split: PDF downloads are the slow, network-flaky step. Keeping
-them isolated means a transient ReliefWeb CDN error only invalidates
-step 3, so a retry doesn't re-pull the API metadata. It also lets the
-manifest stand on its own — a downstream consumer can use it as an index
-of "what's in S3 for week W" without scanning the bucket.
+``reliefweb_fetch`` runs on its own ``reliefweb_fetch_schedule``; ``kb_fetch_sensor``
+then launches the source-neutral downstream (``reliefweb_kb`` group) for the
+country that just got new data. Each source has its own fetch + schedule; the
+downstream is shared (ADR-0013).
 
 S3 layout under ``reliefweb/``::
 
-  reports/<iso3>/<format-slug>/<YYYY>-W<WW>.jsonl              # step 1 — metadata
-  pdfs/<iso3>/<format-slug>/<YYYY>-W<WW>.manifest.jsonl        # step 2 — manifest
-  pdfs/<iso3>/<format-slug>/<report_id>/<filename>             # step 3 — the PDFs
+  reports/<iso3>/<format-slug>/<YYYY>-W<WW>.staged.jsonl       # fetch marker + staged docs
+  pdfs/<iso3>/<format-slug>/<report_id>/<filename>             # the PDFs
 
 ``date.created`` (when ReliefWeb indexed the report) drives the rolling
 weekly window — ``date.original`` would let back-dated publications land
@@ -40,6 +33,7 @@ Credentials come from environment variables (``.env`` at project root):
 import json
 import os
 import tempfile
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,8 +46,6 @@ from clear_pipeline.defs.reliefweb_partitions import (
     FORMAT_NAME,
     country_partitions,
     list_pipeline_iso3s,
-    pdf_key,
-    pdf_prefix,
     reports_prefix,
 )
 
@@ -142,7 +134,7 @@ def _s3_object_exists(s3, bucket: str, key: str) -> bool:
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Step 1 — pull report metadata
+# ReliefWeb report query (used by the connector's fetch)
 # ────────────────────────────────────────────────────────────────────────
 
 def _fetch_window(
@@ -200,151 +192,8 @@ def _fetch_window(
     return reports
 
 
-@dg.asset(group_name="reliefweb", partitions_def=country_partitions)
-def reliefweb_weekly_reports_in_s3(
-    context: dg.AssetExecutionContext,
-) -> list[dict]:
-    """Fetch a rolling window of ReliefWeb report metadata for this run's
-    country partition and write it to S3 as JSONL. Routine runs take the
-    7-day weekly delta; the country's FIRST run (no report window in S3 yet for
-    that iso3) reaches back the wider initial lookback (90d) so the datapoint
-    aggregation has a full window to backfill over.
-
-    Returns the report list so the downstream PDF-manifest asset can
-    consume it without a round-trip back to S3."""
-    iso3 = context.partition_key
-    appname = _require_env("RELIEFWEB_APPNAME")
-    bucket = _require_env("S3_BUCKET")
-    s3 = _s3_client()
-
-    # This COUNTRY's first run (no report window in S3 yet for its iso3) reaches
-    # back the wider initial lookback so a freshly-onboarded country seeds the
-    # window the aggregation backfills; routine runs use the weekly delta.
-    if _is_first_ingest(s3, bucket, iso3):
-        lookback_days = int(
-            os.environ.get("KB_INGEST_INITIAL_LOOKBACK_DAYS", str(_DEFAULT_INITIAL_LOOKBACK_DAYS)),
-        )
-        window_label = "initial-backfill"
-    else:
-        lookback_days = int(
-            os.environ.get("KB_INGEST_LOOKBACK_DAYS", str(_DEFAULT_LOOKBACK_DAYS)),
-        )
-        window_label = "weekly"
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=lookback_days)
-    context.log.info(
-        "reliefweb ingest: country=%s mode=%s window=[%s, %s]",
-        iso3, window_label, start.isoformat(), end.isoformat(),
-    )
-    reports = _fetch_window(context, appname, start, end, iso3)
-
-    key = f"{reports_prefix(iso3)}{_week_tag(end)}.jsonl"
-    body = b"\n".join(
-        json.dumps(r, separators=(",", ":")).encode("utf-8") for r in reports
-    )
-    if body:
-        body += b"\n"
-    s3.put_object(
-        Bucket=bucket, Key=key, Body=body, ContentType="application/x-ndjson",
-    )
-    context.log.info(
-        "uploaded %d reports (%d bytes) -> s3://%s/%s",
-        len(reports), len(body), bucket, key,
-    )
-
-    context.add_output_metadata(
-        {
-            "country": dg.MetadataValue.text(iso3),
-            "format": dg.MetadataValue.text(FORMAT_NAME),
-            "mode": dg.MetadataValue.text(window_label),
-            "window_from": dg.MetadataValue.text(start.isoformat()),
-            "window_to": dg.MetadataValue.text(end.isoformat()),
-            "report_count": dg.MetadataValue.int(len(reports)),
-            "s3_bucket": dg.MetadataValue.text(bucket),
-            "s3_key": dg.MetadataValue.text(key),
-            "bytes_written": dg.MetadataValue.int(len(body)),
-        },
-    )
-    return reports
-
-
 # ────────────────────────────────────────────────────────────────────────
-# Step 2 — build the PDF manifest
-# ────────────────────────────────────────────────────────────────────────
-
-@dg.asset(group_name="reliefweb", partitions_def=country_partitions)
-def reliefweb_weekly_pdf_manifest(
-    context: dg.AssetExecutionContext,
-    reliefweb_weekly_reports_in_s3: list[dict],
-) -> list[dict]:
-    """Flatten every ``fields.file[]`` entry into a download manifest
-    and write it to S3 as JSONL.
-
-    Each manifest entry::
-
-        {"report_id": str, "filename": str, "url": str, "s3_key": str}
-
-    The download step keys off ``s3_key`` so renaming this convention in
-    one place automatically retargets future uploads."""
-    iso3 = context.partition_key
-    bucket = _require_env("S3_BUCKET")
-
-    manifest: list[dict] = []
-    reports_with_pdfs = 0
-    for report in reliefweb_weekly_reports_in_s3:
-        files = (report.get("fields") or {}).get("file") or []
-        if not files:
-            continue
-        reports_with_pdfs += 1
-        report_id = str(report.get("id") or "unknown")
-        for f in files:
-            url = f.get("url")
-            filename = f.get("filename")
-            if not url or not filename:
-                # Defensive: skip malformed entries but keep marching.
-                context.log.warning(
-                    "report %s has an attachment with no url/filename — skipping (%s)",
-                    report_id, f,
-                )
-                continue
-            manifest.append(
-                {
-                    "report_id": report_id,
-                    "filename": filename,
-                    "url": url,
-                    "s3_key": pdf_key(iso3, report_id, filename),
-                },
-            )
-
-    end = datetime.now(timezone.utc)
-    manifest_key = f"{pdf_prefix(iso3)}{_week_tag(end)}.manifest.jsonl"
-    body = b"\n".join(
-        json.dumps(entry, separators=(",", ":")).encode("utf-8") for entry in manifest
-    )
-    if body:
-        body += b"\n"
-    _s3_client().put_object(
-        Bucket=bucket, Key=manifest_key, Body=body, ContentType="application/x-ndjson",
-    )
-    context.log.info(
-        "manifest: %d PDFs across %d reports -> s3://%s/%s",
-        len(manifest), reports_with_pdfs, bucket, manifest_key,
-    )
-
-    context.add_output_metadata(
-        {
-            "pdf_count": dg.MetadataValue.int(len(manifest)),
-            "reports_with_pdfs": dg.MetadataValue.int(reports_with_pdfs),
-            "s3_bucket": dg.MetadataValue.text(bucket),
-            "s3_manifest_key": dg.MetadataValue.text(manifest_key),
-        },
-    )
-    return manifest
-
-
-# ────────────────────────────────────────────────────────────────────────
-# Step 3 — download the PDFs
+# Shared PDF download helper (used by the ReliefWeb KB connector)
 # ────────────────────────────────────────────────────────────────────────
 
 def _upload_pdf(
@@ -368,73 +217,110 @@ def _upload_pdf(
     return size
 
 
-@dg.asset(group_name="reliefweb", partitions_def=country_partitions)
-def reliefweb_weekly_pdfs_in_s3(
-    context: dg.AssetExecutionContext,
-    reliefweb_weekly_pdf_manifest: list[dict],
-) -> dg.MaterializeResult:
-    """Download every manifest entry and put it in S3.
 
-    Idempotent: existing keys are HEAD-checked and skipped. Failures on
-    individual PDFs are logged and counted but never abort the run — the
-    manifest will still be in S3 so a re-run picks up where this one
-    left off."""
+# ────────────────────────────────────────────────────────────────────────
+# Multi-source KB connector fetch (ADR-0013)
+# ────────────────────────────────────────────────────────────────────────
+#
+# `reliefweb_fetch` is ReliefWeb's per-source fetch asset: it runs on
+# `reliefweb_fetch_schedule` and, once it stages new data, `kb_fetch_sensor`
+# launches the shared source-neutral downstream (`reliefweb_kb` group) for the
+# country. It lives in its own `kb_fetch` group so the downstream job (which
+# selects `reliefweb_kb`) loads its output from storage rather than re-running it.
+
+
+@dg.asset(group_name="kb_fetch", partitions_def=country_partitions)
+def reliefweb_fetch(context: dg.AssetExecutionContext) -> list[dict]:
+    """Fetch ReliefWeb reports for this country partition via the
+    `ReliefWebConnector`, staging each PDF to S3 and returning the staged
+    `KbRawDocument`s (as dicts) for the downstream to process.
+
+    A country's FIRST ingest (no report window in S3 yet for its iso3) reaches
+    back the wider initial lookback (90d) so the datapoint aggregation has a full
+    window to backfill; routine runs take the 7-day weekly delta. Both knobs are
+    env-overridable.
+
+    The connector stages PDFs to the SAME S3 keys the legacy assets use (pinned
+    byte-for-byte by `test_reliefweb_paths_byte_identical_to_legacy`), HEAD-
+    skipping ones already present — so running this against an established
+    country re-stages nothing.
+    """
+    # Instantiate the connector directly (rather than via the registry) so this
+    # asset has no import-order dependency on the connector module having been
+    # imported for its registration side effect. The registry + `all_connectors`
+    # are what the phase-2b fetch SENSOR enumerates to stay source-agnostic.
+    from clear_pipeline.providers.kb_sources.reliefweb import ReliefWebConnector
+
     iso3 = context.partition_key
     bucket = _require_env("S3_BUCKET")
     s3 = _s3_client()
 
-    uploaded = 0
-    skipped = 0
-    failed = 0
-    total_bytes = 0
-    failures: list[str] = []
+    # Same window rule as the legacy ingest asset, keyed off whether THIS country
+    # already has a report window in S3 (country-scoped first-ingest detection).
+    if _is_first_ingest(s3, bucket, iso3):
+        lookback_days = int(
+            os.environ.get("KB_INGEST_INITIAL_LOOKBACK_DAYS", str(_DEFAULT_INITIAL_LOOKBACK_DAYS)),
+        )
+        window_label = "initial-backfill"
+    else:
+        lookback_days = int(
+            os.environ.get("KB_INGEST_LOOKBACK_DAYS", str(_DEFAULT_LOOKBACK_DAYS)),
+        )
+        window_label = "weekly"
 
-    for i, entry in enumerate(reliefweb_weekly_pdf_manifest, 1):
-        key = entry["s3_key"]
-        if _s3_object_exists(s3, bucket, key):
-            skipped += 1
-            continue
-        try:
-            size = _upload_pdf(s3, bucket, entry["url"], key)
-            uploaded += 1
-            total_bytes += size
-            if i % 10 == 0 or i == len(reliefweb_weekly_pdf_manifest):
-                context.log.info(
-                    "progress %d/%d (uploaded=%d skipped=%d failed=%d)",
-                    i, len(reliefweb_weekly_pdf_manifest), uploaded, skipped, failed,
-                )
-        except Exception as err:  # noqa: BLE001 — log + continue is intentional
-            failed += 1
-            failures.append(f"{entry['report_id']}/{entry['filename']}: {err}")
-            context.log.error(
-                "failed to upload %s -> s3://%s/%s : %s",
-                entry["url"], bucket, key, err,
-            )
-
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=lookback_days)
     context.log.info(
-        "PDFs done: uploaded=%d skipped=%d failed=%d total_bytes=%d",
-        uploaded, skipped, failed, total_bytes,
+        "reliefweb_fetch: country=%s mode=%s window=[%s, %s]",
+        iso3, window_label, start.isoformat(), end.isoformat(),
     )
 
-    metadata: dict = {
-        "manifest_entries": dg.MetadataValue.int(len(reliefweb_weekly_pdf_manifest)),
-        "uploaded": dg.MetadataValue.int(uploaded),
-        "skipped_already_present": dg.MetadataValue.int(skipped),
-        "failed": dg.MetadataValue.int(failed),
-        "bytes_uploaded": dg.MetadataValue.int(total_bytes),
-        "s3_bucket": dg.MetadataValue.text(bucket),
-        "s3_prefix": dg.MetadataValue.text(pdf_prefix(iso3)),
-    }
-    if failures:
-        # First few only — the run log carries the full list.
-        metadata["failure_sample"] = dg.MetadataValue.md(
-            "\n".join(f"- `{line}`" for line in failures[:10]),
-        )
-    return dg.MaterializeResult(metadata=metadata)
+    docs = ReliefWebConnector().fetch(
+        country_iso3=iso3,
+        window_start=start.isoformat(),
+        window_end=end.isoformat(),
+    )
+    records = [asdict(d) for d in docs]
+
+    # First-ingest marker. `_is_first_ingest` keys off ANY object under the
+    # country's reports prefix; the legacy `reliefweb_weekly_reports_in_s3` wrote
+    # the raw report JSONL there as that marker. The connector returns
+    # `KbRawDocument`s instead, so persist the staged-doc records under the same
+    # prefix — under a distinct `.staged.jsonl` key so it never clobbers the
+    # legacy `<week>.jsonl` while both coexist pre-cutover. This keeps first-
+    # ingest detection correct: the next run sees the country as established and
+    # takes the weekly delta instead of re-running the 90-day backfill.
+    marker_key = f"{reports_prefix(iso3)}{_week_tag(end)}.staged.jsonl"
+    body = b"\n".join(
+        json.dumps(r, separators=(",", ":")).encode("utf-8") for r in records
+    )
+    if body:
+        body += b"\n"
+    s3.put_object(
+        Bucket=bucket, Key=marker_key, Body=body, ContentType="application/x-ndjson",
+    )
+
+    context.log.info(
+        "reliefweb_fetch: staged %d document(s) for %s; marker -> s3://%s/%s",
+        len(records), iso3, bucket, marker_key,
+    )
+    context.add_output_metadata(
+        {
+            "country": dg.MetadataValue.text(iso3),
+            "source": dg.MetadataValue.text("reliefweb"),
+            "mode": dg.MetadataValue.text(window_label),
+            "window_from": dg.MetadataValue.text(start.isoformat()),
+            "window_to": dg.MetadataValue.text(end.isoformat()),
+            "staged_documents": dg.MetadataValue.int(len(records)),
+            "marker_s3_key": dg.MetadataValue.text(marker_key),
+        },
+    )
+    return records
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Job + schedule
+# Per-source fetch job + schedule, and the sensor-triggered source-neutral
+# downstream (ADR-0013)
 # ────────────────────────────────────────────────────────────────────────
 
 # `clear/weight: heavy` caps these against the run queue's tag_concurrency_limits
@@ -442,39 +328,39 @@ def reliefweb_weekly_pdfs_in_s3(
 # a time instead of starving the in-process code server's heartbeat on Railway.
 _HEAVY_RUN_TAGS = {"clear/weight": "heavy"}
 
-reliefweb_weekly_job = dg.define_asset_job(
-    name="reliefweb_weekly_to_s3",
-    selection=[
-        reliefweb_weekly_reports_in_s3,
-        reliefweb_weekly_pdf_manifest,
-        reliefweb_weekly_pdfs_in_s3,
-    ],
+# Per-source fetch. Each KB source (ReliefWeb today; manual upload + others next)
+# gets its OWN fetch job + schedule so a source polls — and fails — in isolation,
+# never blocking another source or the downstream.
+reliefweb_fetch_job = dg.define_asset_job(
+    name="reliefweb_fetch_job",
+    selection=[reliefweb_fetch],
     tags=_HEAVY_RUN_TAGS,
 )
 
-# The full weekly pipeline: ReliefWeb ingest → PDF text → chunks →
-# LLM enrichment → embedding + knowledgebase upsert. Selected by
-# group name so adding assets to either group picks them up
-# automatically. Runs end-to-end on the schedule below.
-reliefweb_weekly_kb_job = dg.define_asset_job(
-    name="reliefweb_weekly_knowledgebase",
-    selection=dg.AssetSelection.groups("reliefweb", "reliefweb_kb"),
+# The source-neutral downstream: pdf_text → chunks → enriched_chunks → upsert,
+# plus figures, datapoints, datapoint_aggregations (the whole `reliefweb_kb`
+# group). It does NOT select the fetch assets — `pdf_text`/`figures` load the
+# staged docs from `reliefweb_fetch`'s latest materialization. Selected by group
+# so new downstream assets are picked up automatically. The figure→KB sync keeps
+# its own job/schedule (separate `reliefweb_kb_figures` group).
+kb_downstream_job = dg.define_asset_job(
+    name="kb_downstream_job",
+    selection=dg.AssetSelection.groups("kb"),
     tags=_HEAVY_RUN_TAGS,
 )
 
 # Tuesday 06:00 UTC — by the time we run, all of "last week" is settled in
-# ReliefWeb's index. The assets are partitioned by country, so the schedule
-# fans out ONE run per live country partition (rather than a single global run).
-# `run_key` is per-country-per-week so a re-tick in the same week is deduped.
-# Points at the KB-inclusive job so the weekly cron builds the full knowledge
-# base for every country, not just the S3 ingest.
+# ReliefWeb's index. Partitioned by country, so the schedule fans out ONE fetch
+# run per live country partition; `run_key` is per-country-per-week so a re-tick
+# in the same week is deduped. This runs ONLY the fetch — `kb_fetch_sensor` below
+# starts the downstream once the staged data lands.
 @dg.schedule(
-    name="reliefweb_weekly_schedule",
-    job=reliefweb_weekly_kb_job,
+    name="reliefweb_fetch_schedule",
+    job=reliefweb_fetch_job,
     cron_schedule="0 6 * * TUE",
     execution_timezone="UTC",
 )
-def reliefweb_weekly_schedule(context: dg.ScheduleEvaluationContext):
+def reliefweb_fetch_schedule(context: dg.ScheduleEvaluationContext):
     iso3s = context.instance.get_dynamic_partitions(country_partitions.name)
     if not iso3s:
         # The sync sensor seeds the partition set from pipelineCountries; until
@@ -488,6 +374,64 @@ def reliefweb_weekly_schedule(context: dg.ScheduleEvaluationContext):
         dg.RunRequest(partition_key=iso3, run_key=f"{iso3}-{week}")
         for iso3 in iso3s
     ]
+
+
+# Source-neutral downstream trigger. The moment ANY KB source stages new data —
+# a `*_fetch` asset materializes for a country — launch the downstream for that
+# country partition. Cursor-tracked over fetch materializations so it processes
+# only new batches and never backfills history; the downstream's per-report
+# skip-if-exists (pdf_text / enrich / datapoints) makes a re-trigger of an
+# already-processed report a no-op, so even a replayed materialization is safe.
+#
+# Adding a PULL source = append its fetch AssetKey here (so this sensor launches
+# the downstream when it stages data). The downstream discovers the staged docs
+# from S3 itself (`read_latest_staged_documents`), so `kb_pdf_text` needs no edit.
+# PUSH sources (manual upload) have no fetch asset — clear-api launches
+# `kb_downstream_job` directly — so they are not listed here.
+_FETCH_ASSET_KEYS = [dg.AssetKey("reliefweb_fetch")]
+
+
+@dg.sensor(name="kb_fetch_sensor", job=kb_downstream_job, minimum_interval_seconds=30)
+def kb_fetch_sensor(context: dg.SensorEvaluationContext):
+    # Cursor = the max materialization storage_id seen so far (one int across all
+    # fetch assets). `None` means never-primed: the first tick records the current
+    # high-water mark and triggers NOTHING, so enabling the sensor never backfills
+    # pre-existing fetch runs. The cursor is ALWAYS persisted afterwards (even "0"
+    # on an empty instance) so priming happens exactly once — the first fetch after
+    # enabling then trips the downstream.
+    priming = context.cursor is None
+    start = 0 if priming else int(context.cursor)
+    high = start
+    run_requests: list[dg.RunRequest] = []
+    for key in _FETCH_ASSET_KEYS:
+        result = context.instance.fetch_materializations(
+            dg.AssetRecordsFilter(asset_key=key, after_storage_id=start or None),
+            limit=5000,
+            ascending=True,
+        )
+        for record in result.records:
+            high = max(high, record.storage_id)
+            if priming:
+                continue
+            mat = record.event_log_entry.asset_materialization
+            partition = mat.partition if mat else None
+            if not partition:
+                continue
+            run_requests.append(
+                dg.RunRequest(
+                    partition_key=partition,
+                    run_key=f"kb-{key.to_python_identifier()}-{partition}-{record.storage_id}",
+                ),
+            )
+    context.update_cursor(str(high))
+    if priming:
+        return dg.SkipReason(
+            "primed cursor at the current high-water mark — will trigger the "
+            "downstream on the next fetch materialization",
+        )
+    if not run_requests:
+        return dg.SkipReason("no new KB fetch materializations since last tick")
+    return run_requests
 
 
 # Keep the dynamic partition set in lockstep with clear-api's `pipelineCountries`

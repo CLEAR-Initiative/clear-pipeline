@@ -45,6 +45,7 @@ from clear_pipeline.defs.reliefweb_partitions import (
     figures_prefix,
 )
 from clear_pipeline.providers import clear_api, make_llm_provider
+from clear_pipeline.providers.kb_sources.staging import read_latest_staged_documents
 from clear_pipeline.providers.pdf_regions import detect_figure_regions, pad_bbox
 from clear_pipeline.providers.pdf_render import (
     figure_s3_key,
@@ -213,17 +214,17 @@ def _capture_pdf(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
-    # Ordering-only dep: PDFs must be uploaded before we read them back (same
-    # NoSuchKey race pdf_text guards against). pdf_text also carries the
-    # per-report metadata (title/url/publisher/country) we attach to each figure.
-    deps=["reliefweb_weekly_pdfs_in_s3"],
+    group_name="kb",
+    # Source-neutral, mirroring kb_pdf_text: the per-report PDF keys come from the
+    # staged docs discovered in S3 (`read_latest_staged_documents`), and the
+    # `kb_pdf_text` input supplies both the per-report metadata and the set of
+    # reports that successfully produced text (so we skip ones whose PDF was
+    # unreadable upstream). kb_pdf_text runs first, so the PDFs are present.
     partitions_def=country_partitions,
 )
-def reliefweb_weekly_figures(
+def kb_figures(
     context: AssetExecutionContext,
-    reliefweb_weekly_pdf_manifest: list[dict],
-    reliefweb_weekly_pdf_text: list[dict],
+    kb_pdf_text: list[dict],
 ) -> list[dict]:
     """Per-report captured figures: cropped PNGs in S3 + structured transcription
     upserted to clear-api's ``report_figures``. Returns a slim summary list.
@@ -241,14 +242,19 @@ def reliefweb_weekly_figures(
     s3 = _s3_client()
     llm_extract = make_llm_provider("extraction")
 
-    # PDF attachments grouped by report, in manifest order (matches pdf_text's
-    # concatenation so pageNumber lines up across a report's multiple PDFs).
+    # PDF attachments grouped by report, in staged order (matches pdf_text's
+    # concatenation so pageNumber lines up across a report's multiple PDFs). The
+    # staged KbRawDocument dicts carry `pdf_s3_key`; normalise to the `s3_key`
+    # shape the capture loop below reads.
     by_report: dict[str, list[dict]] = {}
-    for entry in reliefweb_weekly_pdf_manifest:
-        by_report.setdefault(entry["report_id"], []).append(entry)
+    for doc in read_latest_staged_documents(s3, bucket, iso3):
+        report_id = str(doc["report_id"])
+        by_report.setdefault(report_id, []).append(
+            {"report_id": report_id, "s3_key": doc["pdf_s3_key"], "filename": doc.get("filename")},
+        )
 
     # Per-report metadata (title/url/publisher/country) from the text stage.
-    meta_by_report = {r["report_id"]: r for r in reliefweb_weekly_pdf_text}
+    meta_by_report = {r["report_id"]: r for r in kb_pdf_text}
 
     summaries: list[dict] = []
     total_figures = 0

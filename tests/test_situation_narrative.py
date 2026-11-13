@@ -17,18 +17,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clear_pipeline.defs.situation.narrative import (
+    _AccessLLM,
     _AISummaryLLM,
     _CONTEXT_DOMAIN_KEYS,
-    _DisplacementLLM,
     _GuidedAnswerLLM,
-    _HazardsVulnerabilitiesLLM,
-    _HumanitarianAccessLLM,
+    _ShocksLLM,
     generate_ai_summary,
     generate_context_risks,
     generate_displacement_narrative,
     generate_hazards_and_vulnerabilities,
     generate_humanitarian_access,
 )
+from clear_pipeline.defs.situation.displacement_story import DisplacementStoryLLM
 from clear_pipeline.defs.situation.rag_helper import RAGContext
 
 
@@ -364,10 +364,11 @@ class TestGenerateHazardsAndVulnerabilities:
         assert result.vulnerabilities == []
         llm.complete_structured.assert_not_called()
 
-    def test_resolves_per_bullet_from_inline_markers(self):
-        # LLM emits bullets with inline [Rn] markers; the generator strips them
-        # and attributes each bullet to ONLY the reports it cited (not the
-        # coarse union), and builds the container's report_id -> [lines] map.
+    def test_files_factors_under_topics_with_resolved_citations(self):
+        # Hazards stay "Label: detail" bullets; aggravating and mitigating
+        # factors carry a taxonomy topic and an optional scope. Each item keeps
+        # only the reports it cited, and older readers still get the
+        # aggravating factors as `vulnerabilities`.
         from clear_pipeline.defs.situation.questions import question_for_schema_key
 
         with patch(
@@ -375,9 +376,14 @@ class TestGenerateHazardsAndVulnerabilities:
             return_value=_fake_rag_context(hits=2, report_ids=["r-x", "r-y"]),
         ) as fetch:
             llm = MagicMock()
-            llm.complete_structured.return_value = _HazardsVulnerabilitiesLLM(
-                hazards=["Drought [R1]", "Armed clashes [R2]"],
-                vulnerabilities=["Weak health system [R1]", "High poverty rate [R2]"],
+            llm.complete_structured.return_value = _ShocksLLM(
+                summary="Conflict is the main hazard. [R1]",
+                hazards=["Drought: below-normal rains in July. [R1]", "Armed clashes: fighting in El Obeid. [R2]"],
+                aggravating_factors=[
+                    {"topic": "economic_fragility", "text": "Currency collapse: pound down 89%. [R1]", "scope": "Sudan-wide"},
+                    {"topic": "governance_policy", "text": "[R2]"},
+                ],
+                mitigating_factors=[{"topic": "preparedness", "text": "Stocks: kits pre-positioned. [R2]"}],
                 completeness=0.6,
                 questions_not_answered=["preparedness measures"],
             )
@@ -390,18 +396,21 @@ class TestGenerateHazardsAndVulnerabilities:
         assert fetch.call_args.kwargs["query"] == f"Sudan {shock_q.question}"
         user = llm.complete_structured.call_args.kwargs["user"]
         assert "QUESTION (Shock-Event)" in user
-        assert shock_q.question in user
-        assert "Produce the Hazards" not in user
-        assert [h.description for h in result.hazards] == ["Drought", "Armed clashes"]
-        # Per-bullet: resolved-only, NOT the coarse union.
-        assert result.hazards[0].source_report_ids == ["r-x"]
+        assert "aggravating_factors" in user
+        assert result.hazards_summary == "Conflict is the main hazard."
+        assert [h.description for h in result.hazards] == [
+            "Drought: below-normal rains in July.", "Armed clashes: fighting in El Obeid.",
+        ]
         assert result.hazards[1].source_report_ids == ["r-y"]
-        assert result.vulnerabilities[0].source_report_ids == ["r-x"]
-        assert result.vulnerabilities[1].source_report_ids == ["r-y"]
-        # Container map inverts across both lists.
+        # The marker-only factor is dropped.
+        assert [(f.topic, f.scope, f.source_report_ids) for f in result.aggravating_factors] == [
+            ("economic_fragility", "Sudan-wide", ["r-x"]),
+        ]
+        assert [(f.topic, f.scope) for f in result.mitigating_factors] == [("preparedness", None)]
+        assert [v.description for v in result.vulnerabilities] == ["Currency collapse: pound down 89%."]
         assert result.contributing_sources == {
-            "r-x": ["Drought", "Weak health system"],
-            "r-y": ["Armed clashes", "High poverty rate"],
+            "r-x": ["Drought: below-normal rains in July.", "Currency collapse: pound down 89%."],
+            "r-y": ["Armed clashes: fighting in El Obeid.", "Stocks: kits pre-positioned."],
         }
         assert result.completeness == 0.6
         assert result.questions_not_answered == ["preparedness measures"]
@@ -427,33 +436,46 @@ class TestGenerateDisplacementNarrative:
         assert result.return_intention == []
         llm.complete_structured.assert_not_called()
 
-    def test_populates_push_factors_and_return_intention(self):
-        # Regression guard for the `return_intention]` typo we hit in
-        # Phase C — the list comprehension must close cleanly with `]`.
-        # Bullets carry inline [R1] markers → resolved per-bullet.
+    def test_writes_the_story_and_keeps_the_older_lists(self):
+        places = {("Gebrat Al Sheikh", "area"): "loc-gas", ("Chad", "country"): "loc-chad"}
         with patch(
             "clear_pipeline.defs.situation.generate_component.fetch_rag_context",
             return_value=_fake_rag_context(hits=3, report_ids=["r-1"]),
+        ), patch(
+            "clear_pipeline.defs.situation.narrative._resolve_place",
+            side_effect=lambda name, kind: places.get((name, kind)),
         ):
             llm = MagicMock()
-            llm.complete_structured.return_value = _DisplacementLLM(
-                push_factors=["Active conflict in Darfur [R1]"],
-                return_intention=["Wait until security stabilises [R1]"],
-                completeness=0.4,
-                questions_not_answered=["local integration support requirements"],
-            )
+            llm.complete_structured.return_value = DisplacementStoryLLM.model_validate({
+                "summary": "Fighting keeps displacing people.",
+                "findings": [
+                    {"label": "What forces people out", "callout": "Conflict",
+                     "description": "Attacks drove most movement. [R1]", "direction": "out", "group": "idp"},
+                    {"label": "Uneven returns", "callout": "59% vs <1%",
+                     "description": "Returns are uneven. [R1]", "direction": "back", "group": "idp"},
+                ],
+                "flows": [{"direction": "out", "group": "refugee", "from_place": "Gebrat Al Sheikh",
+                           "to_place": "Chad", "people": 5402, "label": "Chad 5,402", "evidence": "[R1]"}],
+                "map_since": "April 2023",
+                "completeness": 0.4,
+            })
             result = generate_displacement_narrative(
                 llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
-        assert len(result.push_factors) == 1
-        assert result.push_factors[0].description == "Active conflict in Darfur"
-        assert result.push_factors[0].source_report_ids == ["r-1"]
-        assert len(result.return_intention) == 1
-        assert result.return_intention[0].description == "Wait until security stabilises"
-        assert result.return_intention[0].source_report_ids == ["r-1"]
+        user = llm.complete_structured.call_args.kwargs["user"]
+        assert "The analysed area is Sudan." in user and "{area}" not in user
+        assert result.summary == "Fighting keeps displacing people."
+        assert [f.label for f in result.findings] == ["What forces people out", "Uneven returns"]
+        assert result.findings[0].source_report_ids == ["r-1"]
+        flow = result.flows[0]
+        assert (flow.from_location_id, flow.to_location_id, flow.people) == ("loc-gas", "loc-chad", 5402)
+        assert result.map_since == "April 2023"
+        assert [b.description for b in result.push_factors] == [
+            "What forces people out: Conflict Attacks drove most movement.",
+        ]
+        assert [b.description for b in result.return_intention] == ["Uneven returns: 59% vs <1% Returns are uneven."]
         assert result.completeness == 0.4
-        assert result.questions_not_answered == ["local integration support requirements"]
 
     def test_llm_error_returns_empty(self):
         with patch(
@@ -490,15 +512,18 @@ class TestGenerateHumanitarianAccess:
         assert result.constraints == []
         llm.complete_structured.assert_not_called()
 
-    def test_populates_barriers_and_constraints(self):
+    def test_files_findings_under_access_topics(self):
         with patch(
             "clear_pipeline.defs.situation.generate_component.fetch_rag_context",
             return_value=_fake_rag_context(hits=2, report_ids=["r-1"]),
         ):
             llm = MagicMock()
-            llm.complete_structured.return_value = _HumanitarianAccessLLM(
-                barriers=["Checkpoint delays for convoys [R1]"],
-                constraints=["Seasonal flooding cuts corridor [R1]"],
+            llm.complete_structured.return_value = _AccessLLM(
+                summary="Access is worst in Darfur.",
+                items=[
+                    {"topic": "relief_to_population", "text": "Convoys held: checkpoints delay aid. [R1]"},
+                    {"topic": "physical", "text": "Roads cut: rains close the Habila road. [R1]", "scope": "Darfur region"},
+                ],
                 completeness=0.7,
                 questions_not_answered=["prospects"],
             )
@@ -506,11 +531,14 @@ class TestGenerateHumanitarianAccess:
                 llm, country_name="Sudan", period_label="2026",
                 aggregated={}, cache_key="k",
             )
-        assert len(result.barriers) == 1
-        assert result.barriers[0].description == "Checkpoint delays for convoys"
-        assert result.barriers[0].source_report_ids == ["r-1"]
-        assert len(result.constraints) == 1
-        assert result.constraints[0].description == "Seasonal flooding cuts corridor"
+        assert result.summary == "Access is worst in Darfur."
+        assert [(i.topic, i.scope, i.source_report_ids) for i in result.items] == [
+            ("relief_to_population", None, ["r-1"]),
+            ("physical", "Darfur region", ["r-1"]),
+        ]
+        # Older readers: physical and security are constraints, the rest barriers.
+        assert [b.description for b in result.barriers] == ["Convoys held: checkpoints delay aid."]
+        assert [c.description for c in result.constraints] == ["Roads cut: rains close the Habila road."]
         assert result.completeness == 0.7
         assert result.questions_not_answered == ["prospects"]
 
@@ -582,3 +610,72 @@ class TestRecentWindow:
         )
         user = llm.complete_structured.call_args.kwargs["user"]
         assert "30 days up to 31 March 2026" in user
+
+
+class TestDisplacementMapArea:
+    def _story(self):
+        return DisplacementStoryLLM.model_validate({
+            "summary": "People keep moving.",
+            "findings": [{"label": "Local", "callout": "500", "description": "people left [R1].",
+                          "direction": "out", "group": "idp"}],
+            "flows": [
+                {"direction": "out", "group": "idp", "from_place": "Sheikan", "to_place": "Kosti",
+                 "label": "Sheikan 500", "evidence": "[R1]"},
+                {"direction": "within", "group": "idp", "from_place": "Nyala", "to_place": "Kosti",
+                 "label": "Nyala 300", "evidence": "[R1]"},
+            ],
+        })
+
+    def _assemble(self, area):
+        from clear_pipeline.defs.situation import narrative
+
+        places = {"Sheikan": "loc-sheikan", "Nyala": "loc-nyala", "Kosti": "loc-kosti"}
+        parents = {"loc-sheikan": "loc-nk", "loc-nk": "loc-sd", "loc-nyala": "loc-south-darfur",
+                   "loc-south-darfur": "loc-sd", "loc-kosti": "loc-wn", "loc-wn": "loc-sd"}
+        token = narrative.analysis_area.set(area)
+        try:
+            with patch.object(narrative, "_resolve_place", side_effect=lambda name, kind: places.get(name)), \
+                    patch.object(narrative.clear_api, "get_location_parents", return_value=parents):
+                return narrative.assemble_displacement(self._story(), _fake_rag_context(hits=1, report_ids=["r-1"]))
+        finally:
+            narrative.analysis_area.reset(token)
+
+    def test_created_analysis_keeps_only_flows_that_touch_its_area(self):
+        assert [f.label for f in self._assemble(("loc-nk",)).flows] == ["Sheikan 500"]
+
+    def test_country_analysis_keeps_every_flow(self):
+        assert [f.label for f in self._assemble(None).flows] == ["Sheikan 500", "Nyala 300"]
+
+    def test_a_failed_lookup_fails_the_section_instead_of_the_analysis(self):
+        # An empty section over non-empty evidence is a failed generation: selective
+        # regen keeps the prior section and retries it next run.
+        from clear_pipeline.defs.situation import narrative
+
+        llm = MagicMock()
+        llm.complete_structured.return_value = self._story()
+        token = narrative.analysis_area.set(("loc-nk",))
+        try:
+            with patch(
+                "clear_pipeline.defs.situation.generate_component.fetch_rag_context",
+                return_value=_fake_rag_context(hits=1, report_ids=["r-1"]),
+            ), patch.object(narrative, "_resolve_place", return_value="loc-sheikan"), \
+                    patch.object(narrative.clear_api, "get_location_parents", side_effect=RuntimeError("clear-api down")):
+                result = generate_displacement_narrative(
+                    llm, country_name="North Kordofan", period_label="2026", aggregated=None, cache_key="k",
+                )
+        finally:
+            narrative.analysis_area.reset(token)
+        assert result.findings == [] and result.flows == []
+
+    def test_a_failed_place_lookup_is_not_cached(self):
+        from clear_pipeline.defs.situation import narrative
+
+        narrative._resolve_place.cache_clear()
+        try:
+            with patch.object(narrative.clear_api, "resolve_location",
+                              side_effect=[RuntimeError("clear-api down"), "loc-kosti"]):
+                with pytest.raises(RuntimeError):
+                    narrative._resolve_place("Kosti", "area")
+                assert narrative._resolve_place("Kosti", "area") == "loc-kosti"
+        finally:
+            narrative._resolve_place.cache_clear()

@@ -1,0 +1,18 @@
+{
+  "message_id": "<synthetic-02_single_incident@security-reports.example>",
+  "sender": "reports@security-reports.example",
+  "subject": "[SYNTHETIC] SECURITY REPORT – SUDAN –KHARTOUM: Crime",
+  "published_at": "2026-10-14T16:05:00+00:00",
+  "severity_raw": "ATTENTION RECOMMENDED",
+  "location_raw": "Republic of Sudan, Khartoum",
+  "country_raw": "Republic of Sudan",
+  "incident_type": "Crime",
+  "report_datetime": "2026-10-14T16:05:00",
+  "serial": "SDN/Khartoum/IR/20261410/R1",
+  "issued_by": "Sudan Security Team",
+  "information": "On 14 October, in Omdurman, Khartoum State, armed men stopped an NGO vehicle at an informal checkpoint and stole two phones and cash. No injuries were reported.",
+  "analysis": "Informal checkpoints have increased on secondary roads in Omdurman.",
+  "advice": [
+    "NGOs should use primary roads and travel in convoys of at least two vehicles."
+  ]
+}

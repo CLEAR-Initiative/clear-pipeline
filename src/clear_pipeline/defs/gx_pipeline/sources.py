@@ -19,18 +19,36 @@ pure transform, no clear-api write, built on
 
 from __future__ import annotations
 
+import hashlib
 import json
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
-from clear_pipeline.providers import acled, darfur24, dataminr, idmc, sudan_witness
+from clear_pipeline.providers import (
+    acled,
+    darfur24,
+    dataminr,
+    idmc,
+    inso,
+    iom_dtm_flash_alerts,
+    newsletter_mailbox,
+    sudan_witness,
+)
 from clear_pipeline.providers.clear_api import (
     get_locations_by_level,
     get_source_id_by_name,
 )
+from clear_pipeline.providers.classify import SignalClassification
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
+
+
+class Quarantined(Exception):
+    """A record the source can't trust or parse. Raised from ``parse`` or
+    ``to_silver_inputs`` by a source with the quarantine hook (see
+    ``InsoGXSource``): `_silver` moves the raw blob to ``quarantine/`` with
+    this message as the reason and goes on with the batch."""
 
 
 @runtime_checkable
@@ -240,10 +258,8 @@ class IDMCGXSource:
     ingestion path. IDU rows revise in place (same `idu_id`), so the sync hooks
     let bronze skip unchanged rows and `_push` send revisions and retractions."""
 
-    # Optional, probed via `getattr` in factory.py: gives the job a poll sensor.
-    # Only gx-only sources (IDMC, Sudan Witness) set it — the other sources'
-    # watermarks and seen-sets are shared with the production poll in
-    # `defs/signals`, which a second poller would race.
+    # Optional (probed in factory.py): gives the job a poll sensor. gx-only sources only —
+    # the others share watermarks/seen-sets with the `defs/signals` poll, which a second poller would race.
     poll_interval_minutes: int = settings.idmc_poll_interval_minutes
 
     @property
@@ -282,8 +298,7 @@ class IDMCGXSource:
         pass
 
     # ── Optional sync hooks ────────────────────────────────────────────────
-    # IDMC revises rows in place (so does Sudan Witness). Probed via `getattr`
-    # in factory.py, like the group hooks below.
+    # IDMC revises rows in place. Probed via `getattr` in factory.py, like the group hooks below.
 
     def content_hash(self, record: Any) -> str:
         return record["content_hash"]
@@ -360,15 +375,220 @@ class SudanWitnessGXSource:
         return sudan_witness.build_signal_content_update(signal_input, retracted=retracted)
 
 
-# IDMC runs the full chain for QA and pre-push filtering, like ACLED/Darfur24.
-# IDMC-native event grouping is NOT designed: the district+type heuristic runs
-# as-is (as in the drain, IDMCConnector drained=True), and gold events are a
-# QA-only sandbox that never reaches clear-api. Only IDMCGXSource and
-# SudanWitnessGXSource define the sync hooks; other sources stay create-only.
+@dataclass
+class IOMDTMFlashAlertsGXSource:
+    """DTM Flash Alerts' only ingestion path; every poll returns every bulletin, so the sync hooks dedup.
+    Not frozen: caches the L0 location id per country."""
+
+    poll_interval_minutes: int = settings.iom_dtm_flash_alerts_poll_interval_minutes
+    _location_ids: dict[str, str | None] = field(default_factory=dict, repr=False)
+
+    @property
+    def source(self) -> str:
+        return settings.iom_dtm_flash_alerts_source_name
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        return iom_dtm_flash_alerts.fetch_iom_dtm_flash_alerts(since=since)
+
+    def external_id(self, record: Any) -> str:
+        return record["external_id"]
+
+    def published_at(self, record: Any) -> str:
+        return record.get("field_published_date") or ""
+
+    def raw_bytes(self, record: Any) -> bytes:
+        # Bronze stays raw: the untouched original, not the decoded fields.
+        return json.dumps(record["raw"]).encode("utf-8")
+
+    def parse(self, raw: bytes) -> Any:
+        record = iom_dtm_flash_alerts.parse_record(json.loads(raw))
+        if record is None:  # bronze only writes records that parsed
+            raise ValueError("DTM Flash Alert blob has no parseable external id")
+        return record
+
+    def api_source_id(self) -> str:
+        return get_source_id_by_name(settings.iom_dtm_flash_alerts_source_name)
+
+    def last_synced(self) -> datetime | None:
+        return iom_dtm_flash_alerts.get_last_synced()
+
+    def set_watermark(self, ts: datetime) -> None:
+        iom_dtm_flash_alerts.set_last_synced(ts)
+
+    def _resolve_location_id(self, country_name: str) -> str | None:
+        """L0 location id for `field_country1`, cached per country.
+        Failures propagate: better silver fails than push a signal with no location and no countries."""
+        if country_name not in self._location_ids:
+            self._location_ids[country_name] = next(
+                (loc["id"] for loc in get_locations_by_level(0) if loc["name"] == country_name),
+                None,
+            )
+        return self._location_ids[country_name]
+
+    def to_silver_input(self, record: Any, source_id: str) -> dict:
+        # Country only: the drain locates the bulletin from its text
+        # (`IOMDTMFlashAlertsConnector.locate`), so silver writes nothing.
+        return iom_dtm_flash_alerts.build_iom_dtm_flash_alert_signal_input(
+            record, source_id, self._resolve_location_id(record["field_country1"])
+        )
+
+    def mark_seen(self, external_id: str) -> None:
+        pass  # No seen-set: the bronze skip (gold hash + pushedState) dedups.
+
+    # ── Optional sync hooks (probed via `getattr` in factory.py) ──────────
+    def content_hash(self, record: Any) -> str:
+        return record["content_hash"]
+
+    def content_update_input(self, signal_input: dict, *, retracted: bool) -> dict:
+        return iom_dtm_flash_alerts.build_signal_content_update(signal_input, retracted=retracted)
+
+
+@dataclass
+class InsoGXSource:
+    """INSO security newsletters, read from the shared newsletter mailbox
+    (`providers/newsletter_mailbox.py`) and parsed by `providers/inso.py`;
+    gx is its only ingestion path. One email lands in bronze verbatim (`.eml`
+    + provenance sidecar) and fans out into one signal per incident at silver.
+
+    Quarantine (the hook): an untrusted sender at bronze; a parse failure, an
+    unknown country or an unusable extraction at extract. The IMAP cursor
+    (`UIDVALIDITY:UID`) replaces the date watermark: `set_watermark` (a clean
+    bronze batch) stages it, `commit_watermark` (`_push` reached) advances it,
+    so an email whose silver/classify step fails is fetched again next poll.
+    Not frozen: holds the polled cursor and the L0 locations, like
+    `Darfur24GXSource`."""
+
+    poll_interval_minutes: int = settings.inso_poll_interval_minutes
+    raw_format: tuple[str, str] = ("eml", "message/rfc822")
+    # A new prompt version re-extracts; any other rerun reads the stored answer.
+    extraction_version: str = inso.EXTRACTION_PROMPT_VERSION
+    _pending_cursor: tuple[int, int] | None = None
+    _countries: list[dict] | None = field(default=None, repr=False)
+
+    @property
+    def source(self) -> str:
+        return settings.inso_source_name
+
+    def poll(self, since: datetime | None) -> list[Any]:
+        """Every message after the stored cursor, as ``{uid, uidvalidity,
+        folder, fetched_at, raw}``. ``since`` is unused: the cursor is IMAP's.
+        Drops a cursor an earlier run staged but never committed: a bronze that
+        fails here won't restage, and `_push` would commit that stale one past
+        an email that never reached gold."""
+        self._pending_cursor = None
+        newsletter_mailbox.stage_cursor(self.source, None)
+        validity, last_uid = newsletter_mailbox.get_cursor(self.source)
+        folder = settings.inso_imap_folder
+        batch = newsletter_mailbox.fetch_after(folder, validity, last_uid)
+        fetched_at = datetime.now(UTC).isoformat()
+        if batch.messages:
+            self._pending_cursor = (batch.uidvalidity, max(uid for uid, _ in batch.messages))
+        elif batch.uidvalidity != validity:
+            self._pending_cursor = (batch.uidvalidity, 0)
+        return [
+            {"uid": uid, "uidvalidity": batch.uidvalidity, "folder": folder, "fetched_at": fetched_at, "raw": raw}
+            for uid, raw in batch.messages
+        ]
+
+    def external_id(self, record: Any) -> str:
+        """The email's content hash: bronze is keyed by it, not by the serial
+        (a parse failure must still land somewhere)."""
+        return hashlib.sha256(record["raw"]).hexdigest()
+
+    def published_at(self, record: Any) -> str:
+        """The Date header for the bronze partition; "" (an `unknown` day) when
+        it can't be read — `parse` quarantines that email at silver."""
+        try:
+            return inso.published_at(record["raw"])
+        except inso.InsoParseError:
+            return ""
+
+    def raw_bytes(self, record: Any) -> bytes:
+        return record["raw"]
+
+    def sidecar(self, record: Any) -> dict:
+        return {
+            "imapUid": record["uid"],
+            "uidValidity": record["uidvalidity"],
+            "folder": record["folder"],
+            "fetchedAt": record["fetched_at"],
+            "sha256": self.external_id(record),
+            "authenticationResults": newsletter_mailbox.authentication_results(record["raw"]),
+            "requireDkim": settings.inso_require_dkim,
+        }
+
+    def quarantine_reason(self, record: Any) -> str | None:
+        allowed = {s.strip().lower() for s in settings.inso_allowed_senders.split(",") if s.strip()}
+        return newsletter_mailbox.sender_rejection(record["raw"], allowed, require_auth=settings.inso_require_dkim)
+
+    def parse(self, raw: bytes) -> Any:
+        try:
+            return inso.parse(raw)
+        except inso.InsoParseError as e:
+            raise Quarantined(f"parse: {e}") from e
+
+    def api_source_id(self) -> str:
+        return get_source_id_by_name(settings.inso_source_name)
+
+    def last_synced(self) -> datetime | None:
+        return None  # the cursor is IMAP's, read in `poll`
+
+    def set_watermark(self, ts: datetime) -> None:
+        """Stage the cursor `poll` reached; `commit_watermark` advances it."""
+        newsletter_mailbox.stage_cursor(self.source, self._pending_cursor)
+
+    def commit_watermark(self) -> None:
+        """Called by `_push`: every email of the batch went through or was
+        quarantined. Quarantined emails advance it too — they're replayed from
+        quarantine, not by rewinding."""
+        newsletter_mailbox.commit_cursor(self.source)
+
+    def _country(self, report: inso.InsoReport) -> inso.Country:
+        if self._countries is None:
+            self._countries = get_locations_by_level(0)
+        country = inso.match_country(report.country_raw, self._countries)
+        if country is None:
+            raise Quarantined(f"country {report.country_raw!r} matches no country location")
+        return country
+
+    def to_silver_input(self, record: Any, source_id: str) -> dict:
+        raise NotImplementedError("INSO fans out: the factory calls to_silver_inputs")
+
+    def extract(self, record: Any) -> dict:
+        """INFORMATION → incidents (LLM split + fields), checked verbatim. The
+        country is resolved first, so an unknown one never costs a call."""
+        self._country(record)
+        try:
+            incidents = inso.extract_incidents(record)
+            uncovered = inso.check_extraction(record, incidents)
+        except inso.InsoParseError as e:
+            raise Quarantined(f"extraction: {e}") from e
+        return {"incidents": [i.model_dump() for i in incidents], "uncovered": uncovered}
+
+    def to_silver_inputs(self, record: Any, source_id: str, extraction: dict) -> list[dict]:
+        """One signal input per stored incident: pure code, no LLM call."""
+        incidents = [inso.Incident.model_validate(i) for i in extraction["incidents"]]
+        try:
+            return inso.build_inso_signal_inputs(record, incidents, source_id, self._country(record))
+        except inso.InsoParseError as e:
+            raise Quarantined(f"extraction: {e}") from e
+
+    def classify(self, row: dict) -> SignalClassification:
+        """The shared event-classification prompt, one incident per call."""
+        return inso.classify_incident(row["signalInput"])
+
+    def mark_seen(self, external_id: str) -> None:
+        pass  # No seen-set: gold dedups on externalId.
+
+
+# IDMC has no native grouping: the district+type heuristic runs as-is; gold events are QA-only, never pushed.
+# Sources without the sync hooks stay create-only.
 GX_SOURCES: list[GXSource] = [
     DataminrGXSource(),
     ACLEDGXSource(),
     Darfur24GXSource(),
     IDMCGXSource(),
     SudanWitnessGXSource(),
+    IOMDTMFlashAlertsGXSource(),
+    InsoGXSource(),
 ]

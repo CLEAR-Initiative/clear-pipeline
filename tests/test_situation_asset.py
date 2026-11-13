@@ -541,7 +541,7 @@ class TestWeeklySituationAnalysesAsset:
             }
             ctx = dg.build_asset_context(partition_key="sdn")
             result = weekly_situation_analyses(
-                ctx, reliefweb_weekly_datapoint_aggregations={},
+                ctx, kb_datapoint_aggregations={},
             )
         assert mock_year.call_count == 1
         assert mock_month.call_count == 1
@@ -559,7 +559,7 @@ class TestWeeklySituationAnalysesAsset:
             pytest.raises(dg.Failure),
         ):
             ctx = dg.build_asset_context(partition_key="xxx")
-            weekly_situation_analyses(ctx, reliefweb_weekly_datapoint_aggregations={})
+            weekly_situation_analyses(ctx, kb_datapoint_aggregations={})
 
     def test_helper_returning_none_is_dropped_from_summaries(self):
         # Both helpers return None (e.g. country resolver failed). The asset
@@ -580,7 +580,7 @@ class TestWeeklySituationAnalysesAsset:
         ):
             ctx = dg.build_asset_context(partition_key="sdn")
             result = weekly_situation_analyses(
-                ctx, reliefweb_weekly_datapoint_aggregations={},
+                ctx, kb_datapoint_aggregations={},
             )
         assert result == []
 

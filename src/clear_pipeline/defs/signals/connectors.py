@@ -18,6 +18,8 @@ capability flags:
   │ darfur24   │  True   │  True   │ ingest asset + poll sensor; feeds stages    │
   │ idmc       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
+  │ inso       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
+  │ iom_dtm_f.‡│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
@@ -26,11 +28,13 @@ capability flags:
     (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
     ``createManualSignal`` accepts.
   † ``sudan_witness`` (``SudanWitnessConnector``).
+  ‡ ``iom_dtm_flash_alerts`` (``IOMDTMFlashAlertsConnector``).
 
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
   clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
-  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``). The drain projects from the blob
+  ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``,
+  ``iom_dtm_flash_alerts``, ``inso``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
 - **drained** — its NEW signals are processed by the classify/group stage
   (see ``DRAINED_SOURCES``). Every source is drained.
@@ -43,23 +47,32 @@ implementation.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
+
+import httpx
 
 from clear_pipeline.providers import (
     acled,
     darfur24,
     dataminr,
     gdacs,
+    inso,
+    iom_dtm_flash_alerts,
 )
 from clear_pipeline.providers.clear_api import (
+    ClearApiError,
+    GraphQLErrors,
     get_locations_by_level,
     get_source_id_by_name,
 )
-from clear_pipeline.providers.location import locate_in_country
+from clear_pipeline.providers.location import LocationsUnavailableError, locate_in_country
 from clear_pipeline.providers.signal import build_signal_input
 from clear_pipeline.signals.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -78,6 +91,10 @@ class SignalView:
     title: str                            # raw headline — classify/group title
     timestamp: str                        # ISO-8601 publication time
     description: str | None = None        # short summary
+    #: Uncut source text for location resolution, when the source shortens
+    #: ``description`` for display (darfur24 keeps 500 chars). None = use
+    #: ``description``. Classification and grouping keep reading ``description``.
+    full_text: str | None = None
     location_name: str | None = None
     url: str | None = None
     lat: float | None = None
@@ -393,23 +410,6 @@ class Darfur24Connector:
     drained = True  # news signals flow through the same classify → group → alert stages
     poll_interval_minutes = settings.darfur24_poll_interval_minutes
 
-    def __init__(self) -> None:
-        self._location_id: str | None = None
-
-    def _resolve_location_id(self) -> str | None:
-        """L0 location id for ``darfur24_default_country`` (cached, best-effort —
-        None on failure so a signal is never dropped over a location lookup)."""
-        if self._location_id is not None:
-            return self._location_id
-        try:
-            for loc in get_locations_by_level(0):
-                if loc["name"] == settings.darfur24_default_country:
-                    self._location_id = loc["id"]
-                    return self._location_id
-        except Exception:  # noqa: BLE001 — location is best-effort (expo-385)
-            return None
-        return None
-
     def poll(self, since: datetime | None) -> list[Any]:
         return darfur24.fetch_darfur24_articles()  # RSS has no time window
 
@@ -426,8 +426,27 @@ class Darfur24Connector:
         return get_source_id_by_name(settings.darfur24_source_name)
 
     def to_signal_input(self, record: Any, api_source_id: str) -> dict:
-        return darfur24.build_darfur24_signal_input(
-            record, api_source_id, self._resolve_location_id()
+        # No location at creation: the drain's ``locate`` places the article
+        # from its text before grouping and falls back to the country itself,
+        # so a darfur24 signal never ends up location-less (expo-385).
+        return darfur24.build_darfur24_signal_input(record, api_source_id, None)
+
+    def locate(self, view: SignalView) -> str | None:
+        """Every article on this feed is about Sudan, but carries no
+        coordinates: resolve the most specific state or district Claude can
+        match in the text, geocode the place it names to a point inside that
+        area, else Sudan itself. Until 31 Oct 2026 every darfur24 signal was
+        pinned to the country at creation, so none could join an event
+        (grouping keys on district)."""
+        # Errors propagate: a locations outage defers the article (the drain), where
+        # a country pin, or none, would lose its district for good.
+        return locate_in_country(
+            view.title,
+            # The uncut article: a district named only after the first 500
+            # characters would otherwise be missed.
+            view.full_text or view.description,
+            settings.darfur24_default_country,
+            country_code=settings.darfur24_country_code or None,
         )
 
     def last_synced(self) -> datetime | None:
@@ -452,6 +471,7 @@ class Darfur24Connector:
             title=record["title"],
             timestamp=created.get("publishedAt") or record.get("published_at") or "",
             description=record.get("description"),
+            full_text=darfur24.article_text(record),
             location_name=_first_location_name(created),
             url=record.get("url"),
         )
@@ -519,6 +539,106 @@ class SudanWitnessConnector:
             url=created.get("url"),
             lat=attributes.get("D_Latitude"),
             lng=attributes.get("D_Longitude"),
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# INSO — security newsletters (downloaded by gx, drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class InsoConnector:
+    """Downloaded only by ``gx_pipeline`` (``InsoGXSource``). One email holds
+    several incidents, each its own signal, all pointing at the same raw
+    ``.eml``: ``project`` takes the incident's fields from the clear-api row
+    gx created, and only the report from the blob. gx sends only the country,
+    so the drain locates each incident from its title and description."""
+
+    _countries: list[dict] | None = None  # L0 locations, fetched once per process
+
+    source = settings.inso_source_name
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def parse(self, raw: bytes) -> inso.InsoReport:
+        return inso.parse(raw)
+
+    def project(self, record: inso.InsoReport | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"inso signal {created['id']} has no rawS3Key")
+        return SignalView(
+            external_id=created.get("externalId") or created["id"],
+            title=created.get("title") or "",
+            timestamp=created.get("publishedAt") or record.published_at,
+            description=created.get("description"),
+            # The header's country, as written: ``locate`` matches it to an L0.
+            location_name=record.country_raw,
+            url=created.get("url"),
+        )
+
+    def locate(self, view: SignalView) -> str | None:
+        """Most specific state/district in the report's country, geocoded to a
+        point when the country has an ISO2, else the country itself. Reads the
+        incident's own title and description (written by extraction), not the
+        report: one email spans several places."""
+        if not view.location_name:
+            return None
+        if self._countries is None:
+            try:
+                self._countries = get_locations_by_level(0)
+            except (GraphQLErrors, ClearApiError, httpx.HTTPError) as exc:
+                raise LocationsUnavailableError(f"countries for inso: {exc}") from exc
+        country = inso.match_country(view.location_name, self._countries)
+        if country is None:  # gx quarantines an unknown country, so only a renamed L0 lands here
+            logger.warning("[inso] country %r matches no L0 location", view.location_name)
+            return None
+        # Errors propagate: a locations outage defers the incident (the drain), where
+        # a country pin, or none, would lose its district for good.
+        return locate_in_country(view.title, view.description, country.name, country_code=country.iso2)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IOM DTM Flash Alerts — Sudan displacement bulletins (downloaded by gx, drained)
+# ──────────────────────────────────────────────────────────────────────────────
+class IOMDTMFlashAlertsConnector:
+    """Downloaded only by gx (``IOMDTMFlashAlertsGXSource``), which sends only the country,
+    so the drain locates the bulletin from its title and summary."""
+
+    source = settings.iom_dtm_flash_alerts_source_name
+    polled = False
+    drained = True
+    poll_interval_minutes = settings.manual_poll_interval_minutes  # shared drain sensor
+
+    def parse(self, raw: bytes) -> dict:
+        return json.loads(raw)
+
+    def project(self, record: dict | None, created: dict) -> SignalView:
+        if record is None:  # gx always records rawS3Key; a row without one is an anomaly
+            raise ValueError(f"{self.source} signal {created['id']} has no rawS3Key")
+        # `record` is the pristine S3 blob — re-derive decoded fields + external_id.
+        parsed = iom_dtm_flash_alerts.parse_record(record) or record
+        return SignalView(
+            external_id=parsed.get("external_id") or created.get("externalId") or created["id"],
+            title=parsed.get("title") or "",
+            timestamp=created.get("publishedAt")
+            or parsed.get("field_published_date")
+            or "",
+            description=parsed.get("field_summary"),
+            location_name=parsed.get("field_country1") or _first_location_name(created),
+            url=parsed.get("field_report_file"),
+        )
+
+    def locate(self, view: SignalView) -> str | None:
+        """Most specific state/district in the bulletin's country, geocoded to a point if it has an ISO2,
+        else the country itself. Pinned to the displacement's origin: the summary also lists where people went."""
+        if not view.location_name:
+            return None
+        # Errors propagate: a locations outage defers the bulletin (the drain), where
+        # a country pin, or none, would lose its district for good.
+        return locate_in_country(
+            view.title,
+            view.description,
+            view.location_name,
+            country_code=settings.iom_dtm_flash_alerts_country_codes.get(view.location_name),
         )
 
 
@@ -614,6 +734,8 @@ CONNECTORS: list[SignalSource] = [
     Darfur24Connector(),
     IDMCConnector(),
     SudanWitnessConnector(),
+    IOMDTMFlashAlertsConnector(),
+    InsoConnector(),
     *(ManualConnector(name) for name in _manual_source_names()),
     SudanWarXConnector(),
 ]

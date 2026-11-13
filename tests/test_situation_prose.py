@@ -138,6 +138,7 @@ def test_humanitarian_access_projected():
     assert access == {
         "barriers": [{"description": "Checkpoints delay aid convoys"}],
         "constraints": [{"description": "Seasonal flooding blocks secondary roads"}],
+        "items": [],
         "questions_not_answered": ["Where are bureaucratic impediments worst?"],
     }
     assert "completeness" not in access
@@ -169,7 +170,47 @@ def test_empty_payload_yields_stable_empty_shape():
     assert prose["humanitarian_access"] == {
         "barriers": [],
         "constraints": [],
+        "items": [],
         "questions_not_answered": [],
     }
     assert prose["sectors"] == {}
     assert prose["changes"] == {"notes": {}}
+
+
+def test_taxonomy_sections_and_displacement_story_are_projected():
+    prose = extract_situation_prose({
+        "hazards_and_vulnerabilities": {
+            "hazards_summary": "Conflict is the main hazard.",
+            "aggravating_factors": [{"topic": "economic_fragility", "description": "Currency collapse: pound down 89%.",
+                                     "source_report_ids": ["r1"], "scope": "Sudan-wide"}],
+            "mitigating_factors": [{"topic": "preparedness", "description": "Stocks: kits pre-positioned.",
+                                    "source_report_ids": ["r2"], "scope": None}],
+        },
+        "humanitarian_access": {
+            "summary": "Access is worst in Darfur.",
+            "items": [{"topic": "physical", "description": "Roads cut: rains close the Habila road.",
+                       "source_report_ids": ["r3"]}],
+        },
+        "displacement": {
+            "summary": "Fighting drives most movement.",
+            "findings": [{"label": "Uneven returns", "callout": "59% vs <1%", "description": "Returns are uneven.",
+                          "direction": "back", "group": "idp", "as_of": None, "source_report_ids": ["r4"]}],
+            "data_check": {"description": "Two counts disagree.", "source_report_ids": ["r5"]},
+            "flows": [{"direction": "out", "group": "refugee", "label": "Chad 5,402", "sublabel": None,
+                       "from_location_id": "loc-1", "people": 5402, "source_report_ids": ["r6"]}],
+            "map_since": "April 2023",
+        },
+    })
+    hv = prose["hazards_and_vulnerabilities"]
+    assert hv["hazards_summary"] == "Conflict is the main hazard."
+    assert hv["aggravating_factors"] == [{"description": "Currency collapse: pound down 89%.", "scope": "Sudan-wide"}]
+    # Topic keys, ids and a null scope stay canonical.
+    assert hv["mitigating_factors"] == [{"description": "Stocks: kits pre-positioned."}]
+    assert prose["humanitarian_access"]["summary"] == "Access is worst in Darfur."
+    assert prose["humanitarian_access"]["items"] == [{"description": "Roads cut: rains close the Habila road."}]
+    disp = prose["displacement"]
+    assert disp["summary"] == "Fighting drives most movement."
+    assert disp["findings"] == [{"label": "Uneven returns", "callout": "59% vs <1%", "description": "Returns are uneven."}]
+    assert disp["data_check"] == {"description": "Two counts disagree."}
+    assert disp["flows"] == [{"label": "Chad 5,402"}]
+    assert disp["map_since"] == "April 2023"

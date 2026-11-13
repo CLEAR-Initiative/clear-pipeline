@@ -52,14 +52,15 @@ class Settings(BaseSettings):
     darfur24_feed_urls: str = "https://darfur24.com/en/feed/"
     darfur24_poll_interval_minutes: int = 30
     darfur24_source_name: str = "darfur24"
-    # Country whose L0 location every darfur24 signal is attached to.
-    # News articles carry no structured coordinates, but a signal without a
-    # location is invisible in every country-scoped UI view (signalsPage
-    # filters by location descendants) — so we pin signals to the outlet's
-    # deployment country and leave finer-grained resolution to the
-    # classification follow-up. Must match a level-0 location `name` in the
-    # CLEAR API (expo-385).
+    # Country every darfur24 article is about. The drain resolves each
+    # article's location from its text, scoped to this country's states and
+    # districts (``Darfur24Connector.locate``), and falls back to the country
+    # itself: a signal without a location is invisible in every country-scoped
+    # UI view (expo-385). Must match a level-0 location `name` in the CLEAR API.
     darfur24_default_country: str = "Sudan"
+    # ISO2 of that country. The place Claude names in an article is geocoded
+    # within it (gazetteer, then LocationIQ) to reach a point; empty disables.
+    darfur24_country_code: str = "sd"
 
     # IDMC IDU (Internal Displacement Updates, via the Helix Tools API). The
     # endpoint requires a registered `client_id` (query param) — request one
@@ -101,6 +102,27 @@ class Settings(BaseSettings):
     sudan_witness_poll_interval_minutes: int = 24 * 60
     # Forced full pull even when the layer fingerprint is unchanged (safety net).
     sudan_witness_full_pull_max_age_hours: int = 7 * 24
+
+    # Shared newsletter mailbox (IMAP, implicit TLS). Named after its role, not
+    # the vendor, so other newsletters reuse it and a move to another host
+    # renames nothing. Each newsletter source reads only its
+    # own folder; empty credentials make those sources refuse to poll.
+    clear_mailbox_imap_host: str = "mail.infomaniak.com"
+    clear_mailbox_imap_port: int = 993
+    clear_mailbox_imap_user: str = ""
+    clear_mailbox_imap_password: str = ""
+
+    # INSO security newsletters (gx-only, providers/inso.py).
+    inso_source_name: str = "inso"
+    # The mailbox folder this source reads; nothing else in the mailbox enters it.
+    inso_imap_folder: str = "INSO-TEST"
+    # Comma-separated From addresses accepted; anything else is quarantined.
+    inso_allowed_senders: str = "reports@sdn.ngosafety.org"
+    # Require a DKIM (aligned with From) or DMARC pass in the receiving server's
+    # Authentication-Results. Turn off only in a local .env, for self-sent mail.
+    inso_require_dkim: bool = True
+    # Default cadence; editable live from the poll sensor's cursor.
+    inso_poll_interval_minutes: int = 24 * 60
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
     # NEW signals with this source name straight from clear-api. No ingest asset;
@@ -312,6 +334,17 @@ class Settings(BaseSettings):
     # disable filtering and pool all types — only safe when the data has no
     # BA/FM overlap.
     iom_dtm_assessment_type: str = "BA,FM"
+
+    # DTM Flash Alert narrative bulletins — a different product from the IOM DTM API above.
+    # Ingested only by gx (`IOMDTMFlashAlertsGXSource`).
+    iom_dtm_flash_alerts_source_name: str = "iom_dtm_flash_alerts"
+    # Every country in one export, no server-side filter: `iom_dtm_flash_alerts_countries` filters client-side.
+    iom_dtm_flash_alerts_export_url: str = "https://dtm.iom.int/flash-reports-export"
+    iom_dtm_flash_alerts_countries: str = "Sudan"
+    # ISO2 per `field_country1` for geocoding to a point; a missing country still reaches state/district.
+    iom_dtm_flash_alerts_country_codes: dict[str, str] = {"Sudan": "sd"}
+    # IOM asks for polling at most once or twice daily; bulletins publish irregularly (~monthly for Sudan).
+    iom_dtm_flash_alerts_poll_interval_minutes: int = 60 * 24
 
     # ─── Nominatim geocoder (currently LocationIQ as the backend) ────────────
     # The Nominatim-compatible geocoder client uses these. We talk to

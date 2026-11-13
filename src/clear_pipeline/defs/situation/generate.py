@@ -18,9 +18,9 @@ calendar year. This asset:
      (bitemporal supersede + insert on the clear-api side).
 
 Cost: ~15 LLM calls per country-year (5 narrative + 10 sector). Runs
-downstream of `reliefweb_weekly_datapoint_aggregations` so the numbers
+downstream of `kb_datapoint_aggregations` so the numbers
 reflect this week's freshly-recomputed aggregates, and of
-`reliefweb_weekly_knowledgebase_upsert` so the narrative is grounded in
+`kb_upsert` so the narrative is grounded in
 this week's chunks rather than last week's.
 """
 
@@ -43,6 +43,7 @@ from clear_pipeline.defs.situation.frame import (
     build_rag_filters,
     country_frame,
 )
+from clear_pipeline.defs.situation.narrative import analysis_area
 from clear_pipeline.defs.situation.selective import (
     build_leaf_components,
     generate_ai_summary_fanin,
@@ -363,11 +364,16 @@ def _log_component_summary(
     cr = bool(context_risks and any(
         getattr(getattr(context_risks, d, None), "bullets", None) for d in _CR_DOMAINS
     ))
-    hz = bool(hazards and (hazards.hazards or hazards.vulnerabilities))
-    dp = bool(displacement and (displacement.push_factors or displacement.return_intention))
+    hz = bool(hazards and (
+        hazards.hazards or hazards.vulnerabilities
+        or hazards.aggravating_factors or hazards.mitigating_factors
+    ))
+    dp = bool(displacement and (
+        displacement.push_factors or displacement.return_intention or displacement.findings
+    ))
     ha = bool(
         humanitarian_access
-        and (humanitarian_access.barriers or humanitarian_access.constraints)
+        and (humanitarian_access.barriers or humanitarian_access.constraints or humanitarian_access.items)
     )
     sec_total = sec_pop = 0
     if sectors is not None:
@@ -401,6 +407,7 @@ def generate_and_upsert_for_frame(
     rag_filters: dict[str, Any] | None,
     log_context=None,
     force: bool = False,
+    limit_map_to_area: bool = False,
 ) -> dict | None:
     """Generate + upsert one unified analysis snapshot for a FRAME (ADR-0007) —
     the generalisation of the situation generator. Instead of a (country,
@@ -483,11 +490,17 @@ def generate_and_upsert_for_frame(
             )
         prior_data = prior.get("data") if prior else None
 
-        leaf_result = build_leaf_components(
-            llm, prior_payload=None if force else prior_data, country_name=scope_label,
-            period_label=period_label, aggregated=aggregated, cache_key=cache_key,
-            rag_filters=rag_filters, log=log,
-        )
+        # A created analysis keeps only map flows that touch its area
+        # (`limit_map_to_area`); a country analysis keeps every flow.
+        area_token = analysis_area.set(frame.location_ids if limit_map_to_area else None)
+        try:
+            leaf_result = build_leaf_components(
+                llm, prior_payload=None if force else prior_data, country_name=scope_label,
+                period_label=period_label, aggregated=aggregated, cache_key=cache_key,
+                rag_filters=rag_filters, log=log,
+            )
+        finally:
+            analysis_area.reset(area_token)
         context_risks_component = leaf_result.context_risks
         hazards_component = leaf_result.hazards_and_vulnerabilities
         displacement_component = leaf_result.displacement
@@ -592,6 +605,13 @@ def generate_and_upsert_for_frame(
                 scope_label, exc,
             )
 
+    # Token usage of the whole generation — summed across every component + the
+    # change-note call on this one `narrative` provider instance — recorded on
+    # the analysis so spend can be derived downstream from current prices (the
+    # native-Anthropic generation returns tokens, not cost). None on the
+    # deterministic-only path, where no LLM provider was created.
+    generation_usage = llm.total_usage if not skip else None
+
     def _ids_from_bullets(bullets: list[Any] | None) -> list[str]:
         out: list[str] = []
         for b in bullets or []:
@@ -608,16 +628,22 @@ def generate_and_upsert_for_frame(
     if hazards_component is not None:
         hazards_source_ids.extend(_ids_from_bullets(hazards_component.hazards))
         hazards_source_ids.extend(_ids_from_bullets(hazards_component.vulnerabilities))
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.aggravating_factors))
+        hazards_source_ids.extend(_ids_from_bullets(hazards_component.mitigating_factors))
 
     displacement_source_ids: list[str] = []
     if displacement_component is not None:
         displacement_source_ids.extend(_ids_from_bullets(displacement_component.push_factors))
         displacement_source_ids.extend(_ids_from_bullets(displacement_component.return_intention))
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.findings))
+        displacement_source_ids.extend(_ids_from_bullets(displacement_component.flows))
+        displacement_source_ids.extend(_ids_from_bullets([displacement_component.data_check]))
 
     ha_source_ids: list[str] = []
     if humanitarian_access_component is not None:
         ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.barriers))
         ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.constraints))
+        ha_source_ids.extend(_ids_from_bullets(humanitarian_access_component.items))
 
     sector_source_ids: list[str] = []
     if sectors_component is not None:
@@ -650,7 +676,11 @@ def generate_and_upsert_for_frame(
             data=payload.model_dump(mode="json"),
             source_report_ids=all_source_ids,
             generated_by_model=generated_by_model,
+            # Cost stays null — native Anthropic reports no price; we persist the
+            # token usage instead and derive USD downstream (see upsert_analysis).
             generation_cost_usd=None,
+            generation_input_tokens=(generation_usage or {}).get("input_tokens"),
+            generation_output_tokens=(generation_usage or {}).get("output_tokens"),
             schema_version=SCHEMA_VERSION,
             force=force,
             **frame.upsert_kwargs(),
@@ -809,13 +839,13 @@ def generate_and_upsert_for_country_month(
 
 
 @dg.asset(
-    group_name="reliefweb_kb",
-    deps=["reliefweb_weekly_knowledgebase_upsert"],
+    group_name="kb",
+    deps=["kb_upsert"],
     partitions_def=country_partitions,
 )
 def weekly_situation_analyses(
     context: AssetExecutionContext,
-    reliefweb_weekly_datapoint_aggregations: dict,
+    kb_datapoint_aggregations: dict,
 ) -> list[dict]:
     """Generate + upsert the situation-analysis snapshots for THIS country
     partition (calendar-year-to-date + current month) for the current year.
@@ -823,12 +853,12 @@ def weekly_situation_analyses(
     Two upstream dependencies - the analysis needs BOTH branches of
     this week's ingest to be fresh before it runs:
 
-      - ``reliefweb_weekly_datapoint_aggregations`` (parameter dep):
+      - ``kb_datapoint_aggregations`` (parameter dep):
         the yearly × country aggregated_datapoint bucket must be
         refreshed for the deterministic Datapoints component + as
         the numeric context prompt-cached across every LLM call.
 
-      - ``reliefweb_weekly_knowledgebase_upsert`` (``deps=`` dep):
+      - ``kb_upsert`` (``deps=`` dep):
         the narrative components (AI summary, context risks, hazards,
         displacement, sectors) all run RAG searches over
         `knowledgebase`. Without this dep declared, Dagster might
@@ -841,7 +871,7 @@ def weekly_situation_analyses(
     refresh actually ran" - we re-fetch aggregations from clear-api
     to pick up the freshly-inserted rows.
     """
-    del reliefweb_weekly_datapoint_aggregations  # only used to enforce ordering
+    del kb_datapoint_aggregations  # only used to enforce ordering
 
     iso3 = context.partition_key
     # Map the partition iso3 back to the country's name + pcode. The generators

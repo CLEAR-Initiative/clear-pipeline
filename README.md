@@ -38,7 +38,7 @@ Code lives in [`src/clear_pipeline/defs/`](src/clear_pipeline/defs/), one packag
 
 | Area | Sources in | What comes out (in clear-api) | Main assets / jobs | Trigger |
 |---|---|---|---|---|
-| **Signals** ([`defs/signals`](src/clear_pipeline/defs/signals)) | Dataminr, ACLED, GDACS, darfur24 (polled); IDMC, Sudan Witness (via the GX pipeline); analyst-created and pushed signals | Signals, grouped into Events, plus Alerts and translations | `raw_<source>` / `<source>_ingest`, then shared stages `classify_group`, `alert`, `translate` | Per-source poll sensors; downstream stages run eagerly |
+| **Signals** ([`defs/signals`](src/clear_pipeline/defs/signals)) | Dataminr, ACLED, GDACS, darfur24 (polled); IDMC, Sudan Witness, IOM DTM flash alerts (via the GX pipeline); analyst-created and pushed signals | Signals, grouped into Events, plus Alerts and translations | `raw_<source>` / `<source>_ingest`, then shared stages `classify_group`, `alert`, `translate` | Per-source poll sensors; downstream stages run eagerly |
 | **Knowledge base** ([`defs/knowledgebase`](src/clear_pipeline/defs/knowledgebase), [`reliefweb_to_s3.py`](src/clear_pipeline/defs/reliefweb_to_s3.py)) | ReliefWeb reports and their PDFs, one-off manual uploads | Embedded, contextualised knowledge-base chunks; report figures; structured report datapoints and their aggregations | `reliefweb_weekly_knowledgebase` job (groups `reliefweb` + `reliefweb_kb`), `process_manual_document_job` | Weekly schedule, Tuesday 06:00 UTC, one run per country |
 | **Situation analysis** ([`defs/situation`](src/clear_pipeline/defs/situation)) | The knowledge base and aggregated datapoints | One RAG-grounded situation analysis per country | `weekly_situation_analyses` (part of the weekly job) | Weekly, after the knowledge-base upsert |
 | **On-demand and scheduled analyses** ([`defs/analysis`](src/clear_pipeline/defs/analysis)) | clear-api's analysis request and automation queues | Generated analyses for a user-chosen frame (locations, event types, sectors, time window) | `drain_analysis_requests`, `drain_analysis_automations` | Queue-drain sensors |
@@ -81,6 +81,7 @@ Then fill in `.env`. [`.env.example`](.env.example) documents every variable. Th
 | `CLEAR_API_URL`, `CLEAR_API_KEY` | All reads and writes. The key's user needs the `admin` or `pipeline` role. |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Raw source blobs, PDFs, text and chunk snapshots. |
 | `LLM_<ROLE>_PROVIDER`, `LLM_<ROLE>_MODEL`, `LLM_<ROLE>_API_KEY` | LLM calls, per role. |
+| `LLM_ANALYSIS_*` | The analysis module (`defs/analysis`). DeepSeek via OpenRouter by default (`openai_compat`); unset falls back to `LLM_EXTRACTION_*`. |
 | `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_DIMENSIONS` | Knowledge-base embeddings. `EMBEDDING_DIMENSIONS` must match clear-api's pgvector column (1024). |
 | `REDIS_URL` | Locks, watermarks and dedup for the drains. |
 | `RELIEFWEB_APPNAME` | The ReliefWeb ingest. |
@@ -119,6 +120,7 @@ src/clear_pipeline/
   providers/            Clients and shared logic: clear-api, LLM, embeddings, S3, Redis lock,
                         source APIs (dataminr.py, acled.py, gdacs.py, hapi.py, ...)
   signals/config.py     Settings for the signal pipeline
+  backfill/             One-off commands run by hand (place_names.py: see docs/place-name-backfill.md)
 tests/                  pytest suite (run by CI)
 evals/                  Model-replacement eval (see evals/README.md)
 deploy/                 dagster.yaml and workspace.yaml baked into the Docker image

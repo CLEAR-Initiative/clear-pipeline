@@ -92,21 +92,21 @@ def _earliest_reporting_period_end(summaries: list[dict]) -> datetime | None:
     return earliest
 
 
-@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
-def reliefweb_weekly_datapoint_aggregations(
+@dg.asset(group_name="kb", partitions_def=country_partitions)
+def kb_datapoint_aggregations(
     context: AssetExecutionContext,
-    reliefweb_weekly_datapoints: list[dict],
+    kb_datapoints: list[dict],
 ) -> dict:
     """Trigger clear-api's aggregation refresh for the rolling window.
 
-    Depends on ``reliefweb_weekly_datapoints`` so it always runs AFTER
+    Depends on ``kb_datapoints`` so it always runs AFTER
     per-report extraction — a Dagster upstream constraint that mirrors
     the doc's Layer 2 → Layer 1 flow. The mutation is idempotent (uses
     bitemporal supersede semantics), so a re-run against unchanged
     data produces no observable change.
     """
     iso3 = context.partition_key
-    if not reliefweb_weekly_datapoints:
+    if not kb_datapoints:
         context.log.info(
             "[%s] no per-report datapoints landed this run — skipping aggregation refresh",
             iso3,
@@ -178,7 +178,7 @@ def reliefweb_weekly_datapoint_aggregations(
     # the union of the rolling window and the batch's [min…max] period span. The
     # refresh is idempotent, so the buckets in between with no new reports are
     # recomputed to an unchanged value.
-    batch_start = _earliest_reporting_period_end(reliefweb_weekly_datapoints)
+    batch_start = _earliest_reporting_period_end(kb_datapoints)
     if batch_start is not None and batch_start < window_start:
         # Clamp the widening (#27): `batch_start` is an LLM-emitted
         # `reportingPeriodEnd`, so one hallucinated/typo'd year ("2016" for

@@ -381,7 +381,7 @@ def manual_document_capture_figures(
     context: OpExecutionContext,
     kb_result: dict,
 ) -> dict:
-    """Figure capture for the manual path — the weekly ``reliefweb_weekly_figures``
+    """Figure capture for the manual path — the weekly ``kb_figures``
     asset's work for a single uploaded PDF, plus the inline KB merge.
 
     Runs only when ``KB_CAPTURE_FIGURES`` is set (same gate as the weekly asset),

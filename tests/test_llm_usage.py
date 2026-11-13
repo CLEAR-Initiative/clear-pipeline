@@ -27,6 +27,7 @@ def test_anthropic_records_usage_after_each_call():
         usage=SimpleNamespace(input_tokens=120, output_tokens=30),
     )
     assert p.last_usage is None
+    assert p.total_usage == {"input_tokens": 0, "output_tokens": 0}
     assert p.complete_structured(system="s", user="u", schema=Out).answer == "x"
     assert p.last_usage == {"input_tokens": 120, "output_tokens": 30}
 
@@ -36,6 +37,32 @@ def test_anthropic_records_usage_after_each_call():
     )
     assert p.complete_text(system="s", user="u") == "hello"
     assert p.last_usage == {"input_tokens": 5, "output_tokens": 2}
+    # total_usage sums BOTH calls (what a multi-call generation reads at the end).
+    assert p.total_usage == {"input_tokens": 125, "output_tokens": 32}
+
+
+def test_openai_compatible_total_usage_sums_calls_including_repair():
+    p = OpenAICompatibleProvider(role="narrative", model="m", base_url="http://x", api_key="k")
+    p._client = MagicMock()
+    bad = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="not json"))],
+                          usage=SimpleNamespace(prompt_tokens=10, completion_tokens=1))
+    good = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"answer":"y"}'))],
+                           usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3))
+    text = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hi"))],
+                           usage=SimpleNamespace(prompt_tokens=4, completion_tokens=2))
+    p._client.chat.completions.create.side_effect = [bad, good, text]
+    p.complete_structured(system="s", user="u", schema=Out)  # 10/1 + repair 12/3
+    p.complete_text(system="s", user="u")                     # + 4/2
+    assert p.total_usage == {"input_tokens": 26, "output_tokens": 6}
+
+
+def test_fallback_total_usage_sums_both_children():
+    primary = MagicMock(model="primary", provider_name="p", role="narrative",
+                        total_usage={"input_tokens": 100, "output_tokens": 20})
+    fallback = MagicMock(model="fallback", provider_name="f", role="narrative",
+                         total_usage={"input_tokens": 7, "output_tokens": 3})
+    fb = FallbackProvider(primary, fallback)
+    assert fb.total_usage == {"input_tokens": 107, "output_tokens": 23}
 
 
 def test_openai_compatible_records_usage_including_the_repair_call():

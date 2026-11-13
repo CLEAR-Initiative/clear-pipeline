@@ -68,7 +68,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision"]
+LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision", "analysis"]
 
 # Per-request timeout (seconds). A flaky/hung model must fail FAST so it can be
 # retried or fall back — never block the pipeline. 600s (the old value) let a
@@ -95,6 +95,12 @@ class EmptyResponseError(RuntimeError):
     a failure — not a successful empty string — so a configured fallback
     re-serves the call and the breaker counts it, rather than the context step
     silently embedding a blank prefix and poisoning that chunk."""
+
+
+class LLMUnavailableError(RuntimeError):
+    """No usable LLM: the provider (and any fallback) refused or was unreachable
+    after the built-in retries, or the role isn't configured. Not a bad input, so
+    a caller must fail on it rather than degrade the result."""
 
 
 # Exceptions that mean "the provider/transport failed" and should trigger the
@@ -124,6 +130,28 @@ TRANSIENT_LLM_ERRORS: tuple[type[BaseException], ...] = (
     openai.InternalServerError,
 )
 
+# Failures that outlive the retries and the fallback and mean no usable LLM: an
+# outage, a refused key, exhausted credits. NOT a per-input 4xx (context too long,
+# rejected content): that would fail every run on the same signal, never retired.
+_LLM_UNAVAILABLE_ERRORS: tuple[type[BaseException], ...] = (
+    *TRANSIENT_LLM_ERRORS,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+    openai.AuthenticationError,
+    openai.PermissionDeniedError,
+)
+
+
+def is_llm_unavailable(exc: BaseException) -> bool:
+    """True iff ``exc`` means no usable LLM rather than a bad input. A caller that
+    degrades on bad model output re-raises these as LLMUnavailableError instead."""
+    if isinstance(exc, _LLM_UNAVAILABLE_ERRORS):
+        return True
+    if not isinstance(exc, (openai.APIStatusError, anthropic.APIStatusError)):
+        return False
+    # Out of credits: OpenRouter answers 402; Anthropic a 400 naming the credit balance.
+    return exc.status_code == 402 or (exc.status_code == 400 and "credit balance" in str(exc).lower())
+
 # New roles fall back to `extraction`'s env vars when their own aren't set.
 # Keeps a code deploy safe if it lands before the infra apply that adds the
 # per-role vars: pre-apply, `extraction` is still Sonnet, so datapoints /
@@ -144,6 +172,13 @@ _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     # yield null transcriptions. Narrative is vision-capable and higher quality.
     # A dedicated LLM_VISION_* block still overrides this fallback.
     "vision": "narrative",
+    # Standalone analysis module (defs/analysis). Falls back to the OSS
+    # extraction role's creds unless a dedicated LLM_ANALYSIS_* block is set —
+    # so a code deploy is safe before the infra apply that adds the vars, and
+    # the module defaults to the cheap OSS backend rather than the pinned
+    # Anthropic narrative. Production sets LLM_ANALYSIS_* to DeepSeek via
+    # OpenRouter.
+    "analysis": "extraction",
 }
 
 # Pydantic bound so `complete_structured` returns the exact subclass the
@@ -191,6 +226,11 @@ class LLMProvider(Protocol):
     #: the last call that finished, so keep one provider per sequential job
     #: when spend is recorded (the Task Worker does).
     last_usage: dict[str, int] | None
+    #: Cumulative token usage across EVERY call this provider instance has made —
+    #: ``{"input_tokens", "output_tokens"}``, starting at zero. Lets a caller sum
+    #: a multi-call job (e.g. one situation-analysis generation) by reading it
+    #: once at the end, instead of snapshotting ``last_usage`` after each call.
+    total_usage: dict[str, int]
     #: Why the most recent ``complete_text`` call stopped. ``STOP_LENGTH`` means
     #: the reply hit ``max_tokens`` and is cut off; any other value is the
     #: provider's own reason; ``None`` before the first call. Same "last call
@@ -279,6 +319,7 @@ class AnthropicProvider:
         self.role = role
         self.model = model
         self.last_usage: dict[str, int] | None = None
+        self.total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self.last_stop_reason: str | None = None
         self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
@@ -290,6 +331,7 @@ class AnthropicProvider:
             "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
             "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
         }
+        self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
 
     @retry(
         retry=retry_if_exception_type(
@@ -529,6 +571,7 @@ class OpenAICompatibleProvider:
         self.role = role
         self.model = model
         self.last_usage: dict[str, int] | None = None
+        self.total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self.last_stop_reason: str | None = None
         self._json_schema_mode = json_schema_mode
         self._client = openai.OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
@@ -629,6 +672,7 @@ class OpenAICompatibleProvider:
             **self._request_extra_kwargs(structured=True),
         )
         self.last_usage = _openai_usage(raw)
+        self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         text = _strip_code_fence(raw.choices[0].message.content or "")
@@ -660,7 +704,9 @@ class OpenAICompatibleProvider:
                 response_format=response_format,  # type: ignore[arg-type]
                 **self._request_extra_kwargs(structured=True),
             )
-            self.last_usage = _add_usage(self.last_usage, _openai_usage(repair))
+            repair_usage = _openai_usage(repair)
+            self.last_usage = _add_usage(self.last_usage, repair_usage)
+            self.total_usage = _add_usage(self.total_usage, repair_usage) or self.total_usage
             repaired_text = _strip_code_fence(repair.choices[0].message.content or "")
             return schema.model_validate_json(repaired_text)
 
@@ -703,6 +749,7 @@ class OpenAICompatibleProvider:
             **self._request_extra_kwargs(structured=False),
         )
         self.last_usage = _openai_usage(raw)
+        self.total_usage = _add_usage(self.total_usage, self.last_usage) or self.total_usage
         if not raw.choices:
             raise EmptyResponseError(f"no choices from {self.model}")
         self.last_stop_reason = _normalise_stop_reason(
@@ -774,6 +821,16 @@ class FallbackProvider:
         with self._lock:
             served = self._fallback if self._served_model == self._fallback.model else self._primary
         return getattr(served, "last_stop_reason", None)
+
+    @property
+    def total_usage(self) -> dict[str, int]:
+        """Cumulative usage across every call this instance served — the sum of
+        the primary's and the fallback's running totals (each child tallies the
+        calls routed to it, so summing covers a job that spilled to fallback)."""
+        return _add_usage(
+            getattr(self._primary, "total_usage", None),
+            getattr(self._fallback, "total_usage", None),
+        ) or {"input_tokens": 0, "output_tokens": 0}
 
     @property
     def model(self) -> str:

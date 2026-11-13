@@ -50,6 +50,20 @@ _Avoid_: Event, disaster, hazard (reserve Hazard for the forward-looking risk co
 Ambiguous across the CLEAR system — avoid it unqualified. In the alerts/signals system it is a ranked, clustered record built from **event-driven** sources (ACLED, GDACS, Dataminr), carrying its own `populationAffected`. That is a different population, measured a different way, over event types that may not correspond to those an analytical Report covers. It has no counterpart in this pipeline: Reports give totals over a Figure Scope, not per-event records. The two are not comparable today — see `docs/adr/0001-affected-extracted-not-sourced-from-events.md`.
 _Avoid_: using bare "event" in any field name, prompt, or dashboard label
 
+**Geocode miss**:
+A place name that the text locator (`locate_in_country`) could not place inside the area the model chose: no lookup tier found a point inside the area, or the L4 promote gave no location. The drain records each miss in clear-api's unresolved place-name queue (`recordUnresolvedPlaceName`) with the signal id, the name, its Arabic spelling, the area and a reason: `NO_MATCH`, or `OUTSIDE_AREA` when the name exists elsewhere in the country. Not a miss: a failed lookup (an outage proves nothing), an area with no geometry, and an **Area name**. See clear-api ADR-0019.
+_Avoid_: failed geocode (an outage is not a miss)
+
+**Named places** (of a post):
+Every specific place a post names as a site of what it reports, from a separate model call (`named_places`, prompt `place-names-v1`). The location prompt gives one `place_name` and is left unchanged: its wording is fragile. The locator tries the answer's own name first, then the other named places, and only when the model placed the post in a state: a name must geocode inside that state. The first hit places the signal; each name that does not is a **Geocode miss**. An **Area name** is not tried.
+
+**Area name**:
+A name that no point stands for: the country's or a state's own name, a region phrase ("South Blue Nile", "N. Kordofan", "Darfur", "وسط دارفور"), or a natural feature (a river, a plain, a mountain range). The locator gives it no point, whether it is the name the location answer is based on or another named place: the signal stays at the area the model chose. Three checks find one. The name itself (`_names_a_place`). The gazetteer's match: a state, a region or a mountain range by its GeoNames feature code (`_AREA_FEATURE_CODES`); an exact one ends the lookup. A LocationIQ result whose address names only a state or a country. GeoNames and LocationIQ give each such area a centre point, and a signal promoted to it lands in whatever district holds that centre. A district is not an area name: its point lies inside the district it names. A town is not one either, whatever its name reads like: "Khartoum North" is a city, and the name check asks the gazetteer for an exact town of that name before it refuses a region phrase.
+_Avoid_: region (one kind of area name)
+
+**Place alias hit**:
+A gazetteer answer that came from one of clear-api's place aliases (`source: ALIAS`, with a `locationId`), not from GeoNames. A person mapped the spelling to a CLEAR location, so the locator uses that location as it is: no L4 promote, and no Latin-name check on an Arabic hit. The area check still applies. A landmark name (a facility) takes only an alias hit from the gazetteer; GeoNames answers those with the nearest town. See clear-api ADR-0019.
+
 ### Aggregation
 
 **Additive Count**:

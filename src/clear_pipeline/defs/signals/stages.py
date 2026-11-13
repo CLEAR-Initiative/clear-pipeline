@@ -40,6 +40,12 @@ from clear_pipeline.defs.signals.connectors import (
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.alert import escalate_to_alert
 from clear_pipeline.providers.jev import JevError
+from clear_pipeline.providers.llm import LLMUnavailableError
+from clear_pipeline.providers.location import (
+    GeocodeMiss,
+    LocationsUnavailableError,
+    collect_geocode_misses,
+)
 from clear_pipeline.providers.signal_classifier import (
     classifier_stats_snapshot,
     classify_signal,
@@ -55,11 +61,17 @@ from clear_pipeline.providers.clear_api import (
     get_ground_message_canonical,
     get_location_canonical,
     get_situation_canonical,
+    dagster_run_id,
     mark_signals_processed,
+    pipeline_run,
+    RUN_KIND_LIVE,
+    RUN_KIND_REPLAY,
     mark_translated,
     pending_recomputes,
     pending_signals,
     pending_translations,
+    get_signal_location,
+    record_unresolved_place_name,
     sync_event_cards,
     update_signal_location,
     update_signal_severity,
@@ -134,6 +146,53 @@ def _event_location_id(created: dict) -> str | None:
     return None
 
 
+def _needs_locating(created: dict) -> bool:
+    """True iff the drain would call the LLM to place this signal (``_locate_if_unplaced``)."""
+    connector = CONNECTORS_BY_SOURCE.get((created.get("source") or {}).get("name") or "")
+    return isinstance(connector, LocatingSource) and not _event_location_id(created)
+
+
+# Drained sources whose signals never need the locator, so they drain while it's down.
+_SOURCES_NEVER_LOCATING: tuple[str, ...] = tuple(sorted(
+    name for name in DRAINED_SOURCES if not isinstance(CONNECTORS_BY_SOURCE.get(name), LocatingSource)
+))
+
+
+def _pending(source: str | None) -> list[dict]:
+    """NEW signals, oldest-first: from every source, or from ``source`` only."""
+    if source is None:
+        return pending_signals(first=_BATCH_SIZE)
+    return pending_signals(first=_BATCH_SIZE, source=source)
+
+
+def _record_geocode_misses(signal_id: str, misses: list[GeocodeMiss]) -> bool:
+    """Send each place name the locator could not geocode to clear-api's
+    unresolved place-name queue, where a person can resolve it. Best-effort: a
+    clear-api error or timeout is logged and never fails the signal's drain.
+    clear-api counts a signal once per row, so a re-drained signal is safe.
+
+    Returns True when a name was resolved already: clear-api applies its
+    alias as it records the miss, so the signal may have moved."""
+    resolved = False
+    for miss in misses:
+        try:
+            row = record_unresolved_place_name(
+                signal_id=signal_id,
+                name=miss.name,
+                name_ar=miss.name_ar,
+                country_code=miss.country_code,
+                area_location_id=miss.area_id,
+                reason=miss.reason,
+            )
+            resolved = resolved or (row or {}).get("status") == "RESOLVED"
+        except Exception as exc:  # noqa: BLE001 — a side note; the drain carries on
+            logger.warning(
+                "[classify_group] signal %s: could not record unresolved place name %r: %s",
+                signal_id, miss.name, exc,
+            )
+    return resolved
+
+
 def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     """For a connector that can locate its own signals (``LocatingSource`` —
     push feeds that arrive with no location), resolve and persist a location
@@ -145,16 +204,33 @@ def _locate_if_unplaced(connector, view: SignalView, created: dict) -> dict:
     retry leaves the signal NEW rather than grouping it location-less."""
     if _event_location_id(created) or not isinstance(connector, LocatingSource):
         return created
-    location_id = connector.locate(view)
+    with collect_geocode_misses() as misses:
+        location_id = connector.locate(view)
     if not location_id:
+        _record_geocode_misses(created["id"], misses)
         logger.info("[classify_group] signal %s: no location resolved", created["id"])
         return created
     updated = update_signal_location(created["id"], location_id)
+    # After the location is saved: when the name was resolved in the meantime,
+    # clear-api moves the signal from its saved location to the alias location
+    # as it records the miss. A failed save leaves the signal NEW, and the
+    # next drain locates it and records the miss again.
+    general_location = updated.get("generalLocation")
+    if _record_geocode_misses(created["id"], misses):
+        # The signal may now be at the alias location: group on where it is,
+        # not on the location saved a moment ago.
+        try:
+            general_location = get_signal_location(created["id"]) or general_location
+        except Exception as exc:  # noqa: BLE001 — keep the saved location; grouping still works
+            logger.warning(
+                "[classify_group] signal %s: could not re-read its location after a late alias: %s",
+                created["id"], exc,
+            )
     logger.info(
         "[classify_group] signal %s: located → %s",
-        created["id"], (updated.get("generalLocation") or {}).get("name") or location_id,
+        created["id"], (general_location or {}).get("name") or location_id,
     )
-    return {**created, "generalLocation": updated.get("generalLocation")}
+    return {**created, "generalLocation": general_location}
 
 
 def _enqueue_translations(entity_type: str, entity_id: str) -> None:
@@ -328,7 +404,9 @@ def _drain_signals(context) -> dg.MaterializeResult:
         if not acquired:
             context.log.info("[classify_group] another drain holds the lock — skipping this run")
             return dg.MaterializeResult(metadata={"skipped_concurrent": True})
-        return _drain_signals_locked(context)
+        # clear-api logs where this run placed each signal (clear-api ADR-0020).
+        with pipeline_run(RUN_KIND_LIVE, run_id=dagster_run_id(context)):
+            return _drain_signals_locked(context)
 
 
 # Chunk the sync so a cutover/backfill (touched_events in the hundreds–thousands)
@@ -381,66 +459,89 @@ def _mark(items: list[dict], status: str) -> int:
 
 def _drain_signals_locked(context) -> dg.MaterializeResult:
     processed = dropped = requeued = failed = conflicts = 0
+    deferred: set[str] = set()  # left NEW for want of a locator; seen again in each later batch
+    # No usable LLM or gazetteer: locating would fail the same way for every signal.
+    locating_unavailable: LLMUnavailableError | LocationsUnavailableError | None = None
     touched_events: set[str] = set()
     # Reset so the emitted fallback rate reflects THIS drain, not the worker's
     # whole lifetime (a serial drain owns the single-flight lock, so no other
     # drain is mutating these counters concurrently).
     reset_classifier_stats()
-    for _ in range(_MAX_BATCHES):
-        batch = pending_signals(first=_BATCH_SIZE)  # ALL sources, oldest-first
-        if not batch:
-            break
-        done_ids: list[dict] = []
-        failed_ids: list[dict] = []
-        for created in batch:
-            try:
-                outcome = _process_one_signal(created, touched_events)
-            except Exception:  # noqa: BLE001 — isolate one signal's failure
-                # Transient (S3/clear-api blip) vs persistent: retry up to
-                # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely
-                # bad signal still leaves the queue instead of poisoning the head.
-                sid = created["id"]
-                attempts = _redis.incr(f"signal:attempts:{sid}")
-                _redis.expire(f"signal:attempts:{sid}", 86400)
-                if attempts >= _MAX_SIGNAL_ATTEMPTS:
-                    context.log.exception(
-                        "[classify_group] signal %s failed %d× — marking FAILED", sid, attempts
-                    )
-                    failed_ids.append(_item(created))
+    queues: list[str | None] = [None]  # None: every source, oldest-first
+    capped = False
+    while queues and not capped:
+        source = queues.pop(0)
+        for _ in range(_MAX_BATCHES):
+            batch = _pending(source)
+            if not batch:
+                break
+            done_ids: list[dict] = []
+            failed_ids: list[dict] = []
+            for created in batch:
+                if locating_unavailable and _needs_locating(created):
+                    deferred.add(created["id"])  # would fail the same way: leave NEW, no attempt charged
+                    continue
+                try:
+                    outcome = _process_one_signal(created, touched_events)
+                except (LLMUnavailableError, LocationsUnavailableError) as exc:
+                    # Can't locate: leave this one NEW without charging an attempt, defer the
+                    # other signals that need locating, drain the rest, and fail the run at the end.
+                    context.log.error("[classify_group] signal %s: can't locate (%s) — deferring", created["id"], exc)
+                    locating_unavailable = exc
+                    deferred.add(created["id"])
+                    continue
+                except Exception:  # noqa: BLE001 — isolate one signal's failure
+                    # Transient (S3/clear-api blip) vs persistent: retry up to
+                    # _MAX_SIGNAL_ATTEMPTS (leave NEW), then mark FAILED so a genuinely
+                    # bad signal still leaves the queue instead of poisoning the head.
+                    sid = created["id"]
+                    attempts = _redis.incr(f"signal:attempts:{sid}")
+                    _redis.expire(f"signal:attempts:{sid}", 86400)
+                    if attempts >= _MAX_SIGNAL_ATTEMPTS:
+                        context.log.exception(
+                            "[classify_group] signal %s failed %d× — marking FAILED", sid, attempts
+                        )
+                        failed_ids.append(_item(created))
+                        failed += 1
+                    else:
+                        context.log.warning(
+                            "[classify_group] signal %s failed (attempt %d/%d) — leaving NEW for retry",
+                            sid, attempts, _MAX_SIGNAL_ATTEMPTS,
+                        )
+                        requeued += 1
+                    continue
+                if outcome == _PROCESSED:
+                    done_ids.append(_item(created))
+                    processed += 1
+                elif outcome == _DROP_DONE:
+                    done_ids.append(_item(created))  # mark PROCESSED — leaves the queue
+                    dropped += 1
+                elif outcome == _DROP_FAILED:
+                    failed_ids.append(_item(created))  # mark FAILED — leaves the queue
                     failed += 1
-                else:
-                    context.log.warning(
-                        "[classify_group] signal %s failed (attempt %d/%d) — leaving NEW for retry",
-                        sid, attempts, _MAX_SIGNAL_ATTEMPTS,
-                    )
+                else:  # _REQUEUE — transient, stays NEW for the next run
                     requeued += 1
-                continue
-            if outcome == _PROCESSED:
-                done_ids.append(_item(created))
-                processed += 1
-            elif outcome == _DROP_DONE:
-                done_ids.append(_item(created))  # mark PROCESSED — leaves the queue
-                dropped += 1
-            elif outcome == _DROP_FAILED:
-                failed_ids.append(_item(created))  # mark FAILED — leaves the queue
-                failed += 1
-            else:  # _REQUEUE — transient, stays NEW for the next run
-                requeued += 1
-        conflicts += _mark(done_ids, "PROCESSED")
-        conflicts += _mark(failed_ids, "FAILED")
-        # Cost guardrail: cap LLM spend per run (each processed signal makes a
-        # rewrite call). The remainder stays NEW and drains on the next run.
-        if processed >= settings.signal_max_signals_per_run:
-            context.log.warning(
-                "[classify_group] hit per-run cap of %d processed signals — "
-                "stopping; remainder drains next run", settings.signal_max_signals_per_run,
-            )
-            break
-        # Stop only when the batch advanced NOTHING — i.e. every row was a
-        # transient requeue (lock contention). Permanent drops go into done/failed,
-        # so a cutover backlog of legacy no-blob rows drains instead of deadlocking.
-        if not done_ids and not failed_ids:
-            break
+            conflicts += _mark(done_ids, "PROCESSED")
+            conflicts += _mark(failed_ids, "FAILED")
+            # Cost guardrail: cap LLM spend per run (each processed signal makes a
+            # rewrite call). The remainder stays NEW and drains on the next run.
+            if processed >= settings.signal_max_signals_per_run:
+                context.log.warning(
+                    "[classify_group] hit per-run cap of %d processed signals — "
+                    "stopping; remainder drains next run", settings.signal_max_signals_per_run,
+                )
+                capped = True
+                break
+            # Stop only when the batch advanced NOTHING — i.e. every row was a
+            # transient requeue (lock contention). Permanent drops go into done/failed,
+            # so a cutover backlog of legacy no-blob rows drains instead of deadlocking.
+            if not done_ids and not failed_ids:
+                break
+
+        if source is None and locating_unavailable is not None:
+            # Deferred rows now hold the head of the oldest-first queue, which has no cursor
+            # past them: reach the sources that never locate through their own queries.
+            queues = list(_SOURCES_NEVER_LOCATING)
 
     try:
         recompute = _drain_recomputes(
@@ -471,11 +572,14 @@ def _drain_signals_locked(context) -> dg.MaterializeResult:
 
     metadata = {
         "processed": processed, "dropped": dropped, "requeued": requeued, "failed": failed,
-        "mark_conflicts": conflicts, **recompute,
+        "locate_deferred": len(deferred), "mark_conflicts": conflicts, **recompute,
         "jev_classified": jev_ok, "jev_failed": jev_failed,
         "jev_failure_rate": round(failure_rate, 4),
     }
     context.log.info("[classify_group] %s", " ".join(f"{k}={v}" for k, v in metadata.items()))
+    if locating_unavailable is not None:
+        # Everything else drained; fail so the outage is visible instead of a quiet backlog.
+        raise locating_unavailable
     return dg.MaterializeResult(metadata=metadata)
 
 
@@ -585,7 +689,9 @@ def _drain_recomputes(context, touched_events: set[str], llm_budget: int) -> dic
                 if attempts >= _MAX_SIGNAL_ATTEMPTS:
                     failed.append(_item(row))
                     counts["recompute_failed"] += 1
-        counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
+        # A recompute re-processes signals that a run already finished: a replay.
+        with pipeline_run(RUN_KIND_REPLAY):
+            counts["conflicts"] += _mark(done, "PROCESSED") + _mark(failed, "FAILED")
         if deferred:
             break
     return counts
@@ -621,27 +727,29 @@ def alert(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     # this returns is recent + severe → publish an alert. No archived-suppression
     # path (creating an alert row, even archived, still fanned out emails).
     alerted = failed = 0
-    for _ in range(_MAX_BATCHES):
-        events = events_pending_alert(
-            first=_BATCH_SIZE,
-            min_severity=_ALERT_MIN_SEVERITY,
-            max_age_hours=settings.alert_max_signal_age_hours,
-        )
-        if not events:
-            break
-        made_progress = False
-        for event in events:
-            try:
-                escalate_to_alert(event)  # published
-            except Exception:  # noqa: BLE001 — isolate one event's failure
-                context.log.exception("[alert] event %s failed", event.get("id"))
-                failed += 1
-                continue
-            alerted += 1
-            made_progress = True  # this event now has an alert → leaves the queue
-        # Terminate when a batch produced no new alerts (every event errored).
-        if not made_progress:
-            break
+    # clear-api records that a Live run raised each alert (clear-api ADR-0021).
+    with pipeline_run(RUN_KIND_LIVE, run_id=dagster_run_id(context)):
+        for _ in range(_MAX_BATCHES):
+            events = events_pending_alert(
+                first=_BATCH_SIZE,
+                min_severity=_ALERT_MIN_SEVERITY,
+                max_age_hours=settings.alert_max_signal_age_hours,
+            )
+            if not events:
+                break
+            made_progress = False
+            for event in events:
+                try:
+                    escalate_to_alert(event)  # published
+                except Exception:  # noqa: BLE001 — isolate one event's failure
+                    context.log.exception("[alert] event %s failed", event.get("id"))
+                    failed += 1
+                    continue
+                alerted += 1
+                made_progress = True  # this event now has an alert → leaves the queue
+            # Terminate when a batch produced no new alerts (every event errored).
+            if not made_progress:
+                break
 
     context.log.info("[alert] alerted=%d failed=%d", alerted, failed)
     return dg.MaterializeResult(metadata={"alerted": alerted, "failed": failed})

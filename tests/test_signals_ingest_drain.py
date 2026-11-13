@@ -28,6 +28,7 @@ from clear_pipeline.defs.signals.connectors import (
     ManualConnector,
     SignalSource,
     SudanWarXConnector,
+    InsoConnector,
     SudanWitnessConnector,
 )
 from clear_pipeline.providers.translation_hash import (
@@ -71,7 +72,7 @@ def _run():
 
 
 def _batched(batches):
-    def pending(first):
+    def pending(first, source=None):
         return batches.pop(0) if batches else []
     return pending
 
@@ -100,6 +101,8 @@ EXPECTED_FLAGS = {
     "darfur24": (True, True),
     "idmc": (False, True),
     "sudan_witness": (False, True),
+    "iom_dtm_flash_alerts": (False, True),
+    "inso": (False, True),
     "manual": (False, True),
     "field_officer": (False, True),
     "partner": (False, True),
@@ -127,6 +130,7 @@ def test_connectors_by_source_map():
         assert CONNECTORS_BY_SOURCE[name].source == name
     assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["sudan_witness"], SudanWitnessConnector)
+    assert isinstance(CONNECTORS_BY_SOURCE["inso"], InsoConnector)
 
 
 def test_manual_source_names_keep_legacy_setting_and_dedupe():
@@ -263,6 +267,12 @@ def test_idmc_has_no_ingest_defs():
     # polled sources still build their ingest asset + sensor
     for c in (DataminrConnector(), ACLEDConnector(), GDACSConnector(), Darfur24Connector()):
         assert len(factory.build_source_assets(c)) == 2
+
+
+def test_dtm_flash_alerts_is_drained_with_no_ingest_defs():
+    flash_alerts = CONNECTORS_BY_SOURCE["iom_dtm_flash_alerts"]
+    assert not flash_alerts.polled and flash_alerts.drained
+    assert factory.build_source_assets(flash_alerts) == []
 
 
 def test_loaded_definitions_have_no_raw_idmc_but_keep_the_gx_idmc_assets():
@@ -1000,7 +1010,7 @@ def test_mark_conflicts_are_counted():
 def test_drain_metadata_keys():
     result, *_ = _run_lanes([], [])
     assert set(result.metadata) == {
-        "processed", "dropped", "requeued", "failed", "mark_conflicts",
+        "processed", "dropped", "requeued", "failed", "locate_deferred", "mark_conflicts",
         "recompute_rows", "recomputed_events", "recompute_failed", "recompute_deferred", "recompute_stale",
         "recompute_head_blocked",
         "jev_classified", "jev_failed", "jev_failure_rate",
@@ -1050,3 +1060,78 @@ def test_member_text_raises_on_other_s3_errors():
     member = {"id": "a1", "source": {"name": "acled"}, "rawS3Key": "raw/acled/x.json"}
     with patch.object(lake, "s3_client", return_value=denied), pytest.raises(ClientError):
         stages._member_text(member)
+
+
+def test_deferred_rows_at_the_queue_head_dont_block_other_sources():
+    # A full batch of deferred rows advances nothing, and the oldest-first query has no
+    # cursor past them: other sources must still drain, through their own queries.
+    from clear_pipeline.providers.location import LocationsUnavailableError
+
+    head = [{"id": f"d{i}", "source": {"name": "iom_dtm_flash_alerts"}} for i in range(3)]
+    acled = [{"id": "a1", "source": {"name": "acled"}}]
+    queried: list[str | None] = []
+
+    def pending(first, source=None):
+        queried.append(source)
+        if source is None:
+            return head  # never shrinks: deferred rows stay NEW
+        return list(acled) if source == "acled" else []
+
+    def process(created, touched_events):
+        if created["source"]["name"] == "iom_dtm_flash_alerts":
+            raise LocationsUnavailableError("down")
+        acled.clear()  # marked PROCESSED: leaves the acled query
+        return stages._PROCESSED
+
+    marked: list[tuple[str, list[str]]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=pending),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
+        patch.object(stages, "_process_one_signal", side_effect=process),
+        pytest.raises(LocationsUnavailableError),
+    ):
+        _run()
+
+    assert ("PROCESSED", ["a1"]) in marked
+    assert queried[0] is None and "acled" in queried
+    assert "iom_dtm_flash_alerts" not in queried and "darfur24" not in queried
+
+
+@pytest.mark.parametrize("unavailable", ["llm", "locations"])
+def test_drain_defers_only_signals_that_need_locating_when_locating_is_unavailable(unavailable):
+    # No usable LLM: don't burn attempts (or pin to a fallback), but don't stall the
+    # sources that never call it either. Signals that need locating stay NEW with no
+    # attempt charged; the rest drain; the run fails at the end so the outage shows.
+    from clear_pipeline.providers.llm import LLMUnavailableError
+    from clear_pipeline.providers.location import LocationsUnavailableError
+
+    error = LLMUnavailableError if unavailable == "llm" else LocationsUnavailableError
+    darfur = {"name": "darfur24"}
+    rows = [
+        {"id": "first", "source": {"name": "acled"}},
+        {"id": "second", "source": darfur},
+        {"id": "third", "source": darfur},  # unplaced: skipped without calling the LLM
+        {"id": "fourth", "source": darfur, "generalLocation": {"id": "sd-nd"}},  # placed: no LLM
+        {"id": "fifth", "source": {"name": "acled"}},
+    ]
+
+    def process(created, touched_events):
+        if created["id"] == "second":
+            raise error("down")
+        return stages._PROCESSED
+
+    marked: list[tuple[str, list[str]]] = []
+    with (
+        patch.object(stages, "pending_signals", side_effect=_batched([rows])),
+        patch.object(stages, "mark_signals_processed", side_effect=_recorder(marked)),
+        patch.object(stages, "_process_one_signal", side_effect=process) as processed,
+        patch.object(stages._redis, "incr") as incr,
+        patch.object(stages, "_drain_recomputes", wraps=stages._drain_recomputes) as recomputes,
+        pytest.raises(error),
+    ):
+        _run()
+
+    assert ("PROCESSED", ["first", "fourth", "fifth"]) in marked
+    assert [c.args[0]["id"] for c in processed.call_args_list] == ["first", "second", "fourth", "fifth"]
+    incr.assert_not_called()
+    recomputes.assert_called_once()  # the recompute lane still runs

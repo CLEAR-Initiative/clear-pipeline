@@ -273,11 +273,11 @@ def _log_hiccup(ref: LocationRef, exc: BaseException) -> None:
     )
 
 
-@dg.asset(group_name="reliefweb_kb", partitions_def=country_partitions)
-def reliefweb_weekly_enriched_chunks(
+@dg.asset(group_name="kb", partitions_def=country_partitions)
+def kb_enriched_chunks(
     context: AssetExecutionContext,
-    reliefweb_weekly_chunks: list[dict],
-    reliefweb_weekly_pdf_text: list[dict],
+    kb_chunks: list[dict],
+    kb_pdf_text: list[dict],
 ) -> list[dict]:
     """Chunks with LLM-generated context + extracted parameters +
     resolved location IDs. Persists to S3 for replay; returns a summary
@@ -299,13 +299,13 @@ def reliefweb_weekly_enriched_chunks(
     # Build a report_id → text_key map so we can pull the full doc for
     # each chunk's contextualization step without shuffling it through
     # the Dagster IO manager.
-    text_key_by_report = {r["report_id"]: r["s3_text_key"] for r in reliefweb_weekly_pdf_text}
+    text_key_by_report = {r["report_id"]: r["s3_text_key"] for r in kb_pdf_text}
 
     summaries: list[dict] = []
     total_enriched = 0
     total_skipped = 0
     reused = 0
-    for report in reliefweb_weekly_chunks:
+    for report in kb_chunks:
         report_id = report["report_id"]
         enriched_key = _enriched_key(iso3, report_id)
 

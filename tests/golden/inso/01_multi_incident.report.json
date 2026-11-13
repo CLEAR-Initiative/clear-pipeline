@@ -1,0 +1,19 @@
+{
+  "message_id": "<synthetic-01_multi_incident@security-reports.example>",
+  "sender": "reports@security-reports.example",
+  "subject": "[SYNTHETIC] SECURITY REPORT – SUDAN –DARFUR: Conflict Impact Civilians, Risking Humanitarian Operations",
+  "published_at": "2026-10-20T09:30:00+00:00",
+  "severity_raw": "ATTENTION RECOMMENDED",
+  "location_raw": "Republic of Sudan, Darfur",
+  "country_raw": "Republic of Sudan",
+  "incident_type": "Conflict Impact Civilians, Risking Humanitarian Operations",
+  "report_datetime": "2026-10-20T09:30:00",
+  "serial": "SDN/Darfur/IR/20262010/R1",
+  "issued_by": "Sudan Security Team",
+  "information": "On 18 October, in North Darfur, the RSF conducted artillery shelling on a market in El Fasher city, El Fasher locality. This resulted in four fatalities and nine injuries among civilians.\n\nSimilarly, on 19 October in Tawila, North Darfur, an unknown actor conducted a drone strike near an IDP gathering point, resulting in an unspecified number of civilian casualties.\n\nMeanwhile, in South Darfur, on 19 October, SAF's drone strike hit a fuel depot in Nyala town, Nyala locality, damaging two trucks. No casualties were reported.",
+  "analysis": "Mid-October confirmed the trend of strikes on civilian infrastructure. On 02 October, an RSF drone strike on Kutum hit a water point, killing three civilians.\n\nMovements along the El Fasher - Tawila corridor are likely to remain exposed to indirect fire.",
+  "advice": [
+    "NGOs should review shelter-in-place procedures for staff in El Fasher and Tawila.",
+    "NGOs should avoid gatherings near markets and fuel depots until the situation stabilises."
+  ]
+}
