@@ -291,6 +291,86 @@ def test_the_area_check_is_not_paid_for_when_no_miss_is_recorded():
     asked.assert_not_called()
 
 
+# ── a match inside the area that only shares an area's name (#1475) ──────────
+
+def _answer_inside(*, code=None, cls=None, exact=True, osm_class=None, alias=None, name="Jabal Marrah"):
+    """A geocode answer inside the searched area: a gazetteer hit with
+    ``code``, or a LocationIQ result with ``osm_class``."""
+    from clear_pipeline.providers.geoparser import GeoparseResult
+
+    raw = {"name": name, "featureClass": cls, "featureCode": code, "exact": exact} if code else {"class": osm_class}
+    return GeoparseResult(
+        candidate="Jabal Marrah", kind="admin", field="body", lat=13.1, lng=24.0, country_code="sd",
+        osm_class=None if code else osm_class, osm_type=f"geonames:{code}" if code else "peak",
+        importance=1.0, display_name=name, raw=raw, location_id=alias,
+    )
+
+
+def _within(answer, *, names_area):
+    """`_geocode_within` for "Jabal Marrah", with the lookups replaced."""
+    geometry = {"type": "Polygon", "coordinates": [list(ND_SHAPE.exterior.coords)]}
+    location._area_shapes_cache.clear()
+    promote = MagicMock(return_value={"locationId": "l4-new", "reused": False, "abortedReason": None})
+    with (
+        patch.object(location, "geocode_place_name", return_value=answer),
+        patch.object(location, "arabic_lookup_applies", return_value=False),
+        patch.object(location, "gazetteer_names_area", return_value=names_area) as asked,
+        patch.object(location, "find_or_create_landmark_l4", promote),
+        patch.object(location, "get_location_with_geometry", return_value={"id": "sd-nd", "geometry": geometry}),
+        location.collect_geocode_misses() as misses,
+    ):
+        located = location._geocode_within("Jabal Marrah", "sd-nd", "sd", text=POST)
+    location._area_shapes_cache.clear()
+    return located, asked, promote, misses
+
+
+@pytest.mark.parametrize("answer", [
+    # What dev gave for "Jabal Marrah" inside a district, 15 Nov 2026:
+    _answer_inside(code="ADM2", cls="A", exact=False, name="Gharb Jabal Marrah"),  # the district itself
+    _answer_inside(code="VLC", cls="T"),                                           # a volcano entry
+    _answer_inside(osm_class="natural"),                                           # LocationIQ: a peak
+    _answer_inside(code="PPL", cls="P", exact=False, name="Jabal Marra Camp"),     # a loose match on a village
+])
+def test_a_match_that_only_shares_an_areas_name_gives_no_point(answer):
+    located, asked, promote, misses = _within(answer, names_area=True)
+
+    assert located is None
+    asked.assert_called_once_with("Jabal Marrah", "sd", arabic_name=None)
+    promote.assert_not_called()
+    assert misses == []  # an area name: a reviewer has no place to give it
+
+
+def test_a_district_that_is_no_area_name_elsewhere_keeps_its_point():
+    # "Tendalti" inside Tendalti: the match is the district (ADM2). Asked for
+    # the whole country, the name is no state, region or range.
+    located, asked, promote, _ = _within(_answer_inside(code="ADM2", cls="A", name="Tendalti"), names_area=False)
+
+    assert located == "l4-new"
+    asked.assert_called_once()
+    promote.assert_called_once()
+
+
+@pytest.mark.parametrize("answer", [
+    _answer_inside(code="PPL", cls="P", name="Ţawīlah"),      # an exact match on a town
+    _answer_inside(code="PPLC", cls="P", name="Khartoum"),    # "الخرطوم" inside Khartoum district: the city
+    _answer_inside(osm_class="place"),                        # LocationIQ: a town
+])
+def test_a_town_is_not_checked_again(answer):
+    located, asked, promote, _ = _within(answer, names_area=True)
+
+    assert located == "l4-new"
+    asked.assert_not_called()  # no extra lookup for most names
+    promote.assert_called_once()
+
+
+def test_a_place_alias_is_not_checked_again():
+    located, asked, promote, _ = _within(_answer_inside(code="MTS", cls="T", alias="loc-1"), names_area=True)
+
+    assert located == "loc-1"
+    asked.assert_not_called()
+    promote.assert_not_called()
+
+
 # ── the gazetteer ────────────────────────────────────────────────────────────
 
 def hit(name, code, *, cls=None, exact=True, lat="13.0", lng="25.0", population=0):
