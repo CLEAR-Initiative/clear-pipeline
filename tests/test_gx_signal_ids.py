@@ -9,7 +9,7 @@ import pytest
 from clear_pipeline.defs.gx_pipeline import iceberg_signals
 from clear_pipeline.defs.gx_pipeline.signal_ids import signal_id
 from clear_pipeline.providers.clear_api import ClearApiError
-from tests.test_gx_sync import Harness, HookedSource, _rec
+from tests.test_gx_sync import R, T, Harness, HookedSource, _rec
 
 # uuid5(signal_ids.NAMESPACE, "fakesrc:a"), computed outside the code under test.
 A_ID = "462cf688-6fbb-5d0d-be27-b38afe56bac7"
@@ -139,3 +139,34 @@ def test_gold_rows_from_before_the_column_get_their_id_from_the_stored_external_
     assert h.gold["a"]["signalId"] == A_ID
     [(op, sent)] = h.pg.calls
     assert (op, sent["id"]) == ("create", A_ID)
+
+
+def _legacy_row_behind_a_failed_follow_up_update_then_superseded(h, *, aliases_fail=False):
+    h.pg.rows[("source-fake-123", "fakesrc:a")] = {
+        "id": "clegacy0000000000000000aa", "contentHash": "old", "retracted": False, "rawS3Key": None,
+    }
+    h.pg.fail_next["update"] = ClearApiError("boom")
+    h.poll([_rec("a", event_id="e1", role=T)])
+    real = iceberg_signals.upsert_aliases
+
+    def upsert_aliases(rows):
+        if aliases_fail and rows:
+            raise ClearApiError("aliases commit failed")
+        real(rows)
+
+    with patch.object(iceberg_signals, "upsert_aliases", side_effect=upsert_aliases):
+        h.poll([_rec("b", event_id="e1", role=R)])  # b supersedes a: a is probed
+
+
+def test_a_probe_that_reaches_a_legacy_row_records_its_alias(h):
+    _legacy_row_behind_a_failed_follow_up_update_then_superseded(h)
+    assert h.pg_row("a")["retracted"] is True
+    assert h.gold["a"]["pushedState"] == "h1|1"
+    assert _aliases(h) == [{"signalId": A_ID, "externalId": "fakesrc:a", "legacyId": "clegacy0000000000000000aa"}]
+    assert _view(h)[A_ID] == "clegacy0000000000000000aa"
+
+
+def test_a_probe_alias_is_stored_before_the_row_is_marked_probed(h):
+    with pytest.raises(ClearApiError):
+        _legacy_row_behind_a_failed_follow_up_update_then_superseded(h, aliases_fail=True)
+    assert h.gold["a"]["pushedState"] is None

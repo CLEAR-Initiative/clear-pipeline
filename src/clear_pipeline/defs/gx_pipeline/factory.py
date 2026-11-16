@@ -785,8 +785,15 @@ def build_gx_source_assets(source: GXSource) -> list:
     content_update_input = getattr(source, "content_update_input", None)
     commit_watermark = getattr(source, "commit_watermark", None)
 
-    def _send_update(row: dict, *, retracted: bool) -> None:
-        update_signal_content(content_update_input(row["signalInput"], retracted=retracted))
+    def _send_update(row: dict, *, retracted: bool) -> dict:
+        return update_signal_content(content_update_input(row["signalInput"], retracted=retracted))
+
+    def _alias(row: dict, postgres_id: str) -> dict | None:
+        """The alias to record when Postgres keeps another id for this row:
+        a row that predates pipeline ids keeps its Prisma id."""
+        if postgres_id == row["signalId"]:
+            return None
+        return {"signalId": row["signalId"], "externalId": row["signalInput"]["externalId"], "legacyId": postgres_id}
 
     @dg.asset(
         name=f"{src}_push",
@@ -822,13 +829,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                             raise ValueError("gold row has no signalId")
                         with pipeline_run(run_id=dagster_run_id(context)):
                             created = create_signal_for_sync({**row["signalInput"], "id": signal_id})
-                        # A row that predates pipeline ids keeps its Prisma id.
-                        if created["id"] != signal_id:
-                            alias = {
-                                "signalId": signal_id,
-                                "externalId": row["signalInput"]["externalId"],
-                                "legacyId": created["id"],
-                            }
+                        alias = _alias(row, created["id"])
                         sent_hash = (row["signalInput"] or {}).get("contentHash")
                         # get-or-create may return an older row (earlier half-failed
                         # push, or one production created): bring it up to date.
@@ -852,7 +853,8 @@ def build_gx_source_assets(source: GXSource) -> list:
                             counts["not_found"] += 1
                     else:  # probe
                         try:
-                            _send_update(row, retracted=True)
+                            # Lands on a row an earlier create left unrecorded, alias included.
+                            alias = _alias(row, _send_update(row, retracted=True)["id"])
                         except ClearApiNotFound:
                             pass  # never created — nothing to retract
                         counts["probed"] += 1
