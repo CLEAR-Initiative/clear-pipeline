@@ -139,23 +139,23 @@ def test_serper_scrape_defensive_parse_and_cap(monkeypatch):
 
 # ── resolver ────────────────────────────────────────────────────────
 
-def test_resolver_defaults_to_brave(monkeypatch):
+def test_resolver_defaults_to_serper(monkeypatch):
     monkeypatch.delenv("WEB_SEARCH_PROVIDER", raising=False)
-    client, key_env, name = resolve_web_search()
-    assert name == "brave" and key_env == "BRAVE_SEARCH_API_KEY"
-
-
-def test_resolver_selects_serper(monkeypatch):
-    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "serper")
     client, key_env, name = resolve_web_search()
     assert name == "serper" and key_env == "SERPER_API_KEY"
     assert client is serper_search
 
 
-def test_resolver_unknown_falls_back_to_brave(monkeypatch):
-    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "nope")
+def test_resolver_selects_brave_explicitly(monkeypatch):
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "brave")
     _client, key_env, name = resolve_web_search()
     assert name == "brave" and key_env == "BRAVE_SEARCH_API_KEY"
+
+
+def test_resolver_unknown_falls_back_to_serper(monkeypatch):
+    monkeypatch.setenv("WEB_SEARCH_PROVIDER", "nope")
+    _client, key_env, name = resolve_web_search()
+    assert name == "serper" and key_env == "SERPER_API_KEY"
 
 
 def test_serper_error_is_a_web_search_error():
