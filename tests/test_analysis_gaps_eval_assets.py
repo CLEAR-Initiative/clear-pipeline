@@ -138,6 +138,9 @@ def test_web_gapfill_no_gaps_is_noop(monkeypatch):
 
 def test_web_gapfill_skips_without_api_key(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "b")
+    # default provider is serper → its key must be unset for the skip path
+    monkeypatch.delenv("WEB_SEARCH_PROVIDER", raising=False)
+    monkeypatch.delenv("SERPER_API_KEY", raising=False)
     monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
     with ExitStack() as stack:
         stack.enter_context(patch.object(mod, "_s3", return_value=MagicMock()))
@@ -151,7 +154,7 @@ def test_web_gapfill_skips_without_api_key(monkeypatch):
 
 def test_web_gapfill_runs_for_unmet_gaps(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "b")
-    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bk")
+    monkeypatch.setenv("SERPER_API_KEY", "sk")  # default provider is serper
     saved = {}
     with ExitStack() as stack:
         stack.enter_context(patch.object(mod, "_s3", return_value=MagicMock()))

@@ -246,7 +246,7 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
 def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
     """CONDITIONAL web gap-fill — runs ONLY for the unmet gaps analysis_gaps
     found, and only when the selected web-search provider's key is configured
-    (doc §8/§9). The provider is WEB_SEARCH_PROVIDER (brave default | serper);
+    (doc §8/§9). The provider is WEB_SEARCH_PROVIDER (serper default | brave);
     when the DB already answered the country's questions (no gaps), this is a
     no-op. Bounded by the run budget and ANALYSIS_WEB_GAPFILL_MAX_GAPS."""
     iso3 = context.partition_key

@@ -5,13 +5,13 @@ Two interchangeable providers expose the SAME callable interface — a search
 list of results that each carry ``url`` / ``title`` / ``snippets`` / ``site_name``
 — so :func:`web_gapfill.fill_gap` consumes either without caring which answered:
 
-- ``brave``  (default) — Brave LLM Context: search + extracted chunks in one call,
-  independent index (``providers/brave_search.py``).
-- ``serper``           — Serper (Google SERP): real Google recall, e.g. Arabic
+- ``serper`` (default) — Serper (Google SERP): real Google recall, e.g. Arabic
   via ``SERPER_GL``/``SERPER_HL`` (``providers/serper_search.py``).
+- ``brave``            — Brave LLM Context: search + extracted chunks in one call,
+  independent index (``providers/brave_search.py``).
 
-Selected by ``WEB_SEARCH_PROVIDER`` (``brave`` | ``serper``); unknown values fall
-back to ``brave``. Both providers raise :class:`WebSearchError` on failure, so the
+Selected by ``WEB_SEARCH_PROVIDER`` (``serper`` | ``brave``); unknown values fall
+back to ``serper``. Both providers raise :class:`WebSearchError` on failure, so the
 asset catches one error type regardless of the configured provider.
 """
 
@@ -43,15 +43,15 @@ def resolve_web_search() -> tuple[WebSearchClient, str, str]:
     is configured (an empty key disables web gap-fill). Imports are lazy so a
     deploy without one provider's deps still loads.
     """
-    provider = (os.environ.get("WEB_SEARCH_PROVIDER") or "brave").strip().lower()
-    if provider == "serper":
-        from clear_pipeline.providers.serper_search import serper_search
+    provider = (os.environ.get("WEB_SEARCH_PROVIDER") or "serper").strip().lower()
+    if provider == "brave":
+        from clear_pipeline.providers.brave_search import llm_context
 
-        return serper_search, "SERPER_API_KEY", "serper"
-    if provider not in ("brave", ""):
+        return llm_context, "BRAVE_SEARCH_API_KEY", "brave"
+    if provider not in ("serper", ""):
         logger.warning(
-            "[web_search] unknown WEB_SEARCH_PROVIDER=%r — falling back to brave", provider
+            "[web_search] unknown WEB_SEARCH_PROVIDER=%r — falling back to serper", provider
         )
-    from clear_pipeline.providers.brave_search import llm_context
+    from clear_pipeline.providers.serper_search import serper_search
 
-    return llm_context, "BRAVE_SEARCH_API_KEY", "brave"
+    return serper_search, "SERPER_API_KEY", "serper"
