@@ -85,6 +85,9 @@ def test_analysis_evaluation_asset_judges_band_and_persists(monkeypatch):
     assert by_key[b.key]["reason"] == "judge_not_answered"
     assert by_key[b.key]["judge"]["score"] == "not_answered"
     assert payload["recommendations"][b.key]["action"] == "Add"
+    # provenance: which judge model + prompt version produced the verdict
+    prov = payload["judge_provenance"][b.key]
+    assert prov["prompt_version"] == "v1" and "model" in prov
 
 
 # ── analysis_web_gapfill ────────────────────────────────────────────

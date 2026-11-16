@@ -33,6 +33,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# Judge prompt/rubric version — bump when JUDGE_SYSTEM_PROMPT changes enough that
+# verdicts are no longer comparable. Stored with each verdict (with the model) so
+# a change in which sections are kept/dropped can be explained.
+JUDGE_PROMPT_VERSION = "v1"
+
 # complete/partial/not_answered → coverage weight (not_evaluable excluded).
 WEIGHTS: dict[str, float] = {"complete": 1.0, "partial": 0.5, "not_answered": 0.0}
 

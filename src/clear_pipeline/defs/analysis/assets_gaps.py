@@ -34,6 +34,7 @@ from clear_pipeline.defs.analysis.gaps import (
     derive_gaps,
 )
 from clear_pipeline.defs.analysis.judge import (
+    JUDGE_PROMPT_VERSION,
     coverage as judge_coverage,
     format_findings,
     judge_node,
@@ -147,6 +148,7 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
     budget = analysis_run_budget()
     verdicts_by_key = {}
     recommendations = {}
+    judge_provenance = {}
     judged = 0
     for node_key in to_judge:
         node = nodes_by_key.get(node_key)
@@ -157,17 +159,28 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
             context.log.warning("[analysis_evaluation] %s: budget exhausted before judging %s", iso3, node_key)
             break
         findings_text = format_findings(art.get("descriptive", {}).get("findings"))
-        provider = make_llm_provider(ANALYSIS_JUDGE_LLM_ROLE)
+        # Construct INSIDE the try so a judge misconfig (e.g. no creds on the role
+        # chain) isolates to this node — it falls back to the self-rating verdict —
+        # rather than raising out of the asset and blocking revision + publish.
+        provider = None
         try:
+            provider = make_llm_provider(ANALYSIS_JUDGE_LLM_ROLE)
             verdict = judge_node(node=node, findings_text=findings_text, provider=provider, max_tokens=max_tokens)
         except Exception:  # noqa: BLE001 — isolate one node's failure; it falls back to self-rating
             context.log.exception("[analysis_evaluation] %s: judging %s failed", iso3, node_key)
             continue
         finally:
-            charge(budget, provider)
+            if provider is not None:
+                charge(budget, provider)
         verdicts_by_key[node_key] = verdict
         action, rationale = recommendation_for(verdict)
         recommendations[node_key] = {"action": action, "rationale": rationale}
+        # Record WHICH judge actually served (the role can fall back mid-run) so a
+        # change in kept/dropped sections is explainable.
+        judge_provenance[node_key] = {
+            "model": getattr(provider, "model", ""),
+            "prompt_version": JUDGE_PROMPT_VERSION,
+        }
         judged += 1
 
     # Judge is primary for graded nodes; self-rating triages the rest.
@@ -190,6 +203,8 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
         # Raw judge verdicts (reconstructable as JudgeVerdict) so the final
         # re-evaluation in analysis_revision re-uses them without re-judging.
         "judge_verdicts": {k: asdict(v) for k, v in verdicts_by_key.items()},
+        # Which judge model + prompt version produced each verdict (audit trail).
+        "judge_provenance": judge_provenance,
         "recommendations": recommendations,
     }
     save_json(s3, bucket, paths.evaluation_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION), payload)

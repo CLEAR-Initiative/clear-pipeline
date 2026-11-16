@@ -922,7 +922,8 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
       LLM_<ROLE>_BASE_URL   = required for "openai_compat" only
       LLM_<ROLE>_THINK      = "true" to EXPLICITLY enable reasoning for a model
                               that defaults to non-thinking (judge role); pair
-                              with a raised max_tokens. NO_THINK wins if both set.
+                              with a raised max_tokens. THINK overrides an
+                              inherited NO_THINK.
       LLM_<ROLE>_NO_THINK   = "true" to disable an Ollama thinking model's
                               reasoning (sent as `think: false`) — otherwise a
                               short-output role gets an empty `content`.
@@ -932,13 +933,23 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
                               backend that honours `response_format` — needed for
                               structured output to actually be enforced (openai_compat).
 
-    For ``datapoints`` / ``narrative`` a missing role-scoped var falls back
-    to the ``extraction`` role's equivalent (see ``_ROLE_ENV_FALLBACK``).
+    A missing role-scoped var falls back along the whole ``_ROLE_ENV_FALLBACK``
+    chain (e.g. ``analysis_judge`` → ``analysis`` → ``extraction``), so a
+    deployment that configures only an upstream role still serves the rest.
     """
     def _env(suffix: str, *, required: bool) -> str | None:
-        val = os.environ.get(f"LLM_{role.upper()}_{suffix}")
-        if not val and role in _ROLE_ENV_FALLBACK:
-            val = os.environ.get(f"LLM_{_ROLE_ENV_FALLBACK[role].upper()}_{suffix}")
+        # Walk the WHOLE fallback chain, not just one hop: a role can fall back
+        # through another role (e.g. analysis_judge → analysis → extraction), so a
+        # deployment that configures only LLM_EXTRACTION_* still serves the judge.
+        seen: set[str] = set()
+        cur: str | None = role
+        val: str | None = None
+        while cur and cur not in seen:
+            val = os.environ.get(f"LLM_{cur.upper()}_{suffix}")
+            if val:
+                break
+            seen.add(cur)
+            cur = _ROLE_ENV_FALLBACK.get(cur)
         if not val and required:
             raise RuntimeError(
                 f"Missing env var LLM_{role.upper()}_{suffix}. "

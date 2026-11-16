@@ -162,17 +162,20 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
         revised.append(node_key)
 
     # Re-evaluate over the revised-or-original artifacts, honouring web rescue and
-    # the adversarial judge's verdicts. The judge ran in analysis_evaluation on the
-    # ORIGINAL artifacts, so a node we just revised gets its stale judge verdict
-    # dropped — its improved self-rating decides keep/drop instead.
+    # the adversarial judge's verdicts (which ran in analysis_evaluation).
     floor = float(os.environ.get("ANALYSIS_EVAL_COMPLETENESS_FLOOR", DEFAULT_EVAL_COMPLETENESS_FLOOR))
-    revised_set = set(revised)
+    final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    # The judge verdict was formed on the ORIGINAL findings, so it's stale for any
+    # node whose loaded artifact is a revision — THIS run's or a cached prior run's.
+    # Detect every loaded revision by the revision-only `revised_from_completeness`
+    # field (not just this run's `revised`, which a lower cap on a rerun would miss)
+    # so a stale "judge_not_answered" can't drop an already-improved revision.
+    revised_loaded = {k for k, a in final_artifacts.items() if "revised_from_completeness" in a}
     judge_verdicts = {
         k: JudgeVerdict(**d)
         for k, d in (evaluation.get("judge_verdicts") or {}).items()
-        if k not in revised_set
+        if k not in revised_loaded
     }
-    final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
     package = filter_package(
         nodes, final_artifacts, completeness_floor=floor,
         rescued_node_keys=rescued, judge_verdicts=judge_verdicts,

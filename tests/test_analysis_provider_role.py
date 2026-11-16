@@ -80,6 +80,25 @@ def test_judge_role_reasons_even_while_inheriting_generation_no_think(monkeypatc
     assert provider._base_extra_body.get("think") is True
 
 
+def test_judge_role_falls_back_transitively_through_analysis_to_extraction(monkeypatch):
+    """With only LLM_EXTRACTION_* set, the judge resolves judge → analysis →
+    extraction (the whole chain), instead of failing on the single hop."""
+    _clear(monkeypatch, _ANALYSIS_VARS)
+    _clear(monkeypatch, _JUDGE_VARS)
+    _clear(monkeypatch, _EXTRACTION_VARS)
+    for k, v in {
+        "LLM_EXTRACTION_PROVIDER": "anthropic",
+        "LLM_EXTRACTION_MODEL": "claude-haiku-4-5",
+        "LLM_EXTRACTION_API_KEY": "sk-anthropic",
+    }.items():
+        monkeypatch.setenv(k, v)
+
+    provider = make_llm_provider("analysis_judge")
+    assert provider.model == "claude-haiku-4-5"  # reached via judge → analysis → extraction
+    assert provider.provider_name == "anthropic"
+    assert provider.role == "analysis_judge"
+
+
 def test_analysis_role_falls_back_to_extraction_creds_when_unset(monkeypatch):
     # No LLM_ANALYSIS_* block → the factory reads the extraction role's env
     # (safe pre-infra-apply; defaults to the OSS backend, not Anthropic).
