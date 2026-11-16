@@ -124,8 +124,8 @@ def test_drops_flagged_nodes_and_attaches_quality_and_web_evidence(monkeypatch):
         "revised_node_keys": ["sectors/health"], "web_rescued_node_keys": [],
     }
     gapfills = {"sectors/health": {"status": "partial", "confidence": 0.6,
-                                   "value": [{"text": "web-sourced detail"}], "sources": [{"url": "x"}],
-                                   "source_category_used": 2}}
+                                   "value": [{"text": "web-sourced detail", "source_urls": ["https://who.int/x"]}],
+                                   "sources": [{"url": "x"}], "source_category_used": 2}}
     _res, upsert_an, _dp = _run(
         monkeypatch, numbers=_NUMBERS, artifacts=arts, package=package, gapfills=gapfills,
         upsert_result={"analysisId": "an1", "skipped": False, "supersededPrevious": True, "reason": None},
@@ -134,7 +134,37 @@ def test_drops_flagged_nodes_and_attaches_quality_and_web_evidence(monkeypatch):
     assert set(data["nodes"].keys()) == {"sectors/health"}  # WASH dropped
     assert data["quality"]["flagged"] == 1 and data["quality"]["kept"] == 1
     assert data["quality"]["dropped"][0]["reason"] == "below_floor"
-    assert data["nodes"]["sectors/health"]["web_evidence"]["findings"] == ["web-sourced detail"]
+    # web evidence keeps each finding's text AND its resolved citations
+    web = data["nodes"]["sectors/health"]["web_evidence"]["findings"]
+    assert web == [{"text": "web-sourced detail", "source_urls": ["https://who.int/x"]}]
+
+
+def test_web_only_rescued_node_is_published_from_taxonomy(monkeypatch):
+    """A node whose descriptive call produced no artifact but that the web
+    rescued is still published (seeded from taxonomy) with its web evidence."""
+    arts = {"sectors/health": _art("Health", "Clinics closed")}  # WASH has NO artifact
+    # Package keeps Health (KB) and WASH (web_rescued, no descriptive artifact).
+    package = {
+        "kept_node_keys": ["sectors/health", "sectors/wash"],
+        "verdicts": [
+            {"node_key": "sectors/health", "kept": True, "reason": "kept", "completeness": 0.7, "task": "Sectors"},
+            {"node_key": "sectors/wash", "kept": True, "reason": "web_rescued", "completeness": None, "task": "Sectors"},
+        ],
+        "by_task": {"Sectors": 0.7}, "mean_completeness": 0.7, "completeness_floor": 0.4,
+        "revised_node_keys": [], "web_rescued_node_keys": ["sectors/wash"],
+    }
+    gapfills = {"sectors/wash": {"status": "resolved", "confidence": 0.8,
+                                 "value": [{"text": "wells restored", "source_urls": ["https://unicef.org/w"]}],
+                                 "sources": [{"url": "w"}], "source_category_used": 1}}
+    _res, upsert_an, _dp = _run(
+        monkeypatch, numbers=_NUMBERS, artifacts=arts, package=package, gapfills=gapfills,
+        upsert_result={"analysisId": "an1", "skipped": False, "supersededPrevious": True, "reason": None},
+    )
+    data = upsert_an.call_args.kwargs["data"]
+    assert set(data["nodes"].keys()) == {"sectors/health", "sectors/wash"}  # web-only node survived
+    wash = data["nodes"]["sectors/wash"]
+    assert wash["findings"] == [] and wash["name"] == "WASH"  # seeded stub, no KB findings
+    assert wash["web_evidence"]["findings"] == [{"text": "wells restored", "source_urls": ["https://unicef.org/w"]}]
 
 
 def test_skips_datapoints_when_numbers_empty(monkeypatch):

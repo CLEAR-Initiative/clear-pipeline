@@ -90,6 +90,7 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
     s3, bucket = _s3(), os.environ["S3_BUCKET"]
     nodes = l1_nodes()
     names = {n.key: n.name for n in nodes}
+    nodes_by_key = {n.key: n for n in nodes}
     numbers = load_json(
         s3, bucket, paths.numbers_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
     ) or {}
@@ -110,6 +111,22 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
     kept_artifacts = {k: a for k, a in final_artifacts.items() if k in kept_keys}
     gapfills = load_gapfills(s3, bucket, iso3, _WINDOW_KIND, nodes)
     web_evidence = {k: gapfills[k] for k in kept_keys if k in gapfills}
+
+    # Web-only rescue: a node whose descriptive call produced no artifact can
+    # still be kept (reason web_rescued) when the web gap-fill answered it. It is
+    # absent from final_artifacts, so seed a stub from the taxonomy — no KB
+    # findings to show, but its web_evidence (attached below) still publishes.
+    for key in kept_keys - kept_artifacts.keys():
+        node = nodes_by_key.get(key)
+        if node is None:
+            continue
+        kept_artifacts[key] = {
+            "node": {"name": node.name, "task": node.task, "level": node.level},
+            "descriptive": {
+                "findings": [], "completeness": None,
+                "questions_not_answered": [], "source_report_ids": [],
+            },
+        }
 
     quality = {
         "mean_completeness": package.get("mean_completeness"),

@@ -47,10 +47,19 @@ _V5_SECTOR_KEY: dict[str, str] = {
 def _web_evidence_block(gapfill: dict) -> dict[str, Any]:
     """Publish-shaped view of a node's web gap-fill result: the tiered web
     evidence that answered a gap the KB could not. Kept separate from the KB
-    ``findings`` (different provenance — §9 source tiers, not report ids)."""
+    ``findings`` (different provenance — §9 source tiers, not report ids).
+
+    Each finding keeps its own resolved ``source_urls`` alongside the text:
+    ``fill_gap`` has already stripped the inline ``[Rn]`` markers, so the
+    flat ``sources`` list alone can't say which source backs which claim.
+    """
     return {
-        # GapFillResult.value is the list of SourcedFinding ({text, ...}).
-        "findings": [f.get("text") for f in gapfill.get("value", []) if f.get("text")],
+        # GapFillResult.value is the list of SourcedFinding ({text, source_urls}).
+        "findings": [
+            {"text": f.get("text"), "source_urls": f.get("source_urls", [])}
+            for f in gapfill.get("value", [])
+            if f.get("text")
+        ],
         "status": gapfill.get("status"),
         "confidence": gapfill.get("confidence"),
         "source_category_used": gapfill.get("source_category_used"),
