@@ -65,6 +65,7 @@ import pandas as pd
 
 from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
+from clear_pipeline.defs.gx_pipeline.signal_ids import InvalidExternalId, mint
 from clear_pipeline.defs.gx_pipeline.sources import GXSource, Quarantined
 from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
@@ -81,7 +82,7 @@ from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
 
 _BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
-_SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
+_SILVER_COLUMNS = ["externalId", "signalId", "publishedAt", "title", "description", "severity"]
 
 # Concurrency pool shared by every asset that writes a source's gold table
 # (see the module docstring and deploy/dagster.yaml's `concurrency.pools`).
@@ -322,7 +323,17 @@ def build_gx_source_assets(source: GXSource) -> list:
             silver_inputs.extend((bronze_row, signal_input, ext_id) for signal_input, ext_id in batch)
 
         rows: list[dict] = []
+        id_failed = 0
         for bronze_row, signal_input, ext_id in silver_inputs:
+            try:
+                signal_input["id"] = mint(signal_input.get("externalId"), source.id_prefix)
+            except InvalidExternalId:
+                # TODO(#1487 follow-up): only this row fails, and it is lost: the
+                # watermark already moved on. Decide between quarantine and a
+                # GX row-level gate (an unprefixed id is a connector bug).
+                context.log.exception("[%s silver] %s gets no Signal id — dropped", src, ext_id)
+                id_failed += 1
+                continue
             signal_input["rawS3Key"] = bronze_row["s3Key"]
 
             key = lake.raw_key(src, bronze_row["publishedAt"], ext_id, layer="silver")
@@ -330,6 +341,7 @@ def build_gx_source_assets(source: GXSource) -> list:
 
             rows.append({
                 "externalId": ext_id,
+                "signalId": signal_input["id"],
                 "publishedAt": bronze_row["publishedAt"],
                 "title": signal_input.get("title"),
                 "description": signal_input.get("description"),
@@ -340,7 +352,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "signalInput": signal_input,
             })
 
-        context.add_output_metadata({"rows": len(rows), "quarantined": quarantined})
+        context.add_output_metadata({"rows": len(rows), "quarantined": quarantined, "id_failed": id_failed})
         if not rows:
             return pd.DataFrame(columns=_SILVER_COLUMNS)
         df = pd.DataFrame(rows)
@@ -641,7 +653,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 bundle["title"] = row.title or bundle["title"]
                 bundle["description"] = row.description or bundle["description"]
 
-            bundle["signalIds"] = list({*bundle["signalIds"], row.externalId})
+            bundle["signalIds"] = list({*bundle["signalIds"], row.signalId})
             # Highest known severity across the bundle's signals; stays null while
             # every contributing signal's severity is unknown (no invented floor).
             _sevs = [s for s in (bundle["severity"], row.severity) if s is not None]
@@ -649,6 +661,7 @@ def build_gx_source_assets(source: GXSource) -> list:
             bundle["lastSignalCreatedAt"] = row.publishedAt
             bundle.setdefault("newSignalRows", []).append({
                 "externalId": row.externalId,
+                "signalId": row.signalId,
                 "eventId": row.eventId,
                 "relevanceScore": row.relevanceScore,
                 "eventType": row.eventType,
@@ -793,17 +806,29 @@ def build_gx_source_assets(source: GXSource) -> list:
             commit_watermark()
         todo = iceberg_signals.signals_to_sync(signals_table, can_update=content_update_input is not None)
 
-        counts = {"created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0}
+        counts = {"created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0, "aliased": 0}
         to_upsert: list[dict] = []
+        aliases: list[dict] = []
         now_iso = datetime.now(UTC).isoformat()
 
         for action, rows in todo.items():
             for row in rows:
                 state = iceberg_signals.sync_state(row)
+                alias = None
                 try:
                     if action == "create":
+                        signal_id = row.get("signalId")
+                        if not signal_id:
+                            raise ValueError("gold row has no signalId")
                         with pipeline_run(run_id=dagster_run_id(context)):
-                            created = create_signal_for_sync(row["signalInput"])
+                            created = create_signal_for_sync({**row["signalInput"], "id": signal_id})
+                        # A row that predates pipeline ids keeps its Prisma id.
+                        if created["id"] != signal_id:
+                            alias = {
+                                "signalId": signal_id,
+                                "externalId": row["signalInput"]["externalId"],
+                                "legacyId": created["id"],
+                            }
                         sent_hash = (row["signalInput"] or {}).get("contentHash")
                         # get-or-create may return an older row (earlier half-failed
                         # push, or one production created): bring it up to date.
@@ -839,7 +864,13 @@ def build_gx_source_assets(source: GXSource) -> list:
                     continue
                 row["pushedState"] = state
                 to_upsert.append(row)
+                if alias is not None:
+                    aliases.append(alias)
 
+        # Aliases first: a row is marked pushed only once its alias is stored,
+        # so a failed write here re-creates it next run and records it again.
+        iceberg_signals.upsert_aliases(aliases)
+        counts["aliased"] = len(aliases)
         iceberg_signals.upsert_signals(signals_table, to_upsert)
 
         context.log.info("[%s push] %s", src, " ".join(f"{k}={v}" for k, v in counts.items()))

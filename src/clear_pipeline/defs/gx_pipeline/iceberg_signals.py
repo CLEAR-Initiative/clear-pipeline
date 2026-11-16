@@ -2,7 +2,10 @@
 upserted on `externalId`, no history (docs/data-quality-medallion-implementation.md §6).
 `signalInput` is a JSON string column. `groupKey`/`retracted` keep cross-poll
 supersession readable from gold (`retracted` is reversible). `pushedState` is
-the `sync_state` Postgres last received; a mismatch means the row needs an update."""
+the `sync_state` Postgres last received; a mismatch means the row needs an update.
+`signalId` is the id the pipeline minted (`signal_ids.py`). Where Postgres
+kept an older id, `gold.signal_id_aliases` maps it: read Postgres ids
+through `postgres_ids`, never `signalId` alone."""
 
 import json
 
@@ -16,12 +19,13 @@ from clear_pipeline.defs.gx_pipeline.iceberg_catalog import (
     catalog,
     ensure_namespace,
 )
+from clear_pipeline.defs.gx_pipeline.signal_ids import signal_id
 
 _COLUMNS = [
     "externalId", "eventId", "relevanceScore", "eventType", "districtKey",
     "matchOutcome", "severity", "populationAffectedContribution",
     "casualtiesContribution", "createdAt", "pushedAt", "signalInputJson",
-    "groupKey", "retracted", "pushedState",
+    "groupKey", "retracted", "pushedState", "signalId",
 ]
 
 _SCHEMA = Schema(
@@ -40,6 +44,16 @@ _SCHEMA = Schema(
     NestedField(13, "groupKey", StringType(), required=False),
     NestedField(14, "retracted", BooleanType(), required=False),
     NestedField(15, "pushedState", StringType(), required=False),
+    NestedField(16, "signalId", StringType(), required=False),
+    identifier_field_ids=[1],
+)
+
+# One table for every source: a Signal id is unique across sources.
+_ALIASES = f"{NAMESPACE}.signal_id_aliases"
+_ALIAS_SCHEMA = Schema(
+    NestedField(1, "signalId", StringType(), required=True),
+    NestedField(2, "externalId", StringType(), required=False),
+    NestedField(3, "legacyId", StringType(), required=False),
     identifier_field_ids=[1],
 )
 
@@ -65,8 +79,21 @@ def _ensure_columns(cat, identifier: str, table):
         return table
     # Projects the new columns as NULL. Rewritten even when empty: the stale
     # snapshot, not its rows, is what breaks the upsert.
-    table.overwrite(table.scan().to_arrow())
+    table.overwrite(_fill_signal_ids(table.scan().to_arrow()))
     return cat.load_table(identifier)
+
+
+def _fill_signal_ids(arrow_table):
+    """A NULL `signalId` minted from the row's stored signalInput.externalId.
+    No prefix check: gold only holds rows that passed it, or predate it."""
+    import pyarrow as pa  # lazy — keep the heavy arrow import out of module load
+
+    rows = arrow_table.to_pylist()
+    for row in rows:
+        external_id = (json.loads(row["signalInputJson"] or "null") or {}).get("externalId")
+        if row.get("signalId") is None and external_id:
+            row["signalId"] = signal_id(external_id)
+    return pa.Table.from_pylist(rows, schema=arrow_table.schema)
 
 
 def get_signals_table(source: str):
@@ -200,3 +227,35 @@ def existing_push_state(table, external_ids: list[str]) -> dict[str, dict]:
         }
         for row in df.to_dict("records")
     }
+
+
+def get_aliases_table():
+    """`gold.signal_id_aliases`, created on first use."""
+    cat = catalog()
+    ensure_namespace(cat)
+    if not cat.table_exists(_ALIASES):
+        return cat.create_table(_ALIASES, schema=_ALIAS_SCHEMA)
+    return cat.load_table(_ALIASES)
+
+
+def upsert_aliases(rows: list[dict]) -> None:
+    """Record ``{signalId, externalId, legacyId}``: Postgres kept ``legacyId``
+    for this Signal. Keyed by `signalId`, so recording one twice is a no-op."""
+    if not rows:
+        return
+    import pyarrow as pa  # lazy — keep the heavy arrow import out of module load
+
+    table = get_aliases_table()
+    table.upsert(pa.Table.from_pylist(rows, schema=table.schema().as_arrow()), join_cols=["signalId"])
+
+
+def aliases_df() -> pd.DataFrame:
+    return get_aliases_table().scan().to_pandas()
+
+
+def postgres_ids(source: str) -> dict[str, str]:
+    """``{signalId: Postgres id}`` for every gold row of ``source``: the
+    alias's `legacyId` when there is one, else `signalId` itself."""
+    signal_ids = get_signals_table(source).scan(selected_fields=("signalId",)).to_pandas()["signalId"]
+    legacy = dict(aliases_df()[["signalId", "legacyId"]].itertuples(index=False))
+    return {sid: legacy.get(sid, sid) for sid in signal_ids.dropna()}
