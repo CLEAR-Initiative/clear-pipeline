@@ -48,7 +48,8 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
 - A row whose externalId is missing or unprefixed is **dropped** in `_silver`,
   logged and counted as `id_failed`. It is lost: the watermark has moved on.
   Quarantining it, or gating it with a row-level GX expectation, is a
-  follow-up (`TODO` in `factory.py`). GX checks here act per batch, not per
+  follow-up: [Exponential #1491](https://www.exponential.im/w/clear/products/clear/tickets/1491)
+  (`TODO` in `factory.py`). GX checks here act per batch, not per
   row, so they cannot filter it today.
 
 ## Consequences

@@ -328,7 +328,7 @@ def build_gx_source_assets(source: GXSource) -> list:
             try:
                 signal_input["id"] = mint(signal_input.get("externalId"), source.id_prefix)
             except InvalidExternalId:
-                # TODO(#1487 follow-up): only this row fails, and it is lost: the
+                # TODO(#1491): only this row fails, and it is lost: the
                 # watermark already moved on. Decide between quarantine and a
                 # GX row-level gate (an unprefixed id is a connector bug).
                 context.log.exception("[%s silver] %s gets no Signal id — dropped", src, ext_id)
