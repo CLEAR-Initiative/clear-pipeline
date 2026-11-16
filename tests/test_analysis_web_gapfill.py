@@ -80,7 +80,7 @@ def _brave_two(*a, **k):
 
 def test_fill_gap_synthesises_with_tiered_citations():
     provider = _FakeProvider(GapFillLLM(value=["10,000 people displaced [R1]"], confidence=0.8, status="resolved"))
-    res = fill_gap(requirement="How many displaced by the floods?", provider=provider, brave=_brave_two)
+    res = fill_gap(requirement="How many displaced by the floods?", provider=provider, search=_brave_two)
 
     # ranked best-tier-first → who.int (gov, 1) is [R1], msf (orgs, 2) is [R2]
     assert res.sources[0].domain == "who.int"
@@ -95,7 +95,7 @@ def test_fill_gap_synthesises_with_tiered_citations():
 
 def test_fill_gap_no_results_is_unresolved():
     provider = _FakeProvider(GapFillLLM(value=["x"]))
-    res = fill_gap(requirement="q", provider=provider, brave=lambda *a, **k: [])
+    res = fill_gap(requirement="q", provider=provider, search=lambda *a, **k: [])
     assert res.status == "unresolved"
     assert res.value == []
     assert res.source_category_used is None

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from clear_pipeline.providers.web_search import WebSearchError
+
 logger = logging.getLogger(__name__)
 
 _URL = "https://api.search.brave.com/res/v1/llm/context"
@@ -25,7 +27,7 @@ _QUERY_MAX_CHARS = 600  # endpoint hard cap
 _DEFAULT_TIMEOUT = float(os.environ.get("BRAVE_TIMEOUT_SECONDS", "30"))
 
 
-class BraveSearchError(RuntimeError):
+class BraveSearchError(WebSearchError):
     """Brave request failed (missing key, HTTP error, rate limit)."""
 
 

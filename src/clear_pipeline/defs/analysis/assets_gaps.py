@@ -51,8 +51,8 @@ from clear_pipeline.defs.analysis.store import load_descriptive, load_json, save
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 from clear_pipeline.defs.analysis.web_gapfill import fill_gap
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
-from clear_pipeline.providers.brave_search import BraveSearchError
 from clear_pipeline.providers.llm import make_llm_provider
+from clear_pipeline.providers.web_search import WebSearchError, resolve_web_search
 
 _WINDOW_KIND = "yearly"
 
@@ -245,9 +245,10 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
 )
 def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
     """CONDITIONAL web gap-fill — runs ONLY for the unmet gaps analysis_gaps
-    found, and only when a Brave key is configured (doc §8/§9). When the DB
-    already answered the country's questions (no gaps), this is a no-op. Bounded
-    by the run budget and ANALYSIS_WEB_GAPFILL_MAX_GAPS; one provider per gap."""
+    found, and only when the selected web-search provider's key is configured
+    (doc §8/§9). The provider is WEB_SEARCH_PROVIDER (brave default | serper);
+    when the DB already answered the country's questions (no gaps), this is a
+    no-op. Bounded by the run budget and ANALYSIS_WEB_GAPFILL_MAX_GAPS."""
     iso3 = context.partition_key
     s3, bucket = _s3(), os.environ["S3_BUCKET"]
 
@@ -262,13 +263,17 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
         })
         return {"iso3": iso3, "gaps": 0, "filled": 0, "status": "no_gaps"}
 
-    if not os.environ.get("BRAVE_SEARCH_API_KEY"):
+    # Resolve the configured provider (brave | serper); an empty key disables it.
+    search, key_env, provider_name = resolve_web_search()
+    if not os.environ.get(key_env):
         context.log.warning(
-            "[analysis_web_gapfill] %s: %d gaps but BRAVE_SEARCH_API_KEY unset — skipping", iso3, len(gaps)
+            "[analysis_web_gapfill] %s: %d gaps but %s unset (provider=%s) — skipping",
+            iso3, len(gaps), key_env, provider_name,
         )
         context.add_output_metadata({
             "country": dg.MetadataValue.text(iso3),
             "gaps": dg.MetadataValue.int(len(gaps)),
+            "provider": dg.MetadataValue.text(provider_name),
             "status": dg.MetadataValue.text("no_api_key"),
         })
         return {"iso3": iso3, "gaps": len(gaps), "filled": 0, "status": "no_api_key"}
@@ -287,10 +292,10 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
         provider = make_llm_provider(ANALYSIS_LLM_ROLE)
         try:
             gf = fill_gap(
-                requirement=requirement, provider=provider, budget=budget,
+                requirement=requirement, provider=provider, budget=budget, search=search,
                 freshness="py", pinned_sites=pinned, domain_cache=domain_cache,
             )
-        except BraveSearchError as exc:
+        except WebSearchError as exc:
             context.log.warning("[analysis_web_gapfill] %s %s: search failed (%s)", iso3, node_key, exc)
             results.append({"node": node_key, "status": "search_failed"})
             continue
@@ -318,6 +323,7 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
     resolved = sum(1 for r in results if r.get("status") == "resolved")
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),
+        "provider": dg.MetadataValue.text(provider_name),
         "gaps": dg.MetadataValue.int(len(gaps)),
         "attempted": dg.MetadataValue.int(len(results)),
         "resolved": dg.MetadataValue.int(resolved),
