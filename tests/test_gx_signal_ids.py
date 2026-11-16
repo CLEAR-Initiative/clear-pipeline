@@ -40,6 +40,7 @@ def test_a_fixed_record_gets_a_literal_id_in_gold_and_on_the_wire(h):
     assert h.pg_row("a")["id"] == A_ID
     silver = next(v for k, v in h.s3.objects.items() if k.startswith("silver/"))
     assert json.loads(silver)["id"] == A_ID
+    assert "id" not in json.loads(h.gold["a"]["signalInputJson"])  # the column is gold's only copy
     assert _aliases(h) == []
 
 

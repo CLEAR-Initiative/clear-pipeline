@@ -21,8 +21,9 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
   `GXSource` declares its own as `id_prefix`. A test checks that no prefix
   equals or starts another, nor `x:`, `whatsapp:` or `url:`. Never rename
   one: it re-ids the source and breaks clear-api's dedupe.
-- **Silver** mints the id once per signal, into `signalInput["id"]` (so the
-  silver JSON carries it) and the `signalId` column.
+- **Silver** mints the id once per signal, into the silver JSON on S3 (`id`)
+  and the `signalId` column. Gold's `signalInput` does not carry it: the
+  column is the only copy, and `_push` adds it to the payload.
 - **Gold**: `gold.<source>_signals` gains `signalId`; the row key stays the
   bare externalId. Rows written before the column get it in the same schema
   migration, from their stored `signalInput.externalId` (no DB call). Event

@@ -326,7 +326,7 @@ def build_gx_source_assets(source: GXSource) -> list:
         id_failed = 0
         for bronze_row, signal_input, ext_id in silver_inputs:
             try:
-                signal_input["id"] = mint(signal_input.get("externalId"), source.id_prefix)
+                sid = mint(signal_input.get("externalId"), source.id_prefix)
             except InvalidExternalId:
                 # TODO(#1491): only this row fails, and it is lost: the
                 # watermark already moved on. Decide between quarantine and a
@@ -337,11 +337,11 @@ def build_gx_source_assets(source: GXSource) -> list:
             signal_input["rawS3Key"] = bronze_row["s3Key"]
 
             key = lake.raw_key(src, bronze_row["publishedAt"], ext_id, layer="silver")
-            lake.write_json(s3, bucket, key, signal_input)
+            lake.write_json(s3, bucket, key, {**signal_input, "id": sid})
 
             rows.append({
                 "externalId": ext_id,
-                "signalId": signal_input["id"],
+                "signalId": sid,
                 "publishedAt": bronze_row["publishedAt"],
                 "title": signal_input.get("title"),
                 "description": signal_input.get("description"),
