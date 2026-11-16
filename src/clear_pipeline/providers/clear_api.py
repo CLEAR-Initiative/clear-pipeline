@@ -1276,19 +1276,35 @@ def get_analysis(
     return data.get("analysis")
 
 
-_PENDING_ANALYSES = """
-query PendingAnalyses($limit: Int) {
-  pendingAnalyses(limit: $limit) {
+# The on-demand node deep-dive selection (analysis-node-deepdive) is a field that
+# exists on clear-api ONLY after its PR #345 + migration deploy — and selecting an
+# unknown GraphQL field fails the whole query. So `taxonomyNodeKeys` is requested
+# only when ANALYSIS_NODE_DEEPDIVE is enabled: flip it on once BOTH sides are
+# deployed to activate deep-dives (the drain then routes node requests to the
+# per-node path); until then the query stays compatible with the pre-migration
+# schema. Keep the flag in lockstep with clear-api emitting node requests — while
+# it is off, a node request would silently take the frame-level path.
+def _node_deepdive_enabled() -> bool:
+    return (os.environ.get("ANALYSIS_NODE_DEEPDIVE") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _pending_analyses_query() -> str:
+    node_field = "    taxonomyNodeKeys\n" if _node_deepdive_enabled() else ""
+    return f"""
+query PendingAnalyses($limit: Int) {{
+  pendingAnalyses(limit: $limit) {{
     id
     locationIds
     eventTypes
     needSectors
     windowStart
     windowEnd
-    teamId
+{node_field}    teamId
     force
-  }
-}
+  }}
+}}
 """
 
 _MARK_ANALYSIS_REQUEST_GENERATED = """
@@ -1307,7 +1323,7 @@ mutation MarkAnalysisRequestFailed($id: String!, $error: String) {
 def get_pending_analyses(*, limit: int = 20) -> list[dict[str, Any]]:
     """Drain the on-demand analysis request queue (ADR-0007 §4). Returns the
     oldest PENDING requests (each a frame) for the generation sensor to process."""
-    data = _execute(_PENDING_ANALYSES, {"limit": limit})
+    data = _execute(_pending_analyses_query(), {"limit": limit})
     return data.get("pendingAnalyses") or []
 
 

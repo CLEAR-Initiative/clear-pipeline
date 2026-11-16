@@ -182,7 +182,9 @@ class TestNodeDeepdiveRouting:
         assert upsert.call_args.kwargs["location_ids"] == ["x"]
         marked.assert_called_once()
 
-    def test_all_nodes_failed_marks_request_failed_without_upsert(self):
+    def test_all_nodes_retryable_requeue_without_terminal_mark(self):
+        # failed / budget_skipped nodes keep the request PENDING (no upsert, no
+        # terminal mark) — the next drain retries them.
         from clear_pipeline.defs.analysis import stages
 
         frame = _frame_from_request(self._REQ)
@@ -191,11 +193,36 @@ class TestNodeDeepdiveRouting:
              patch.object(stages, "_resolve_frame_aggregated", return_value=None), \
              patch.object(stages, "_scope_label", return_value="Sudan"), \
              patch.object(stages.clear_api, "upsert_node_analyses") as upsert, \
-             patch.object(stages.clear_api, "mark_analysis_request_failed", return_value={}) as failed:
+             patch.object(stages.clear_api, "mark_analysis_request_generated") as gen, \
+             patch.object(stages.clear_api, "mark_analysis_request_failed") as failed:
             out = stages._process_node_deepdive(MagicMock(), dict(self._REQ), frame)
-        assert out == stages._FAILED
+        assert out == stages._REQUEUE
         upsert.assert_not_called()
-        failed.assert_called_once()
+        gen.assert_not_called()
+        failed.assert_not_called()
+
+    def test_partial_success_upserts_done_nodes_and_requeues_the_rest(self):
+        # One node succeeds, one fails transiently: persist the success now (cache
+        # spares it next drain) but keep the request PENDING so the failed node
+        # retries — a part-generated request never leaves the queue.
+        from clear_pipeline.defs.analysis import stages
+
+        frame = _frame_from_request(self._REQ)
+        artifacts = [
+            {"node": {"key": "a", "name": "A", "task": "T", "level": 2},
+             "descriptive": {"source_report_ids": []}, "status": "ok", "provenance": {}, "usage": {}, "cost_usd": 0.0},
+            {"node": {"key": "b"}, "status": "failed"},
+        ]
+        with patch.object(stages, "generate_nodes_for_frame", return_value=artifacts), \
+             patch.object(stages, "_resolve_frame_aggregated", return_value=None), \
+             patch.object(stages, "_scope_label", return_value="Sudan"), \
+             patch.object(stages.clear_api, "upsert_node_analyses", return_value={"upserted": 1}) as upsert, \
+             patch.object(stages.clear_api, "mark_analysis_request_generated") as gen:
+            out = stages._process_node_deepdive(MagicMock(), dict(self._REQ), frame)
+        assert out == stages._REQUEUE  # "b" still pending
+        upsert.assert_called_once()  # "a" persisted now
+        assert [r["nodeKey"] for r in upsert.call_args.kwargs["nodes"]] == ["a"]
+        gen.assert_not_called()  # not complete → not marked GENERATED
 
 
 class TestScopeLabelInGeneration:

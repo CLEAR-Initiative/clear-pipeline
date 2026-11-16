@@ -92,6 +92,7 @@ def generate_nodes_for_frame(
     nodes: tuple[TaxonomyNode, ...],
     scope_label: str,
     aggregated_context: str | None = None,
+    effective_end: str | None = None,
     budget=None,
     log=None,
 ) -> list[dict]:
@@ -102,6 +103,10 @@ def generate_nodes_for_frame(
     clear-api upsert. One LLM provider per concurrent node (``total_usage`` would
     race on a shared instance — doc §7); per-node failures are isolated and come
     back as ``status="failed"``/``"budget_skipped"`` rather than sinking the batch.
+
+    RAG retrieval is time-scoped to the frame's window (``effective_end``
+    materialises a rolling frame's end), so an on-demand deep-dive over a
+    historical window cites only in-window evidence.
 
     Skip-if-exists is frame-addressed: a re-run of the same frame reuses a node's
     artifact (loaded back from S3 so the caller can still upsert it) instead of
@@ -123,6 +128,7 @@ def generate_nodes_for_frame(
         res = analyse_node(
             node=node, frame=frame, scope_label=scope_label,
             provider=provider, aggregated_context=aggregated_context, budget=budget,
+            include_time_range=True, effective_end=effective_end,
         )
         artifact = _artifact(frame, node, res)
         body = json.dumps(artifact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

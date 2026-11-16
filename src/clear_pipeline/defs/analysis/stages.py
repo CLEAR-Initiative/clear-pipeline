@@ -272,7 +272,7 @@ def _process_node_deepdive(context, req: dict, frame: Frame) -> str:
     try:
         artifacts = generate_nodes_for_frame(
             frame=frame, nodes=nodes, scope_label=_scope_label(frame),
-            aggregated_context=aggregated_context, log=context.log,
+            aggregated_context=aggregated_context, effective_end=effective_end, log=context.log,
         )
     except Exception as exc:  # noqa: BLE001 — transient (LLM / S3 blip): retry next tick
         context.log.warning(
@@ -280,33 +280,42 @@ def _process_node_deepdive(context, req: dict, frame: Frame) -> str:
         )
         return _REQUEUE
 
+    # failed / budget_skipped nodes are RETRYABLE — a transient provider/S3 error
+    # or an exhausted-this-run budget. surfaceable = real findings (incl. a
+    # best_effort "no evidence" result), persisted now so partial progress isn't
+    # lost and the S3 cache spares them from re-running next drain.
+    retryable = [a for a in artifacts if a.get("status") in {"failed", "budget_skipped"}]
     surfaceable = [a for a in artifacts if a.get("status") not in {"failed", "budget_skipped"}]
-    if not surfaceable:
-        ok = _mark(
-            context, clear_api.mark_analysis_request_failed, request_id,
-            "node deep-dive produced no content",
-        )
-        return _FAILED if ok else _REQUEUE
 
-    try:
-        clear_api.upsert_node_analyses(
-            schema_version=NODE_SCHEMA_VERSION,
-            nodes=[_node_row(a) for a in surfaceable],
-            **frame.upsert_kwargs(),
-        )
-    except clear_api.ClearApiError as exc:
-        context.log.error("[drain_analysis] deep-dive %s upsert rejected: %s", request_id, exc)
-        ok = _mark(context, clear_api.mark_analysis_request_failed, request_id, str(exc))
-        return _FAILED if ok else _REQUEUE
-    except Exception as exc:  # noqa: BLE001 — transient upsert blip: retry
-        context.log.warning(
-            "[drain_analysis] deep-dive %s upsert failed transiently — leaving PENDING: %s", request_id, exc,
+    if surfaceable:
+        try:
+            clear_api.upsert_node_analyses(
+                schema_version=NODE_SCHEMA_VERSION,
+                nodes=[_node_row(a) for a in surfaceable],
+                **frame.upsert_kwargs(),
+            )
+        except clear_api.ClearApiError as exc:
+            context.log.error("[drain_analysis] deep-dive %s upsert rejected: %s", request_id, exc)
+            ok = _mark(context, clear_api.mark_analysis_request_failed, request_id, str(exc))
+            return _FAILED if ok else _REQUEUE
+        except Exception as exc:  # noqa: BLE001 — transient upsert blip: retry
+            context.log.warning(
+                "[drain_analysis] deep-dive %s upsert failed transiently — leaving PENDING: %s", request_id, exc,
+            )
+            return _REQUEUE
+
+    # Keep the request PENDING while ANY node still needs a (re)try, so a
+    # part-generated request never leaves the queue: the next drain reruns only
+    # the missing nodes (cache hits on the done ones, so it converges). Only when
+    # EVERY selected node produced a result is the request complete.
+    if retryable:
+        context.log.info(
+            "[drain_analysis] deep-dive %s: %d/%d nodes done, %d pending retry — leaving PENDING",
+            request_id, len(surfaceable), len(nodes), len(retryable),
         )
         return _REQUEUE
 
-    context.log.info(
-        "[drain_analysis] deep-dive %s: %d/%d nodes surfaced", request_id, len(surfaceable), len(nodes),
-    )
+    context.log.info("[drain_analysis] deep-dive %s: all %d nodes surfaced", request_id, len(nodes))
     return _GENERATED if _mark(context, clear_api.mark_analysis_request_generated, request_id) else _REQUEUE
 
 
