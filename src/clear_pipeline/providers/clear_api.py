@@ -1146,6 +1146,51 @@ def upsert_analysis(
     return result["upsertAnalysis"]
 
 
+_UPSERT_NODE_ANALYSES = """
+mutation UpsertNodeAnalyses($input: UpsertNodeAnalysesInput!) {
+  upsertNodeAnalyses(input: $input) { upserted }
+}
+"""
+
+
+def upsert_node_analyses(
+    *,
+    location_ids: list[str],
+    event_types: list[str],
+    need_sectors: list[str],
+    window_start: str,
+    window_end: str | None,
+    schema_version: str,
+    nodes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Upsert the per-node results of an on-demand node **deep-dive** — one row
+    per ``(frame, taxonomy node)`` (decision A). Unlike ``upsert_analysis`` (a
+    single frame-scoped situation snapshot), a deep-dive generates a handful of
+    SELECTED taxonomy leaves (L2/L3), each surfaced independently so a UI can read
+    exactly the nodes the user drilled into.
+
+    ``nodes`` are already in clear-api shape — each
+    ``{nodeKey, nodeName, task, level, data, status, sourceReportIds,
+    generatedByModel, generationCostUsd, generationInputTokens,
+    generationOutputTokens}``. The frame addresses the rows the same way as
+    ``upsert_analysis`` (array columns + window; ``window_end=None`` is rolling).
+    Returns ``{upserted}``.
+    """
+    payload = {
+        "frame": {
+            "locationIds": location_ids,
+            "eventTypes": event_types,
+            "needSectors": need_sectors,
+            "windowStart": window_start,
+            "windowEnd": window_end,
+        },
+        "schemaVersion": schema_version,
+        "nodes": nodes,
+    }
+    result = _execute(_UPSERT_NODE_ANALYSES, {"input": payload})
+    return result["upsertNodeAnalyses"]
+
+
 _FRAME_EVIDENCE_WATERMARK = """
 query FrameEvidenceWatermark($frame: AnalysisFrameInput!) {
   frameEvidenceWatermark(frame: $frame) {

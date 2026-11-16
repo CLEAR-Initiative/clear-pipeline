@@ -18,6 +18,8 @@ clear-api / Dagster / LLM.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -82,6 +84,20 @@ class Frame:
             "window_start": self.window_start,
             "window_end": self.window_end,
         }
+
+    def digest(self) -> str:
+        """A short, byte-stable hash of the canonical frame — used to
+        content-address a custom frame's artifacts in S3 where there is no single
+        ``(iso3, window_kind)`` to key on (the country fan-out's scheme). Pure +
+        deterministic: the frame's arrays are already canonicalised, so two
+        equal frames hash identically and a changed scope re-keys cleanly.
+
+        Addressing only — NOT the clear-api identity (that is the array columns +
+        window via the partial unique index); never send this to clear-api."""
+        blob = json.dumps(
+            self.upsert_kwargs(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def country_frame(country_location_id: str, *, window_start: str, window_end: str | None) -> Frame:
