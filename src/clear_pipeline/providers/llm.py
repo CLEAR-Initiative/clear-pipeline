@@ -68,7 +68,7 @@ from tenacity import (
 
 logger = logging.getLogger(__name__)
 
-LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision", "analysis"]
+LLMRole = Literal["context", "extraction", "datapoints", "narrative", "signal", "translate", "vision", "analysis", "analysis_judge"]
 
 # Per-request timeout (seconds). A flaky/hung model must fail FAST so it can be
 # retried or fall back — never block the pipeline. 600s (the old value) let a
@@ -179,6 +179,11 @@ _ROLE_ENV_FALLBACK: dict[LLMRole, LLMRole] = {
     # Anthropic narrative. Production sets LLM_ANALYSIS_* to DeepSeek via
     # OpenRouter.
     "analysis": "extraction",
+    # Adversarial-judge evaluation role (defs/analysis evaluation step). Falls
+    # back to the generation role's creds unless a dedicated LLM_ANALYSIS_JUDGE_*
+    # block is set. Production sets it to DeepSeek v3.2 via OpenRouter with
+    # LLM_ANALYSIS_JUDGE_THINK=true (reasoning on) + a raised max_tokens.
+    "analysis_judge": "analysis",
 }
 
 # Pydantic bound so `complete_structured` returns the exact subclass the
@@ -565,6 +570,7 @@ class OpenAICompatibleProvider:
         api_key: str,
         json_schema_mode: bool = True,
         disable_thinking: bool = False,
+        enable_thinking: bool = False,
         require_parameters: bool = False,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
@@ -597,11 +603,19 @@ class OpenAICompatibleProvider:
         #    the whole request 404s ("Filter by Parameters"). Keeping it off the
         #    text path is what lets a non-reasoning model (e.g. the qwen translate
         #    primary) route while reasoning is still being disabled.
+        #  - think:true / reasoning.enabled:true — the inverse: a reasoning model
+        #    (e.g. DeepSeek V3.2 via OpenRouter) may default to NON-thinking, so an
+        #    accuracy-critical role like the adversarial judge must EXPLICITLY turn
+        #    reasoning on (and be given a raised max_tokens so the reasoning tokens
+        #    don't starve the JSON). `disable_thinking` wins if both are set.
         # No-ops on providers that ignore unknown body fields.
         base_extra_body: dict[str, Any] = {}
         if disable_thinking:
             base_extra_body["think"] = False
             base_extra_body["reasoning"] = {"enabled": False}
+        elif enable_thinking:
+            base_extra_body["think"] = True
+            base_extra_body["reasoning"] = {"enabled": True}
         self._base_extra_body = base_extra_body
         self._require_parameters = require_parameters
 
@@ -906,6 +920,9 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
       LLM_<ROLE>_MODEL      = e.g. "claude-haiku-4-5", "meta-llama/…"
       LLM_<ROLE>_API_KEY    = provider API key
       LLM_<ROLE>_BASE_URL   = required for "openai_compat" only
+      LLM_<ROLE>_THINK      = "true" to EXPLICITLY enable reasoning for a model
+                              that defaults to non-thinking (judge role); pair
+                              with a raised max_tokens. NO_THINK wins if both set.
       LLM_<ROLE>_NO_THINK   = "true" to disable an Ollama thinking model's
                               reasoning (sent as `think: false`) — otherwise a
                               short-output role gets an empty `content`.
@@ -942,6 +959,9 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     # Claude fallback (AnthropicProvider ignores the flag) and on a non-reasoning
     # model (the switch is a no-op).
     no_think = (_env("NO_THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
+    # Inverse switch: explicitly turn reasoning ON for a role whose model defaults
+    # to non-thinking (the adversarial judge). NO_THINK wins if both are set.
+    think = (_env("THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
     # Force OpenRouter to route to a backend that honours `response_format`;
     # without it a "supports structured outputs" model can still land on a
     # backend that ignores the schema → free-form output → truncation.
@@ -949,7 +969,8 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
 
     def _construct(
         prov: str, mdl: str, key: str, base_url: str | None, *,
-        disable_thinking: bool = False, require_parameters: bool = False,
+        disable_thinking: bool = False, enable_thinking: bool = False,
+        require_parameters: bool = False,
     ) -> LLMProvider:
         if prov == "anthropic":
             return AnthropicProvider(role=role, model=mdl, api_key=key)
@@ -961,6 +982,7 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
             return OpenAICompatibleProvider(
                 role=role, model=mdl, base_url=base_url, api_key=key,
                 disable_thinking=disable_thinking,
+                enable_thinking=enable_thinking,
                 require_parameters=require_parameters,
             )
         raise ValueError(
@@ -972,6 +994,7 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         provider, model, api_key,
         _env("BASE_URL", required=(provider == "openai_compat")),
         disable_thinking=no_think,
+        enable_thinking=think,
         require_parameters=require_params,
     )
 
@@ -996,7 +1019,8 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
         fb_provider = (_env("FALLBACK_PROVIDER", required=False) or "anthropic").strip().lower()
         fallback = _construct(
             fb_provider, fb_model, fb_key, _env("FALLBACK_BASE_URL", required=False),
-            disable_thinking=no_think, require_parameters=require_params,
+            disable_thinking=no_think, enable_thinking=think,
+            require_parameters=require_params,
         )
         logger.info(
             "[LLM] role=%s primary=%s with fallback=%s", role, model, fb_model,

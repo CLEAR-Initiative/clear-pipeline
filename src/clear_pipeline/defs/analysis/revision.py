@@ -21,6 +21,12 @@ from __future__ import annotations
 _RESCUE_STATUSES = {"resolved", "partial"}
 DEFAULT_WEB_RESCUE_CONFIDENCE = 0.5
 
+# Flagged-node reasons whose node still has KB findings to re-use, so a reflexion
+# pass can help: the self-rating floor miss and the judge's "answered poorly" /
+# "off-subject padding" verdicts. ``no_evidence`` / ``not_generated`` are excluded
+# (nothing to re-use → left to web rescue).
+_REVISABLE_REASONS = {"below_floor", "judge_not_answered", "judge_off_subject"}
+
 
 def web_rescued_keys(
     gapfills: dict[str, dict],
@@ -50,15 +56,17 @@ def select_nodes_to_revise(
     """Which flagged nodes get a reflexion pass, worst-first, capped at
     ``max_nodes``.
 
-    Only ``below_floor`` nodes qualify — they had KB evidence but scored low, so
-    a second pass can help. ``no_evidence`` / ``not_generated`` nodes have no KB
-    evidence to re-use (reflexion would just re-emit empty); they are left to web
-    rescue. Among candidates, the lowest completeness goes first, and a node that
-    also has web evidence to lean on breaks ties ahead of one that doesn't.
+    Nodes that still carry KB evidence qualify — ``below_floor`` (self-rating miss)
+    and the judge's ``judge_not_answered`` / ``judge_off_subject`` verdicts: they
+    had evidence but used it poorly, so a second pass can help. ``no_evidence`` /
+    ``not_generated`` nodes have no KB evidence to re-use (reflexion would just
+    re-emit empty); they are left to web rescue. Among candidates, the lowest
+    completeness goes first, and a node that also has web evidence to lean on
+    breaks ties ahead of one that doesn't.
     """
     candidates: list[tuple[str, float, bool]] = []
     for v in verdicts:
-        if v.get("kept") or v.get("reason") != "below_floor":
+        if v.get("kept") or v.get("reason") not in _REVISABLE_REASONS:
             continue
         key = v["node_key"]
         completeness = v.get("completeness")

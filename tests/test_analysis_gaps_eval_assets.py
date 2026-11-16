@@ -7,6 +7,7 @@ import dagster as dg
 import pytest
 
 from clear_pipeline.defs.analysis import assets_gaps as mod
+from clear_pipeline.defs.analysis.judge import JudgeVerdict
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 
 _THREE = list(l1_nodes()[:3])
@@ -53,21 +54,37 @@ def test_analysis_gaps_asset_derives_and_persists(monkeypatch):
     assert {g["reason"] for g in payload["gaps"]} == {"low_completeness", "unanswered_questions"}
 
 
-def test_analysis_evaluation_asset_filters_and_persists(monkeypatch):
+def test_analysis_evaluation_asset_judges_band_and_persists(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "b")
     saved = {}
+    a, b, c = _THREE
+    # floor 0.4, band 0.2 → ceiling 0.6: a(0.9)/c(0.8) trusted-kept without a judge
+    # call; b(0.2) is in the uncertain band → judged. The judge flags it.
+    flagged = JudgeVerdict(
+        node_key=b.key, score="not_answered", has_content=True, out_of_subject=False,
+        out_of_subject_share="none", notes="thin", kept=False, reason="judge_not_answered",
+    )
     with ExitStack() as stack:
         _mocks(stack, saved)
+        stack.enter_context(patch.object(mod, "make_llm_provider", return_value=MagicMock()))
+        jn = stack.enter_context(patch.object(mod, "judge_node", return_value=flagged))
         ctx = dg.build_asset_context(partition_key="SDN")
         res = mod.analysis_evaluation(ctx)
 
-    # floor 0.4: a(0.9) and c(0.8) kept; b(0.2) flagged
-    assert res["kept"] == 2
-    assert res["flagged"] == 1
+    # only the band node b was judged; a and c kept cheaply
+    jn.assert_called_once()
+    assert res["nodes_judged"] == 1
+    assert res["kept"] == 2 and res["flagged"] == 1
     (key, payload), = saved.items()
     assert key.startswith("analysis/evaluation/SDN/")
     assert payload["mean_completeness"] == pytest.approx((0.9 + 0.2 + 0.8) / 3)
     assert len(payload["verdicts"]) == 3
+    # judge verdict stored (for revision re-use) + reason surfaced + recommendation
+    assert b.key in payload["judge_verdicts"]
+    by_key = {v["node_key"]: v for v in payload["verdicts"]}
+    assert by_key[b.key]["reason"] == "judge_not_answered"
+    assert by_key[b.key]["judge"]["score"] == "not_answered"
+    assert payload["recommendations"][b.key]["action"] == "Add"
 
 
 # ── analysis_web_gapfill ────────────────────────────────────────────
