@@ -22,6 +22,12 @@ from typing import TypedDict
 # extraction role's creds when unset.
 ANALYSIS_LLM_ROLE = "analysis"
 
+# The LLM role for the adversarial evaluation judge (the ported clear_eval
+# framework). Driven by LLM_ANALYSIS_JUDGE_* env; falls back to the generation
+# role (analysis) when unset. Production runs it with reasoning ON
+# (LLM_ANALYSIS_JUDGE_THINK=true) and a raised max_tokens.
+ANALYSIS_JUDGE_LLM_ROLE = "analysis_judge"
+
 # Output-schema version for descriptive artifacts. Bump on any breaking change
 # to a node's output shape; coexists with prior versions in storage.
 SCHEMA_VERSION = "v1"

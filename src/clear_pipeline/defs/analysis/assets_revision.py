@@ -31,6 +31,7 @@ from clear_pipeline.defs.analysis.evaluation import (
     filter_package,
 )
 from clear_pipeline.defs.analysis.frame import country_frame
+from clear_pipeline.defs.analysis.judge import JudgeVerdict
 from clear_pipeline.defs.analysis.registry import ANALYSIS_LLM_ROLE, PROMPT_VERSION, SCHEMA_VERSION
 from clear_pipeline.defs.analysis.revision import (
     DEFAULT_WEB_RESCUE_CONFIDENCE,
@@ -160,10 +161,25 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
         save_json(s3, bucket, rev_key, artifact)
         revised.append(node_key)
 
-    # Re-evaluate over the revised-or-original artifacts, honouring web rescue.
+    # Re-evaluate over the revised-or-original artifacts, honouring web rescue and
+    # the adversarial judge's verdicts (which ran in analysis_evaluation).
     floor = float(os.environ.get("ANALYSIS_EVAL_COMPLETENESS_FLOOR", DEFAULT_EVAL_COMPLETENESS_FLOOR))
     final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
-    package = filter_package(nodes, final_artifacts, completeness_floor=floor, rescued_node_keys=rescued)
+    # The judge verdict was formed on the ORIGINAL findings, so it's stale for any
+    # node whose loaded artifact is a revision — THIS run's or a cached prior run's.
+    # Detect every loaded revision by the revision-only `revised_from_completeness`
+    # field (not just this run's `revised`, which a lower cap on a rerun would miss)
+    # so a stale "judge_not_answered" can't drop an already-improved revision.
+    revised_loaded = {k for k, a in final_artifacts.items() if "revised_from_completeness" in a}
+    judge_verdicts = {
+        k: JudgeVerdict(**d)
+        for k, d in (evaluation.get("judge_verdicts") or {}).items()
+        if k not in revised_loaded
+    }
+    package = filter_package(
+        nodes, final_artifacts, completeness_floor=floor,
+        rescued_node_keys=rescued, judge_verdicts=judge_verdicts,
+    )
 
     final_payload = {
         "iso3": iso3, "window_kind": _WINDOW_KIND, "completeness_floor": floor,
