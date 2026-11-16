@@ -54,8 +54,8 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
 
 ## Consequences
 
-- Deploy order per environment: clear-api released, shape query clean,
-  `VALIDATE CONSTRAINT`, then this pipeline, then a one-off export of aliases
+- Deploy order per environment: shape query clean (clear-api ADR-0023),
+  clear-api released, then this pipeline, then a one-off export of aliases
   for gx rows pushed before the switch. Rollback runs in reverse. A pipeline
   that sends `id` to an older clear-api fails every create.
 - `gold.signal_id_aliases` is shared by every source, while the gold pool is
