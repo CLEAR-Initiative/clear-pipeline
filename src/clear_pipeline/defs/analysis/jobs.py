@@ -15,13 +15,14 @@ import dagster as dg
 # share the concurrency ceiling rather than piling on.
 _HEAVY_RUN_TAGS = {"clear/weight": "heavy"}
 
-# The descriptive → numbers → gaps/eval → (web gap-fill) → publish chain.
+# The descriptive → numbers → gaps/eval → (web gap-fill) → revision → publish chain.
 ANALYSIS_ASSET_KEYS = [
     "analysis_sub",
     "analysis_numbers_extract",
     "analysis_gaps",
     "analysis_evaluation",
     "analysis_web_gapfill",
+    "analysis_revision",
     "analysis_overview",
 ]
 

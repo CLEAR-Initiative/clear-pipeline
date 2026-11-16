@@ -25,7 +25,8 @@ class NodeVerdict:
     task: str
     kept: bool
     completeness: float | None
-    reason: str  # kept | below_floor | no_evidence | not_generated
+    # kept | web_rescued | below_floor | no_evidence | not_generated
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -42,10 +43,18 @@ def filter_package(
     artifacts: dict[str, dict],
     *,
     completeness_floor: float = DEFAULT_EVAL_COMPLETENESS_FLOOR,
+    rescued_node_keys: set[str] | None = None,
 ) -> EvaluatedPackage:
     """Filter the descriptive package: keep nodes that cleared the completeness
     floor and carry evidence; flag the rest. Summarise completeness overall and
-    per task (section)."""
+    per task (section).
+
+    ``rescued_node_keys`` are nodes the web gap-fill answered (resolved/partial
+    with enough confidence): they are kept even below the floor — the trusted
+    content comes from the tiered web evidence attached at publish time, so a
+    thin KB answer no longer drops a question the web could answer.
+    """
+    rescued = rescued_node_keys or set()
     verdicts: list[NodeVerdict] = []
     scores: list[float] = []
     by_task_scores: dict[str, list[float]] = {}
@@ -56,14 +65,16 @@ def filter_package(
         completeness = desc.get("completeness")
         has_findings = bool(desc.get("findings"))
 
-        if art is None:
+        if completeness is not None and has_findings and completeness >= completeness_floor:
+            kept, reason = True, "kept"
+        elif node.key in rescued:
+            kept, reason = True, "web_rescued"
+        elif art is None:
             kept, reason = False, "not_generated"
         elif not has_findings:
             kept, reason = False, "no_evidence"
-        elif completeness is None or completeness < completeness_floor:
-            kept, reason = False, "below_floor"
         else:
-            kept, reason = True, "kept"
+            kept, reason = False, "below_floor"
 
         verdicts.append(
             NodeVerdict(

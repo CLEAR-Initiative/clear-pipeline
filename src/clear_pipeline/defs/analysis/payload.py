@@ -44,19 +44,50 @@ _V5_SECTOR_KEY: dict[str, str] = {
 }
 
 
+def _web_evidence_block(gapfill: dict) -> dict[str, Any]:
+    """Publish-shaped view of a node's web gap-fill result: the tiered web
+    evidence that answered a gap the KB could not. Kept separate from the KB
+    ``findings`` (different provenance — §9 source tiers, not report ids).
+
+    Each finding keeps its own resolved ``source_urls`` alongside the text:
+    ``fill_gap`` has already stripped the inline ``[Rn]`` markers, so the
+    flat ``sources`` list alone can't say which source backs which claim.
+    """
+    return {
+        # GapFillResult.value is the list of SourcedFinding ({text, source_urls}).
+        "findings": [
+            {"text": f.get("text"), "source_urls": f.get("source_urls", [])}
+            for f in gapfill.get("value", [])
+            if f.get("text")
+        ],
+        "status": gapfill.get("status"),
+        "confidence": gapfill.get("confidence"),
+        "source_category_used": gapfill.get("source_category_used"),
+        "sources": gapfill.get("sources", []),
+    }
+
+
 def build_v6_payload(
     node_artifacts: dict[str, dict],
     numbers: dict | None = None,
     overview: str = "",
+    *,
+    quality: dict | None = None,
+    web_evidence: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the v6 payload from the per-node descriptive artifacts
-    (``analysis_sub`` output, keyed by ``node_key``), the numbers artifact, and
-    the cross-section overview text."""
+    """Assemble the v6 payload from the **kept** per-node descriptive artifacts
+    (flagged nodes are dropped upstream), the numbers artifact, and the overview.
+
+    ``quality`` is the run-level evaluation summary (mean/by-task completeness,
+    kept/flagged/revised/web-rescued counts, dropped nodes) so a consumer knows
+    how trustworthy and complete the picture is. ``web_evidence`` attaches a
+    node's tiered web gap-fill answer where one exists."""
+    web_evidence = web_evidence or {}
     nodes: dict[str, Any] = {}
     for key, art in node_artifacts.items():
         node = art.get("node", {})
         desc = art.get("descriptive", {})
-        nodes[key] = {
+        entry = {
             "name": node.get("name"),
             "task": node.get("task"),
             "level": node.get("level"),
@@ -65,12 +96,17 @@ def build_v6_payload(
             "questions_not_answered": desc.get("questions_not_answered", []),
             "source_report_ids": desc.get("source_report_ids", []),
         }
+        gf = web_evidence.get(key)
+        if gf:
+            entry["web_evidence"] = _web_evidence_block(gf)
+        nodes[key] = entry
     return {
         "schema_version": PAYLOAD_SCHEMA_VERSION,
         "taxonomy_depth": "L1",
         "overview": overview,
         "nodes": nodes,
         "numbers": numbers or {},
+        "quality": quality or {},
     }
 
 

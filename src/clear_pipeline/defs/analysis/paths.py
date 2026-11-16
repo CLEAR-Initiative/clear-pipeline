@@ -53,6 +53,25 @@ def gapfill_key(
     return f"{_ROOT}/gapfill/{iso3}/{window_kind}/{prompt_version}_{schema_version}/{node_key}.json"
 
 
+def revision_key(
+    iso3: str, window_kind: str, prompt_version: str, schema_version: str, node_key: str
+) -> str:
+    """S3 key for one node's REVISED descriptive artifact (reflexion rescue of a
+    flagged node). Same ``{node, descriptive}`` shape as the original, under a
+    ``revision/`` prefix so the original stays intact and overview can prefer the
+    revised one."""
+    return f"{_ROOT}/revision/{iso3}/{window_kind}/{prompt_version}_{schema_version}/{node_key}.json"
+
+
+def revision_package_key(
+    iso3: str, window_kind: str, prompt_version: str, schema_version: str
+) -> str:
+    """S3 key for the per-country FINAL evaluated package after revision + web
+    rescue (kept/flagged/revised/rescued + quality summary). What overview reads
+    to decide which nodes to publish."""
+    return f"{_ROOT}/revision/{iso3}/{window_kind}/{prompt_version}_{schema_version}/_package.json"
+
+
 def pinned_sites_key(iso3: str) -> str:
     """S3 key for the operator-maintained per-frame pinned-sites map
     (``{domain: category}``) consumed by the source classifier (§9.1)."""

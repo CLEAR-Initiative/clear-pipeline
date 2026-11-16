@@ -33,6 +33,41 @@ def load_descriptive(
     return out
 
 
+def load_final_descriptive(
+    s3, bucket: str, iso3: str, window_kind: str, nodes: list[TaxonomyNode]
+) -> dict[str, dict]:
+    """Like :func:`load_descriptive`, but prefer a node's REVISED artifact
+    (reflexion rescue) over its original when one exists. The revised artifact
+    carries the same ``{node, descriptive}`` shape, so downstream code is
+    unaffected."""
+    out: dict[str, dict] = {}
+    for node in nodes:
+        revised_key = paths.revision_key(iso3, window_kind, PROMPT_VERSION, SCHEMA_VERSION, node.key)
+        orig_key = paths.descriptive_key(iso3, window_kind, PROMPT_VERSION, SCHEMA_VERSION, node.key)
+        for key in (revised_key, orig_key):
+            try:
+                obj = s3.get_object(Bucket=bucket, Key=key)
+                out[node.key] = json.loads(obj["Body"].read())
+                break
+            except Exception:  # noqa: BLE001 — try the original, else omit (= gap)
+                continue
+    return out
+
+
+def load_gapfills(
+    s3, bucket: str, iso3: str, window_kind: str, nodes: list[TaxonomyNode]
+) -> dict[str, dict]:
+    """Load the per-node web gap-fill artifacts → ``{node_key: gapfill}`` (nodes
+    with no gap-fill are omitted)."""
+    out: dict[str, dict] = {}
+    for node in nodes:
+        key = paths.gapfill_key(iso3, window_kind, PROMPT_VERSION, SCHEMA_VERSION, node.key)
+        gf = load_json(s3, bucket, key)
+        if gf:
+            out[node.key] = gf
+    return out
+
+
 def save_json(s3, bucket: str, key: str, payload: dict) -> None:
     """Persist a JSON artifact (compact, UTF-8)."""
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

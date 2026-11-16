@@ -25,7 +25,11 @@ from clear_pipeline.defs.analysis.payload import (
     build_v6_payload,
 )
 from clear_pipeline.defs.analysis.registry import ANALYSIS_LLM_ROLE, PROMPT_VERSION, SCHEMA_VERSION
-from clear_pipeline.defs.analysis.store import load_descriptive, load_json
+from clear_pipeline.defs.analysis.store import (
+    load_final_descriptive,
+    load_gapfills,
+    load_json,
+)
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
 from clear_pipeline.providers import clear_api
@@ -46,13 +50,29 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _weakness_note(flagged_verdicts: list[dict], names: dict[str, str], by_task: dict) -> str:
+    """A short, bounded note on where evidence is thin, for the overview prompt:
+    the dropped sections (with why) and the weakest tasks."""
+    lines = [
+        f"- {names.get(v['node_key'], v['node_key'])} ({v.get('reason')})"
+        for v in flagged_verdicts[:10]
+    ]
+    weak_tasks = sorted((by_task or {}).items(), key=lambda kv: kv[1])[:3]
+    if weak_tasks:
+        lines.append(
+            "weakest sections: " + ", ".join(f"{t} ({c:.2f})" for t, c in weak_tasks)
+        )
+    return "\n".join(lines)
+
+
 @dg.asset(
     group_name="analysis",
-    deps=["analysis_sub", "analysis_numbers_extract", "analysis_evaluation"],
+    deps=["analysis_sub", "analysis_numbers_extract", "analysis_revision"],
     partitions_def=country_partitions,
 )
 def analysis_overview(context: dg.AssetExecutionContext) -> dict:
-    """Assemble + publish THIS country's analysis: overview synthesis → hybrid
+    """Assemble + publish THIS country's analysis: drop flagged nodes, fold in
+    web evidence + the quality summary, synthesise a calibrated overview → hybrid
     v6+v5 payload → upsert the analyses row → link analysis_datapoints."""
     iso3 = context.partition_key
     row = {
@@ -69,23 +89,77 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
 
     s3, bucket = _s3(), os.environ["S3_BUCKET"]
     nodes = l1_nodes()
-    artifacts = load_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    names = {n.key: n.name for n in nodes}
+    nodes_by_key = {n.key: n for n in nodes}
     numbers = load_json(
         s3, bucket, paths.numbers_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
     ) or {}
 
-    # Cross-section overview synthesis (one bounded DeepSeek call).
+    # The FINAL evaluated package (after reflexion revision + web rescue) decides
+    # what we publish: KEPT nodes only — flagged nodes are dropped. Prefer each
+    # node's revised artifact over its original.
+    final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    package = load_json(
+        s3, bucket, paths.revision_package_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+    ) or {}
+    # Defensive: if the package is missing, publish everything generated rather
+    # than nothing (revision is a hard dep, so this is an edge case).
+    kept_keys = set(package.get("kept_node_keys", final_artifacts.keys()))
+    verdicts = package.get("verdicts", [])
+    flagged_verdicts = [v for v in verdicts if not v.get("kept")]
+
+    kept_artifacts = {k: a for k, a in final_artifacts.items() if k in kept_keys}
+    gapfills = load_gapfills(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    web_evidence = {k: gapfills[k] for k in kept_keys if k in gapfills}
+
+    # Web-only rescue: a node whose descriptive call produced no artifact can
+    # still be kept (reason web_rescued) when the web gap-fill answered it. It is
+    # absent from final_artifacts, so seed a stub from the taxonomy — no KB
+    # findings to show, but its web_evidence (attached below) still publishes.
+    for key in kept_keys - kept_artifacts.keys():
+        node = nodes_by_key.get(key)
+        if node is None:
+            continue
+        kept_artifacts[key] = {
+            "node": {"name": node.name, "task": node.task, "level": node.level},
+            "descriptive": {
+                "findings": [], "completeness": None,
+                "questions_not_answered": [], "source_report_ids": [],
+            },
+        }
+
+    quality = {
+        "mean_completeness": package.get("mean_completeness"),
+        "by_task": package.get("by_task", {}),
+        "completeness_floor": package.get("completeness_floor"),
+        "kept": len(kept_artifacts),
+        "flagged": len(flagged_verdicts),
+        "revised_node_keys": package.get("revised_node_keys", []),
+        "web_rescued_node_keys": package.get("web_rescued_node_keys", []),
+        "dropped": [
+            {"node_key": v["node_key"], "name": names.get(v["node_key"]), "reason": v.get("reason")}
+            for v in flagged_verdicts
+        ],
+    }
+
+    # Cross-section overview synthesis (one bounded DeepSeek call) over KEPT
+    # sections, calibrated by where evidence is thin.
+    weakness = _weakness_note(flagged_verdicts, names, package.get("by_task", {}))
     budget = analysis_run_budget()
     provider = make_llm_provider(ANALYSIS_LLM_ROLE)
     try:
-        outcome = synthesise_overview(provider=provider, node_artifacts=artifacts, budget=budget)
+        outcome = synthesise_overview(
+            provider=provider, node_artifacts=kept_artifacts, weakness=weakness, budget=budget
+        )
         overview_text = outcome.output.overview
         model = outcome.provenance["model"]
     except Exception:  # noqa: BLE001 — publish the descriptive picture even if synthesis fails
         context.log.exception("[analysis_overview] %s: overview synthesis failed", iso3)
         overview_text, model = "", getattr(provider, "model", "")
 
-    v6 = build_v6_payload(artifacts, numbers, overview_text)
+    v6 = build_v6_payload(
+        kept_artifacts, numbers, overview_text, quality=quality, web_evidence=web_evidence
+    )
     data = assemble_published_data(v6)
     source_report_ids = sorted(
         {r for n in v6["nodes"].values() for r in (n.get("source_report_ids") or [])}
@@ -134,6 +208,9 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
         "analysis_id": dg.MetadataValue.text(analysis_id or "(skipped)"),
         "skipped": dg.MetadataValue.bool(bool(res.get("skipped"))),
         "nodes_published": dg.MetadataValue.int(len(v6["nodes"])),
+        "nodes_dropped": dg.MetadataValue.int(len(flagged_verdicts)),
+        "nodes_revised": dg.MetadataValue.int(len(quality["revised_node_keys"])),
+        "nodes_web_rescued": dg.MetadataValue.int(len(quality["web_rescued_node_keys"])),
         "numbers_linked": dg.MetadataValue.bool(linked),
         "spend_usd": dg.MetadataValue.float(round(budget.spent, 4)),
         "schema_version": dg.MetadataValue.text(PAYLOAD_SCHEMA_VERSION),
