@@ -51,8 +51,22 @@ def _outcome(text="Overview text."):
     )
 
 
-def _run(monkeypatch, *, numbers, upsert_result):
+def _package(kept_keys):
+    return {
+        "kept_node_keys": list(kept_keys),
+        "verdicts": [
+            {"node_key": k, "kept": True, "reason": "kept", "completeness": 0.7, "task": "Sectors"}
+            for k in kept_keys
+        ],
+        "by_task": {"Sectors": 0.7}, "mean_completeness": 0.7, "completeness_floor": 0.4,
+        "revised_node_keys": [], "web_rescued_node_keys": [],
+    }
+
+
+def _run(monkeypatch, *, numbers, upsert_result, artifacts=None, package=None, gapfills=None):
     monkeypatch.setenv("S3_BUCKET", "b")
+    arts = _ARTIFACTS if artifacts is None else artifacts
+    pkg = _package(arts.keys()) if package is None else package
     upsert_dp = MagicMock()
     with patch.object(mod.clear_api, "get_pipeline_countries", return_value=[{"name": "Sudan", "iso3": "SDN", "bbox": []}]), \
          patch.object(mod.clear_api, "resolve_country_location_id", return_value="loc-a0"), \
@@ -60,8 +74,9 @@ def _run(monkeypatch, *, numbers, upsert_result):
          patch.object(mod.clear_api, "upsert_analysis_datapoints", upsert_dp), \
          patch.object(mod, "_s3", return_value=MagicMock()), \
          patch.object(mod, "make_llm_provider", return_value=MagicMock()), \
-         patch.object(mod, "load_descriptive", return_value=_ARTIFACTS), \
-         patch.object(mod, "load_json", return_value=numbers), \
+         patch.object(mod, "load_final_descriptive", return_value=arts), \
+         patch.object(mod, "load_gapfills", return_value=gapfills or {}), \
+         patch.object(mod, "load_json", side_effect=[numbers, pkg]), \
          patch.object(mod, "synthesise_overview", return_value=_outcome()):
         res = mod.analysis_overview(dg.build_asset_context(partition_key="SDN"))
     return res, upsert_an, upsert_dp
@@ -91,6 +106,35 @@ def test_skips_datapoints_when_upsert_skipped(monkeypatch):
     )
     assert res["skipped"] is True and res["numbers_linked"] is False
     upsert_dp.assert_not_called()
+
+
+def test_drops_flagged_nodes_and_attaches_quality_and_web_evidence(monkeypatch):
+    arts = {
+        "sectors/health": _art("Health", "Clinics closed"),
+        "sectors/wash": _art("WASH", "Thin WASH note"),
+    }
+    # Package keeps only Health; WASH is flagged (dropped). Health has web evidence.
+    package = {
+        "kept_node_keys": ["sectors/health"],
+        "verdicts": [
+            {"node_key": "sectors/health", "kept": True, "reason": "kept", "completeness": 0.7, "task": "Sectors"},
+            {"node_key": "sectors/wash", "kept": False, "reason": "below_floor", "completeness": 0.2, "task": "Sectors"},
+        ],
+        "by_task": {"Sectors": 0.45}, "mean_completeness": 0.45, "completeness_floor": 0.4,
+        "revised_node_keys": ["sectors/health"], "web_rescued_node_keys": [],
+    }
+    gapfills = {"sectors/health": {"status": "partial", "confidence": 0.6,
+                                   "value": [{"text": "web-sourced detail"}], "sources": [{"url": "x"}],
+                                   "source_category_used": 2}}
+    _res, upsert_an, _dp = _run(
+        monkeypatch, numbers=_NUMBERS, artifacts=arts, package=package, gapfills=gapfills,
+        upsert_result={"analysisId": "an1", "skipped": False, "supersededPrevious": True, "reason": None},
+    )
+    data = upsert_an.call_args.kwargs["data"]
+    assert set(data["nodes"].keys()) == {"sectors/health"}  # WASH dropped
+    assert data["quality"]["flagged"] == 1 and data["quality"]["kept"] == 1
+    assert data["quality"]["dropped"][0]["reason"] == "below_floor"
+    assert data["nodes"]["sectors/health"]["web_evidence"]["findings"] == ["web-sourced detail"]
 
 
 def test_skips_datapoints_when_numbers_empty(monkeypatch):

@@ -31,9 +31,13 @@ class OverviewLLM(BaseModel):
     completeness: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
-def build_overview_prompt(node_artifacts: dict[str, dict]) -> str:
+def build_overview_prompt(node_artifacts: dict[str, dict], weakness: str = "") -> str:
     """Render the section findings into the synthesis user prompt. Nodes with no
-    findings are skipped (nothing to synthesise from)."""
+    findings are skipped (nothing to synthesise from).
+
+    ``weakness`` is a short note on where evidence is thin (flagged/dropped
+    sections, low-completeness tasks) so the overview is calibrated — honest
+    about gaps rather than narrating every section as equally solid."""
     blocks: list[str] = []
     for art in node_artifacts.values():
         node = art.get("node", {})
@@ -45,8 +49,9 @@ def build_overview_prompt(node_artifacts: dict[str, dict]) -> str:
         if bullets:
             blocks.append(f"### {node.get('name', '?')}\n{bullets}")
     body = "\n\n".join(blocks) if blocks else "(no section findings available)"
+    weak_note = f"\n\nWHERE EVIDENCE IS THIN (reflect this honestly, don't overstate):\n{weakness}" if weakness else ""
     return (
-        "SECTION FINDINGS:\n" + body + "\n\n"
+        "SECTION FINDINGS:\n" + body + weak_note + "\n\n"
         "Write the cross-cutting situation overview in `overview`."
     )
 
@@ -55,11 +60,12 @@ def synthesise_overview(
     *,
     provider,
     node_artifacts: dict[str, dict],
+    weakness: str = "",
     budget=None,
     caps: Caps | None = None,
 ) -> NodeOutcome:
     """Run the bounded overview synthesis over the node artifacts."""
-    user = build_overview_prompt(node_artifacts)
+    user = build_overview_prompt(node_artifacts, weakness)
     return run_node(
         provider=provider,
         system=_SYSTEM,
