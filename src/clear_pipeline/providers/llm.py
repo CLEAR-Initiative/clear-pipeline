@@ -960,8 +960,14 @@ def make_llm_provider(role: LLMRole) -> LLMProvider:
     # model (the switch is a no-op).
     no_think = (_env("NO_THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
     # Inverse switch: explicitly turn reasoning ON for a role whose model defaults
-    # to non-thinking (the adversarial judge). NO_THINK wins if both are set.
+    # to non-thinking (the adversarial judge).
     think = (_env("THINK", required=False) or "").strip().lower() in ("1", "true", "yes")
+    # An explicit THINK=true overrides NO_THINK. This matters because a role can
+    # INHERIT NO_THINK from its fallback role (_ROLE_ENV_FALLBACK) — e.g. the
+    # judge (analysis_judge) inherits LLM_ANALYSIS_NO_THINK=true — but must still
+    # reason. Only THINK-opted roles are affected; everything else is unchanged.
+    if think:
+        no_think = False
     # Force OpenRouter to route to a backend that honours `response_format`;
     # without it a "supports structured outputs" model can still land on a
     # backend that ignores the schema → free-form output → truncation.
