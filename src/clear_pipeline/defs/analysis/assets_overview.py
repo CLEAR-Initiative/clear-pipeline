@@ -19,6 +19,7 @@ import dagster as dg
 from clear_pipeline.defs.analysis import paths
 from clear_pipeline.defs.analysis.assemble_v5 import assemble_v5
 from clear_pipeline.defs.analysis.budget import analysis_run_budget
+from clear_pipeline.defs.analysis.numbers import project_v5_datapoints
 from clear_pipeline.defs.analysis.output_schemas import NodeEnvelope
 from clear_pipeline.defs.analysis.overview import synthesise_overview
 from clear_pipeline.defs.analysis.payload import (
@@ -88,7 +89,7 @@ def _assemble_structured_data(
             "source_report_ids": source_report_ids,
             "contributing_sources": {},
         },
-        "datapoints": (numbers or {}).get("data", {}),
+        "datapoints": project_v5_datapoints(numbers),
         "sources": _build_sources(kept_artifacts, source_report_ids),
     }
 

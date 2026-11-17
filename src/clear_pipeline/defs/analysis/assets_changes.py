@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import dagster as dg
 
 from clear_pipeline.defs.analysis import paths
+from clear_pipeline.defs.analysis.numbers import project_v5_datapoints
 from clear_pipeline.defs.analysis.assemble_v5 import assemble_v5
 from clear_pipeline.defs.analysis.budget import analysis_run_budget
 from clear_pipeline.defs.analysis.changes import empty_changes, generate_changes
@@ -94,7 +95,7 @@ def _assemble_new_v5(s3, bucket, iso3: str, nodes) -> dict:
     numbers = load_json(
         s3, bucket, paths.numbers_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
     ) or {}
-    new_v5["datapoints"] = numbers.get("data", {})
+    new_v5["datapoints"] = project_v5_datapoints(numbers)
     return new_v5
 
 
