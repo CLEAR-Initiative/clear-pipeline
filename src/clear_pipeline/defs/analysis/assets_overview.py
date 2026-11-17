@@ -17,7 +17,9 @@ from datetime import datetime, timezone
 import dagster as dg
 
 from clear_pipeline.defs.analysis import paths
+from clear_pipeline.defs.analysis.assemble_v5 import assemble_v5
 from clear_pipeline.defs.analysis.budget import analysis_run_budget
+from clear_pipeline.defs.analysis.output_schemas import NodeEnvelope
 from clear_pipeline.defs.analysis.overview import synthesise_overview
 from clear_pipeline.defs.analysis.payload import (
     PAYLOAD_SCHEMA_VERSION,
@@ -25,10 +27,12 @@ from clear_pipeline.defs.analysis.payload import (
     build_v6_payload,
 )
 from clear_pipeline.defs.analysis.registry import ANALYSIS_LLM_ROLE, PROMPT_VERSION, SCHEMA_VERSION
+from clear_pipeline.defs.analysis.structured import structured_enabled
 from clear_pipeline.defs.analysis.store import (
     load_final_descriptive,
     load_gapfills,
     load_json,
+    load_total_cost,
 )
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
@@ -50,6 +54,67 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _assemble_structured_data(
+    v6: dict, kept_artifacts: dict, overview_text: str, numbers: dict, source_report_ids: list,
+) -> dict:
+    """The v6-as-true-superset ``analyses.data`` (ADR-0015, structured path).
+
+    Merges three views into one blob:
+    - the v5 TOP-LEVEL fields from the kept nodes' envelopes (``assemble_v5``) —
+      what clear-mvp reads today, so flipping the flag doesn't regress it;
+    - the v6 keyed ``nodes`` view + ``overview`` / ``numbers`` / ``quality``;
+    - the v5 scalar fields (``ai_summary`` / ``datapoints`` / ``sources``).
+
+    A kept node with no envelope (web-rescue stub) is simply absent from the v5
+    top-level assembly — it still appears in the v6 ``nodes`` view."""
+    l1_envelopes: dict[str, NodeEnvelope] = {}
+    for key, art in kept_artifacts.items():
+        dump = art.get("envelope")
+        if not dump:
+            continue
+        try:
+            l1_envelopes[key] = NodeEnvelope(**dump)
+        except Exception:  # noqa: BLE001 — a malformed envelope just drops from v5 top-level
+            continue
+    v5_fields = assemble_v5(l1_envelopes)
+    return {
+        **v6,
+        **v5_fields,
+        # v5 scalar fields in the exact shapes clear-mvp reads: ai_summary.text,
+        # sources.reports[] with titles (clear-api returns data verbatim, so the
+        # titles must be embedded here or the UI shows 'Untitled report').
+        "ai_summary": {
+            "text": overview_text,
+            "source_report_ids": source_report_ids,
+            "contributing_sources": {},
+        },
+        "datapoints": (numbers or {}).get("data", {}),
+        "sources": _build_sources(kept_artifacts, source_report_ids),
+    }
+
+
+def _build_sources(kept_artifacts: dict, source_report_ids: list) -> dict:
+    """v5 ``sources.reports`` — each cited report with its title/url/date, lifted
+    from the per-node ``report_meta`` (captured from the RAG hits at generation).
+    Newest-first; a report with no captured title falls back to its id (so it is
+    still citable), matching the legacy situation path."""
+    meta: dict[str, dict] = {}
+    for art in kept_artifacts.values():
+        for rid, m in (art.get("report_meta") or {}).items():
+            meta.setdefault(rid, m)
+    reports = [
+        {
+            "report_id": rid,
+            "report_title": (meta.get(rid, {}).get("report_title") or rid),
+            "source_url": meta.get(rid, {}).get("source_url") or "",
+            "published_at": meta.get(rid, {}).get("published_at") or "",
+        }
+        for rid in source_report_ids
+    ]
+    reports.sort(key=lambda r: r["published_at"], reverse=True)
+    return {"reports": reports}
+
+
 def _weakness_note(flagged_verdicts: list[dict], names: dict[str, str], by_task: dict) -> str:
     """A short, bounded note on where evidence is thin, for the overview prompt:
     the dropped sections (with why) and the weakest tasks."""
@@ -67,7 +132,10 @@ def _weakness_note(flagged_verdicts: list[dict], names: dict[str, str], by_task:
 
 @dg.asset(
     group_name="analysis",
-    deps=["analysis_sub", "analysis_numbers_extract", "analysis_revision"],
+    deps=[
+        "analysis_sub", "analysis_numbers_extract", "analysis_revision",
+        "analysis_scenarios", "analysis_changes",
+    ],
     partitions_def=country_partitions,
 )
 def analysis_overview(context: dg.AssetExecutionContext) -> dict:
@@ -160,9 +228,45 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
     v6 = build_v6_payload(
         kept_artifacts, numbers, overview_text, quality=quality, web_evidence=web_evidence
     )
-    data = assemble_published_data(v6)
     source_report_ids = sorted(
         {r for n in v6["nodes"].values() for r in (n.get("source_report_ids") or [])}
+    )
+
+    if structured_enabled():
+        # v6-as-true-superset (ADR-0015): the overlapping L1s publish to their v5
+        # TOP-LEVEL paths (sectors / context_risks / displacement / hazards /
+        # access) so clear-mvp reads them unchanged — no regression — and new-only
+        # L1s land under data.taxonomy. The v6 keyed `nodes` view + overview /
+        # numbers / quality ride alongside.
+        data = _assemble_structured_data(
+            v6, kept_artifacts, overview_text, numbers, source_report_ids
+        )
+        # Overlay the forward-looking `scenarios` + temporal `changes` components,
+        # each produced by its own upstream asset (analysis_scenarios /
+        # analysis_changes) and read here from S3. Absent artifact → the empty
+        # skeleton default stays (frontend-stable).
+        scenarios = load_json(
+            s3, bucket, paths.scenarios_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+        )
+        if scenarios:
+            data["scenarios"] = scenarios.get("scenarios", data.get("scenarios"))
+        changes = load_json(
+            s3, bucket, paths.changes_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+        )
+        if changes:
+            data["changes"] = changes.get("changes", data.get("changes"))
+    else:
+        # Legacy hybrid: v6 payload with the (lossy) v5 projection embedded under
+        # data["v5"]. Unchanged until the structured flag is flipped.
+        data = assemble_published_data(v6)
+
+    # Total generation cost = every upstream stage's recorded spend + this asset's
+    # own synthesis. Each asset owns a SEPARATE run budget, so `budget.spent` here
+    # is only the overview's slice — the real cost is the sum across stages.
+    total_cost = round(
+        load_total_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+        + budget.spent,
+        4,
     )
 
     # Publish the analyses row (schema_version v6).
@@ -175,7 +279,7 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
         data=data,
         source_report_ids=source_report_ids,
         generated_by_model=model,
-        generation_cost_usd=round(budget.spent, 4),
+        generation_cost_usd=total_cost,
         schema_version=PAYLOAD_SCHEMA_VERSION,
     )
     analysis_id = res.get("analysisId")
@@ -212,7 +316,8 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
         "nodes_revised": dg.MetadataValue.int(len(quality["revised_node_keys"])),
         "nodes_web_rescued": dg.MetadataValue.int(len(quality["web_rescued_node_keys"])),
         "numbers_linked": dg.MetadataValue.bool(linked),
-        "spend_usd": dg.MetadataValue.float(round(budget.spent, 4)),
+        "overview_spend_usd": dg.MetadataValue.float(round(budget.spent, 4)),
+        "total_generation_cost_usd": dg.MetadataValue.float(total_cost),
         "schema_version": dg.MetadataValue.text(PAYLOAD_SCHEMA_VERSION),
     })
     return {

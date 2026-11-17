@@ -45,6 +45,12 @@ from clear_pipeline.defs.analysis.store import (
     load_gapfills,
     load_json,
     save_json,
+    save_stage_cost,
+)
+from clear_pipeline.defs.analysis.structured import (
+    build_structured_artifact,
+    compose_l1,
+    structured_enabled,
 )
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
@@ -73,6 +79,50 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
     start = datetime(year, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
     return start.isoformat(), end.isoformat()
+
+
+def _prior_completeness(art: dict) -> float:
+    env = art.get("envelope") or {}
+    if env.get("completeness") is not None:
+        return float(env["completeness"])
+    c = (art.get("descriptive") or {}).get("completeness")
+    return float(c) if c is not None else 0.0
+
+
+def _revise_structured(
+    context, s3, bucket, rev_key, iso3, node, art, frame, country_name, budget,
+) -> bool:
+    """Structured reflexion pass (ADR-0015): regenerate the flagged node's
+    envelope and keep it only if completeness improved. Writes the same dual-shape
+    artifact as analysis_sub (so load_final_descriptive + assemble_v5 see it).
+
+    First cut: a plain structured regenerate, not a prior-shown reflexion — the
+    archetype call has no prior-attempt channel yet. Returns True if a revision
+    was written."""
+    prior_comp = _prior_completeness(art)
+    try:
+        env, accts = compose_l1(
+            node=node, frame=frame, scope_label=country_name,
+            make_provider=lambda: make_llm_provider(ANALYSIS_LLM_ROLE), budget=budget,
+        )
+    except BudgetExhaustedError:
+        context.log.warning("[analysis_revision] %s: budget exhausted revising %s", iso3, node.key)
+        return False
+    except Exception:  # noqa: BLE001 — isolate one node's failure
+        context.log.exception("[analysis_revision] %s: revising %s failed", iso3, node.key)
+        return False
+    if (env.completeness or 0.0) <= prior_comp:
+        context.log.info(
+            "[analysis_revision] %s %s: revision did not improve (%.2f→%.2f), dropping",
+            iso3, node.key, prior_comp, env.completeness or 0.0,
+        )
+        return False
+    artifact = build_structured_artifact(
+        iso3=iso3, window_kind=_WINDOW_KIND, frame=frame, node=node, env=env, accts=accts,
+    )
+    artifact["revised_from_completeness"] = prior_comp
+    save_json(s3, bucket, rev_key, artifact)
+    return True
 
 
 @dg.asset(
@@ -116,7 +166,12 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
     frame = country_frame(country_id, window_start=window_start, window_end=window_end)
     budget = analysis_run_budget()
     originals = load_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    structured = structured_enabled()
 
+    context.log.info(
+        "[analysis_revision] %s: %d flagged nodes selected to revise, %d web-rescued (structured=%s)",
+        iso3, len(to_revise), len(rescued), structured,
+    )
     revised: list[str] = []
     for node_key in to_revise:
         node = nodes_by_key.get(node_key)
@@ -130,6 +185,13 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
         if not budget.allow_more_spend():
             context.log.warning("[analysis_revision] %s: budget exhausted before %s", iso3, node_key)
             break
+        context.log.info("[analysis_revision] %s %s: revising (reflexion)…", iso3, node_key)
+        if structured:
+            if _revise_structured(
+                context, s3, bucket, rev_key, iso3, node, art, frame, country_name, budget,
+            ):
+                revised.append(node_key)
+            continue
         prior = NodeDescriptive.model_validate(art.get("descriptive", {}))
         provider = make_llm_provider(ANALYSIS_LLM_ROLE)
         try:
@@ -199,6 +261,7 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "revision", budget.spent)
 
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),

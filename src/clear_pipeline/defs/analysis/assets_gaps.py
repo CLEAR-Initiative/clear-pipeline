@@ -19,6 +19,7 @@ NOTE: no ``from __future__ import annotations`` — Dagster introspects the
 """
 
 import os
+import time
 from dataclasses import asdict
 
 import dagster as dg
@@ -47,7 +48,12 @@ from clear_pipeline.defs.analysis.registry import (
     PROMPT_VERSION,
     SCHEMA_VERSION,
 )
-from clear_pipeline.defs.analysis.store import load_descriptive, load_json, save_json
+from clear_pipeline.defs.analysis.store import (
+    load_descriptive,
+    load_json,
+    save_json,
+    save_stage_cost,
+)
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 from clear_pipeline.defs.analysis.web_gapfill import fill_gap
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
@@ -146,6 +152,10 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
     # Judge each uncertain node (budget-gated; one provider per node so
     # provider.last_usage is unambiguous — doc §7 concurrency caveat).
     budget = analysis_run_budget()
+    context.log.info(
+        "[analysis_evaluation] %s: %d/%d nodes selected for judging (floor=%.2f, band=%.2f)",
+        iso3, len(to_judge), len(nodes), floor, band,
+    )
     verdicts_by_key = {}
     recommendations = {}
     judge_provenance = {}
@@ -174,6 +184,7 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
                 charge(budget, provider)
         verdicts_by_key[node_key] = verdict
         action, rationale = recommendation_for(verdict)
+        context.log.info("[analysis_evaluation] %s %s → %s", iso3, node_key, action)
         recommendations[node_key] = {"action": action, "rationale": rationale}
         # Record WHICH judge actually served (the role can fall back mid-run) so a
         # change in kept/dropped sections is explainable.
@@ -214,6 +225,7 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "evaluation", budget.spent)
 
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),
@@ -283,13 +295,24 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
     budget = analysis_run_budget()
     domain_cache: dict[str, int] = {}
 
+    to_fill = gaps[:max_gaps]  # gaps are pre-ranked worst-first
+    context.log.info(
+        "[analysis_web_gapfill] %s: %d gaps, filling up to %d via %s",
+        iso3, len(gaps), len(to_fill), provider_name,
+    )
     results: list[dict] = []
-    for gap in gaps[:max_gaps]:  # gaps are pre-ranked worst-first
+    for i, gap in enumerate(to_fill, 1):
         if not budget.allow_more_spend():
+            context.log.warning("[analysis_web_gapfill] %s: budget exhausted after %d gaps", iso3, i - 1)
             break
         node_key = gap.get("node_key")
         requirement = gap.get("question") or gap.get("node_name") or ""
+        context.log.info(
+            "[analysis_web_gapfill] %s (%d/%d) %s: searching — %s",
+            iso3, i, len(to_fill), node_key, requirement[:80],
+        )
         provider = make_llm_provider(ANALYSIS_LLM_ROLE)
+        t0 = time.monotonic()
         try:
             gf = fill_gap(
                 requirement=requirement, provider=provider, budget=budget, search=search,
@@ -304,6 +327,11 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
             results.append({"node": node_key, "status": "error"})
             continue
 
+        context.log.info(
+            "[analysis_web_gapfill] %s (%d/%d) %s → %s (confidence=%s, tier=%s, sources=%d, %.1fs)",
+            iso3, i, len(to_fill), node_key, gf.status, gf.confidence,
+            gf.source_category_used, len(gf.sources), time.monotonic() - t0,
+        )
         save_json(
             s3, bucket,
             paths.gapfill_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, node_key),
@@ -319,6 +347,7 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "web_gapfill", budget.spent)
 
     resolved = sum(1 for r in results if r.get("status") == "resolved")
     context.add_output_metadata({

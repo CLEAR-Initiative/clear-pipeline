@@ -81,3 +81,38 @@ def load_json(s3, bucket: str, key: str) -> dict | None:
         return json.loads(obj["Body"].read())
     except Exception:  # noqa: BLE001 — missing/unreadable → None
         return None
+
+
+def save_stage_cost(
+    s3, bucket: str, iso3: str, window_kind: str, prompt_version: str,
+    schema_version: str, stage: str, spend_usd: float,
+) -> None:
+    """Record one DAG stage's per-country LLM spend, for overview to sum into the
+    published ``generation_cost_usd`` (each asset owns a separate run budget)."""
+    save_json(
+        s3, bucket,
+        paths.cost_key(iso3, window_kind, prompt_version, schema_version, stage),
+        {"spend_usd": round(float(spend_usd or 0.0), 4)},
+    )
+
+
+# Every analysis stage that charges an LLM budget (gaps = pure logic, numbers =
+# deterministic, so neither spends). overview sums these + its own synthesis.
+GENERATION_COST_STAGES = ["sub", "evaluation", "web_gapfill", "revision", "scenarios", "changes"]
+
+
+def load_total_cost(
+    s3, bucket: str, iso3: str, window_kind: str, prompt_version: str,
+    schema_version: str, stages: list[str] | None = None,
+) -> float:
+    """Sum the recorded per-stage spends (missing stage → 0.0). Defaults to every
+    generation stage."""
+    stages = stages if stages is not None else GENERATION_COST_STAGES
+    total = 0.0
+    for stage in stages:
+        doc = load_json(
+            s3, bucket, paths.cost_key(iso3, window_kind, prompt_version, schema_version, stage)
+        )
+        if doc:
+            total += float(doc.get("spend_usd", 0.0) or 0.0)
+    return total

@@ -16,6 +16,8 @@ import dagster as dg
 _HEAVY_RUN_TAGS = {"clear/weight": "heavy"}
 
 # The descriptive → numbers → gaps/eval → (web gap-fill) → revision → publish chain.
+# analysis_scenarios / analysis_changes produce the forward-looking + temporal v5
+# components overview folds into the published payload.
 ANALYSIS_ASSET_KEYS = [
     "analysis_sub",
     "analysis_numbers_extract",
@@ -23,6 +25,8 @@ ANALYSIS_ASSET_KEYS = [
     "analysis_evaluation",
     "analysis_web_gapfill",
     "analysis_revision",
+    "analysis_scenarios",
+    "analysis_changes",
     "analysis_overview",
 ]
 

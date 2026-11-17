@@ -20,6 +20,7 @@ NOTE: no ``from __future__ import annotations`` — Dagster introspects the
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -36,6 +37,13 @@ from clear_pipeline.defs.analysis.registry import (
     SCHEMA_VERSION,
 )
 from clear_pipeline.defs.analysis.runtime import BudgetExhaustedError
+from clear_pipeline.defs.analysis.schema_registry import entry_for
+from clear_pipeline.defs.analysis.store import load_json, save_stage_cost
+from clear_pipeline.defs.analysis.structured import (
+    build_structured_artifact,
+    compose_l1,
+    structured_enabled,
+)
 from clear_pipeline.defs.analysis.taxonomy import l1_nodes
 from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
     SCHEMA_VERSION as AGGREGATION_SCHEMA_VERSION,
@@ -71,6 +79,20 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
     start = datetime(year, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
     return start.isoformat(), end.isoformat()
+
+
+def _emit_node_progress(context, iso3: str, node, r: dict, done: int, total: int) -> None:
+    """Live per-node observability: a one-line log as each leaf lands, carrying its
+    archetype, status, completeness, cost, and elapsed time. Called from the main
+    thread only."""
+    comp = r.get("completeness")
+    comp_s = f"{comp:.2f}" if isinstance(comp, (int, float)) else "—"
+    context.log.info(
+        "[analysis_sub] %s (%d/%d) %s [%s] → %s  completeness=%s cost=$%.4f %.1fs%s",
+        iso3, done, total, node.key, r.get("archetype", "?"), r.get("status", "?"),
+        comp_s, float(r.get("cost_usd", 0.0) or 0.0), float(r.get("elapsed_s", 0.0) or 0.0),
+        " (reused)" if r.get("reused") else "",
+    )
 
 
 @dg.asset(
@@ -123,11 +145,36 @@ def analysis_sub(context: dg.AssetExecutionContext) -> list[dict]:
     budget = analysis_run_budget()
     s3, bucket = _s3_client(), os.environ["S3_BUCKET"]
     nodes = l1_nodes()
+    structured = structured_enabled()
 
-    def run_one(node) -> dict:
-        key = paths.descriptive_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, node.key)
-        if _exists(s3, bucket, key):
-            return {"node": node.key, "status": "cached", "reused": True}
+    def _write(key: str, artifact: dict) -> None:
+        body = json.dumps(artifact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+
+    def _run_structured(node, key) -> dict:
+        # Compose the node's archetype envelope (Section L1s fold in their L2
+        # children) and persist a dual-shape artifact: the legacy `descriptive`
+        # projection (gaps/judge/revision read it unchanged) + the full `envelope`
+        # (overview's assemble_v5 reads it). ONE provider per LLM call — §7.
+        # `logger` surfaces per-L2-child progress for the Section L1s.
+        env, accts = compose_l1(
+            node=node, frame=frame, scope_label=country_name,
+            make_provider=lambda: make_llm_provider(ANALYSIS_LLM_ROLE),
+            aggregated_context=aggregated_context, budget=budget, logger=context.log,
+        )
+        artifact = build_structured_artifact(
+            iso3=iso3, window_kind=_WINDOW_KIND, frame=frame, node=node, env=env, accts=accts,
+        )
+        _write(key, artifact)
+        return {
+            "node": node.key, "status": artifact["status"], "reused": False,
+            "cost_usd": artifact["cost_usd"], "completeness": env.completeness,
+            "rag_hit_count": artifact["rag_hit_count"],
+        }
+
+    def _compute_one(node, key) -> dict:
+        if structured:
+            return _run_structured(node, key)
         # ONE provider per node — total_usage would race on a shared instance (§7).
         provider = make_llm_provider(ANALYSIS_LLM_ROLE)
         res = analyse_node(
@@ -146,25 +193,61 @@ def analysis_sub(context: dg.AssetExecutionContext) -> list[dict]:
             "provenance": res.provenance,
             "rag_hit_count": res.rag_hit_count,
         }
-        body = json.dumps(artifact, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+        _write(key, artifact)
         return {
             "node": node.key, "status": res.status, "reused": False,
             "cost_usd": res.cost_usd, "completeness": res.descriptive.completeness,
+            "rag_hit_count": res.rag_hit_count,
         }
 
+    def run_one(node) -> dict:
+        archetype = entry_for(node.key).archetype if structured else "descriptive"
+        key = paths.descriptive_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, node.key)
+        if _exists(s3, bucket, key):
+            # Structured mode must not reuse an artifact that lacks what the
+            # structured publish needs: the `envelope` (v6 fields) and the
+            # `report_meta` key (sources.reports titles/urls/dates). An artifact
+            # written before either feature is self-healingly recomputed — the
+            # `report_meta` KEY is required, not truthy content (an empty-RAG node
+            # legitimately has {}), so already-metad nodes still cache.
+            if not structured:
+                return {"node": node.key, "status": "cached", "reused": True, "archetype": archetype}
+            cached = load_json(s3, bucket, key)
+            if cached and cached.get("envelope") and "report_meta" in cached:
+                return {"node": node.key, "status": "cached", "reused": True, "archetype": archetype}
+        context.log.info("[analysis_sub] %s %s [%s]: start", iso3, node.key, archetype)
+        t0 = time.monotonic()
+        r = _compute_one(node, key)
+        r["archetype"] = archetype
+        r["elapsed_s"] = round(time.monotonic() - t0, 1)
+        return r
+
+    total = len(nodes)
+    context.log.info(
+        "[analysis_sub] %s: fanning out %d L1 nodes (structured=%s, workers=%d)",
+        iso3, total, structured, _MAX_WORKERS,
+    )
     results: list[dict] = []
+    done = 0
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
         futures = {pool.submit(run_one, n): n for n in nodes}
         for fut in as_completed(futures):
             node = futures[fut]
+            done += 1
             try:
-                results.append(fut.result())
+                r = fut.result()
+                results.append(r)
+                _emit_node_progress(context, iso3, node, r, done, total)
             except BudgetExhaustedError:
-                context.log.warning("[analysis_sub] budget exhausted — skipped %s", node.key)
+                context.log.warning(
+                    "[analysis_sub] %s (%d/%d) %s: budget exhausted — skipped",
+                    iso3, done, total, node.key,
+                )
                 results.append({"node": node.key, "status": "budget_skipped"})
             except Exception:  # noqa: BLE001 — isolate one node's failure (doc §7)
-                context.log.exception("[analysis_sub] node %s failed", node.key)
+                context.log.exception(
+                    "[analysis_sub] %s (%d/%d) %s: failed", iso3, done, total, node.key
+                )
                 results.append({"node": node.key, "status": "failed"})
 
     # context.run.run_id in a real run; fall back for build_asset_context (no run).
@@ -173,6 +256,7 @@ def analysis_sub(context: dg.AssetExecutionContext) -> list[dict]:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "sub", budget.spent)
     created = sum(1 for r in results if not r.get("reused") and r.get("status") == "ok")
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),
