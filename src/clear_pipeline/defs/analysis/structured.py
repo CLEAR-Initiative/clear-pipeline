@@ -28,7 +28,7 @@ from clear_pipeline.defs.analysis.profiles import Caps
 from clear_pipeline.defs.analysis.prompts import build_evidence_user_prompt, build_system_prompt
 from clear_pipeline.defs.analysis.rag_helper import fetch_rag_context
 from clear_pipeline.defs.analysis.registry import provenance_stamp
-from clear_pipeline.defs.analysis.runtime import run_node
+from clear_pipeline.defs.analysis.runtime import BudgetExhaustedError, run_node
 from clear_pipeline.defs.analysis.schema_registry import entry_for
 from clear_pipeline.defs.analysis.taxonomy import TaxonomyNode, children_of
 
@@ -292,11 +292,31 @@ def compose_l1(
     child_summaries: list[str] = []
     for i, child in enumerate(children, 1):
         provider = make_provider()
-        child_env, acct = analyse_node_structured(
-            node=child, frame=frame, scope_label=scope_label, provider=provider,
-            aggregated_context=aggregated_context, budget=budget, rag_limit=rag_limit,
-            include_time_range=include_time_range, effective_end=effective_end,
-        )
+        try:
+            child_env, acct = analyse_node_structured(
+                node=child, frame=frame, scope_label=scope_label, provider=provider,
+                aggregated_context=aggregated_context, budget=budget, rag_limit=rag_limit,
+                include_time_range=include_time_range, effective_end=effective_end,
+            )
+        except BudgetExhaustedError:
+            # Budget gone mid-Section: keep the subsections already generated and
+            # mark this one and the rest unanswered, rather than losing the whole
+            # Section (e.g. Context after 8 of 9 domains completed).
+            log("[compose] %s: budget exhausted at %s — keeping %d/%d subsections",
+                node.key, child.key, len(subsections), len(children))
+            for rem in children[i - 1:]:
+                subsections[rem.key] = _empty_envelope(
+                    rem, entry_for(rem.key).archetype
+                ).model_dump()
+                qna.append(rem.question)
+            break
+        except Exception:  # noqa: BLE001 — isolate one child; the Section keeps its others
+            log("[compose] %s: subsection %s failed — marking unanswered", node.key, child.key)
+            subsections[child.key] = _empty_envelope(
+                child, entry_for(child.key).archetype
+            ).model_dump()
+            qna.append(child.question)
+            continue
         log(
             "[compose] %s: subsection (%d/%d) %s [%s] → completeness=%.2f, rag=%d",
             node.key, i, len(children), child.key, entry_for(child.key).archetype,
