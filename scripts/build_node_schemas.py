@@ -70,12 +70,30 @@ def _pinned_entry(node: TaxonomyNode) -> dict | None:
     return None
 
 
+def _load_existing() -> dict[str, dict]:
+    """The current on-disk registry (``{node_key: entry}``), or empty on first run."""
+    try:
+        return json.loads(_OUT.read_text(encoding="utf-8")).get("nodes", {})
+    except Exception:  # noqa: BLE001 — missing/unreadable → treat as a first build
+        return {}
+
+
 def build() -> dict[str, dict]:
     nodes = get_taxonomy()
+    existing = _load_existing()
     registry: dict[str, dict] = {}
     for n in nodes:
         pinned = _pinned_entry(n)
-        registry[n.key] = pinned or {"archetype": _classify(n.question), "pinned": False}
+        if pinned:
+            registry[n.key] = pinned  # v5-contract pin — always reasserted
+            continue
+        # Preserve a maintainer's reviewed pin for a node still in the taxonomy,
+        # rather than clobbering it with the keyword classifier each regeneration.
+        prev = existing.get(n.key)
+        if prev and prev.get("pinned"):
+            registry[n.key] = prev
+            continue
+        registry[n.key] = {"archetype": _classify(n.question), "pinned": False}
     # Validate: one entry per node, no dupes.
     if len(registry) != len(nodes):
         raise SystemExit(f"registry size {len(registry)} != taxonomy {len(nodes)}")
