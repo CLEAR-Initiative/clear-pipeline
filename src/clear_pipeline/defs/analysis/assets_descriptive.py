@@ -256,7 +256,7 @@ def analysis_sub(context: dg.AssetExecutionContext) -> list[dict]:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
-    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "sub", budget.spent)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "sub", budget.spent, run_id)
     created = sum(1 for r in results if not r.get("reused") and r.get("status") == "ok")
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),

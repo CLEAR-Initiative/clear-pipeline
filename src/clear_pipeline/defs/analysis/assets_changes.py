@@ -127,6 +127,10 @@ def analysis_changes(context: dg.AssetExecutionContext) -> dict:
 
     s3, bucket = _s3(), os.environ["S3_BUCKET"]
     out_key = paths.changes_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+    try:
+        run_id = context.run.run_id
+    except Exception:  # noqa: BLE001
+        run_id = getattr(context, "run_id", "unknown")
 
     # The PRIOR generation = the frame's current analyses row, fetched BEFORE
     # overview's upsert supersedes it.
@@ -149,7 +153,7 @@ def analysis_changes(context: dg.AssetExecutionContext) -> dict:
             ),
             "status": "no_prior",
         })
-        save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "changes", 0.0)
+        save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "changes", 0.0, run_id)
         context.add_output_metadata({
             "country": dg.MetadataValue.text(iso3),
             "status": dg.MetadataValue.text("no_prior"),
@@ -178,12 +182,8 @@ def analysis_changes(context: dg.AssetExecutionContext) -> dict:
         "iso3": iso3, "window_kind": _WINDOW_KIND, "changes": changes, "status": "ran",
     })
 
-    try:
-        run_id = context.run.run_id
-    except Exception:  # noqa: BLE001
-        run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
-    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "changes", budget.spent)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "changes", budget.spent, run_id)
 
     n_notes = len(changes.get("notes", {}))
     context.log.info("[analysis_changes] %s: %d section(s) changed vs prior", iso3, n_notes)

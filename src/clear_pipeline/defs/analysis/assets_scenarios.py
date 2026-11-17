@@ -106,7 +106,7 @@ def analysis_scenarios(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
-    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "scenarios", budget.spent)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "scenarios", budget.spent, run_id)
 
     has_content = bool(result.most_likely or result.best_case or result.worst_case)
     context.add_output_metadata({

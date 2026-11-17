@@ -271,7 +271,7 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
-    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "revision", budget.spent)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "revision", budget.spent, run_id)
 
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),

@@ -93,14 +93,17 @@ def load_json(s3, bucket: str, key: str) -> dict | None:
 
 def save_stage_cost(
     s3, bucket: str, iso3: str, window_kind: str, prompt_version: str,
-    schema_version: str, stage: str, spend_usd: float,
+    schema_version: str, stage: str, spend_usd: float, run_id: str = "",
 ) -> None:
     """Record one DAG stage's per-country LLM spend, for overview to sum into the
-    published ``generation_cost_usd`` (each asset owns a separate run budget)."""
+    published ``generation_cost_usd`` (each asset owns a separate run budget). The
+    ``run_id`` tags the spend to THIS run so a stale file from an earlier run (a
+    stage that was skipped this run, e.g. web gap-fill on ``no_gaps``) is not
+    counted again."""
     save_json(
         s3, bucket,
         paths.cost_key(iso3, window_kind, prompt_version, schema_version, stage),
-        {"spend_usd": round(float(spend_usd or 0.0), 4)},
+        {"spend_usd": round(float(spend_usd or 0.0), 4), "run_id": run_id},
     )
 
 
@@ -111,16 +114,18 @@ GENERATION_COST_STAGES = ["sub", "evaluation", "web_gapfill", "revision", "scena
 
 def load_total_cost(
     s3, bucket: str, iso3: str, window_kind: str, prompt_version: str,
-    schema_version: str, stages: list[str] | None = None,
+    schema_version: str, run_id: str, stages: list[str] | None = None,
 ) -> float:
-    """Sum the recorded per-stage spends (missing stage → 0.0). Defaults to every
-    generation stage."""
+    """Sum the per-stage spends recorded by THIS run (``run_id``). A stage file
+    from an earlier run — a stage skipped this run, or left over after toggling the
+    structured flag — does not match and is ignored (missing stage → 0.0). Defaults
+    to every generation stage."""
     stages = stages if stages is not None else GENERATION_COST_STAGES
     total = 0.0
     for stage in stages:
         doc = load_json(
             s3, bucket, paths.cost_key(iso3, window_kind, prompt_version, schema_version, stage)
         )
-        if doc:
+        if doc and doc.get("run_id") == run_id:
             total += float(doc.get("spend_usd", 0.0) or 0.0)
     return total

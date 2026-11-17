@@ -262,11 +262,16 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
         # data["v5"]. Unchanged until the structured flag is flipped.
         data = assemble_published_data(v6)
 
-    # Total generation cost = every upstream stage's recorded spend + this asset's
-    # own synthesis. Each asset owns a SEPARATE run budget, so `budget.spent` here
-    # is only the overview's slice — the real cost is the sum across stages.
+    # Total generation cost = every upstream stage's recorded spend for THIS run +
+    # this asset's own synthesis. Each asset owns a SEPARATE run budget, so
+    # `budget.spent` here is only the overview's slice; the per-stage costs are tied
+    # to run_id so a stage skipped this run doesn't fold in stale spend.
+    try:
+        run_id = context.run.run_id
+    except Exception:  # noqa: BLE001
+        run_id = getattr(context, "run_id", "unknown")
     total_cost = round(
-        load_total_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+        load_total_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, run_id)
         + budget.spent,
         4,
     )
@@ -303,11 +308,7 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
         )
         linked = True
 
-    try:
-        run_id = context.run.run_id
-    except Exception:  # noqa: BLE001
-        run_id = getattr(context, "run_id", "unknown")
-    budget.log_summary(run_id=run_id)
+    budget.log_summary(run_id=run_id)  # run_id computed above for the cost sum
 
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),

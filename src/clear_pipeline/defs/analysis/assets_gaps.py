@@ -225,7 +225,7 @@ def analysis_evaluation(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
-    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "evaluation", budget.spent)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "evaluation", budget.spent, run_id)
 
     context.add_output_metadata({
         "country": dg.MetadataValue.text(iso3),
@@ -347,7 +347,7 @@ def analysis_web_gapfill(context: dg.AssetExecutionContext) -> dict:
     except Exception:  # noqa: BLE001
         run_id = getattr(context, "run_id", "unknown")
     budget.log_summary(run_id=run_id)
-    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "web_gapfill", budget.spent)
+    save_stage_cost(s3, bucket, iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, "web_gapfill", budget.spent, run_id)
 
     resolved = sum(1 for r in results if r.get("status") == "resolved")
     context.add_output_metadata({
