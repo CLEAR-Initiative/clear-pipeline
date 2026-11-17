@@ -66,7 +66,11 @@ def _period_label(window_start: str, window_end: str | None) -> str:
 def _assemble_new_v5(s3, bucket, iso3: str, nodes) -> dict:
     """The new side to diff: the v5-shaped sections from this run's final node
     envelopes + the extracted datapoints (so figure changes are caught)."""
-    final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    # Structured mode only (changes asset no-ops otherwise) — ignore envelope-less
+    # legacy revisions so the new side reflects the structured originals.
+    final_artifacts = load_final_descriptive(
+        s3, bucket, iso3, _WINDOW_KIND, nodes, require_envelope=True
+    )
     l1_envelopes: dict[str, NodeEnvelope] = {}
     for key, art in final_artifacts.items():
         dump = art.get("envelope")

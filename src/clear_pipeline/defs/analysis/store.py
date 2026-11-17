@@ -34,12 +34,17 @@ def load_descriptive(
 
 
 def load_final_descriptive(
-    s3, bucket: str, iso3: str, window_kind: str, nodes: list[TaxonomyNode]
+    s3, bucket: str, iso3: str, window_kind: str, nodes: list[TaxonomyNode],
+    *, require_envelope: bool = False,
 ) -> dict[str, dict]:
     """Like :func:`load_descriptive`, but prefer a node's REVISED artifact
-    (reflexion rescue) over its original when one exists. The revised artifact
-    carries the same ``{node, descriptive}`` shape, so downstream code is
-    unaffected."""
+    (reflexion rescue) over its original when one exists.
+
+    ``require_envelope`` (structured mode): a revised artifact that predates the
+    structured path has no ``envelope``, and preferring it would hide the newly
+    generated structured original — leaving the node's v5 section empty. When set,
+    an envelope-less revision is skipped so the original (which has the envelope)
+    is used instead."""
     out: dict[str, dict] = {}
     for node in nodes:
         revised_key = paths.revision_key(iso3, window_kind, PROMPT_VERSION, SCHEMA_VERSION, node.key)
@@ -47,10 +52,13 @@ def load_final_descriptive(
         for key in (revised_key, orig_key):
             try:
                 obj = s3.get_object(Bucket=bucket, Key=key)
-                out[node.key] = json.loads(obj["Body"].read())
-                break
+                art = json.loads(obj["Body"].read())
             except Exception:  # noqa: BLE001 — try the original, else omit (= gap)
                 continue
+            if key == revised_key and require_envelope and not art.get("envelope"):
+                continue  # legacy (envelope-less) revision → fall back to the original
+            out[node.key] = art
+            break
     return out
 
 

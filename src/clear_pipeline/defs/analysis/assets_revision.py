@@ -180,8 +180,16 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
             continue
         rev_key = paths.revision_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION, node_key)
         if _exists(s3, bucket, rev_key):
-            revised.append(node_key)
-            continue
+            # In structured mode, a cached revision that predates the structured
+            # path has no envelope — reusing it would hide the structured original.
+            # Recompute it; otherwise reuse as before.
+            if not structured:
+                revised.append(node_key)
+                continue
+            cached_rev = load_json(s3, bucket, rev_key)
+            if cached_rev and cached_rev.get("envelope"):
+                revised.append(node_key)
+                continue
         if not budget.allow_more_spend():
             context.log.warning("[analysis_revision] %s: budget exhausted before %s", iso3, node_key)
             break
@@ -226,7 +234,9 @@ def analysis_revision(context: dg.AssetExecutionContext) -> dict:
     # Re-evaluate over the revised-or-original artifacts, honouring web rescue and
     # the adversarial judge's verdicts (which ran in analysis_evaluation).
     floor = float(os.environ.get("ANALYSIS_EVAL_COMPLETENESS_FLOOR", DEFAULT_EVAL_COMPLETENESS_FLOOR))
-    final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    final_artifacts = load_final_descriptive(
+        s3, bucket, iso3, _WINDOW_KIND, nodes, require_envelope=structured
+    )
     # The judge verdict was formed on the ORIGINAL findings, so it's stale for any
     # node whose loaded artifact is a revision — THIS run's or a cached prior run's.
     # Detect every loaded revision by the revision-only `revised_from_completeness`

@@ -166,7 +166,9 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
     # The FINAL evaluated package (after reflexion revision + web rescue) decides
     # what we publish: KEPT nodes only — flagged nodes are dropped. Prefer each
     # node's revised artifact over its original.
-    final_artifacts = load_final_descriptive(s3, bucket, iso3, _WINDOW_KIND, nodes)
+    final_artifacts = load_final_descriptive(
+        s3, bucket, iso3, _WINDOW_KIND, nodes, require_envelope=structured_enabled()
+    )
     package = load_json(
         s3, bucket, paths.revision_package_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
     ) or {}
