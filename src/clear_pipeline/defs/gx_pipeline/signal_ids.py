@@ -4,24 +4,12 @@ clear-api stores it as ``signals.id`` (clear-api ADR-0023), so a lake record
 can name its Signal before Postgres has seen it.
 
 The id depends on the exact bytes of the externalId: never change
-``NAMESPACE``, a prefix, or how a source builds its externalId."""
+``NAMESPACE``, a provider's ``ID_PREFIX``, or how a source builds its
+externalId."""
 
 import uuid
 
 NAMESPACE = uuid.UUID("68e7d047-622c-40c8-a533-f9963e5603ce")
-
-# One prefix per source, keyed by the default `GXSource.source`. A rename
-# breaks clear-api's (sourceId, externalId) dedupe and re-ids the source.
-PREFIXES = {
-    "dataminr": "dataminr:",
-    "acled": "acled:",
-    "darfur24": "darfur24:",
-    "idmc": "idmc:",
-    "sudan_witness": "suw:",
-    "iom_dtm_flash_alerts": "iom_dtm_flash_alert:",
-    "inso": "inso:",
-    "gdacs": "gdacs:",
-}
 
 # externalId prefixes that clear-api mints outside the pipeline (X ingest,
 # ground promotion, case acceptance). No pipeline prefix may overlap them.

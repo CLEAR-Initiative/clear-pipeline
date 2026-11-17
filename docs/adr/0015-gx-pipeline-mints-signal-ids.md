@@ -17,9 +17,10 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
   NAMESPACE is one hard-coded UUID. externalId is the prefixed key clear-api
   dedupes on (`idmc:123`), not gold's bare row key. A test pins one input and
   its output.
-- **Prefixes**: `signal_ids.PREFIXES` holds one per source, and each
-  `GXSource` declares its own as `id_prefix`. A test checks that no prefix
-  equals or starts another, nor `x:`, `whatsapp:` or `url:`. Never rename
+- **Prefixes**: each provider defines its prefix once, as `ID_PREFIX`,
+  builds its externalId from it, and its `GXSource` exposes it as
+  `id_prefix`. Tests check that no prefix equals or starts another, nor
+  `x:`, `whatsapp:` or `url:`, and pin each source's prefix. Never rename
   one: it re-ids the source and breaks clear-api's dedupe.
 - **Silver** mints the id once per signal, into the silver JSON on S3 (`id`)
   and the `signalId` column. Gold's `signalInput` does not carry it: the

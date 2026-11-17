@@ -42,6 +42,11 @@ from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "darfur24:"
+
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 # RSS 2.0 module namespaces used by WordPress feeds.
@@ -254,7 +259,7 @@ def build_darfur24_signal_input(article: dict, source_id: str, location_id: str 
         # Dedup key — (sourceId, externalId) is unique in the CLEAR API, so
         # re-ingesting the same article (Redis seen-set expired, feed replay)
         # returns the existing row instead of creating a duplicate.
-        "externalId": f"darfur24:{article['darfur24_id']}",
+        "externalId": f"{ID_PREFIX}{article['darfur24_id']}",
         "rawData": article["raw"],
         "publishedAt": article.get("published_at") or datetime.now(UTC).isoformat(),
         "url": article["url"],

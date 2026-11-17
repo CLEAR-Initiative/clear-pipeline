@@ -30,7 +30,7 @@ def test_mint_refuses_a_missing_or_unprefixed_external_id(external_id):
 
 
 def test_prefixes_are_pairwise_distinct_and_disjoint_from_non_pipeline_ones():
-    prefixes = [*signal_ids.PREFIXES.values(), *signal_ids.NON_PIPELINE_PREFIXES]
+    prefixes = [*(s.id_prefix for s in GX_SOURCES), *signal_ids.NON_PIPELINE_PREFIXES]
     assert len(set(prefixes)) == len(prefixes)
     # No prefix may start another, or two sources could mint the same id.
     for a in prefixes:
@@ -38,7 +38,8 @@ def test_prefixes_are_pairwise_distinct_and_disjoint_from_non_pipeline_ones():
             assert a == b or not b.startswith(a), (a, b)
 
 
-def test_every_gx_source_has_a_registered_prefix():
+def test_gx_source_prefixes_are_pinned():
+    # A renamed prefix silently re-ids its source and breaks clear-api's dedupe.
     assert {s.source: s.id_prefix for s in GX_SOURCES} == {
         "dataminr": "dataminr:", "acled": "acled:", "darfur24": "darfur24:",
         "idmc": "idmc:", "sudan_witness": "suw:",
