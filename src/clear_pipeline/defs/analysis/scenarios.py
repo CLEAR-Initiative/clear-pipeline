@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
+from clear_pipeline.defs.analysis.citations import strip_markers
 from clear_pipeline.defs.analysis.frame import Frame, build_rag_filters
 from clear_pipeline.defs.analysis.profiles import Caps
 from clear_pipeline.defs.analysis.prompts import build_evidence_user_prompt, build_system_prompt
@@ -110,9 +111,13 @@ def generate_scenarios(
         schema=_ScenariosLLM, caps=caps, budget=budget,
     )
     o = outcome.output
+    # The shared system prompt asks for inline [Rn] markers, but their numbering is
+    # local to this search and isn't published as a lookup — strip them from the
+    # prose (the report ids are retained coarsely via source_report_ids).
     return ScenarioResult(
-        most_likely=o.most_likely, best_case=o.best_case, worst_case=o.worst_case,
-        description=o.description, source_report_ids=list(rag.contributing_report_ids),
+        most_likely=strip_markers(o.most_likely), best_case=strip_markers(o.best_case),
+        worst_case=strip_markers(o.worst_case), description=strip_markers(o.description),
+        source_report_ids=list(rag.contributing_report_ids),
         status=outcome.status, usage=outcome.usage, cost_usd=outcome.cost_usd,
         provenance=outcome.provenance,
     )
