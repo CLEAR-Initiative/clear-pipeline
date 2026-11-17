@@ -58,7 +58,8 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
 
 - Deploy order per environment: shape query clean (clear-api ADR-0023),
   clear-api released, then this pipeline, then a one-off export of aliases
-  for gx rows pushed before the switch. Rollback runs in reverse. A pipeline
+  for gx rows pushed before the switch (`scripts/signal_aliases_export.sql`
+  through psql or TablePlus, exported as CSV, then `scripts/signal_aliases_import.py`). Rollback runs in reverse. A pipeline
   that sends `id` to an older clear-api fails every create.
 - `gold.signal_id_aliases` is shared by every source, while the gold pool is
   per source. Two sources' `_push` writing aliases at once can fail one
