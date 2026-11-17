@@ -258,7 +258,8 @@ def aliases_df() -> pd.DataFrame:
 
 def postgres_ids(source: str) -> dict[str, str]:
     """``{signalId: Postgres id}`` for every gold row of ``source``: the
-    alias's `legacyId` when there is one, else `signalId` itself."""
+    alias's `legacyId` when there is one, else `signalId` itself. The SQL
+    equivalent is in ADR-0015: change both together."""
     signal_ids = get_signals_table(source).scan(selected_fields=("signalId",)).to_pandas()["signalId"]
     legacy = dict(aliases_df()[["signalId", "legacyId"]].itertuples(index=False))
     return {sid: legacy.get(sid, sid) for sid in signal_ids.dropna()}

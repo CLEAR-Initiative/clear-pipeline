@@ -37,10 +37,19 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
   unpushed, and the next run re-creates them and records the alias again.
 - **Reading Postgres ids**: `iceberg_signals.postgres_ids(source)` gives
   `legacyId` when aliased, else `signalId`. Lake consumers use it, never
-  `signalId` alone.
+  `signalId` alone. There is no catalog view (the SQL catalog cannot hold
+  one): a SQL reader applies the same rule itself, per source table:
+
+  ```sql
+  SELECT s.signalId, COALESCE(a.legacyId, s.signalId) AS postgresId
+  FROM gold.idmc_signals s
+  LEFT JOIN gold.signal_id_aliases a ON a.signalId = s.signalId
+  ```
 - **`CONFLICT`** from `createSignal` (the id is held by another
-  `(sourceId, externalId)`): `_push` logs it, counts the row as `failed`,
-  writes no alias and leaves the row unpushed for the next run.
+  `(sourceId, externalId)`): `_push` logs it as an error, counts the row as
+  `conflict` (apart from transient `failed`), writes no alias and leaves the
+  row unpushed for the next run. A `CONFLICT` from the follow-up update is
+  a concurrent change and counts as `failed`.
 - **Scope**: every row that reaches gx gold. Only `idmc`, `sudan_witness`,
   `iom_dtm_flash_alerts` and `inso` reach it in production. The legacy
   poller and `_create_signal` send no id and keep cuids.
