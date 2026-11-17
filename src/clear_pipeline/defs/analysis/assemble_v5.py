@@ -168,7 +168,12 @@ def _skeleton() -> dict[str, Any]:
             k: {"severity": None, "top_needs": [], "source_report_ids": []}
             for k in SECTOR_V5_KEY.values()
         },
-        "context_risks": {},
+        # Seed all 9 context domains (like the 10 sectors) so a failed/skipped/
+        # dropped Context L1 still leaves present-but-empty domains, not missing keys.
+        "context_risks": {
+            k: {"bullets": [], "source_report_ids": []}
+            for k in CONTEXT_DOMAIN_V5_KEY.values()
+        },
         "displacement": {"push_factors": [], "return_intention": [], "summary": None},
         "hazards_and_vulnerabilities": {
             "hazards": [], "vulnerabilities": [], "hazards_summary": None,
