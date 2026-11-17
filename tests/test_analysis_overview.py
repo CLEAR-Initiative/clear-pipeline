@@ -28,6 +28,30 @@ def _empty_art(name):
 
 # ── pure prompt ─────────────────────────────────────────────────────
 
+def test_build_sources_embeds_titles_newest_first_with_id_fallback():
+    kept = {
+        "sectors/health": {
+            "report_meta": {
+                "rep-a": {"report_title": "Report A", "source_url": "http://a",
+                          "published_at": "2026-01-01"},
+            }
+        },
+        "pillars_1d/context": {
+            "report_meta": {
+                "rep-b": {"report_title": "Report B", "source_url": "",
+                          "published_at": "2026-03-01"},
+            }
+        },
+    }
+    # rep-c has no captured meta → falls back to its id as the title.
+    out = mod._build_sources(kept, ["rep-a", "rep-b", "rep-c"])
+    reports = out["reports"]
+    # newest-first by published_at: B (2026-03) → A (2026-01) → C (empty date, last)
+    assert [r["report_id"] for r in reports] == ["rep-b", "rep-a", "rep-c"]
+    assert reports[0]["report_title"] == "Report B"
+    assert reports[2]["report_title"] == "rep-c"  # fallback, still citable
+
+
 def test_build_overview_prompt_includes_findings_skips_empty():
     arts = {"sectors/health": _art("Health", "Clinics closed"), "sectors/wash": _empty_art("WASH")}
     prompt = build_overview_prompt(arts)

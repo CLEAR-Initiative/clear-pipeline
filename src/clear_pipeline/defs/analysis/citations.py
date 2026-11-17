@@ -42,6 +42,35 @@ def _clean(text: str) -> str:
     return out.strip()
 
 
+# Public alias — strip inline ``[Rn]`` markers from a free-text string.
+strip_markers = _clean
+
+# A single citation TOKEN the LLM may emit inside a structured ``source_ids``
+# field: "R1", "[R1]", "[1]", or a bare "1" — all 1-based into the RAG hits.
+_TOKEN_RE = re.compile(r"^\s*\[?\s*R?(\d+)\s*\]?\s*$", re.IGNORECASE)
+
+
+def resolve_marker_tokens(
+    tokens: Iterable[str], hit_report_ids: Sequence[str]
+) -> list[str]:
+    """Resolve the citation tokens an LLM put in a structured ``source_ids`` list
+    into real report ids (1-based into ``hit_report_ids``). Accepts ``R1`` /
+    ``[R1]`` / ``1``; range-guarded, order-preserving, de-duplicated. A token that
+    isn't an in-range marker is dropped (hallucination-safe) — the structured
+    sibling of :func:`_resolve_refs`, which parses inline prose markers."""
+    out: list[str] = []
+    for tok in tokens or []:
+        m = _TOKEN_RE.match(str(tok))
+        if not m:
+            continue
+        n = int(m.group(1))
+        if 1 <= n <= len(hit_report_ids):
+            rid = hit_report_ids[n - 1]
+            if rid and rid not in out:
+                out.append(rid)
+    return out
+
+
 def _resolve_refs(text: str, hit_report_ids: Sequence[str]) -> list[str]:
     """Report ids the ``[Rn]`` markers in ``text`` resolve to — 1-based, range-
     guarded, order-preserving, de-duplicated. Unresolvable markers are dropped."""

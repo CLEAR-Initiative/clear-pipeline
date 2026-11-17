@@ -88,6 +88,26 @@ def deepdive_key(
     return f"{deepdive_prefix(frame_digest, prompt_version, schema_version)}/{node_key}.json"
 
 
+def scenarios_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country forward-looking scenarios artifact."""
+    return f"{_ROOT}/scenarios/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
+def changes_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country 'what changed vs the prior generation' artifact."""
+    return f"{_ROOT}/changes/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
+def cost_key(
+    iso3: str, window_kind: str, prompt_version: str, schema_version: str, stage: str
+) -> str:
+    """S3 key for one DAG stage's per-country LLM spend (``{spend_usd}``). Each
+    spending asset writes its own; overview sums them into the published
+    ``generation_cost_usd`` (each asset owns a separate per-run budget, so the
+    total is only knowable by summing across stages)."""
+    return f"{_ROOT}/cost/{iso3}/{window_kind}/{prompt_version}_{schema_version}/{stage}.json"
+
+
 def pinned_sites_key(iso3: str) -> str:
     """S3 key for the operator-maintained per-frame pinned-sites map
     (``{domain: category}``) consumed by the source classifier (§9.1)."""
