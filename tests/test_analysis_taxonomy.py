@@ -76,4 +76,61 @@ def test_registry_stamp_records_the_serving_model():
         "model": "deepseek/deepseek-v3.2",
         "schema_version": registry.SCHEMA_VERSION,
     }
+
+
+# ── resolve_selection — on-demand L2/L3 node deep-dive fan-out ────────────────
+
+
+def _l1_l2_l3_anchor():
+    """A real (L1, L2, [L3...]) chain from the committed taxonomy, so the
+    selection tests don't hard-code slugs that a taxonomy regen could rename."""
+    for l1 in taxonomy.l1_nodes():
+        for l2 in taxonomy.children_of(l1):
+            l3s = taxonomy.children_of(l2)
+            if len(l3s) >= 2:
+                return l1, l2, l3s
+    raise AssertionError("no L1→L2→(≥2 L3) chain in the taxonomy")
+
+
+def test_empty_selection_defaults_to_l1_fan_out():
+    # The country-default analysis is unchanged: no selection → all 22 L1.
+    assert taxonomy.resolve_selection(None) == taxonomy.l1_nodes()
+    assert taxonomy.resolve_selection([]) == taxonomy.l1_nodes()
+    assert taxonomy.resolve_selection(["", None]) == taxonomy.l1_nodes()
+
+
+def test_selecting_two_l3_leaves_generates_only_those_two():
+    # User drills Casualties(L1) → Injured(L2) → picks two L3 leaves. We generate
+    # the two L3 leaves; the L2 on the path is NOT generated even if also sent.
+    _l1, l2, l3s = _l1_l2_l3_anchor()
+    leaf_a, leaf_b = l3s[0], l3s[1]
+    out = taxonomy.resolve_selection([l2.key, leaf_a.key, leaf_b.key])
+    assert {n.key for n in out} == {leaf_a.key, leaf_b.key}
+    assert all(n.level == 3 for n in out)
+
+
+def test_selecting_an_l2_alone_generates_that_l2_leaf():
+    # User stops at Injured(L2) with no L3 chosen → Injured IS the leaf.
+    _l1, l2, _l3s = _l1_l2_l3_anchor()
+    out = taxonomy.resolve_selection([l2.key])
+    assert [n.key for n in out] == [l2.key]
+    assert out[0].level == 2
+
+
+def test_frontier_mixes_levels_and_is_deterministic():
+    # A selection spanning branches keeps each branch's most-specific node; an L1
+    # with no selected descendant stays a leaf alongside a deep L3 from elsewhere.
+    _l1, l2, l3s = _l1_l2_l3_anchor()
+    lone_l1 = next(n for n in taxonomy.l1_nodes() if n.key != _l1.key)
+    out = taxonomy.resolve_selection([lone_l1.key, l2.key, l3s[0].key])
+    assert {n.key for n in out} == {lone_l1.key, l3s[0].key}
+    # Deterministic order: level then key.
+    assert list(out) == sorted(out, key=lambda n: (n.level, n.key))
+
+
+def test_unknown_key_raises_so_a_bad_request_fails_terminally():
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown taxonomy node keys"):
+        taxonomy.resolve_selection(["pillars_1d/casualties", "not/a/real/node"])
     assert registry.ANALYSIS_LLM_ROLE == "analysis"

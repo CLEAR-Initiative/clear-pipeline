@@ -72,6 +72,22 @@ def revision_package_key(
     return f"{_ROOT}/revision/{iso3}/{window_kind}/{prompt_version}_{schema_version}/_package.json"
 
 
+def deepdive_prefix(frame_digest: str, prompt_version: str, schema_version: str) -> str:
+    """Prefix for a request-driven node deep-dive's per-node artifacts. Unlike
+    the country fan-out (keyed by ``iso3``/``window_kind``), an on-demand frame is
+    arbitrary, so it is content-addressed by ``Frame.digest()``. No trailing
+    slash — callers append ``/<node_key>.json``."""
+    return f"{_ROOT}/deepdive/{frame_digest}/{prompt_version}_{schema_version}"
+
+
+def deepdive_key(
+    frame_digest: str, prompt_version: str, schema_version: str, node_key: str
+) -> str:
+    """S3 key for one taxonomy node's descriptive artifact in a frame-scoped
+    on-demand deep-dive (any level — L2/L3 leaves included)."""
+    return f"{deepdive_prefix(frame_digest, prompt_version, schema_version)}/{node_key}.json"
+
+
 def pinned_sites_key(iso3: str) -> str:
     """S3 key for the operator-maintained per-frame pinned-sites map
     (``{domain: category}``) consumed by the source classifier (§9.1)."""

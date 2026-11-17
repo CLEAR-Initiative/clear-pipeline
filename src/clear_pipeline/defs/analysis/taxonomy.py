@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.resources import files
@@ -169,3 +170,39 @@ def children_of(node: TaxonomyNode) -> tuple[TaxonomyNode, ...]:
     return tuple(
         n for n in _load() if n.level == node.level + 1 and n.key.startswith(prefix)
     )
+
+
+def resolve_selection(keys: Iterable[str] | None) -> tuple[TaxonomyNode, ...]:
+    """Resolve a user's node selection to the generation fan-out set.
+
+    The fan-out is the **selection frontier** — the most-specific selected nodes.
+    A selected node that has *another selected node beneath it* is only the
+    navigation path, not a generated leaf; a selected node with no selected
+    descendant IS a leaf and gets generated. So:
+
+    - select ``…/injured`` (L2) + its two L3 children → the **two L3 leaves**
+      (Injured is path only);
+    - select ``…/injured`` (L2) alone → **Injured** (it is the leaf).
+
+    An empty/None selection returns the default L1 fan-out (:func:`l1_nodes`), so
+    the country-default analysis is unchanged.
+
+    Raises :class:`ValueError` listing any keys that are not taxonomy nodes, so a
+    bad on-demand selection fails the request terminally rather than silently
+    generating nothing. Order is deterministic (level, then key) so the fan-out
+    and its metadata are stable.
+    """
+    selected = [k for k in (keys or []) if k]
+    if not selected:
+        return l1_nodes()
+    by_key = _by_key()
+    unknown = sorted({k for k in selected if k not in by_key})
+    if unknown:
+        raise ValueError(f"unknown taxonomy node keys: {unknown[:10]}")
+    sel = set(selected)
+    frontier = [
+        by_key[k]
+        for k in sel
+        if not any(other != k and other.startswith(k + "/") for other in sel)
+    ]
+    return tuple(sorted(frontier, key=lambda n: (n.level, n.key)))

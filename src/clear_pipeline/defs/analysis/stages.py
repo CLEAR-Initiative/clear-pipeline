@@ -19,7 +19,11 @@ from clear_pipeline.defs.knowledgebase.datapoints_schemas import (
 )
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.defs.analysis.frame import FALLBACK_SCOPE_LABEL, Frame, build_rag_filters, scope_label
+from clear_pipeline.defs.analysis.node_deepdive import generate_nodes_for_frame
+from clear_pipeline.defs.analysis.prompts import format_aggregated_for_prompt
+from clear_pipeline.defs.analysis.registry import SCHEMA_VERSION as NODE_SCHEMA_VERSION
 from clear_pipeline.defs.analysis.schemas import SCHEMA_VERSION as ANALYSIS_SCHEMA_VERSION
+from clear_pipeline.defs.analysis.taxonomy import resolve_selection
 
 # TODO(analysis-retire-situation): the unified generator still lives in
 # defs/situation; it is subsumed as the descriptive DAG is built, after which
@@ -224,9 +228,107 @@ def _mark(context, fn, request_id: str, *args) -> bool:
         return False
 
 
+def _node_row(artifact: dict) -> dict:
+    """Map a persisted per-node artifact to the clear-api node-analysis row shape
+    (decision A: one row per (frame, node))."""
+    node = artifact.get("node") or {}
+    desc = artifact.get("descriptive") or {}
+    prov = artifact.get("provenance") or {}
+    usage = artifact.get("usage") or {}
+    return {
+        "nodeKey": node.get("key"),
+        "nodeName": node.get("name"),
+        "task": node.get("task"),
+        "level": node.get("level"),
+        "data": desc,
+        "status": artifact.get("status"),
+        "sourceReportIds": desc.get("source_report_ids") or [],
+        "generatedByModel": prov.get("model"),
+        "generationCostUsd": artifact.get("cost_usd"),
+        "generationInputTokens": usage.get("input_tokens"),
+        "generationOutputTokens": usage.get("output_tokens"),
+    }
+
+
+def _process_node_deepdive(context, req: dict, frame: Frame) -> str:
+    """Generate the SELECTED taxonomy nodes for a frame (on-demand deep-dive) and
+    upsert one result row per node (decision A). The user asked for these exact
+    nodes, so the 24h regeneration gate does not apply — we always generate the
+    selection (skip-if-exists in S3 still spares a re-run the LLM cost). A bad
+    selection (unknown node key) fails the request terminally."""
+    request_id = req["id"]
+    try:
+        nodes = resolve_selection(req.get("taxonomyNodeKeys"))
+    except ValueError as exc:
+        context.log.error("[drain_analysis] request %s bad node selection: %s", request_id, exc)
+        ok = _mark(context, clear_api.mark_analysis_request_failed, request_id, str(exc))
+        return _FAILED if ok else _REQUEUE
+
+    now = datetime.now(timezone.utc)
+    effective_end = None if frame.window_end else now.isoformat()
+    aggregated = _resolve_frame_aggregated(frame, effective_end=effective_end)
+    aggregated_context = format_aggregated_for_prompt(aggregated) if aggregated else None
+
+    try:
+        artifacts = generate_nodes_for_frame(
+            frame=frame, nodes=nodes, scope_label=_scope_label(frame),
+            aggregated_context=aggregated_context, effective_end=effective_end, log=context.log,
+        )
+    except Exception as exc:  # noqa: BLE001 — transient (LLM / S3 blip): retry next tick
+        context.log.warning(
+            "[drain_analysis] deep-dive %s failed transiently — leaving PENDING: %s", request_id, exc,
+        )
+        return _REQUEUE
+
+    # failed / budget_skipped nodes are RETRYABLE — a transient provider/S3 error
+    # or an exhausted-this-run budget. surfaceable = real findings (incl. a
+    # best_effort "no evidence" result), persisted now so partial progress isn't
+    # lost and the S3 cache spares them from re-running next drain.
+    retryable = [a for a in artifacts if a.get("status") in {"failed", "budget_skipped"}]
+    surfaceable = [a for a in artifacts if a.get("status") not in {"failed", "budget_skipped"}]
+
+    if surfaceable:
+        try:
+            clear_api.upsert_node_analyses(
+                schema_version=NODE_SCHEMA_VERSION,
+                nodes=[_node_row(a) for a in surfaceable],
+                **frame.upsert_kwargs(),
+            )
+        except clear_api.ClearApiError as exc:
+            context.log.error("[drain_analysis] deep-dive %s upsert rejected: %s", request_id, exc)
+            ok = _mark(context, clear_api.mark_analysis_request_failed, request_id, str(exc))
+            return _FAILED if ok else _REQUEUE
+        except Exception as exc:  # noqa: BLE001 — transient upsert blip: retry
+            context.log.warning(
+                "[drain_analysis] deep-dive %s upsert failed transiently — leaving PENDING: %s", request_id, exc,
+            )
+            return _REQUEUE
+
+    # Keep the request PENDING while ANY node still needs a (re)try, so a
+    # part-generated request never leaves the queue: the next drain reruns only
+    # the missing nodes (cache hits on the done ones, so it converges). Only when
+    # EVERY selected node produced a result is the request complete.
+    if retryable:
+        context.log.info(
+            "[drain_analysis] deep-dive %s: %d/%d nodes done, %d pending retry — leaving PENDING",
+            request_id, len(surfaceable), len(nodes), len(retryable),
+        )
+        return _REQUEUE
+
+    context.log.info("[drain_analysis] deep-dive %s: all %d nodes surfaced", request_id, len(nodes))
+    return _GENERATED if _mark(context, clear_api.mark_analysis_request_generated, request_id) else _REQUEUE
+
+
 def _process_one_request(context, req: dict) -> str:
     request_id = req["id"]
     frame = _frame_from_request(req)
+
+    # On-demand node deep-dive (L2/L3 leaves): a request carrying a taxonomy node
+    # selection generates just those SELECTED nodes, not the frame-level situation
+    # snapshot. Absent → the frame-level path below (unchanged default).
+    if req.get("taxonomyNodeKeys"):
+        return _process_node_deepdive(context, req, frame)
+
     force = bool(req.get("force"))
     now = datetime.now(timezone.utc)
 
