@@ -8,7 +8,7 @@ import pytest
 
 from clear_pipeline.defs.gx_pipeline import iceberg_signals
 from clear_pipeline.defs.gx_pipeline.signal_ids import signal_id
-from clear_pipeline.providers.clear_api import ClearApiError
+from clear_pipeline.providers.clear_api import ClearApiError, GraphQLErrors
 from tests.test_gx_sync import R, T, Harness, HookedSource, _rec
 
 # uuid5(signal_ids.NAMESPACE, "fakesrc:a"), computed outside the code under test.
@@ -104,14 +104,31 @@ def test_an_unprefixed_external_id_fails_only_its_row(tmp_path):
     assert h.metadata(result, "silver")["id_failed"] == 1
 
 
+def _conflict():
+    # The shape clear-api answers with (signal.resolver.ts: id held by another row).
+    return GraphQLErrors([{"message": "Signal id … already belongs to (sourceId source-other, externalId x)",
+                           "extensions": {"code": "CONFLICT"}}])
+
+
 def test_a_conflict_leaves_the_row_unpushed_without_an_alias_and_retries_it(h):
-    h.pg.fail_next["create"] = ClearApiError("CONFLICT: id held by source-other / fakesrc:a")
-    h.poll([_rec("a")])
+    h.pg.fail_next["create"] = _conflict()
+    result = h.poll([_rec("a")])
+    assert (h.metadata(result, "push")["conflict"], h.metadata(result, "push")["failed"]) == (1, 0)
     assert h.gold["a"]["pushedAt"] is None
     assert _aliases(h) == []
     h.poll([])
     assert h.pg.ops() == ["create"]
     assert h.gold["a"]["pushedAt"] is not None
+
+
+def test_a_conflict_on_the_follow_up_update_is_a_failure_not_an_id_conflict(h):
+    # An update's CONFLICT is a concurrent change: transient.
+    h.pg.rows[("source-fake-123", "fakesrc:a")] = {
+        "id": "clegacy0000000000000000aa", "contentHash": "old", "retracted": False, "rawS3Key": None,
+    }
+    h.pg.fail_next["update"] = _conflict()
+    meta = h.metadata(h.poll([_rec("a")]), "push")
+    assert (meta["conflict"], meta["failed"]) == (0, 1)
 
 
 def test_a_failed_follow_up_update_writes_no_alias_yet(h):

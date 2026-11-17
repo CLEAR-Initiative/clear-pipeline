@@ -347,7 +347,7 @@ def test_rows_are_isolated(h):
 
 def test_push_metadata_keys(h):
     result = h.poll([_rec("a")])
-    assert set(h.metadata(result, "push")) == {"created", "updated", "probed", "not_found", "failed", "aliased"}
+    assert set(h.metadata(result, "push")) == {"created", "updated", "probed", "not_found", "failed", "conflict", "aliased"}
 
 
 def test_legacy_pushed_row_without_state_gets_one_update_with_its_key(h):

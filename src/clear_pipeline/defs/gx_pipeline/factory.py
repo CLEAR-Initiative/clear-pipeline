@@ -72,6 +72,7 @@ from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ClearApiNotFound,
+    GraphQLErrors,
     create_signal_for_sync,
     dagster_run_id,
     pipeline_run,
@@ -93,6 +94,11 @@ def gold_pool(source: str) -> str:
 # The only `resolve_group` verdict that retracts. Any other value keeps the
 # row, so an unexpected value can never retract (contract: IDMCGXSource).
 _RETRACT = "retract"
+
+
+class _IdConflict(Exception):
+    """createSignal answered CONFLICT: the minted id is held by another
+    (source, externalId). No retry fixes it; `_push` counts it as `conflict`."""
 
 
 def _s3():
@@ -813,7 +819,9 @@ def build_gx_source_assets(source: GXSource) -> list:
             commit_watermark()
         todo = iceberg_signals.signals_to_sync(signals_table, can_update=content_update_input is not None)
 
-        counts = {"created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0, "aliased": 0}
+        counts = {
+            "created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0, "conflict": 0, "aliased": 0,
+        }
         to_upsert: list[dict] = []
         aliases: list[dict] = []
         now_iso = datetime.now(UTC).isoformat()
@@ -828,8 +836,16 @@ def build_gx_source_assets(source: GXSource) -> list:
                         signal_id = row.get("signalId")
                         if not signal_id:
                             raise ValueError("gold row has no signalId")
-                        with pipeline_run(run_id=dagster_run_id(context)):
-                            response = create_signal_for_sync({**row["signalInput"], "id": signal_id})
+                        try:
+                            with pipeline_run(run_id=dagster_run_id(context)):
+                                response = create_signal_for_sync({**row["signalInput"], "id": signal_id})
+                        except GraphQLErrors as exc:
+                            # From createSignal, CONFLICT means the id belongs to another
+                            # (source, externalId). An update's CONFLICT is a concurrent
+                            # change, transient, so only this call raises _IdConflict.
+                            if "CONFLICT" in exc.codes():
+                                raise _IdConflict(exc.messages()) from exc
+                            raise
                         sent_hash = (row["signalInput"] or {}).get("contentHash")
                         # get-or-create may return an older row (earlier half-failed
                         # push, or one production created): bring it up to date.
@@ -858,6 +874,13 @@ def build_gx_source_assets(source: GXSource) -> list:
                         except ClearApiNotFound:
                             pass  # never created — nothing to retract
                         counts["probed"] += 1
+                except _IdConflict as exc:
+                    context.log.error(
+                        "[%s push] signal id of %s is held by another Signal — needs a person, "
+                        "retried next poll: %s", src, row["externalId"], exc,
+                    )
+                    counts["conflict"] += 1
+                    continue
                 except Exception:
                     context.log.exception(
                         "[%s push] %s of signal %s failed — retried next poll", src, action, row["externalId"]
