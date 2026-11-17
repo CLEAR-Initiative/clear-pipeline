@@ -309,6 +309,7 @@ def compose_l1(
                     rem, entry_for(rem.key).archetype
                 ).model_dump()
                 qna.append(rem.question)
+                comps.append(0.0)  # a missing domain is unanswered, not absent
             break
         except Exception:  # noqa: BLE001 — isolate one child; the Section keeps its others
             log("[compose] %s: subsection %s failed — marking unanswered", node.key, child.key)
@@ -316,6 +317,7 @@ def compose_l1(
                 child, entry_for(child.key).archetype
             ).model_dump()
             qna.append(child.question)
+            comps.append(0.0)  # count a failed child as 0, so the Section score drops
             continue
         log(
             "[compose] %s: subsection (%d/%d) %s [%s] → completeness=%.2f, rag=%d",

@@ -195,6 +195,25 @@ def test_compose_l1_section_folds_in_l2_children():
     env.validate_data()  # parses under the Section archetype
 
 
+def test_section_counts_failed_children_as_zero_completeness():
+    node = node_by_key("pillars_1d/context")  # 9 domains
+    good = {
+        "findings": [{"description": "d", "locations": [], "source_ids": []}],
+        "summary": "s", "completeness": 0.9, "questions_not_answered": [],
+    }
+    # First domain answers at 0.9; the other 8 error out.
+    with patch.object(st, "fetch_rag_context", return_value=_rag()), \
+         patch.object(st, "run_node", side_effect=[_outcome(good)] + [RuntimeError("boom")] * 8):
+        env, _ = st.compose_l1(
+            node=node, frame=_FRAME, scope_label="Sudan",
+            make_provider=lambda: MagicMock(total_usage={}, model="m"),
+        )
+    assert env.archetype == "Section"
+    assert len(env.data["subsections"]) == 9  # all present (failed ones empty)
+    # 1 of 9 answered → the Section must NOT look complete (0.9/9 ≈ 0.1), not 0.9
+    assert env.completeness < 0.2
+
+
 def test_build_structured_artifact_is_dual_shape():
     env = NodeEnvelope(
         node_key="sectors/health", name="Health", task="Sectors", level=1,
