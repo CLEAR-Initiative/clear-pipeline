@@ -64,15 +64,25 @@ def _period_label(window_start: str, window_end: str | None) -> str:
 
 
 def _assemble_new_v5(s3, bucket, iso3: str, nodes) -> dict:
-    """The new side to diff: the v5-shaped sections from this run's final node
-    envelopes + the extracted datapoints (so figure changes are caught)."""
+    """The new side to diff: the v5-shaped sections from this run's final, KEPT
+    node envelopes + the extracted datapoints (so figure changes are caught).
+
+    Only the KEPT nodes are published (overview drops the flagged ones), so the
+    diff must use the same filter — otherwise a dropped node's change would surface
+    in notes even though neither published analysis contains it."""
     # Structured mode only (changes asset no-ops otherwise) — ignore envelope-less
     # legacy revisions so the new side reflects the structured originals.
     final_artifacts = load_final_descriptive(
         s3, bucket, iso3, _WINDOW_KIND, nodes, require_envelope=True
     )
+    package = load_json(
+        s3, bucket, paths.revision_package_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+    ) or {}
+    kept = set(package.get("kept_node_keys", final_artifacts.keys()))
     l1_envelopes: dict[str, NodeEnvelope] = {}
     for key, art in final_artifacts.items():
+        if key not in kept:
+            continue
         dump = art.get("envelope")
         if not dump:
             continue
