@@ -22,7 +22,7 @@ from clear_pipeline.defs.analysis import paths
 from clear_pipeline.defs.analysis.budget import analysis_run_budget
 from clear_pipeline.defs.analysis.frame import country_frame
 from clear_pipeline.defs.analysis.registry import ANALYSIS_LLM_ROLE, PROMPT_VERSION, SCHEMA_VERSION
-from clear_pipeline.defs.analysis.scenarios import generate_scenarios
+from clear_pipeline.defs.analysis.scenarios import ScenarioResult, generate_scenarios
 from clear_pipeline.defs.analysis.store import save_json, save_stage_cost
 from clear_pipeline.defs.analysis.structured import structured_enabled
 from clear_pipeline.defs.reliefweb_partitions import country_partitions
@@ -73,9 +73,21 @@ def analysis_scenarios(context: dg.AssetExecutionContext) -> dict:
 
     budget = analysis_run_budget()
     provider = make_llm_provider(ANALYSIS_LLM_ROLE)
-    result = generate_scenarios(
-        provider=provider, frame=frame, scope_label=country_name, budget=budget,
-    )
+    try:
+        result = generate_scenarios(
+            provider=provider, frame=frame, scope_label=country_name, budget=budget,
+        )
+    except Exception:  # noqa: BLE001 — scenarios are optional; overview deps on this
+        # asset, so a provider error must NOT block publishing the rest of the
+        # analysis. Persist an empty result and record the failure.
+        context.log.exception(
+            "[analysis_scenarios] %s: generation failed — publishing empty scenarios", iso3
+        )
+        result = ScenarioResult(
+            "", "", "", "", [], "error",
+            dict(getattr(provider, "total_usage", {}) or {}), 0.0,
+            {"model": getattr(provider, "model", "")},
+        )
 
     s3, bucket = _s3(), os.environ["S3_BUCKET"]
     save_json(
