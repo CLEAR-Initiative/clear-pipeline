@@ -76,3 +76,7 @@ Ticket: [Exponential #1487](https://www.exponential.im/w/clear/products/clear/ti
   written for pre-switch rows, so this is rare.
 - Rebuilding silver or gold from S3 gives the same ids: the id is a pure
   function of the externalId.
+- Event bundles' `signalIds` hold minted Signal ids, no longer externalIds.
+  Events are not persisted today (`iceberg_events.py` is a stub); a restore
+  based on `2bba996` must account for this, since that version hashes
+  `signalIds` into `contentHash`.
