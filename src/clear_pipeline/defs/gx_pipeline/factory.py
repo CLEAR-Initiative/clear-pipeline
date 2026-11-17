@@ -821,20 +821,20 @@ def build_gx_source_assets(source: GXSource) -> list:
         for action, rows in todo.items():
             for row in rows:
                 state = iceberg_signals.sync_state(row)
-                alias = None
+                # clear-api's answer, when it reached a row: its `id` is the Postgres id.
+                response: dict | None = None
                 try:
                     if action == "create":
                         signal_id = row.get("signalId")
                         if not signal_id:
                             raise ValueError("gold row has no signalId")
                         with pipeline_run(run_id=dagster_run_id(context)):
-                            created = create_signal_for_sync({**row["signalInput"], "id": signal_id})
-                        alias = _alias(row, created["id"])
+                            response = create_signal_for_sync({**row["signalInput"], "id": signal_id})
                         sent_hash = (row["signalInput"] or {}).get("contentHash")
                         # get-or-create may return an older row (earlier half-failed
                         # push, or one production created): bring it up to date.
                         if content_update_input is not None and (
-                            created.get("contentHash") != sent_hash or created.get("retracted")
+                            response.get("contentHash") != sent_hash or response.get("retracted")
                         ):
                             _send_update(row, retracted=False)
                         source.mark_seen(row["externalId"])
@@ -842,7 +842,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                         counts["created"] += 1
                     elif action == "update":
                         try:
-                            _send_update(row, retracted=bool(row.get("retracted")))
+                            response = _send_update(row, retracted=bool(row.get("retracted")))
                             counts["updated"] += 1
                         except ClearApiNotFound:
                             # Deleted in clear-api (admin delete or DB reset): not re-created.
@@ -853,8 +853,8 @@ def build_gx_source_assets(source: GXSource) -> list:
                             counts["not_found"] += 1
                     else:  # probe
                         try:
-                            # Lands on a row an earlier create left unrecorded, alias included.
-                            alias = _alias(row, _send_update(row, retracted=True)["id"])
+                            # Lands on a row an earlier create left unrecorded.
+                            response = _send_update(row, retracted=True)
                         except ClearApiNotFound:
                             pass  # never created — nothing to retract
                         counts["probed"] += 1
@@ -866,13 +866,12 @@ def build_gx_source_assets(source: GXSource) -> list:
                     continue
                 row["pushedState"] = state
                 to_upsert.append(row)
-                if alias is not None:
+                if response is not None and (alias := _alias(row, response["id"])) is not None:
                     aliases.append(alias)
 
         # Aliases first: a row is marked pushed only once its alias is stored,
         # so a failed write here re-creates it next run and records it again.
-        iceberg_signals.upsert_aliases(aliases)
-        counts["aliased"] = len(aliases)
+        counts["aliased"] = iceberg_signals.upsert_aliases(aliases)
         iceberg_signals.upsert_signals(signals_table, to_upsert)
 
         context.log.info("[%s push] %s", src, " ".join(f"{k}={v}" for k, v in counts.items()))

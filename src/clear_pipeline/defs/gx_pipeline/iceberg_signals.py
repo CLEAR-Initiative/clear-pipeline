@@ -238,15 +238,18 @@ def get_aliases_table():
     return cat.load_table(_ALIASES)
 
 
-def upsert_aliases(rows: list[dict]) -> None:
+def upsert_aliases(rows: list[dict]) -> int:
     """Record ``{signalId, externalId, legacyId}``: Postgres kept ``legacyId``
-    for this Signal. Keyed by `signalId`, so recording one twice is a no-op."""
+    for this Signal. Returns how many rows were new or changed. Keyed by
+    `signalId`: re-recording a stored alias writes nothing and makes no
+    Iceberg commit (PyIceberg skips an empty transaction)."""
     if not rows:
-        return
+        return 0
     import pyarrow as pa  # lazy — keep the heavy arrow import out of module load
 
     table = get_aliases_table()
-    table.upsert(pa.Table.from_pylist(rows, schema=table.schema().as_arrow()), join_cols=["signalId"])
+    result = table.upsert(pa.Table.from_pylist(rows, schema=table.schema().as_arrow()), join_cols=["signalId"])
+    return result.rows_updated + result.rows_inserted
 
 
 def aliases_df() -> pd.DataFrame:

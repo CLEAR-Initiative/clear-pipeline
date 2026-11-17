@@ -69,6 +69,25 @@ def test_a_re_created_legacy_row_keeps_one_alias(h):
     assert len(_aliases(h)) == 1
 
 
+def test_an_update_that_reaches_a_legacy_row_records_its_alias_once(h):
+    h.poll([_rec("a", h="h1")])
+    # Pushed before the switch: Postgres holds its Prisma id, and no alias exists.
+    h.pg_row("a")["id"] = "clegacy0000000000000000aa"
+    h.poll([_rec("a", h="h2")])
+    assert h.pg.ops()[-1] == "update"
+    assert _aliases(h) == [{"signalId": A_ID, "externalId": "fakesrc:a", "legacyId": "clegacy0000000000000000aa"}]
+    snapshots = _alias_snapshots(h)
+    result = h.poll([_rec("a", h="h3")])  # same alias again: nothing written
+    assert h.metadata(result, "push")["aliased"] == 0
+    assert _alias_snapshots(h) == snapshots  # no Iceberg commit on the shared table
+
+
+def _alias_snapshots(h):
+    w, c = h._iceberg()
+    with w, c:
+        return len(iceberg_signals.get_aliases_table().metadata.snapshots)
+
+
 class _BadIdSource(HookedSource):
     def to_silver_input(self, record, source_id):
         data = super().to_silver_input(record, source_id)
