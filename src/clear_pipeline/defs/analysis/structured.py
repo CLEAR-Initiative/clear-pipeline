@@ -344,16 +344,55 @@ def compose_l1(
     return env, accts
 
 
+# Text-bearing keys across the 7 archetypes — flattened into descriptive findings
+# so the judge / gaps / overview read the FULL answer, not just the summary.
+_FINDING_TEXT_KEYS = ("description", "factor", "metric", "status", "option")
+
+
+def _flatten_descriptions(data, *, cap: int = 60) -> list[dict]:
+    """Human-readable ``(description, source_report_ids)`` bullets pulled from an
+    archetype payload (recursing into a Section's subsections). Bounded to ``cap``
+    bullets. The archetype items' ``source_ids`` are already resolved report ids."""
+    out: list[dict] = []
+
+    def walk(obj) -> None:
+        if len(out) >= cap:
+            return
+        if isinstance(obj, dict):
+            for k in _FINDING_TEXT_KEYS:
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    out.append({
+                        "description": v.strip(),
+                        "source_report_ids": list(
+                            obj.get("source_ids") or obj.get("source_report_ids") or []
+                        ),
+                    })
+                    break
+            for v in obj.values():
+                if isinstance(v, (list, dict)):
+                    walk(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                walk(x)
+
+    walk(data or {})
+    return out
+
+
 def envelope_to_descriptive(env: NodeEnvelope) -> dict:
     """Project a :class:`NodeEnvelope` onto the legacy ``descriptive`` artifact
     shape (a :class:`descriptive.NodeDescriptive` dump) so the gaps / judge /
-    revision stages keep reading it unchanged. The structured detail is NOT lost —
-    it rides alongside under the artifact's ``envelope`` key (read by overview)."""
-    findings = (
-        [{"description": env.summary.strip(), "source_report_ids": list(env.source_report_ids)}]
-        if env.summary.strip()
-        else []
-    )
+    revision / overview-synthesis stages read the FULL answer, not just the
+    summary. The summary leads; the archetype detail (every domain of a Section
+    included) follows as findings. The structured form still rides alongside under
+    the artifact's ``envelope`` key (read by ``assemble_v5``)."""
+    findings: list[dict] = []
+    if env.summary.strip():
+        findings.append(
+            {"description": env.summary.strip(), "source_report_ids": list(env.source_report_ids)}
+        )
+    findings.extend(_flatten_descriptions(env.data))
     return {
         "node_key": env.node_key,
         "node_name": env.name,
