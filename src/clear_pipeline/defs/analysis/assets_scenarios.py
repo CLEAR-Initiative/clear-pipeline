@@ -96,6 +96,7 @@ def analysis_scenarios(context: dg.AssetExecutionContext) -> dict:
         {
             "iso3": iso3, "window_kind": _WINDOW_KIND,
             "scenarios": result.to_payload(),
+            "report_meta": result.report_meta,  # overview lists outlook-only sources
             "status": result.status, "cost_usd": result.cost_usd,
             "provenance": result.provenance,
         },

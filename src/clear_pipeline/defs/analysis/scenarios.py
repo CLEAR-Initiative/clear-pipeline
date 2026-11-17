@@ -11,7 +11,7 @@ RAG injected), so it unit-tests with a mocked provider and a mocked RAG fetch.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +51,9 @@ class ScenarioResult:
     usage: dict
     cost_usd: float
     provenance: dict
+    # report_id → {report_title, source_url, published_at} for the outlook's own
+    # sources, so overview can list them (scenarios search separately from nodes).
+    report_meta: dict = field(default_factory=dict)
 
     def to_payload(self) -> dict:
         """The v5 ``scenarios`` block clear-mvp reads."""
@@ -61,6 +64,21 @@ class ScenarioResult:
             "description": self.description,
             "source_report_ids": list(self.source_report_ids),
         }
+
+
+def _report_meta_from_rag(rag) -> dict[str, dict]:
+    """report_id → title/url/date for the outlook's cited reports, from the hits."""
+    meta: dict[str, dict] = {}
+    for hit in getattr(rag, "hits", []) or []:
+        rid = hit.get("reportId")
+        if not rid or rid in meta:
+            continue
+        meta[rid] = {
+            "report_title": hit.get("reportTitle") or "",
+            "source_url": hit.get("sourceUrl") or "",
+            "published_at": hit.get("publishedAt") or "",
+        }
+    return meta
 
 
 def _period_label(frame: Frame) -> str:
@@ -119,5 +137,5 @@ def generate_scenarios(
         worst_case=strip_markers(o.worst_case), description=strip_markers(o.description),
         source_report_ids=list(rag.contributing_report_ids),
         status=outcome.status, usage=outcome.usage, cost_usd=outcome.cost_usd,
-        provenance=outcome.provenance,
+        provenance=outcome.provenance, report_meta=_report_meta_from_rag(rag),
     )

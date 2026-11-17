@@ -57,6 +57,7 @@ def _calendar_year_window(year: int) -> tuple[str, str]:
 
 def _assemble_structured_data(
     v6: dict, kept_artifacts: dict, overview_text: str, numbers: dict, source_report_ids: list,
+    extra_report_meta: dict | None = None,
 ) -> dict:
     """The v6-as-true-superset ``analyses.data`` (ADR-0015, structured path).
 
@@ -90,19 +91,24 @@ def _assemble_structured_data(
             "contributing_sources": {},
         },
         "datapoints": project_v5_datapoints(numbers),
-        "sources": _build_sources(kept_artifacts, source_report_ids),
+        "sources": _build_sources(kept_artifacts, source_report_ids, extra_report_meta),
     }
 
 
-def _build_sources(kept_artifacts: dict, source_report_ids: list) -> dict:
+def _build_sources(
+    kept_artifacts: dict, source_report_ids: list, extra_meta: dict | None = None
+) -> dict:
     """v5 ``sources.reports`` — each cited report with its title/url/date, lifted
-    from the per-node ``report_meta`` (captured from the RAG hits at generation).
-    Newest-first; a report with no captured title falls back to its id (so it is
-    still citable), matching the legacy situation path."""
+    from the per-node ``report_meta`` (captured from the RAG hits at generation),
+    plus ``extra_meta`` for reports cited only by the outlook (the scenarios search
+    is separate from the nodes). Newest-first; a report with no captured title
+    falls back to its id (so it is still citable), matching the legacy path."""
     meta: dict[str, dict] = {}
     for art in kept_artifacts.values():
         for rid, m in (art.get("report_meta") or {}).items():
             meta.setdefault(rid, m)
+    for rid, m in (extra_meta or {}).items():
+        meta.setdefault(rid, m)
     reports = [
         {
             "report_id": rid,
@@ -236,28 +242,31 @@ def analysis_overview(context: dg.AssetExecutionContext) -> dict:
     )
 
     if structured_enabled():
-        # v6-as-true-superset (ADR-0015): the overlapping L1s publish to their v5
-        # TOP-LEVEL paths (sectors / context_risks / displacement / hazards /
-        # access) so clear-mvp reads them unchanged — no regression — and new-only
-        # L1s land under data.taxonomy. The v6 keyed `nodes` view + overview /
-        # numbers / quality ride alongside.
-        data = _assemble_structured_data(
-            v6, kept_artifacts, overview_text, numbers, source_report_ids
-        )
-        # Overlay the forward-looking `scenarios` + temporal `changes` components,
-        # each produced by its own upstream asset (analysis_scenarios /
-        # analysis_changes) and read here from S3. Absent artifact → the empty
-        # skeleton default stays (frontend-stable).
-        scenarios = load_json(
+        # Read the scenarios/changes artifacts FIRST so the outlook's own cited
+        # reports (its search is separate from the nodes) join the published source
+        # list and sources.reports before they're built — otherwise a scenario-only
+        # citation resolves to no report details.
+        scenarios_doc = load_json(
             s3, bucket, paths.scenarios_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
-        )
-        if scenarios:
-            data["scenarios"] = scenarios.get("scenarios", data.get("scenarios"))
-        changes = load_json(
+        ) or {}
+        changes_doc = load_json(
             s3, bucket, paths.changes_key(iso3, _WINDOW_KIND, PROMPT_VERSION, SCHEMA_VERSION)
+        ) or {}
+        scen = scenarios_doc.get("scenarios") or {}
+        scen_meta = scenarios_doc.get("report_meta") or {}
+        source_report_ids = sorted(set(source_report_ids) | set(scen.get("source_report_ids") or []))
+
+        # v6-as-true-superset (ADR-0015): overlapping L1s publish to their v5 TOP-
+        # LEVEL paths (sectors / context_risks / displacement / …) unchanged, new-only
+        # L1s under data.taxonomy, the v6 nodes view + overview / numbers / quality
+        # alongside; scenario sources fold into sources.reports with their titles.
+        data = _assemble_structured_data(
+            v6, kept_artifacts, overview_text, numbers, source_report_ids, scen_meta
         )
-        if changes:
-            data["changes"] = changes.get("changes", data.get("changes"))
+        if scenarios_doc:
+            data["scenarios"] = scen or data.get("scenarios")
+        if changes_doc:
+            data["changes"] = changes_doc.get("changes", data.get("changes"))
     else:
         # Legacy hybrid: v6 payload with the (lossy) v5 projection embedded under
         # data["v5"]. Unchanged until the structured flag is flipped.
