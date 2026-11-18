@@ -65,12 +65,14 @@ import pandas as pd
 
 from clear_pipeline.defs.gx_pipeline import iceberg_events, iceberg_signals
 from clear_pipeline.defs.gx_pipeline.gx_utils import validate_dataframe
+from clear_pipeline.defs.gx_pipeline.signal_ids import InvalidExternalId, mint
 from clear_pipeline.defs.gx_pipeline.sources import GXSource, Quarantined
 from clear_pipeline.defs.run_limits import max_runtime_tags
 from clear_pipeline.defs.signals import lake
 from clear_pipeline.defs.signals.poll_sensor import build_poll_sensor
 from clear_pipeline.providers.clear_api import (
     ClearApiNotFound,
+    GraphQLErrors,
     create_signal_for_sync,
     dagster_run_id,
     pipeline_run,
@@ -81,7 +83,7 @@ from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
 
 _BRONZE_COLUMNS = ["externalId", "publishedAt", "s3Key"]
-_SILVER_COLUMNS = ["externalId", "publishedAt", "title", "description", "severity"]
+_SILVER_COLUMNS = ["externalId", "signalId", "publishedAt", "title", "description", "severity"]
 
 # Concurrency pool shared by every asset that writes a source's gold table
 # (see the module docstring and deploy/dagster.yaml's `concurrency.pools`).
@@ -92,6 +94,11 @@ def gold_pool(source: str) -> str:
 # The only `resolve_group` verdict that retracts. Any other value keeps the
 # row, so an unexpected value can never retract (contract: IDMCGXSource).
 _RETRACT = "retract"
+
+
+class _IdConflict(Exception):
+    """createSignal answered CONFLICT: the minted id is held by another
+    (source, externalId). No retry fixes it; `_push` counts it as `conflict`."""
 
 
 def _s3():
@@ -322,14 +329,25 @@ def build_gx_source_assets(source: GXSource) -> list:
             silver_inputs.extend((bronze_row, signal_input, ext_id) for signal_input, ext_id in batch)
 
         rows: list[dict] = []
+        id_failed = 0
         for bronze_row, signal_input, ext_id in silver_inputs:
+            try:
+                sid = mint(signal_input.get("externalId"), source.id_prefix)
+            except InvalidExternalId:
+                # TODO(#1491): only this row fails, and it is lost: the
+                # watermark already moved on. Decide between quarantine and a
+                # GX row-level gate (an unprefixed id is a connector bug).
+                context.log.exception("[%s silver] %s gets no Signal id — dropped", src, ext_id)
+                id_failed += 1
+                continue
             signal_input["rawS3Key"] = bronze_row["s3Key"]
 
             key = lake.raw_key(src, bronze_row["publishedAt"], ext_id, layer="silver")
-            lake.write_json(s3, bucket, key, signal_input)
+            lake.write_json(s3, bucket, key, {**signal_input, "id": sid})
 
             rows.append({
                 "externalId": ext_id,
+                "signalId": sid,
                 "publishedAt": bronze_row["publishedAt"],
                 "title": signal_input.get("title"),
                 "description": signal_input.get("description"),
@@ -340,7 +358,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "signalInput": signal_input,
             })
 
-        context.add_output_metadata({"rows": len(rows), "quarantined": quarantined})
+        context.add_output_metadata({"rows": len(rows), "quarantined": quarantined, "id_failed": id_failed})
         if not rows:
             return pd.DataFrame(columns=_SILVER_COLUMNS)
         df = pd.DataFrame(rows)
@@ -641,7 +659,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                 bundle["title"] = row.title or bundle["title"]
                 bundle["description"] = row.description or bundle["description"]
 
-            bundle["signalIds"] = list({*bundle["signalIds"], row.externalId})
+            bundle["signalIds"] = list({*bundle["signalIds"], row.signalId})
             # Highest known severity across the bundle's signals; stays null while
             # every contributing signal's severity is unknown (no invented floor).
             _sevs = [s for s in (bundle["severity"], row.severity) if s is not None]
@@ -649,6 +667,7 @@ def build_gx_source_assets(source: GXSource) -> list:
             bundle["lastSignalCreatedAt"] = row.publishedAt
             bundle.setdefault("newSignalRows", []).append({
                 "externalId": row.externalId,
+                "signalId": row.signalId,
                 "eventId": row.eventId,
                 "relevanceScore": row.relevanceScore,
                 "eventType": row.eventType,
@@ -772,8 +791,15 @@ def build_gx_source_assets(source: GXSource) -> list:
     content_update_input = getattr(source, "content_update_input", None)
     commit_watermark = getattr(source, "commit_watermark", None)
 
-    def _send_update(row: dict, *, retracted: bool) -> None:
-        update_signal_content(content_update_input(row["signalInput"], retracted=retracted))
+    def _send_update(row: dict, *, retracted: bool) -> dict:
+        return update_signal_content(content_update_input(row["signalInput"], retracted=retracted))
+
+    def _alias(row: dict, postgres_id: str) -> dict | None:
+        """The alias to record when Postgres keeps another id for this row:
+        a row that predates pipeline ids keeps its Prisma id."""
+        if postgres_id == row["signalId"]:
+            return None
+        return {"signalId": row["signalId"], "externalId": row["signalInput"]["externalId"], "legacyId": postgres_id}
 
     @dg.asset(
         name=f"{src}_push",
@@ -793,22 +819,38 @@ def build_gx_source_assets(source: GXSource) -> list:
             commit_watermark()
         todo = iceberg_signals.signals_to_sync(signals_table, can_update=content_update_input is not None)
 
-        counts = {"created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0}
+        counts = {
+            "created": 0, "updated": 0, "probed": 0, "not_found": 0, "failed": 0, "conflict": 0, "aliased": 0,
+        }
         to_upsert: list[dict] = []
+        aliases: list[dict] = []
         now_iso = datetime.now(UTC).isoformat()
 
         for action, rows in todo.items():
             for row in rows:
                 state = iceberg_signals.sync_state(row)
+                # clear-api's answer, when it reached a row: its `id` is the Postgres id.
+                response: dict | None = None
                 try:
                     if action == "create":
-                        with pipeline_run(run_id=dagster_run_id(context)):
-                            created = create_signal_for_sync(row["signalInput"])
+                        signal_id = row.get("signalId")
+                        if not signal_id:
+                            raise ValueError("gold row has no signalId")
+                        try:
+                            with pipeline_run(run_id=dagster_run_id(context)):
+                                response = create_signal_for_sync({**row["signalInput"], "id": signal_id})
+                        except GraphQLErrors as exc:
+                            # From createSignal, CONFLICT means the id belongs to another
+                            # (source, externalId). An update's CONFLICT is a concurrent
+                            # change, transient, so only this call raises _IdConflict.
+                            if "CONFLICT" in exc.codes():
+                                raise _IdConflict(exc.messages()) from exc
+                            raise
                         sent_hash = (row["signalInput"] or {}).get("contentHash")
                         # get-or-create may return an older row (earlier half-failed
                         # push, or one production created): bring it up to date.
                         if content_update_input is not None and (
-                            created.get("contentHash") != sent_hash or created.get("retracted")
+                            response.get("contentHash") != sent_hash or response.get("retracted")
                         ):
                             _send_update(row, retracted=False)
                         source.mark_seen(row["externalId"])
@@ -816,7 +858,7 @@ def build_gx_source_assets(source: GXSource) -> list:
                         counts["created"] += 1
                     elif action == "update":
                         try:
-                            _send_update(row, retracted=bool(row.get("retracted")))
+                            response = _send_update(row, retracted=bool(row.get("retracted")))
                             counts["updated"] += 1
                         except ClearApiNotFound:
                             # Deleted in clear-api (admin delete or DB reset): not re-created.
@@ -827,10 +869,18 @@ def build_gx_source_assets(source: GXSource) -> list:
                             counts["not_found"] += 1
                     else:  # probe
                         try:
-                            _send_update(row, retracted=True)
+                            # Lands on a row an earlier create left unrecorded.
+                            response = _send_update(row, retracted=True)
                         except ClearApiNotFound:
                             pass  # never created — nothing to retract
                         counts["probed"] += 1
+                except _IdConflict as exc:
+                    context.log.error(
+                        "[%s push] signal id of %s is held by another Signal — needs a person, "
+                        "retried next poll: %s", src, row["externalId"], exc,
+                    )
+                    counts["conflict"] += 1
+                    continue
                 except Exception:
                     context.log.exception(
                         "[%s push] %s of signal %s failed — retried next poll", src, action, row["externalId"]
@@ -839,7 +889,12 @@ def build_gx_source_assets(source: GXSource) -> list:
                     continue
                 row["pushedState"] = state
                 to_upsert.append(row)
+                if response is not None and (alias := _alias(row, response["id"])) is not None:
+                    aliases.append(alias)
 
+        # Aliases first: a row is marked pushed only once its alias is stored,
+        # so a failed write here re-creates it next run and records it again.
+        counts["aliased"] = iceberg_signals.upsert_aliases(aliases)
         iceberg_signals.upsert_signals(signals_table, to_upsert)
 
         context.log.info("[%s push] %s", src, " ".join(f"{k}={v}" for k, v in counts.items()))

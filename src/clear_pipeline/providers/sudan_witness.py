@@ -55,6 +55,11 @@ from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "suw:"
+
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 __all__ = [
@@ -230,7 +235,7 @@ def parse_feature(feature: dict) -> dict | None:
         return None
     published_at = datetime.fromtimestamp(attributes["D_Verified_Date"] / 1000, UTC).isoformat()
     return {
-        "suw_id": f"suw:{int(match.group(1))}",
+        "suw_id": f"{ID_PREFIX}{int(match.group(1))}",
         "published_at": published_at,
         "content_hash": _content_hash(attributes),
         "raw": feature,

@@ -34,6 +34,11 @@ from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "idmc:"
+
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 IDU_URL = "https://helix-tools-api.idmcdb.org/external-api/idus/last-180-days/"
@@ -339,7 +344,7 @@ def build_idmc_signal_input(event: dict, source_id: str, *, promote: bool = True
         # mapping (externalId ← id). One IDU row = one CLEAR signal; CLEAR's
         # own classify/group stage clusters related rows (shared event_id)
         # into one internal event, same as it does for ACLED.
-        "externalId": f"idmc:{event['idu_id']}",
+        "externalId": f"{ID_PREFIX}{event['idu_id']}",
         "rawData": event["raw"],
         "publishedAt": published_at,
         "title": event["title"],
