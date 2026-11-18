@@ -5,6 +5,7 @@ import contextlib
 import http.server
 import os
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -116,3 +117,33 @@ def test_catalog_accepts_an_explicit_when_required(s3_endpoint, tmp_path):
         s3_endpoint, tmp_path, AWS_REQUEST_CHECKSUM_CALCULATION="when_required"
     ):
         iceberg_catalog.catalog()
+
+
+class _SlowHeadS3(http.server.BaseHTTPRequestHandler):
+    """Answers HEAD only after a pause longer than the AWS SDK's 3 s default."""
+
+    def do_HEAD(self):
+        time.sleep(4)
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.send_header("Last-Modified", "Mon, 09 Nov 2026 14:55:00 GMT")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def test_catalog_waits_out_a_slow_s3_response(tmp_path):
+    """The dev failure in #1305/#1376: a HeadObject on table metadata that
+    sent nothing for 3 s raised `curlCode: 28` under the SDK defaults."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowHeadS3)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}"
+        with _s3_settings(endpoint, tmp_path, AWS_EC2_METADATA_DISABLED="true"):
+            io = iceberg_catalog.catalog()._load_file_io(
+                location="s3://bucket/gold-iceberg"
+            )
+            assert io.new_input("s3://bucket/gold-iceberg/metadata.json").exists()
+    finally:
+        server.shutdown()
