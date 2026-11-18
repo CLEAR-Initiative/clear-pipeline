@@ -34,12 +34,17 @@ def load_descriptive(
 
 
 def load_final_descriptive(
-    s3, bucket: str, iso3: str, window_kind: str, nodes: list[TaxonomyNode]
+    s3, bucket: str, iso3: str, window_kind: str, nodes: list[TaxonomyNode],
+    *, require_envelope: bool = False,
 ) -> dict[str, dict]:
     """Like :func:`load_descriptive`, but prefer a node's REVISED artifact
-    (reflexion rescue) over its original when one exists. The revised artifact
-    carries the same ``{node, descriptive}`` shape, so downstream code is
-    unaffected."""
+    (reflexion rescue) over its original when one exists.
+
+    ``require_envelope`` (structured mode): a revised artifact that predates the
+    structured path has no ``envelope``, and preferring it would hide the newly
+    generated structured original — leaving the node's v5 section empty. When set,
+    an envelope-less revision is skipped so the original (which has the envelope)
+    is used instead."""
     out: dict[str, dict] = {}
     for node in nodes:
         revised_key = paths.revision_key(iso3, window_kind, PROMPT_VERSION, SCHEMA_VERSION, node.key)
@@ -47,10 +52,13 @@ def load_final_descriptive(
         for key in (revised_key, orig_key):
             try:
                 obj = s3.get_object(Bucket=bucket, Key=key)
-                out[node.key] = json.loads(obj["Body"].read())
-                break
+                art = json.loads(obj["Body"].read())
             except Exception:  # noqa: BLE001 — try the original, else omit (= gap)
                 continue
+            if key == revised_key and require_envelope and not art.get("envelope"):
+                continue  # legacy (envelope-less) revision → fall back to the original
+            out[node.key] = art
+            break
     return out
 
 
@@ -81,3 +89,43 @@ def load_json(s3, bucket: str, key: str) -> dict | None:
         return json.loads(obj["Body"].read())
     except Exception:  # noqa: BLE001 — missing/unreadable → None
         return None
+
+
+def save_stage_cost(
+    s3, bucket: str, iso3: str, window_kind: str, prompt_version: str,
+    schema_version: str, stage: str, spend_usd: float, run_id: str = "",
+) -> None:
+    """Record one DAG stage's per-country LLM spend, for overview to sum into the
+    published ``generation_cost_usd`` (each asset owns a separate run budget). The
+    ``run_id`` tags the spend to THIS run so a stale file from an earlier run (a
+    stage that was skipped this run, e.g. web gap-fill on ``no_gaps``) is not
+    counted again."""
+    save_json(
+        s3, bucket,
+        paths.cost_key(iso3, window_kind, prompt_version, schema_version, stage),
+        {"spend_usd": round(float(spend_usd or 0.0), 4), "run_id": run_id},
+    )
+
+
+# Every analysis stage that charges an LLM budget (gaps = pure logic, numbers =
+# deterministic, so neither spends). overview sums these + its own synthesis.
+GENERATION_COST_STAGES = ["sub", "evaluation", "web_gapfill", "revision", "scenarios", "changes"]
+
+
+def load_total_cost(
+    s3, bucket: str, iso3: str, window_kind: str, prompt_version: str,
+    schema_version: str, run_id: str, stages: list[str] | None = None,
+) -> float:
+    """Sum the per-stage spends recorded by THIS run (``run_id``). A stage file
+    from an earlier run — a stage skipped this run, or left over after toggling the
+    structured flag — does not match and is ignored (missing stage → 0.0). Defaults
+    to every generation stage."""
+    stages = stages if stages is not None else GENERATION_COST_STAGES
+    total = 0.0
+    for stage in stages:
+        doc = load_json(
+            s3, bucket, paths.cost_key(iso3, window_kind, prompt_version, schema_version, stage)
+        )
+        if doc and doc.get("run_id") == run_id:
+            total += float(doc.get("spend_usd", 0.0) or 0.0)
+    return total

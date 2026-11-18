@@ -76,3 +76,20 @@ def test_shared_create_signal_query_is_unchanged():
     clear-api lacks."""
     assert "retracted" not in clear_api.CREATE_SIGNAL
     assert "contentHash" not in clear_api.CREATE_SIGNAL
+
+
+def test_pending_analyses_query_omits_node_field_by_default(monkeypatch):
+    # Default (deep-dive off): the query must NOT select taxonomyNodeKeys, so the
+    # drain stays compatible with a clear-api that hasn't shipped the field yet.
+    monkeypatch.delenv("ANALYSIS_NODE_DEEPDIVE", raising=False)
+    q = clear_api._pending_analyses_query()
+    assert "pendingAnalyses" in q
+    assert "taxonomyNodeKeys" not in q
+
+
+def test_pending_analyses_query_selects_node_field_when_enabled(monkeypatch):
+    # Flag on (both repos deployed): the drain requests the selection so node
+    # requests route to the per-node deep-dive path.
+    monkeypatch.setenv("ANALYSIS_NODE_DEEPDIVE", "true")
+    q = clear_api._pending_analyses_query()
+    assert "taxonomyNodeKeys" in q

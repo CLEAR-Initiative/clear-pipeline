@@ -138,6 +138,8 @@ def analyse_node(
     caps: Caps | None = None,
     rag_limit: int = 20,
     prior: NodeDescriptive | None = None,
+    include_time_range: bool = False,
+    effective_end: str | None = None,
 ) -> NodeAnalysis:
     """Run the descriptive analyst for one taxonomy node and return the result.
 
@@ -147,12 +149,21 @@ def analyse_node(
 
     ``prior`` turns this into a REVISION (reflexion) pass: the same RAG evidence
     is re-answered with the prior attempt shown, prioritising what it missed.
+
+    ``include_time_range`` time-scopes the RAG retrieval to the frame's window
+    (``effective_end`` materialises a rolling frame's end). Off by default so the
+    country fan-out's retrieval is unchanged (it deliberately never time-filtered
+    — the calendar window governs the numeric aggregation, not the narrative);
+    the on-demand node deep-dive turns it on so a historical-window request cites
+    only in-window evidence.
     """
     caps = caps or _DEFAULT_CAPS
 
     filters = build_rag_filters(
         frame,
         country_scope_id=(frame.location_ids[0] if len(frame.location_ids) == 1 else None),
+        include_time_range=include_time_range,
+        effective_end=effective_end,
     )
     rag = fetch_rag_context(
         query=f"{scope_label} {node.question}", limit=rag_limit, filters=filters, mode="TOPICAL",

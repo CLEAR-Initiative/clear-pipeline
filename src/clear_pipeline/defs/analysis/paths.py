@@ -72,6 +72,42 @@ def revision_package_key(
     return f"{_ROOT}/revision/{iso3}/{window_kind}/{prompt_version}_{schema_version}/_package.json"
 
 
+def deepdive_prefix(frame_digest: str, prompt_version: str, schema_version: str) -> str:
+    """Prefix for a request-driven node deep-dive's per-node artifacts. Unlike
+    the country fan-out (keyed by ``iso3``/``window_kind``), an on-demand frame is
+    arbitrary, so it is content-addressed by ``Frame.digest()``. No trailing
+    slash — callers append ``/<node_key>.json``."""
+    return f"{_ROOT}/deepdive/{frame_digest}/{prompt_version}_{schema_version}"
+
+
+def deepdive_key(
+    frame_digest: str, prompt_version: str, schema_version: str, node_key: str
+) -> str:
+    """S3 key for one taxonomy node's descriptive artifact in a frame-scoped
+    on-demand deep-dive (any level — L2/L3 leaves included)."""
+    return f"{deepdive_prefix(frame_digest, prompt_version, schema_version)}/{node_key}.json"
+
+
+def scenarios_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country forward-looking scenarios artifact."""
+    return f"{_ROOT}/scenarios/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
+def changes_key(iso3: str, window_kind: str, prompt_version: str, schema_version: str) -> str:
+    """S3 key for the per-country 'what changed vs the prior generation' artifact."""
+    return f"{_ROOT}/changes/{iso3}/{window_kind}/{prompt_version}_{schema_version}.json"
+
+
+def cost_key(
+    iso3: str, window_kind: str, prompt_version: str, schema_version: str, stage: str
+) -> str:
+    """S3 key for one DAG stage's per-country LLM spend (``{spend_usd}``). Each
+    spending asset writes its own; overview sums them into the published
+    ``generation_cost_usd`` (each asset owns a separate per-run budget, so the
+    total is only knowable by summing across stages)."""
+    return f"{_ROOT}/cost/{iso3}/{window_kind}/{prompt_version}_{schema_version}/{stage}.json"
+
+
 def pinned_sites_key(iso3: str) -> str:
     """S3 key for the operator-maintained per-frame pinned-sites map
     (``{domain: category}``) consumed by the source classifier (§9.1)."""

@@ -23,7 +23,7 @@ def test_job_selects_only_the_new_dag_assets():
     assert set(ANALYSIS_ASSET_KEYS) == {
         "analysis_sub", "analysis_numbers_extract", "analysis_gaps",
         "analysis_evaluation", "analysis_web_gapfill", "analysis_revision",
-        "analysis_overview",
+        "analysis_scenarios", "analysis_changes", "analysis_overview",
     }
     # the queue drains are NOT part of this scheduled job
     assert "drain_analysis_requests" not in ANALYSIS_ASSET_KEYS

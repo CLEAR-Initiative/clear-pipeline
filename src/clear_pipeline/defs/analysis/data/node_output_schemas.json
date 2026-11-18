@@ -1,0 +1,2807 @@
+{
+  "nodes": {
+    "pillars_1d/casualties": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead/bereaved_household_impacts": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead/fatality_reporting_dynamics": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead/multi_source_count_discrepancies": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead/remains_recovery_and_identification": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead/unconfirmed_fatality_estimates": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/dead/verified_fatality_tallies": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured/acute_treatment_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured/emergency_care_reach": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured/injury_burden_in_at_risk_groups": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured/injury_caseload_profiles": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured/post_acute_care_continuity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/injured/trauma_mental_health_effects": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing/case_intake_channels": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing/cross_agency_case_management": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing/family_information_rights": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing/family_support_and_legal_pathways": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing/missing_person_caseloads": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/casualties/missing/status_verification_and_tracing": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context": {
+      "archetype": "Section",
+      "v5_path": "context_risks",
+      "pinned": true
+    },
+    "pillars_1d/context/demographic": {
+      "archetype": "Described",
+      "v5_path": "context_risks.demographics",
+      "pinned": true
+    },
+    "pillars_1d/context/demographic/age_sex_and_dependency_profile": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/context/demographic/education_livelihood_and_welfare_differentials": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/demographic/fertility_and_household_growth": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/demographic/mobility_and_settlement_shifts": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/context/demographic/mortality_and_population_health": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/demographic/population_counts_and_distribution": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/context/economics": {
+      "archetype": "Described",
+      "v5_path": "context_risks.economy",
+      "pinned": true
+    },
+    "pillars_1d/context/economics/business_climate_and_economic_volatility": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/economics/financial_services_and_credit_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/economics/fiscal_policy_and_resource_equity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/economics/labour_markets_and_household_earnings": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/economics/price_trends_and_affordability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/economics/supply_chains_and_market_availability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/environment": {
+      "archetype": "Described",
+      "v5_path": "context_risks.environment",
+      "pinned": true
+    },
+    "pillars_1d/context/environment/biodiversity_and_habitat_integrity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/environment/climate_patterns_and_change_effects": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/environment/disaster_exposure_and_impacts": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/environment/environmental_contamination_pathways": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/environment/natural_resource_condition_and_agricultural_calendar": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/environment/water_sanitation_and_exposure_sensitivity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/humanitarian_coordination": {
+      "archetype": "Described",
+      "v5_path": "context_risks.humanitarian_coordination",
+      "pinned": true
+    },
+    "pillars_1d/context/humanitarian_coordination/cluster_and_sector_framework": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/humanitarian_coordination/government_humanitarian_interface": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/humanitarian_coordination/national_coordination_architecture": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/humanitarian_coordination/predictability_accountability_and_partnership_design": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/humanitarian_coordination/procedures_and_regulatory_framework": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/humanitarian_coordination/subnational_coordination_arrangements": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/infrastructure_technology": {
+      "archetype": "Described",
+      "v5_path": "context_risks.infrastructure",
+      "pinned": true
+    },
+    "pillars_1d/context/infrastructure_technology/cybersecurity_and_digital_resilience": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/infrastructure_technology/digital_access_and_technology_adoption": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/infrastructure_technology/energy_systems_and_power_supply": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/infrastructure_technology/public_utilities_and_municipal_networks": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/infrastructure_technology/telecommunications_and_ict_networks": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/infrastructure_technology/transport_networks_and_connectivity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/legal_policy": {
+      "archetype": "Described",
+      "v5_path": "context_risks.legal_policy",
+      "pinned": true
+    },
+    "pillars_1d/context/legal_policy/constitutional_and_statutory_frameworks": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/legal_policy/customary_and_plural_legal_systems": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/legal_policy/displacement_asylum_and_migration_law": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/legal_policy/humanitarian_law_and_operational_policy": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/legal_policy/regulatory_and_administrative_rules": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/legal_policy/rights_frameworks_and_legal_protection": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/politics": {
+      "archetype": "Described",
+      "v5_path": "context_risks.political",
+      "pinned": true
+    },
+    "pillars_1d/context/politics/civic_space_and_political_expression": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/politics/dispute_settlement_and_civic_participation": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/politics/external_actors_and_domestic_politics": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/politics/party_dynamics_and_institutional_trust": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/context/politics/political_stability_and_contestation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/politics/public_administration_integrity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/security": {
+      "archetype": "Described",
+      "v5_path": "context_risks.security",
+      "pinned": true
+    },
+    "pillars_1d/context/security/armed_actors_and_force_presence": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/security/civil_unrest_and_collective_disorder": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/context/security/civilian_exposure_and_differentiated_risk": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/security/conflict_dynamics_and_violence_patterns": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/security/crime_and_public_order": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/security/territorial_control_and_contested_areas": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/socio_cultural": {
+      "archetype": "Described",
+      "v5_path": "context_risks.socio_culture",
+      "pinned": true
+    },
+    "pillars_1d/context/socio_cultural/cultural_continuity_and_external_influence": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/socio_cultural/identity_based_exclusion_practices": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/socio_cultural/inclusive_voice_and_representation": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/context/socio_cultural/intergroup_relations_and_cohesion": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/socio_cultural/norms_governing_behaviour_and_authority": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/context/socio_cultural/unequal_access_to_community_resources": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement": {
+      "archetype": "Section",
+      "v5_path": "displacement",
+      "pinned": true
+    },
+    "pillars_1d/displacement/displacement_characteristics": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/displacement/displacement_characteristics/departure_and_arrival_locations": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/displacement_characteristics/displaced_population_profiles": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/displacement/displacement_characteristics/displacement_magnitude_and_counts": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/displacement/displacement_characteristics/on_site_habitability_and_daily_conditions": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/displacement_characteristics/repeat_displacement_and_temporal_patterns": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/displacement/displacement_characteristics/settlement_and_shelter_arrangements": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions/cross_border_movement_plans": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions/preference_to_remain_locally": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions/return_to_alternate_origin_country_sites": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions/return_to_original_place_of_residence": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions/revised_or_deferred_movement_plans": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/intentions/secondary_movement_within_country": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration/education_access_parity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration/healthcare_access_parity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration/legal_status_and_equal_rights": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration/local_labour_market_entry": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration/market_and_service_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/displacement/local_integration/social_cohesion_and_intergroup_relations": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors/destination_basic_needs_availability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors/destination_economic_prospects": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors/destination_habitability_prospects": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors/family_reunification_prospects": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors/healthcare_and_schooling_attractors": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/displacement/pull_factors/peace_and_stability_attractors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors/armed_violence_and_insecurity_drivers": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors/coerced_expulsion_by_armed_actors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors/disaster_and_environmental_pressures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors/essential_services_breakdown": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors/livelihood_collapse_and_destitution": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/displacement/push_factors/targeted_persecution_and_exclusion": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access": {
+      "archetype": "StatusGaps",
+      "v5_path": "humanitarian_access",
+      "pinned": true
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps/access_constrained_population_scale": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps/access_severity_classification": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps/actor_delivery_reach_gaps": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps/geographic_constraint_extent": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps/service_access_infrastructure_limits": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/people_facing_humanitarian_access_constraints_humanitarian_access_gaps/unreached_and_excluded_groups": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints/climatic_and_seasonal_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints/connectivity_and_corridor_controls": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints/conveyance_and_fleet_availability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints/route_blockages_and_closures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints/terrain_remoteness_and_natural_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/physical_constraints/transport_infrastructure_condition": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief/assistance_awareness_and_messaging": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief/movement_restrictions_and_obstructions": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief/physical_reach_to_assistance": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief/safety_risks_for_aid_seekers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief/socio_legal_access_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/population_to_relief/targeting_timeliness_and_service_capacity": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population/coordination_needs_data_and_outreach": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population/entry_presence_and_movement_authorisations": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population/interference_diversion_and_principles": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population/operational_resources_and_continuity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population/physical_corridor_and_site_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/relief_to_population/threats_hostility_and_acceptance": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints/active_hostilities": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints/authority_security_directives": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints/checkpoints_and_movement_controls": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints/civilian_exposure_en_route_to_aid": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints/explosive_ordnance_hazards": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/humanitarian_access/security_constraints/security_outlook_staff_risk_and_disruptions": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means/channel_awareness_and_preferences": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means/connectivity_coverage_and_affordability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means/device_ownership_and_usability": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means/language_and_cultural_appropriateness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means/source_credibility_and_trust": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/communication_sources_and_means/two_way_feedback_pathways": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers/connectivity_and_device_barriers": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers/cultural_norm_communication_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers/language_literacy_and_format_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers/misinformation_rumors_and_safety_silencing": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers/outreach_and_feedback_channel_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/information_challenges_and_barriers/reliable_source_access_barriers": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum/data_collection_and_method_harmonization_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum/inter_agency_sharing_coordination_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum/local_context_analysis_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum/needs_assessment_coverage_gaps": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum/partner_dissemination_channel_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_hum/response_dataset_currency_gaps": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop/aid_provider_contact_methods": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop/assistance_availability_and_access_routes": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop/family_tracing_and_remote_links": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop/local_and_origin_area_news": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop/rights_entitlements_and_distribution_rules": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/information_and_communication/knowledge_and_info_gaps_pop/weather_hazards_and_movement_options": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity/access_permissions_and_security_management": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity/funding_budgets_and_resource_envelopes": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity/geographic_presence_and_office_footprint": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity/logistics_contingency_stocks_and_supply_systems": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity/partnerships_systems_and_programme_readiness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/nrc_internal_capacity/staffing_skills_and_organisational_readiness": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity/actor_presence_and_geographic_coverage": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity/coordination_roles_and_comparative_strengths": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity/coverage_gaps_and_capacity_shortfalls": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity/funding_assets_and_material_means": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity/response_readiness_and_contingency_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/operational_capacity/other_actors_capacity/staffing_resources_and_technical_skills": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event": {
+      "archetype": "Drivers",
+      "v5_path": "hazards_and_vulnerabilities",
+      "pinned": true
+    },
+    "pillars_1d/shock_event/aggravating_factors": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/aggravating_factors/economic_fragility_pressures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/aggravating_factors/environmental_and_technology_stressors": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/aggravating_factors/governance_and_policy_weaknesses": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/aggravating_factors/response_resource_shortfalls": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/aggravating_factors/social_inequality_amplifiers": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/aggravating_factors/stakeholder_coordination_failures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats/industrial_and_contaminant_hazards": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats/intentional_violence_and_security_threats": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats/natural_hazard_profiles": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats/preparedness_and_early_action_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats/public_risk_awareness_levels": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/hazards_threats/risk_management_resourcing": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors/emergency_preparedness_arrangements": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors/hazard_risk_reduction_measures": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors/post_shock_recovery_support": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors/protective_infrastructure_upgrades": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors/public_warning_and_messaging": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/mitigating_factors/response_surge_activation": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics/affected_area_footprint": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics/humanitarian_relevance_signals": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics/onset_timeline_and_evolution": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics/severity_and_scale_indicators": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics/shock_category_and_typology": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_1d/shock_event/type_and_characteristics/situation_reporting_currency": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities/community_input_into_response_planning": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities/contingency_stocks_and_preparedness_assets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities/institutional_capacities_budgets_and_skills": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities/intergovernmental_coordination_arrangements": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities/public_response_programmes_and_delivery": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/government_and_local_authorities/subnational_presence_and_resource_equity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination/coordination_platforms_and_leadership": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination/information_exchange_and_common_situational_awareness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination/local_actor_inclusion_in_coordination": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination/mandate_clarity_and_division_of_labour": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination/principled_practice_and_accountability_arrangements": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/humanitarian_coordination/regulatory_compliance_and_coordination_capacity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations/contingency_stocks_and_prepositioning": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations/funding_envelopes_and_resource_constraints": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations/geographic_presence_and_operational_footprint": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations/partnerships_with_national_and_local_actors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations/response_programmes_transparency_and_results": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/international_organizations/staff_competencies_and_surge_timeliness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations/contingency_stocks_and_prepositioning": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations/funding_and_material_resource_base": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations/geographic_reach_and_access_constraints": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations/linkages_with_other_response_actors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations/needs_informed_programmes_and_interventions": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/national_and_local_organizations/organizational_capacities_and_staff_skills": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/people_reached_and_response_gaps": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/people_reached_and_response_gaps/access_and_resource_drivers_of_gaps": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/people_reached_and_response_gaps/assistance_modalities_and_package_adequacy": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/people_reached_and_response_gaps/geographic_coverage_shortfalls": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/people_reached_and_response_gaps/people_and_communities_reached": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/people_reached_and_response_gaps/underserved_population_groups": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent/community_participation_and_response_activities": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent/contingency_stocks_and_prepositioning": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent/geographic_presence_and_service_accessibility": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent/inter_movement_coordination_and_communication": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent/movement_capacities_personnel_and_resources": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/capacities_response/red_cross_red_crescent/needs_assessment_and_targeting_practices": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms/child_work_as_household_coping": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms/coping_intensity_and_severity_patterns": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms/dietary_adjustment_coping_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms/financial_stress_coping_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms/high_consequence_coping_outcomes": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/coping_mechanisms/household_borrowing_and_indebtedness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards/affordability_of_essential_goods": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards/education_and_protection_service_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards/household_energy_and_electricity_access": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards/household_food_access_conditions": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards/household_water_access_conditions": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/living_standards/shelter_adequacy_and_habitability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need/access_gaps_blocking_recovery": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need/assistance_timing_relative_to_need": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need/drivers_of_humanitarian_need_status": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need/people_in_need_caseload_estimates": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need/people_in_need_within_affected_population": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/number_of_people_in_need/severity_classification_of_unmet_needs": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being/disability_and_functional_independence": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being/disease_burden_and_excess_mortality": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being/mental_health_and_psychosocial_conditions": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being/nutritional_status_of_at_risk_groups": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being/physical_trauma_injury_and_recovery": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/humanitarian_conditions/physical_and_mental_well_being/sexual_and_reproductive_health_status": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/impact": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers/compound_driver_interactions": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers/external_contextual_influences": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers/impact_intensifying_conditions": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers/impact_reducing_measures": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers/sector_specific_driver_patterns": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/drivers/underlying_causal_factors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people/goods_and_services_awareness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people/household_asset_damage": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people/income_and_employment_disruption": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people/movement_capacity_and_civil_status": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people/psychosocial_states_and_beliefs": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_people/social_conduct_and_safety_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks/humanitarian_reach_constraints": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks/market_prices_and_sector_output": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks/public_and_productive_infrastructure": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks/service_availability_status": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks/service_performance_and_quality": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/impact/impact_on_systems_services_and_networks/supply_chain_and_handling_arrangements": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected/people_with_bodily_or_emotional_harm": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected/people_with_capital_and_asset_harm": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected/people_with_practice_or_status_shifts": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected/populations_under_imminent_threat": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected/spatial_distribution_of_affected_people": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/impact/number_of_people_affected/total_affected_caseload_estimates": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff/adaptive_monitoring_priorities": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff/assistance_modality_recommendations": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff/cross_actor_response_alignment": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff/geographic_and_group_targeting": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff/local_partner_planning_roles": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_humanitarian_staff/resource_and_delivery_feasibility": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population/community_priority_expression_channels": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population/group_differentiated_priorities": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population/perceived_intervention_outcomes": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population/preferred_assistance_modalities": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population/preferred_delivery_arrangements": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_interventions/expressed_by_population/sustained_recovery_priorities": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff/extended_horizon_staff_assessments": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff/international_agency_assessments": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff/national_local_and_expert_assessments": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff/near_term_staff_assessments": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff/needs_evidence_alignment_and_tracking": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_humanitarian_staff/population_sector_knowledge_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population/assistance_awareness_and_access_guidance": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population/community_representative_voices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population/group_differences_and_priority_fit": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population/household_and_individual_voices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population/immediate_community_priorities": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "pillars_2d/priority_needs/expressed_by_population/sustained_and_recovery_priorities": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/agriculture": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.agriculture",
+      "pinned": true
+    },
+    "sectors/agriculture/agricultural_infrastructure": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_infrastructure/crop_storage_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_infrastructure/farm_access_routes": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_infrastructure/irrigation_network_condition": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_infrastructure/perishables_cold_chain": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_infrastructure/primary_processing_plants": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_infrastructure/trading_site_infrastructure": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs/crop_protection_products": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs/farm_tools_and_machinery": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs/fertilizer_supply_and_access": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs/livestock_feed_and_fodder": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs/seeds_and_planting_material": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/agricultural_inputs/veterinary_services": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management/agrobiodiversity_and_pest_ecology": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management/climate_advisory_participation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management/climate_ready_herd_management": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management/extreme_weather_exposure": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management/farm_water_use_efficiency": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/natural_resource_management/soil_and_land_stewardship": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/production": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/production/crop_establishment_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/production/harvest_and_handling_outcomes": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "sectors/agriculture/production/in_season_crop_watering": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/production/in_season_nutrient_application": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/agriculture/production/pest_and_disease_pressure": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/agriculture/production/seasonal_land_preparation": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/education": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.education",
+      "pinned": true
+    },
+    "sectors/education/education_policy": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/education_policy/curriculum_goals_and_assessment_mandates": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/education_policy/educator_credentialing_and_development_rules": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/education_policy/equitable_access_and_inclusion_rules": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/education/education_policy/policy_oversight_consultation_and_drivers": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/education/education_policy/public_education_finance_allocation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/education_policy/schooling_cycle_structure_and_providers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/learning_environment": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/education/learning_environment/classroom_capacity_and_condition": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/learning_environment/playgrounds_sports_and_recreation_areas": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/learning_environment/power_climate_control_and_connectivity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/learning_environment/school_feeding_premises_and_equipment": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/learning_environment/site_safety_hazards_and_protective_measures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/learning_environment/water_supply_and_sanitation_amenities": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/provision": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/education/provision/enrolment_participation_and_completion": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/provision/formal_cycles_streams_and_age_coverage": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/provision/government_private_and_civil_society_providers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/provision/non_formal_catch_up_and_bridging": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/provision/safe_reach_distance_and_boarding": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/provision/tertiary_and_vocational_pathways": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel/administrative_planning_capacity_and_tools": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel/continuing_professional_development_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel/qualification_profiles_and_standards_fit": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel/salaries_contracts_and_remuneration": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel/staffing_levels_against_need": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teachers_and_other_education_personnel/working_conditions_and_workforce_retention": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning/assessment_methods_and_certification_use": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning/curriculum_relevance_and_content_fit": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning/delivery_mode_time_and_digital_means": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning/instructional_language_alignment": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning/pedagogy_practice_and_teaching_capacity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/education/teaching_and_learning/textbook_and_learning_material_availability": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/food_security": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.food_security",
+      "pinned": true
+    },
+    "sectors/food_security/food": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/food/dietary_diversity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/food/energy_intake_adequacy": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/food/food_distribution_and_logistics": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/food/food_market_function_and_prices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/food/food_safety_and_product_condition": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/food/nutrient_content_of_diets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/nfi": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/food_security/nfi/cooking_space_safety_and_airflow": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/nfi/cooking_stoves_and_heat_devices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/nfi/fuel_efficiency_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/nfi/household_cooking_fuel_supply": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/nfi/kitchen_sets_and_food_storage_items": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/food_security/nfi/local_cooking_roles_and_customs": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.health",
+      "pinned": true
+    },
+    "sectors/health/health_care": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/health/health_care/access_barriers_to_care": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/health/health_care/essential_intervention_coverage": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/health/health_care/facility_infrastructure_readiness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_care/financing_and_material_resources": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_care/health_workforce_capacity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_care/utilisation_and_clinical_performance": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_status": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_status/crisis_related_mortality": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_status/impairments_and_functional_status": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/health/health_status/mental_health_conditions": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_status/morbidity_and_epidemiological_patterns": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_status/nutritional_anthropometric_status": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/health/health_status/untreated_and_care_deferred_conditions": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.livelihoods",
+      "pinned": true
+    },
+    "sectors/livelihoods/financial_capital": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/financial_capital/cash_credit_and_liquidity_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/financial_capital/contingency_savings_reserves": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/financial_capital/expenditure_patterns_and_burden": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/financial_capital/household_income_streams": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/financial_capital/income_adequacy_gaps": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/financial_capital/shock_effects_on_household_finances": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital/education_levels_and_credentials": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital/employment_participation_barriers": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital/intergenerational_skill_transfer": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital/market_aligned_competencies": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital/training_and_capacity_pathways": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/human_capital/work_capacity_and_fitness": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital/ecosystem_stress_and_stewardship": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital/energy_and_fuel_resources": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital/forest_aquatic_and_biodiversity_assets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital/land_tenure_and_ownership_security": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital/soil_quality_and_land_productivity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/natural_capital/water_resources_for_production": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation/entry_into_income_generating_work": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation/local_livelihood_market_demand": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation/occupation_disruption_and_volatility": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation/occupation_skill_match": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation/primary_and_diversified_occupations": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/occupation/self_employment_and_enterprise_support": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital/asset_damage_and_working_condition": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital/communications_and_energy_equipment": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital/local_supply_rental_and_use_capacity": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital/producer_tools_and_machinery": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital/transport_and_mobility_assets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/physical_capital/workshops_storage_and_structures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/social_capital": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/social_capital/community_safety_nets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/social_capital/formal_group_membership_and_functioning": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/social_capital/savings_and_credit_groups": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/social_capital/social_networks_and_connectedness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/livelihoods/social_capital/trust_reciprocity_and_exchange": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.logistics",
+      "pinned": true
+    },
+    "sectors/logistics/cold_chain": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/cold_chain/cold_distribution_centers": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/cold_chain/handler_training_and_peripheral_reach": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/cold_chain/insulated_packaging_and_unit_loads": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/cold_chain/refrigerated_production_and_storage": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/cold_chain/temperature_controlled_transport_assets": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/cold_chain/temperature_monitoring_equipment": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/energy": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/energy/electricity_generation_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/energy/energy_safety_and_environmental_effects": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/energy/energy_storage_infrastructure": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/energy/grid_transmission_and_end_user_delivery": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/energy/oil_and_gas_supply_chains": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/energy/renewable_generation_assets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict/fixed_telecommunications_infrastructure": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict/internet_connectivity_availability": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict/mobile_network_coverage_and_services": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict/network_security_and_process_control_systems": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict/public_and_operational_broadcasting": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/information_and_communication_technologies_ict/satellite_and_radio_links": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling/goods_protection_and_shelf_life_control": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling/handling_procedures_and_equipment": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling/inventory_visibility_and_stock_control": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling/site_security_and_pipeline_coordination": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling/storage_site_accessibility": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/storage_handling/warehouse_and_field_storage_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/transport": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/transport/air_cargo_and_airport_operations": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/transport/border_clearance_and_multimodal_coordination": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/transport/hazardous_goods_pipeline_movement": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/transport/rail_freight_access_and_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/logistics/transport/road_transport_networks_and_fleets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/logistics/transport/waterborne_shipping_and_port_throughput": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/nutrition": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.nutrition",
+      "pinned": true
+    },
+    "sectors/nutrition/nutrition_services": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_services/community_nutrition_service_coverage": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_services/dietary_practices_promotion": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_services/life_stage_nutrition_support": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_services/nutrition_workforce_capacity": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_services/programme_performance_and_oversight": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_services/therapeutic_feeding_and_diet_therapy": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status/acute_malnutrition_prevalence": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status/adult_body_mass_status": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status/childhood_excess_weight": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status/chronic_child_undernutrition": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status/dietary_energy_and_diversity": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/nutrition/nutrition_status/micronutrient_deficiency_burden": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.protection",
+      "pinned": true
+    },
+    "sectors/protection/child_protection": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/child_protection/child_labor_and_exploitation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/child_protection/detention_schooling_barriers_and_explosive_harm": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/child_protection/family_separation_and_alternative_care": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/protection/child_protection/harmful_practices_and_adolescent_pregnancy": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/child_protection/trafficking_recruitment_and_armed_association": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/child_protection/violence_neglect_and_caregiver_abuse": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/documentation": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/documentation/civil_status_and_credential_recognition": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/documentation/document_loss_theft_and_destruction": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/documentation/immigration_status_and_lawful_stay": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/documentation/legal_identity_and_birth_registration": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/documentation/statelessness_and_service_access_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/documentation/withheld_contested_and_invalidated_papers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement/asylum_entry_and_reception_barriers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement/authority_imposed_travel_controls": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement/coerced_return_and_refoulement": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement/forced_displacement_and_expulsion": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement/siege_and_area_encirclement": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/freedom_of_movement/unsafe_routes_barriers_and_infrastructure_gaps": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp/eviction_risk_and_forced_removal": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp/housing_adequacy_space_and_habitability": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp/occupation_and_expropriation_of_property": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp/property_destruction_and_confiscation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp/settlement_location_and_livelihood_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/housing_land_and_property_hlp/tenure_recognition_and_formal_agreements": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights/expression_belief_assembly_and_association": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights/liberty_arrest_and_due_process": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights/nationality_family_life_and_equal_protection": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights/physical_integrity_and_ill_treatment": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights/privacy_home_and_personal_data": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/human_civil_and_political_rights/right_to_life": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law/court_access_and_legal_assistance": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law/equality_before_the_law": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law/fair_hearing_and_procedural_safeguards": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law/judicial_independence_and_impartiality": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law/law_enforcement_conduct_and_accountability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/justice_and_rule_of_law/remedies_restitution_and_redress": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/mine_uxos_and_ieds": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/protection/mine_uxos_and_ieds/contaminated_and_hazardous_areas": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/mine_uxos_and_ieds/explosive_ordnance_casualties_and_survivors": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/mine_uxos_and_ieds/fear_driven_access_and_livelihood_impacts": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/mine_uxos_and_ieds/mine_risk_education_coverage": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/mine_uxos_and_ieds/victim_assistance_and_reintegration": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security/abduction_disappearance_and_unlawful_arrest": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security/attacks_against_civilians_and_objects": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security/forced_recruitment_and_family_separation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security/harassment_hate_speech_and_discrimination": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security/killing_torture_and_physical_assault": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/physical_safety_and_security/theft_extortion_trafficking_and_forced_labor": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv/forced_marriage_and_harmful_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv/gender_discrimination_and_stigmatization": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv/intimate_partner_and_domestic_violence": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv/sexual_exploitation_and_trafficking": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv/sexual_violence_patterns_and_settings": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/protection/sexual_and_gender_based_violence_sgbv/survivor_support_law_and_public_awareness": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.shelter",
+      "pinned": true
+    },
+    "sectors/shelter/domestic_living_space": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/shelter/domestic_living_space/accessibility_and_usability": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/shelter/domestic_living_space/electricity_access_and_supply": {
+      "archetype": "Figures",
+      "pinned": false
+    },
+    "sectors/shelter/domestic_living_space/indoor_fire_and_egress_safety": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/domestic_living_space/interior_climate_and_habitability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/domestic_living_space/intrusion_and_asset_protection": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/domestic_living_space/privacy_and_living_space": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope/building_materials_and_durability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope/dwelling_types_occupied": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope/enclosure_element_functioning": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope/moisture_damp_and_mold_conditions": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope/structural_condition_and_safety": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/shelter/dwelling_envelope/weather_pest_and_injury_hazards": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/hlp": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/hlp/dispute_incidence_and_resolution_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/shelter/hlp/hlp_governance_and_regulation": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/shelter/hlp/ownership_clarity_and_documentation": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/hlp/rights_awareness_and_obligations": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/hlp/tenure_arrangements_and_security": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/hlp/transfer_inheritance_and_formalization": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items/domestic_lighting_items": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items/household_furniture": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items/personal_clothing": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items/shelter_tools_and_fixings": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items/sleeping_and_bedding_items": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/non_food_household_items/thermal_protection_assets": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/settlement": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/shelter/settlement/communal_settlement_arrangements": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/shelter/settlement/displaced_dispersed_settlement": {
+      "archetype": "Distribution",
+      "pinned": false
+    },
+    "sectors/shelter/settlement/non_displaced_settlement_scenarios": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/settlement/service_reach_and_social_facilities": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/settlement/settlement_density_and_duration": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/shelter/settlement/site_management_and_security": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash": {
+      "archetype": "SeverityNeeds",
+      "v5_path": "sectors.wash",
+      "pinned": true
+    },
+    "sectors/wash/excreta_management_sanitation": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/excreta_management_sanitation/collection_and_conveyance_systems": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/excreta_management_sanitation/containment_and_environmental_contamination_risk": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/excreta_management_sanitation/facility_upkeep_and_hygienic_condition": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/excreta_management_sanitation/sanitation_practices_and_service_monitoring": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/excreta_management_sanitation/toilet_access_safety_and_inclusion": {
+      "archetype": "Drivers",
+      "pinned": false
+    },
+    "sectors/wash/excreta_management_sanitation/treatment_disposal_and_reuse_outcomes": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/hygiene_facilities_and_products": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/hygiene_facilities_and_products/essential_hygiene_product_availability": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/hygiene_facilities_and_products/facility_upkeep_and_operating_supplies": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/hygiene_facilities_and_products/facility_wastewater_and_vector_risk": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/hygiene_facilities_and_products/hygiene_practices_knowledge_and_social_norms": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/hygiene_facilities_and_products/personal_hygiene_facility_access": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/solid_waste_management": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/solid_waste_management/collection_and_transport_services": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/solid_waste_management/community_engagement_and_waste_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/solid_waste_management/environmental_pollution_and_health_exposure": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/solid_waste_management/treatment_infrastructure_and_disposal_practice": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/solid_waste_management/waste_generation_and_household_containment": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/vector_control": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/wash/vector_control/care_access_for_vector_borne_illness": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/vector_control/control_programme_resources_and_capacity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/vector_control/environmental_and_community_control_measures": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/vector_control/habitat_conditions_and_proliferation_drivers": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/vector_control/individual_protection_measures": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/wash/vector_control/vector_population_surveillance": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities/cleaning_standard_precautions_and_ipc": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities/facility_excreta_containment_chain": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities/facility_hygiene_stations_and_laundry": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities/facility_water_supply_and_reliability": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities/healthcare_waste_segregation_and_disposal": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_health_care_facilities/outbreak_mortuary_and_body_handling_protocols": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools/school_cleaning_and_environmental_hygiene": {
+      "archetype": "SeverityNeeds",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools/school_handwashing_facility_functionality": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools/school_sanitation_containment_and_safety": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools/school_solid_waste_handling": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools/school_water_supply_and_reliability": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/wash_in_schools/student_and_staff_hygiene_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/water_supply": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/water_supply/drinking_water_quantity_and_household_access": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/water_supply/point_of_use_safety_and_handling_practices": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/water_supply/source_availability_yield_and_seasonality": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    },
+    "sectors/wash/water_supply/source_water_quality_and_protection": {
+      "archetype": "Described",
+      "pinned": false
+    },
+    "sectors/wash/water_supply/treatment_and_distribution_continuity": {
+      "archetype": "StatusGaps",
+      "pinned": false
+    }
+  }
+}
