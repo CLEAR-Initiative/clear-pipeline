@@ -122,7 +122,7 @@ class Harness:
             patch("clear_pipeline.defs.gx_pipeline.iceberg_catalog.settings.iceberg_catalog_uri", self.catalog_uri),
         )
 
-    def poll(self, batch, *, event_type="conflict", district="d1"):
+    def poll(self, batch, *, event_type="conflict", district="d1", expect_success=True):
         """`event_type`/`district`: what classify/geo assign every row this poll."""
         self.source._batches = [batch]
         self.source._poll_count = 0
@@ -141,8 +141,8 @@ class Harness:
             classify.return_value.relevance = 0.9
             classify.return_value.type_level_2 = event_type
             classify.return_value.disaster_types = ["cv"]
-            result = dg.materialize(self.assets + self.checks)
-        assert result.success
+            result = dg.materialize(self.assets + self.checks, raise_on_error=expect_success)
+        assert result.success is expect_success
         return result
 
     def metadata(self, result, asset):
@@ -617,3 +617,81 @@ def test_only_idmc_defines_sync_hooks():
         assert not hasattr(src, "content_update_input")
     assert hasattr(IDMCGXSource(), "content_hash")
     assert hasattr(IDMCGXSource(), "content_update_input")
+
+
+# ── transient faults ─────────────────────────────────────────────────────────
+
+
+def _flaky_sync_hashes(failures: int):
+    """`sync_hashes` that raises the dev S3 timeout `failures` times, then works."""
+    real = iceberg_signals.sync_hashes
+    calls = {"n": 0}
+
+    def flaky(table, external_ids):
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise OSError("AWS Error NETWORK_CONNECTION during HeadObject operation: curlCode: 28")
+        return real(table, external_ids)
+
+    return patch.object(iceberg_signals, "sync_hashes", side_effect=flaky)
+
+
+class SinceSource(HookedSource):
+    """Like a real feed: each poll returns every record newer than the
+    watermark. Here that is the whole batch until a watermark is set."""
+
+    def poll(self, since):
+        return self._batches[-1] if since is None else []
+
+
+def test_bronze_holds_the_watermark_when_the_iceberg_read_fails(tmp_path):
+    """#1376: bronze advanced the watermark, then the Iceberg read timed out,
+    so the next poll started after the records it never passed on."""
+    with patch("clear_pipeline.defs.gx_pipeline.factory.GX_RETRY_POLICY", None):
+        h = Harness(tmp_path, SinceSource([]))
+    with _flaky_sync_hashes(failures=99):
+        result = h.poll([_rec("a")], expect_success=False)
+    assert [e.step_key for e in result.all_events if e.is_step_failure] == ["fakesrc_bronze"]
+    assert h.source._watermark is None
+    assert h.pg.ops() == []
+
+    h.poll([_rec("a")])  # the next scheduled run gets the record again
+    assert h.pg.ops() == ["create"]
+    assert h.source._watermark is not None
+
+
+def test_bronze_and_gold_retry_a_transient_fault(tmp_path):
+    with patch(
+        "clear_pipeline.defs.gx_pipeline.factory.GX_RETRY_POLICY", dg.RetryPolicy(max_retries=2, delay=0)
+    ):
+        h = Harness(tmp_path, SinceSource([]))
+    with _flaky_sync_hashes(failures=1):
+        h.poll([_rec("a")])
+    assert h.pg.ops() == ["create"]
+    assert h.source._watermark is not None
+    retry = {a.op.name: a.op.retry_policy for a in h.assets}
+    assert retry["fakesrc_bronze"] and retry["fakesrc_gold"]
+    assert retry["fakesrc_push"] is None
+
+
+def test_gold_retry_keeps_every_signal_row(tmp_path):
+    """A retried gold step gets the same input bundles: it must not have
+    consumed their `newSignalRows` on the failed attempt."""
+    with patch(
+        "clear_pipeline.defs.gx_pipeline.factory.GX_RETRY_POLICY", dg.RetryPolicy(max_retries=2, delay=0)
+    ):
+        h = Harness(tmp_path, SinceSource([]))
+    real = iceberg_signals.existing_push_state
+    calls = {"n": 0}
+
+    def flaky(table, external_ids):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("AWS Error NETWORK_CONNECTION during HeadObject operation: curlCode: 28")
+        return real(table, external_ids)
+
+    with patch.object(iceberg_signals, "existing_push_state", side_effect=flaky):
+        h.poll([_rec("a"), _rec("b")])
+    assert calls["n"] == 2, "gold ran twice"
+    assert set(h.gold) == {"a", "b"}
+    assert h.pg.ops() == ["create", "create"]

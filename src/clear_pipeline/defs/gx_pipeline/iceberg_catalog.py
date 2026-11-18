@@ -12,6 +12,12 @@ NAMESPACE = "gold"
 
 _CHECKSUM_ENV = ("AWS_REQUEST_CHECKSUM_CALCULATION", "AWS_RESPONSE_CHECKSUM_VALIDATION")
 
+# Seconds. Without them pyarrow's AWS SDK gives up when a request sends
+# nothing for 3 s (curlCode 28), which failed sudan_witness_gx on dev twice
+# while it read table metadata (tickets #1305, #1376).
+S3_CONNECT_TIMEOUT_S = 10
+S3_REQUEST_TIMEOUT_S = 30
+
 
 def _require_checksums_when_required() -> None:
     """Default the AWS SDK checksum mode to WHEN_REQUIRED; refuse any other value.
@@ -44,6 +50,8 @@ def catalog() -> Catalog:
             # (providers/s3.py), never bare AWS S3 — path-style addressing
             # is what those backends (e.g. MinIO) expect.
             "s3.path-style-access": "true",
+            "s3.connect-timeout": str(S3_CONNECT_TIMEOUT_S),
+            "s3.request-timeout": str(S3_REQUEST_TIMEOUT_S),
         }
     return load_catalog("gx_pipeline", **properties)
 

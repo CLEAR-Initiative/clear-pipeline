@@ -91,6 +91,12 @@ _SILVER_COLUMNS = ["externalId", "signalId", "publishedAt", "title", "descriptio
 def gold_pool(source: str) -> str:
     return f"gx_{source}_gold"
 
+# Re-runs a step that failed on a transient fault, such as an S3 timeout while
+# Iceberg reads table metadata. Only on steps that are safe to re-run: bronze
+# re-polls the same window (its watermark holds until the step succeeds) and
+# gold's upsert is keyed on externalId. Not on push, which writes to clear-api.
+GX_RETRY_POLICY = dg.RetryPolicy(max_retries=2, delay=30, backoff=dg.Backoff.EXPONENTIAL)
+
 # The only `resolve_group` verdict that retracts. Any other value keeps the
 # row, so an unexpected value can never retract (contract: IDMCGXSource).
 _RETRACT = "retract"
@@ -179,6 +185,7 @@ def build_gx_source_assets(source: GXSource) -> list:
         name=f"{src}_bronze",
         group_name=group,
         description=f"Poll {src}, write each raw record to S3 bronze (unchanged from production's raw_{src}).",
+        retry_policy=GX_RETRY_POLICY,
     )
     def _bronze(context: dg.AssetExecutionContext) -> pd.DataFrame:
         poll_started = datetime.now(UTC)
@@ -217,13 +224,6 @@ def build_gx_source_assets(source: GXSource) -> list:
                 context.log.exception("[%s bronze] failed to write a record", src)
                 failed += 1
 
-        # Same clean-batch-only watermark advance as production's factory.py:
-        # a partial failure holds it so the next poll retries the window.
-        if failed == 0:
-            source.set_watermark(poll_started)
-        else:
-            context.log.warning("[%s bronze] %d record(s) failed — watermark held for retry", src, failed)
-
         # Skip rows Postgres already holds unchanged (their blob was rewritten
         # above with identical content, at the same per-revision key).
         skipped = 0
@@ -239,6 +239,14 @@ def build_gx_source_assets(source: GXSource) -> list:
                 else:
                     kept.append(row)
             rows = kept
+
+        # Same clean-batch-only watermark advance as production's factory.py:
+        # a partial failure holds it so the next poll retries the window. Last,
+        # so a step that raises above (e.g. the Iceberg read) holds it too.
+        if failed == 0:
+            source.set_watermark(poll_started)
+        else:
+            context.log.warning("[%s bronze] %d record(s) failed — watermark held for retry", src, failed)
 
         context.add_output_metadata({
             "records_fetched": len(records), "written": written, "failed": failed,
@@ -717,6 +725,7 @@ def build_gx_source_assets(source: GXSource) -> list:
         group_name=group,
         ins={"bundles": dg.AssetIn(key=f"{src}_match")},
         description="Upsert signal rows (Type-1) into Iceberg (§6). Event persistence is stubbed (iceberg_events.py).",
+        retry_policy=GX_RETRY_POLICY,
         # Only sources that revise rows in place re-classify a stored row with
         # new content; elsewhere a re-processed row's drift is classifier noise.
         check_specs=[dg.AssetCheckSpec("grouping_key_drift", asset=f"{src}_gold")] if content_hash else [],
@@ -733,6 +742,8 @@ def build_gx_source_assets(source: GXSource) -> list:
         signal_rows: list[dict] = []
         new_versions = no_op_versions = 0
         for bundle in bundles:
+            # A copy: a retried attempt may get the same input objects back.
+            bundle = dict(bundle)
             new_signals = bundle.pop("newSignalRows", [])
             merged = iceberg_events.merge_event(events_table, bundle)
             if merged["version"] != bundle.get("version"):
