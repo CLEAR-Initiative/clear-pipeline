@@ -69,6 +69,9 @@ class GXSource(Protocol):
         """Fetch source records published since ``since`` (None = initial lookback)."""
         ...
 
+    # Every signalInput's externalId starts with it: the provider's `ID_PREFIX`.
+    id_prefix: str
+
     def external_id(self, record: Any) -> str:
         """Stable upstream id — the S3 key + gold row id."""
         ...
@@ -121,6 +124,8 @@ class DataminrGXSource:
     watermark behavior to today's `raw_dataminr` ingest asset, with no
     import from `defs/signals` (see module docstring)."""
 
+    id_prefix = dataminr.ID_PREFIX
+
     @property
     def source(self) -> str:
         return settings.dataminr_source_name
@@ -162,6 +167,8 @@ class DataminrGXSource:
 @dataclass(frozen=True)
 class ACLEDGXSource:
     """Calls `providers/acled.py` directly — same recipe as `DataminrGXSource`."""
+
+    id_prefix = acled.ID_PREFIX
 
     @property
     def source(self) -> str:
@@ -206,6 +213,8 @@ class Darfur24GXSource:
     it's a clear-api read, worth not repeating per article)."""
 
     _location_id: str | None = None
+
+    id_prefix = darfur24.ID_PREFIX
 
     @property
     def source(self) -> str:
@@ -261,6 +270,8 @@ class IDMCGXSource:
     # Optional (probed in factory.py): gives the job a poll sensor. gx-only sources only —
     # the others share watermarks/seen-sets with the `defs/signals` poll, which a second poller would race.
     poll_interval_minutes: int = settings.idmc_poll_interval_minutes
+
+    id_prefix = idmc.ID_PREFIX
 
     @property
     def source(self) -> str:
@@ -332,6 +343,8 @@ class SudanWitnessGXSource:
 
     poll_interval_minutes: int = settings.sudan_witness_poll_interval_minutes
 
+    id_prefix = sudan_witness.ID_PREFIX
+
     @property
     def source(self) -> str:
         return settings.sudan_witness_source_name
@@ -382,6 +395,8 @@ class IOMDTMFlashAlertsGXSource:
 
     poll_interval_minutes: int = settings.iom_dtm_flash_alerts_poll_interval_minutes
     _location_ids: dict[str, str | None] = field(default_factory=dict, repr=False)
+
+    id_prefix = iom_dtm_flash_alerts.ID_PREFIX
 
     @property
     def source(self) -> str:
@@ -464,6 +479,8 @@ class InsoGXSource:
     extraction_version: str = inso.EXTRACTION_PROMPT_VERSION
     _pending_cursor: tuple[int, int] | None = None
     _countries: list[dict] | None = field(default=None, repr=False)
+
+    id_prefix = inso.ID_PREFIX
 
     @property
     def source(self) -> str:

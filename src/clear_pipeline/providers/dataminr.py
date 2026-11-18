@@ -95,6 +95,11 @@ class DataminrAlertsResponse(BaseModel):
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "dataminr:"
+
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 # Rate limit: track requests per minute via Redis

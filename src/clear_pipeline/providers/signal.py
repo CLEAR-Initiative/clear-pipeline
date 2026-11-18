@@ -9,6 +9,7 @@ from clear_pipeline.providers.clear_api import (
     create_signal,
     find_or_create_landmark_l4,
 )
+from clear_pipeline.providers.dataminr import ID_PREFIX as DATAMINR_ID_PREFIX
 from clear_pipeline.providers.dataminr import DataminrSignal
 from clear_pipeline.providers.event_extraction import extract_event, extracted_signal_fields
 from clear_pipeline.providers.geoparser import (
@@ -500,7 +501,7 @@ def build_signal_input(signal: DataminrSignal, source_id: str, *, promote: bool 
         # Idempotent ingestion key — the clear-api upsert behaviour keys on
         # (sourceId, externalId), so re-ingesting the same Dataminr alert
         # returns the existing row instead of creating a duplicate.
-        "externalId": f"dataminr:{signal.alertId}",
+        "externalId": f"{DATAMINR_ID_PREFIX}{signal.alertId}",
         "rawData": raw_data,
         "publishedAt": signal.alertTimestamp,
         "url": url,

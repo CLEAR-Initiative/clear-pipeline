@@ -137,6 +137,7 @@ class FakeSource:
     """Two synthetic records; second poll returns none (simulates drained)."""
 
     source = "fakesrc"
+    id_prefix = "fakesrc:"
 
     def __init__(self):
         self._records = [

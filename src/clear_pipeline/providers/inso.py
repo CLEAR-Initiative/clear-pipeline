@@ -45,6 +45,11 @@ from clear_pipeline.providers.prompts.event_classification import (
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "inso:"
+
 __all__ = [
     "Country",
     "Incident",
@@ -439,7 +444,7 @@ def incident_dates(incident: Incident, published_at: str) -> IncidentDates:
 
 def external_id(serial: str, ordinal: int) -> str:
     """``inso:<serial verbatim>:<ordinal>``, 1-based."""
-    return f"inso:{serial}:{ordinal}"
+    return f"{ID_PREFIX}{serial}:{ordinal}"
 
 
 @dataclass(frozen=True)

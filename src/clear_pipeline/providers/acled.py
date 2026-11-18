@@ -22,6 +22,11 @@ from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "acled:"
+
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 ACLED_COOKIE_KEY = "acled:cookies"
@@ -418,7 +423,7 @@ def build_acled_signal_input(event: dict, source_id: str, *, promote: bool = Tru
         # Dedup key — ACLED retroactively updates events across rounds and
         # sometimes re-emits them; (sourceId, externalId) ensures we only
         # ever store one row per event.
-        "externalId": f"acled:{event['acled_id']}",
+        "externalId": f"{ID_PREFIX}{event['acled_id']}",
         "rawData": event["raw"],
         "publishedAt": published_at,
         "title": event["title"],

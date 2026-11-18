@@ -16,6 +16,11 @@ from clear_pipeline.signals.config import settings
 
 logger = logging.getLogger(__name__)
 
+# externalId prefix. The Signal id is uuid5 of the prefixed externalId
+# (defs/gx_pipeline/signal_ids.py): never rename it, or the source is re-ided
+# and clear-api's (sourceId, externalId) dedupe breaks.
+ID_PREFIX = "iom_dtm_flash_alert:"
+
 _redis = redis.from_url(settings.redis_url, decode_responses=True)
 
 
@@ -96,7 +101,7 @@ def _extract_external_id_from_report_file(url: str | None) -> str | None:
         logger.warning("[DTM_FLASH_ALERTS] no id param in field_report_file: %s", url)
         return None
 
-    return f"iom_dtm_flash_alert:{node_ids[0]}"
+    return f"{ID_PREFIX}{node_ids[0]}"
 
 
 def _decode_html_entities(value: Any) -> Any:

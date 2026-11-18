@@ -55,8 +55,9 @@ class FakePostgres:
         self._maybe_fail("create")
         key = (data["sourceId"], data["externalId"])
         if key not in self.rows:  # get-or-create returns an existing row unchanged
-            self.rows[key] = {"contentHash": data.get("contentHash"), "retracted": False,
-                              "rawS3Key": data.get("rawS3Key"), "title": data.get("title")}
+            self.rows[key] = {"id": data.get("id") or f"sig-{key[1]}", "contentHash": data.get("contentHash"),
+                              "retracted": False, "rawS3Key": data.get("rawS3Key"), "title": data.get("title")}
+        # A seeded row without an id stands for a legacy, Prisma-minted one.
         return {"id": f"sig-{key[1]}", "externalId": key[1], **self.rows[key]}
 
     def update(self, data):
@@ -346,7 +347,7 @@ def test_rows_are_isolated(h):
 
 def test_push_metadata_keys(h):
     result = h.poll([_rec("a")])
-    assert set(h.metadata(result, "push")) == {"created", "updated", "probed", "not_found", "failed"}
+    assert set(h.metadata(result, "push")) == {"created", "updated", "probed", "not_found", "failed", "conflict", "aliased"}
 
 
 def test_legacy_pushed_row_without_state_gets_one_update_with_its_key(h):
