@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
-from clear_pipeline.providers.brave_search import BraveClient, llm_context
+from clear_pipeline.providers.brave_search import llm_context
+from clear_pipeline.providers.web_search import WebSearchClient
 
 from .citations import resolve_bullets
 from .profiles import Caps
@@ -122,7 +123,7 @@ def fill_gap(
     requirement: str,
     provider,
     budget=None,
-    brave: BraveClient = llm_context,
+    search: WebSearchClient = llm_context,
     freshness: str | None = None,
     max_urls: int = 5,
     threshold_mode: str = "balanced",
@@ -130,8 +131,10 @@ def fill_gap(
     domain_cache: dict[str, int] | None = None,
     caps: Caps | None = None,
 ) -> GapFillResult:
-    """Close one gap from the web. ``brave`` is injectable for tests."""
-    results = brave(
+    """Close one gap from the web. ``search`` is the injected web-search provider
+    (Brave by default; Serper when the asset resolves it) — any callable returning
+    results with url/title/snippets/site_name; injectable for tests."""
+    results = search(
         requirement, count=max_urls * 2, max_urls=max_urls,
         freshness=freshness, threshold_mode=threshold_mode,
     )

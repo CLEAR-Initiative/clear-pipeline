@@ -22,6 +22,7 @@ from clear_pipeline.providers.clear_api import (
 )
 from clear_pipeline.providers.geoparser import (
     GeocodeTrace,
+    GeoparseResult,
     arabic_lookup_applies,
     exact_gazetteer_match,
     gazetteer_knows,
@@ -1150,6 +1151,25 @@ def _area_shape(location_id: str):
     return _area_shapes_cache[location_id]
 
 
+def _may_share_an_areas_name(geo: GeoparseResult) -> bool:
+    """Whether a geocode answer can be a feature that only shares the name of
+    an area, so that the name is worth one more lookup (#1475).
+
+    The lookup inside an area never sees a range or a region itself: "Jabal
+    Marrah" inside a district of Central Darfur answers with the district
+    "Gharb Jabal Marrah" (ADM2), or with a volcano entry (VLC), and the range
+    (MTS) is the gazetteer's answer only for the whole country.
+
+    Not worth the lookup: an exact gazetteer match on a populated place, and
+    a LocationIQ result that is a place. A town is what its name says, also
+    when a state shares that name ("الخرطوم" inside Khartoum district is the
+    city)."""
+    if (geo.osm_type or "").startswith("geonames:"):
+        hit = geo.raw if isinstance(geo.raw, dict) else {}
+        return not (hit.get("exact") and (hit.get("featureClass") or "").upper() == "P")
+    return (geo.osm_class or "").lower() != "place"
+
+
 def _geocode_within(
     place_name: str,
     area_id: str,
@@ -1173,7 +1193,11 @@ def _geocode_within(
     found nothing inside the area, or the L4 promote gave no location. Not a
     miss: an area with no geometry, a lookup that failed (an outage proves
     nothing about the name), and a name that is an area's own (a state, a
-    region, a mountain range: `GeocodeTrace.area`)."""
+    region, a mountain range: `GeocodeTrace.area`).
+
+    A match that is not a town is checked once more: when the name's exact
+    match in the whole country is an area, the match here only shares the
+    name (`_may_share_an_areas_name`), and the name gets no point."""
     try:
         area = _area_shape(area_id)
         if area is None:
@@ -1238,6 +1262,17 @@ def _geocode_within(
             logger.info("[locate] %r → alias location %s inside area %s",
                         place_name, geo.location_id, area_id)
             return geo.location_id
+
+        if _may_share_an_areas_name(geo) and gazetteer_names_area(
+            place_name, country_code, arabic_name=arabic_name
+        ):
+            # The name is an area's own, and the match is another feature of
+            # that name inside the area that was searched. Not a miss either.
+            logger.info(
+                "[locate] %r names an area; the match inside area %s (%r) only shares its name — no point",
+                place_name, area_id, geo.display_name,
+            )
+            return None
 
         promo = find_or_create_landmark_l4(
             name=place_name, lat=geo.lat, lng=geo.lng, kind=geo.kind,

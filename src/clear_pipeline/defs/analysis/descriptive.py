@@ -39,6 +39,28 @@ _MAP_INSTRUCTION = (
     "markers at the end of the line. Omit anything the evidence does not support."
 )
 
+# Instruction for a REVISION pass (reflexion): a prior attempt scored below the
+# completeness floor, so re-answer with the same evidence but target the parts it
+# missed. Still KB-grounded — no new sources enter here (web evidence is attached
+# and tiered separately, §9).
+_REVISE_INSTRUCTION = (
+    "This is a REVISION. A prior attempt (below) scored incomplete. Re-answer the "
+    "QUESTION more completely from the RETRIEVED EVIDENCE, prioritising the parts "
+    "the prior attempt did not answer. Keep every finding grounded in the evidence "
+    "and cite inline with [Rn]; do not invent anything the evidence does not "
+    "support, and do not lower completeness below the prior attempt without reason."
+)
+
+
+def _prior_block(prior: NodeDescriptive) -> str:
+    """Render a prior attempt (findings + what it missed) for the revision prompt."""
+    findings = "\n".join(f"- {b.description}" for b in prior.findings) or "- (none)"
+    missed = "\n".join(f"- {q}" for q in prior.questions_not_answered) or "- (none stated)"
+    return (
+        f"\n\nPRIOR ATTEMPT (completeness {prior.completeness:.2f}):\n{findings}\n"
+        f"DID NOT ANSWER:\n{missed}"
+    )
+
 _DEFAULT_CAPS = Caps(max_turns=1, max_tokens=2000)
 
 
@@ -115,18 +137,33 @@ def analyse_node(
     budget=None,
     caps: Caps | None = None,
     rag_limit: int = 20,
+    prior: NodeDescriptive | None = None,
+    include_time_range: bool = False,
+    effective_end: str | None = None,
 ) -> NodeAnalysis:
     """Run the descriptive analyst for one taxonomy node and return the result.
 
     ``scope_label`` is the human area label for the frame (e.g. "Sudan"), used
     both to scope the RAG query and to frame the prompt. ``provider`` must be a
     provider dedicated to this call (one per concurrent unit — doc §7).
+
+    ``prior`` turns this into a REVISION (reflexion) pass: the same RAG evidence
+    is re-answered with the prior attempt shown, prioritising what it missed.
+
+    ``include_time_range`` time-scopes the RAG retrieval to the frame's window
+    (``effective_end`` materialises a rolling frame's end). Off by default so the
+    country fan-out's retrieval is unchanged (it deliberately never time-filtered
+    — the calendar window governs the numeric aggregation, not the narrative);
+    the on-demand node deep-dive turns it on so a historical-window request cites
+    only in-window evidence.
     """
     caps = caps or _DEFAULT_CAPS
 
     filters = build_rag_filters(
         frame,
         country_scope_id=(frame.location_ids[0] if len(frame.location_ids) == 1 else None),
+        include_time_range=include_time_range,
+        effective_end=effective_end,
     )
     rag = fetch_rag_context(
         query=f"{scope_label} {node.question}", limit=rag_limit, filters=filters, mode="TOPICAL",
@@ -142,9 +179,12 @@ def analyse_node(
 
     system = build_system_prompt(scope_label, _period_label(frame), aggregated_context or "")
 
+    instruction = _REVISE_INSTRUCTION if prior is not None else _MAP_INSTRUCTION
+    question_block = _question_block(node) + (_prior_block(prior) if prior is not None else "")
+
     def build_user(_evidence):
         return build_evidence_user_prompt(
-            _question_block(node), _MAP_INSTRUCTION, rag.formatted_for_prompt,
+            question_block, instruction, rag.formatted_for_prompt,
             include_completeness=True,
         )
 

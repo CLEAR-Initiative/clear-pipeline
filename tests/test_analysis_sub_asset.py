@@ -66,20 +66,24 @@ def test_fans_out_and_persists_one_artifact_per_node(monkeypatch):
     results, s3 = _run(monkeypatch, exists=False)
     assert len(results) == 2
     assert all(r["status"] == "ok" and not r["reused"] for r in results)
-    assert s3.put_object.call_count == 2
-    # keys are the per-node descriptive keys
     keys = {c.kwargs["Key"] for c in s3.put_object.call_args_list}
-    expected = {
+    # the two per-node descriptive keys …
+    node_keys = {
         paths.descriptive_key("SDN", "yearly", "v1", "v1", n.key) for n in l1_nodes()[:2]
     }
-    assert keys == expected
+    assert node_keys <= keys
+    # … plus the run's recorded stage cost (overview sums these)
+    assert paths.cost_key("SDN", "yearly", "v1", "v1", "sub") in keys
+    assert s3.put_object.call_count == 3
 
 
-def test_skip_if_exists_reuses_and_writes_nothing(monkeypatch):
+def test_skip_if_exists_reuses_and_writes_no_node_artifacts(monkeypatch):
     results, s3 = _run(monkeypatch, exists=True)
     assert len(results) == 2
     assert all(r["status"] == "cached" and r["reused"] for r in results)
-    s3.put_object.assert_not_called()
+    # cached nodes write no node artifact; the run still records its (zero) cost
+    keys = {c.kwargs["Key"] for c in s3.put_object.call_args_list}
+    assert keys == {paths.cost_key("SDN", "yearly", "v1", "v1", "sub")}
 
 
 def test_unknown_partition_fails(monkeypatch):

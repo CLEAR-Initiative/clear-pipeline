@@ -2,6 +2,16 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _default_analysis_structured_off(monkeypatch):
+    """Pin ``ANALYSIS_STRUCTURED`` OFF for every test so the analysis-asset tests
+    assert the committed DEFAULT (generic descriptive) path regardless of a
+    developer's local ``.env`` (which the full-suite run loads). Tests that
+    exercise the structured path call the structured functions directly or set the
+    flag within their own scope, overriding this."""
+    monkeypatch.delenv("ANALYSIS_STRUCTURED", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _disable_event_extraction_llm(monkeypatch):
     """Neutralize the unified event extractor's LLM call by default so no test
     accidentally hits a real model / the network (the ingest builders and the
