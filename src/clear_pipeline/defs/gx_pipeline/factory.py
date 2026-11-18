@@ -742,6 +742,8 @@ def build_gx_source_assets(source: GXSource) -> list:
         signal_rows: list[dict] = []
         new_versions = no_op_versions = 0
         for bundle in bundles:
+            # A copy: a retried attempt may get the same input objects back.
+            bundle = dict(bundle)
             new_signals = bundle.pop("newSignalRows", [])
             merged = iceberg_events.merge_event(events_table, bundle)
             if merged["version"] != bundle.get("version"):

@@ -672,3 +672,26 @@ def test_bronze_and_gold_retry_a_transient_fault(tmp_path):
     retry = {a.op.name: a.op.retry_policy for a in h.assets}
     assert retry["fakesrc_bronze"] and retry["fakesrc_gold"]
     assert retry["fakesrc_push"] is None
+
+
+def test_gold_retry_keeps_every_signal_row(tmp_path):
+    """A retried gold step gets the same input bundles: it must not have
+    consumed their `newSignalRows` on the failed attempt."""
+    with patch(
+        "clear_pipeline.defs.gx_pipeline.factory.GX_RETRY_POLICY", dg.RetryPolicy(max_retries=2, delay=0)
+    ):
+        h = Harness(tmp_path, SinceSource([]))
+    real = iceberg_signals.existing_push_state
+    calls = {"n": 0}
+
+    def flaky(table, external_ids):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("AWS Error NETWORK_CONNECTION during HeadObject operation: curlCode: 28")
+        return real(table, external_ids)
+
+    with patch.object(iceberg_signals, "existing_push_state", side_effect=flaky):
+        h.poll([_rec("a"), _rec("b")])
+    assert calls["n"] == 2, "gold ran twice"
+    assert set(h.gold) == {"a", "b"}
+    assert h.pg.ops() == ["create", "create"]
