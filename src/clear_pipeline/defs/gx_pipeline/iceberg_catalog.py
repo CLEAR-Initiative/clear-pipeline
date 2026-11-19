@@ -1,6 +1,6 @@
-"""Shared PyIceberg catalog for the gold layer's two Iceberg tables
-(`iceberg_events.py`, `iceberg_signals.py`) — one SQL catalog, one
-warehouse, one `gold` namespace for both."""
+"""Shared PyIceberg SQL catalog for the gx pipeline's Iceberg tables: one
+catalog, one warehouse. Gold tables (`iceberg_signals.py`,
+`iceberg_events.py`) live in the `gold` namespace."""
 
 import os
 
