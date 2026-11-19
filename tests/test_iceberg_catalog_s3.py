@@ -1,4 +1,4 @@
-"""The gold catalog's S3 uploads and its checksum-mode guard
+"""The gx pipeline Iceberg catalog's S3 uploads and its checksum-mode guard
 (iceberg_catalog._require_checksums_when_required)."""
 
 import contextlib

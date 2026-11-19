@@ -31,7 +31,7 @@ src/clear_pipeline/defs/gx_pipeline/
 ├── sources.py    # GXSource protocol + per-source adapters (ONLY per-source code)
 ├── factory.py    # build_gx_source_assets(source) -> 9 assets + 6 GX checks + 1 job
 ├── gx_utils.py   # Great Expectations Core helper, fully source-agnostic
-├── iceberg_catalog.py  # shared PyIceberg catalog/namespace for both gold tables
+├── iceberg_catalog.py  # shared PyIceberg catalog for the gx pipeline's Iceberg tables
 ├── iceberg_events.py   # gold events, SCD2 (§6) — technology-specific, not pattern-named
 ├── iceberg_signals.py  # gold signals, Type-1 upsert (§6)
 └── assets.py     # loops GX_SOURCES -> module globals, for Dagster auto-discovery
@@ -457,7 +457,9 @@ current row. The pattern is now the exact content of `iceberg_events.py`'s
 
 **Catalog**: `pyiceberg`'s SQL catalog (`ICEBERG_CATALOG_URI` /
 `ICEBERG_WAREHOUSE`, `signals/config.py`, documented in `.env.example`).
-SQLite by default — fine for dev/CI, not durable across pods/redeploys.
+It is shared by every gx pipeline Iceberg table. `ICEBERG_CATALOG_URI` has
+no default: unset fails at `catalog()`. SQLite works for local runs; dev
+and prod use the Postgres database below, set by clear-infra.
 
 Checked before recommending Postgres for production, not assumed: does
 "reuse the existing Postgres" mean literally `DAGSTER_POSTGRES_URL`?

@@ -84,6 +84,7 @@ Then fill in `.env`. [`.env.example`](.env.example) documents every variable. Th
 | `LLM_ANALYSIS_*` | The analysis module (`defs/analysis`). DeepSeek via OpenRouter by default (`openai_compat`); unset falls back to `LLM_EXTRACTION_*`. |
 | `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_DIMENSIONS` | Knowledge-base embeddings. `EMBEDDING_DIMENSIONS` must match clear-api's pgvector column (1024). |
 | `REDIS_URL` | Locks, watermarks and dedup for the drains. |
+| `ICEBERG_CATALOG_URI` | Required by the gx pipeline's Iceberg tables. Locally `sqlite:///.dagster_iceberg_catalog.db` works; dev and prod use Postgres (clear-infra). |
 | `RELIEFWEB_APPNAME` | The ReliefWeb ingest. |
 | Per-source keys (`DATAMINR_*`, `ACLED_*`, `IDMC_CLIENT_ID`, `HAPI_APP_IDENTIFIER`, ...) | Only for the sources you run. |
 | `CLEAR_WORKER_API_KEY` | Only for the Task Worker: a key for clear-api's `worker` service user. |
