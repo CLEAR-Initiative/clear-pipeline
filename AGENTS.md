@@ -18,7 +18,7 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the root. Neither exists yet; 
 
 ### Git flow
 
-Trunk-based on `dev` — `dev` is both the default branch and the deploy trigger. `master` is legacy and strictly behind; do not target it. See `docs/agents/git-flow.md`.
+`dev` → `prod`. Branch from `dev` and PR into `dev`; "Sync prod with dev" PRs ship `dev` to `prod`, which is production and the deploy trigger: a Ticket is `DONE` only once its commit is on `prod`. `master` is legacy; do not target it. See `docs/agents/git-flow.md`.
 
 ### Installed skills
 

@@ -61,7 +61,7 @@ Outside contributors: small fixes are welcome as pull requests. For anything big
 
 ### Branch and pull request
 
-- The model is trunk-based on `dev`. Branch from `dev` and open a PR back into `dev`. `master` is legacy; do not target it. See [docs/agents/git-flow.md](docs/agents/git-flow.md).
+- Branch from `dev` and open a PR back into `dev`. A merge into `dev` ships to dev; "Sync prod with dev" PRs ship `dev` to `prod` (production). `master` is legacy; do not target it. See [docs/agents/git-flow.md](docs/agents/git-flow.md).
 - Name branches `feat/<short-slug>` (or `fix/<short-slug>` for a fix).
 - Merge through a PR, never a direct push to `dev`. Each push to `dev` ships a new dev image.
 

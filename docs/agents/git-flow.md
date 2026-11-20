@@ -1,35 +1,42 @@
 ---
 trunk: dev
 featureBase: dev
-deployTrigger: dev
+deployTrigger: prod
 promotionChain:
   - dev
+  - prod
 ---
 
 # Git flow for this repo
 
-**Model**: trunk-based
+**Model**: simple-develop-trunk (`dev` is the integration branch, `prod` is production)
 
-**Promotion chain**: `dev` (single node — no intermediate branches)
+**Promotion chain**: `dev` → `prod`
 
 - **featureBase** (`dev`) — new feature PRs (the output of `/ship-ticket`) target this branch.
-- **deployTrigger** (`dev`) — when a PR merges into this branch, the GitHub Action scaffolded by `/setup-merge-hook` transitions any linked Tickets from `QA` to `DONE`.
+- **deployTrigger** (`prod`) — work is live in production only when it reaches `prod`. When a PR merges into this branch, the GitHub Action scaffolded by `/setup-merge-hook` acts on any linked Tickets: transitioning them from `QA` to `DONE`. A merge into `dev` is not done: it ships to dev only.
 
 ## How skills use this file
 
 - `/ship-ticket` reads `featureBase` to set the base branch of new PRs.
 - `/setup-merge-hook` reads `deployTrigger` to set the `on.pull_request.branches` filter for the GitHub Action.
-- The Action scans **Rollup PRs** (PRs that promote work between chain nodes) for child PR references in commit messages so Tickets linked to feature PRs are still promoted when their work reaches the deployTrigger through the chain. This repo has a single-node chain, so there are no Rollup PRs.
+- The Action scans **Rollup PRs** (PRs that promote work between chain nodes) for child PR references in commit messages so Tickets linked to feature PRs are still promoted when their work reaches the deployTrigger through the chain. Here the Rollup PRs are the "Sync prod with dev" PRs (`dev` → `prod`).
 
 ## Branches
 
 | Branch | Role |
 |---|---|
-| `dev` | Trunk, featureBase, and deployTrigger. GitHub's default branch. |
-| `master` | **Legacy — do not target.** Strictly behind `dev` (0 ahead, 8 behind; last touched 2026-07-10, verified 2026-07-15). History only. |
-| `feat/*` | Feature branches. Branch from `dev`, PR back into `dev`. |
+| `dev` | Trunk and featureBase. GitHub's default branch. A push runs `release-dev.yml`, which builds and pushes the dev image. |
+| `prod` | Production and deployTrigger. Advanced by "Sync prod with dev" PRs and by prod hotfix PRs, both merged by a person (no auto-merge). A push runs `release-prod.yml`, which tags a MAJOR version and builds the prod image. |
+| `master` | **Legacy — do not target.** History only. |
+| `feat/*`, `fix/*`, `<ticket>-*` | Feature branches. Branch from `dev`, PR back into `dev`. |
 
-`master` is not part of the promotion chain. The trunk-based model was chosen deliberately: none of the intermediate branch names the heuristic scans for (`develop`, `staging`, `release`, `qa`, `uat`, `preprod`) exist here. If `master` is ever revived as a release branch, re-run `/setup-git-flow` — the chain would become `dev → master` and `deployTrigger` would move to `master`.
+### Prod sync and hotfixes
+
+- **Sync:** a PR from `dev` into `prod`, titled "Sync prod with dev". It ships every PR merged into `dev` since the last sync, so it must carry their **Manual deploy steps**, and nobody merges it until each prod step is done (clear [#1525](https://www.exponential.im/w/clear/products/clear/tickets/1525)).
+- **Hotfix:** branch from `prod`, PR into `prod` (for example #182, #184), then merge the fix back into `dev` the same day so the next sync doesn't revert it.
+
+The model changed from trunk-based (`dev` as deployTrigger) on 2026-11-20 ([clear #1530](https://www.exponential.im/w/clear/products/clear/tickets/1530)): with `dev` as the trigger, Tickets read `DONE` before their code was live, which hid that the iom_dtm_flash_alerts source never worked on prod ([postmortem](https://www.exponential.im/w/clear/pages/cmwop8nqh0001jk07nek6zwjn)).
 
 ## Conventions
 
@@ -49,6 +56,7 @@ promotionChain:
 |---|---|
 | `/start-ticket` — branch checked out, work begins | `IN_PROGRESS` |
 | `/ship-ticket` — PR open, awaiting review/QA | `QA` |
-| PR merged into `dev` (deployTrigger) | `DONE` |
+| PR merged into `dev` (running on dev) | stays `QA` |
+| Its commit reaches `prod` in a sync PR (deployTrigger) | `DONE` |
 
-`/setup-merge-hook` automates the final transition. It has not been run for this repo — `QA → DONE` is currently manual.
+`/setup-merge-hook` automates the final transition. It has not been run for this repo, so `QA → DONE` is manual: move a Ticket to `DONE` only once the sync PR that carries its commit has merged into `prod`. When the hook is set up it must filter on `prod` and read the sync PR's commits, which name each feature PR as `(#<n>)` (feature PRs are squash-merged into `dev`).
