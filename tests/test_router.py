@@ -5,11 +5,8 @@ quality."""
 
 import types
 
-import pytest
-
 from clear_pipeline.providers.intake_record import IntakeRecord
 from clear_pipeline.providers.jev import JevError, OccurrenceAnalysis
-from clear_pipeline.providers import router
 from clear_pipeline.providers.router import (
     ANALYSIS,
     OCCURRENCE,
