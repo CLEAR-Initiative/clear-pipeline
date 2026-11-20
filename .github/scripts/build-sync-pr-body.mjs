@@ -4,13 +4,19 @@
 //
 // Why this exists: sync PRs were opened with an empty body bundling ~10 PRs, so
 // the manual steps their authors had written down never reached the person
-// merging. clear-pipeline #204 shipped #149 that way and prod ran for seven days
-// without the `iom_dtm_flash_alerts` source row — a repeat of the 2026-10-20
-// idmc incident. See the 2026-11-13 postmortem, recommendation 4 (clear #1525).
+// merging. On 2026-11-13 clear-api #340 and clear-pipeline #204 merged a minute
+// apart; between them they shipped clear-api #282 (the `iom_dtm_flash_alerts`
+// row, seed-only) and clear-pipeline #149 (the code that looks it up), and prod
+// ran for seven days without the row — a repeat of the 2026-10-20 idmc
+// incident. See the 2026-11-13 postmortem, recommendation 4 (clear #1525).
 //
 // The steps themselves are parsed with the same module that gates every PR into
 // dev (check-manual-deploy-steps.mjs, clear #1524), so this reads exactly the
 // grammar the PR template asks authors for.
+//
+// Nothing here is repo-specific: the repo comes from GITHUB_REPOSITORY and the
+// branches from BASE/HEAD_REF. The same file lives in clear-api and
+// clear-pipeline, as check-manual-deploy-steps.mjs does; keep them in step.
 //
 // Run by .github/workflows/sync-pr-body.yml. Tests:
 //   node --test .github/scripts/build-sync-pr-body.test.mjs
@@ -23,10 +29,31 @@
 // the current body in PR_BODY. BASE/HEAD default to prod/dev.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { manualDeploySection, manualDeploySteps } from "./check-manual-deploy-steps.mjs";
 
 export const START = "<!-- sync-pr-body:start -->";
 export const END = "<!-- sync-pr-body:end -->";
+
+// An invisible anchor written before each step, so a tick can be matched to the
+// step that earned it. `<pr>.<ordinal>` alone would move a tick to a different
+// step if a PR's steps were reordered, so the step's own text is hashed in too.
+// On the way back, the lines under an anchor are re-hashed and the ticks are
+// only trusted when they still match: a step that was edited, or whose anchor
+// someone deleted, loses its ticks instead of donating them to the step above.
+// Checkbox state is normalised out of the hash, so ticking a box never changes
+// the hash of the step it sits in.
+// Each step is fenced by a pair, rather than marked only at its start: a step
+// may itself contain blank lines and sub-headings, so there is no reliable way
+// to infer where it ends — inferring it swallowed the sections after the last
+// step and dropped every tick. A broken pair (either half deleted) leaves the
+// step unattributable, so its ticks are dropped rather than misapplied.
+const normalizeBoxes = (text) => text.replace(/^([ \t]*[-*][ \t]+)\[[xX]\]/gm, "$1[ ]");
+const stepHash = (step) => createHash("sha1").update(normalizeBoxes(step)).digest("hex").slice(0, 8);
+const stepOpen = (number, ordinal, step) => `<!-- step ${number}.${ordinal} ${stepHash(step)} -->`;
+const stepClose = (number, ordinal) => `<!-- /step ${number}.${ordinal} -->`;
+const STEP_OPEN = /^<!--[ \t]*step[ \t]+([\w.]+)[ \t]+([0-9a-f]{8})[ \t]*-->[ \t]*$/;
+const STEP_CLOSE = /^<!--[ \t]*\/step[ \t]+([\w.]+)[ \t]*-->[ \t]*$/;
 
 // "Merge pull request #149 from CLEAR-Initiative/feat/x" (merge commit) and
 // "feat(gx): add the source (#149)" (squash merge, the default here).
@@ -136,7 +163,9 @@ export function renderSyncBody(prs, { base = "prod", head = "dev", sha = "" } = 
     );
     for (const pr of withSteps) {
       out.push(`### ${label(pr)}`, "");
-      out.push(...pr.steps.flatMap((step) => [step, ""]));
+      out.push(
+        ...pr.steps.flatMap((step, i) => [stepOpen(pr.number, i + 1, step), step, stepClose(pr.number, i + 1), ""]),
+      );
     }
   } else {
     out.push("## Manual deploy steps", "", "None declared by the PRs in this sync.", "");
@@ -168,24 +197,101 @@ export function renderSyncBody(prs, { base = "prod", head = "dev", sha = "" } = 
   return out.join("\n");
 }
 
-/** `next` with every checkbox re-ticked that was ticked in `previous`, matched on
- * the text after the box. Without this, the workflow's own re-run on
- * `synchronize` would silently clear the prod ticks someone had earned. */
-export function preserveTicks(previous, next) {
-  const ticked = new Set();
-  for (const line of String(previous ?? "").split("\n")) {
-    const match = CHECKBOX_LINE.exec(line);
-    if (match && match[2] !== " ") ticked.add(match[3].trim());
+/** The generated block's contents, or "" when the body has none. Ticks outside
+ * it are none of our business — in particular the PR template's commented-out
+ * example, which a sync PR keeps above the block. */
+function generatedBlock(body) {
+  const text = String(body ?? "");
+  const start = text.indexOf(START);
+  const end = text.indexOf(END);
+  return start === -1 || end === -1 || end < start ? "" : text.slice(start + START.length, end);
+}
+
+/** Ticked checkbox labels from a previous body, keyed by step anchor, so a tick
+ * can only come back to the step that earned it.
+ *
+ * Each anchor's block is re-hashed and skipped unless it still matches. Without
+ * that check, deleting one step's anchor silently filed its boxes under the
+ * previous step's anchor, and the next render ticked *that* step and reset the
+ * edited one — approving work nobody had done. A block that no longer matches
+ * its anchor is unattributable, so its ticks are dropped. */
+function tickedByStep(previous) {
+  const out = new Map();
+  let open = null;
+  let body = [];
+  for (const line of generatedBlock(previous).split("\n")) {
+    const opens = STEP_OPEN.exec(line);
+    if (opens) {
+      open = { id: opens[1], hash: opens[2] };
+      body = [];
+      continue;
+    }
+    const closes = STEP_CLOSE.exec(line);
+    if (closes) {
+      const block = body.join("\n").trim();
+      if (open?.id === closes[1] && stepHash(block) === open.hash) {
+        const ticked = new Set();
+        for (const inner of block.split("\n")) {
+          const box = CHECKBOX_LINE.exec(inner);
+          if (box && box[2] !== " ") ticked.add(box[3].trim());
+        }
+        // Keyed on id *and* hash: the id alone would let a rewritten step
+        // inherit the tick its earlier text had earned.
+        if (ticked.size > 0) out.set(`${open.id} ${open.hash}`, ticked);
+      }
+      open = null;
+      body = [];
+      continue;
+    }
+    if (open) body.push(line);
   }
+  return out;
+}
+
+/** `next` with every checkbox re-ticked that was ticked on the same step in
+ * `previous`. Without this, the workflow's own re-run on `synchronize` would
+ * silently clear the prod ticks someone had earned.
+ *
+ * Matching is per step, not per label. Two steps may legitimately carry the same
+ * checkbox text: the gate accepts a bare `- [ ] prod` when the ticket is named
+ * elsewhere in the step, so several steps can read exactly `- [ ] prod`. Keying
+ * on the label alone let one tick approve all of them, and the sync then passed
+ * with prod work undone — the failure this script exists to prevent. */
+export function preserveTicks(previous, next) {
+  const ticked = tickedByStep(previous);
   if (ticked.size === 0) return next;
-  return next
+
+  // Only ever rewrite inside the generated block. The CLI hands this the whole
+  // spliced body, and walking all of it left the last step's anchor in scope
+  // past END: a `- [ ] prod` a human had written below the block was ticked on
+  // their behalf whenever the last generated step carried an identical ticked
+  // box, and the gate then passed with that work unfinished.
+  const start = next.indexOf(START);
+  const end = next.indexOf(END);
+  if (start === -1 || end === -1 || end < start) return next;
+  const head = next.slice(0, start + START.length);
+  const tail = next.slice(end);
+
+  let anchor = "";
+  const block = next
+    .slice(start + START.length, end)
     .split("\n")
     .map((line) => {
-      const match = CHECKBOX_LINE.exec(line);
-      if (!match || match[2] !== " " || !ticked.has(match[3].trim())) return line;
-      return `${match[1]}[x]${match[3]}`;
+      const opens = STEP_OPEN.exec(line);
+      if (opens) {
+        anchor = `${opens[1]} ${opens[2]}`;
+        return line;
+      }
+      if (STEP_CLOSE.test(line)) {
+        anchor = "";
+        return line;
+      }
+      const box = CHECKBOX_LINE.exec(line);
+      if (!box || box[2] !== " " || !anchor || !ticked.get(anchor)?.has(box[3].trim())) return line;
+      return `${box[1]}[x]${box[3]}`;
     })
     .join("\n");
+  return `${head}${block}${tail}`;
 }
 
 /** Replace the generated block in `body`, or append it when there is none, so
@@ -200,9 +306,17 @@ export function spliceBody(body, generated) {
   return `${text.slice(0, start)}${generated}${text.slice(end + END.length)}`;
 }
 
-/** Unticked `prod` checkboxes in the body — the sync's remaining work. */
+/** Unticked `prod` checkboxes in the body — the sync's remaining work.
+ *
+ * HTML comments are dropped first. GitHub prefills a new PR with
+ * .github/pull_request_template.md, whose commented-out example contains
+ * `- [ ] prod: …/tickets/<number>`; spliceBody keeps that prose above the
+ * generated block, so counting it would block every sync — including one with
+ * no manual steps at all — on a checkbox nobody can see or tick. Boxes a human
+ * wrote outside the block still count: those are visible and real. */
 export function pendingProdBoxes(body) {
   return String(body ?? "")
+    .replace(/<!--[\s\S]*?-->/g, "")
     .split("\n")
     .filter((line) => PROD_BOX.test(line) && /\[[ ]\]/.test(line))
     .map((line) => line.trim());
@@ -210,8 +324,20 @@ export function pendingProdBoxes(body) {
 
 // ─── GitHub access ──────────────────────────────────────────────────────────
 
-function gh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+// A sync bundles ~10 PRs, so a render makes ~11 API calls and a single network
+// blip would otherwise abort the whole body. Retry, then fail: a body that
+// silently omits a PR is the exact failure this script exists to prevent, so
+// there is no partial-success path.
+function gh(args, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      if (attempt >= attempts) throw error;
+      console.error(`gh ${args[1]} failed (attempt ${attempt}/${attempts}), retrying: ${error.message.split("\n")[0]}`);
+      execFileSync("sleep", [String(attempt * 2)]);
+    }
+  }
 }
 
 /** The PRs in `base..head`, in commit order. `--paginate` is deliberately not
