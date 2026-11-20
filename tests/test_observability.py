@@ -228,9 +228,43 @@ def test_repeated_failure_alert_fires_from_the_second_failure_once_per_streak():
     assert second["fingerprint"] == third["fingerprint"] == ["dagster-repeated-failure|", "idmc_gx", "|", "r2"]
     assert second["message"].startswith("Dagster job failing repeatedly: idmc_gx failed its last 2 runs")
     assert second["tags"]["failure_streak"] == "2"
-    long = observability_defs.repeated_failure_alert(run, 50, None, "boom")
-    assert long["tags"]["failure_streak"] == "50+"
-    assert long["fingerprint"][-1] == "long"
+    # Past the lookback the start is unknown: no new fingerprint, so no second issue.
+    assert observability_defs.repeated_failure_alert(run, 50, None, "boom") is None
+
+
+def test_failure_streak_counts_from_the_triggering_run_not_a_later_success():
+    # r3 and r2 failed, then r4 succeeded before the daemon handled r3's failure.
+    records = [_finished("r4", False), _finished("r3", True), _finished("r2", True), _finished("r1", False)]
+    assert observability_defs.failure_streak(records, "r3") == (2, "r2")
+    assert observability_defs.failure_streak(records) == (0, None)
+    assert observability_defs.failure_streak(records, "unknown") == (0, None)
+
+
+def test_long_streak_keeps_one_issue(monkeypatch):
+    monkeypatch.setattr(observability_defs, "FAILURE_STREAK_LOOKBACK", 3)
+    run = SimpleNamespace(run_id="r2", job_name="idmc_gx")
+    fingerprints = set()
+    for n in range(1, 6):  # streak grows 1..5 with a lookback of 3
+        records = [_finished(f"r{i}", True) for i in range(n, 0, -1)]
+        streak, start = observability_defs.failure_streak(records, f"r{n}")
+        alert = observability_defs.repeated_failure_alert(run, streak, start, "boom")
+        if alert:
+            fingerprints.add(tuple(alert["fingerprint"]))
+    assert fingerprints == {("dagster-repeated-failure|", "idmc_gx", "|", "r1")}
+
+
+def test_run_failure_sensor_alerts_on_a_streak_a_later_success_came_after(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        observability_defs, "capture_message", lambda msg, **kw: sent.append((msg, kw.get("level"), kw.get("fingerprint")))
+    )
+    run = SimpleNamespace(run_id="r3", job_name="idmc_gx")
+    records = [_finished("r4", False), _finished("r3", True), _finished("r2", True), _finished("r1", False)]
+    instance = SimpleNamespace(get_run_records=lambda **kw: records)
+    context = SimpleNamespace(dagster_run=run, failure_event=SimpleNamespace(message="boom"), instance=instance)
+    observability_defs.run_failure_glitchtip_sensor._run_status_sensor_fn(context)
+    assert [level for _, level, _ in sent] == ["error", "fatal"]
+    assert sent[1][2] == ["dagster-repeated-failure|", "idmc_gx", "|", "r2"]
 
 
 def test_run_failure_sensor_sends_the_repeated_alert_when_the_last_run_failed(monkeypatch):
