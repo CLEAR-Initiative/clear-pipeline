@@ -90,7 +90,7 @@ PRs are squash-merged, so the PR title becomes the commit on `dev`. Give it the 
 
 ### Review and merge
 
-- Every PR into `dev` runs pytest and ruff (`Check`).
+- Every PR into `dev` runs pytest and ruff (`Check`). `Check` also fails while the PR description's **Manual deploy steps** section is blank: write "None", or list each step the code needs but no code performs (for example a clear-api `data_sources` row) with its exact command, a `- [ ] dev` and a `- [ ] prod` checkbox, and a link to the ticket that tracks the prod step. You own each step until prod is ticked.
 - [Greptile](https://www.greptile.com/) reviews PRs automatically. A workflow ([`bot-greptile-automerge.yml`](.github/workflows/bot-greptile-automerge.yml)) squash-merges the PR once Greptile has reviewed its latest commit with no unresolved P0/P1 findings and the required checks pass. P2 findings don't block.
 - Add the `no-automerge` label to keep a PR for a human.
 - PRs from forks, drafts and bot authors are never auto-merged. A maintainer merges them.
@@ -109,7 +109,7 @@ To add a variable:
 
 1. Add it to [`.env.example`](.env.example) with a comment: what it is, whether it is required, and its default.
 2. Read it where the code needs it. Signal-pipeline settings live in [`signals/config.py`](src/clear_pipeline/signals/config.py); other areas read it in the provider or asset that uses it. Follow the existing pattern: a missing credential must not stop the definitions loading. Check for it when the asset runs and fail with a clear message.
-3. Values for the deployed environments are set by the team in a private infrastructure repo. Say in your PR that the new variable needs adding for dev and prod.
+3. Values for the deployed environments are set by the team in a private infrastructure repo. List it under **Manual deploy steps** in your PR so it gets added for dev and prod.
 
 ## Secrets
 
