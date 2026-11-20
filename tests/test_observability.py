@@ -150,6 +150,137 @@ def test_run_failure_alert_falls_back_when_job_name_missing():
     assert alert["tags"]["job"] == "unknown"
 
 
+def _meta(**overrides):
+    meta = {
+        "run_id": "e209a4cf-7912-4877-b4e8-93b9e18cf29b",
+        "job_name": "iom_dtm_flash_alerts_gx",
+        "step_key": "iom_dtm_flash_alerts_silver",
+        "resource_name": None,
+        "dagster_event": SimpleNamespace(event_type=dg.DagsterEventType.STEP_FAILURE),
+        "orig_message": 'Execution of step "iom_dtm_flash_alerts_silver" failed.',
+    }
+    meta.update(overrides)
+    return meta
+
+
+def test_dagster_log_fingerprint_ignores_the_run_id():
+    a = observability.dagster_log_fingerprint(_meta())
+    b = observability.dagster_log_fingerprint(_meta(run_id="2efaa9b2-0383-4bda-a790-dd7e8e6bc9ed"))
+    assert a == b
+    assert "e209a4cf" not in "".join(a)
+    assert a[1:4] == ["job=iom_dtm_flash_alerts_gx|", "step=iom_dtm_flash_alerts_silver|", "event=STEP_FAILURE|"]
+
+
+def test_dagster_log_fingerprint_strips_ids_from_the_message_and_splits_by_step():
+    a = observability.dagster_log_fingerprint(_meta(orig_message="Run 42064586-759f-4ed8-a1ba-b10dc4bfdea8 wrote 41 rows"))
+    b = observability.dagster_log_fingerprint(_meta(orig_message="Run 9e59b22c-f8de-4d41-9938-0f7789c33025 wrote 41 rows"))
+    assert a == b
+    other_step = observability.dagster_log_fingerprint(_meta(step_key="iom_dtm_flash_alerts_push"))
+    assert other_step != a
+
+
+def test_non_dagster_events_pass_through_unchanged():
+    event = {"message": "plain"}
+    assert observability.group_dagster_log_events(event, {}) == {"message": "plain"}
+    record = SimpleNamespace()  # a log record with no dagster_meta
+    assert "fingerprint" not in observability.group_dagster_log_events({"m": 1}, {"log_record": record})
+
+
+def test_dagster_log_events_get_a_fingerprint_and_tags():
+    record = SimpleNamespace(dagster_meta=_meta())
+    event = observability.group_dagster_log_events({"message": "x"}, {"log_record": record})
+    assert event["fingerprint"][0] == "dagster-log|"
+    assert event["tags"] == {
+        "job": "iom_dtm_flash_alerts_gx",
+        "step": "iom_dtm_flash_alerts_silver",
+        "run_id": "e209a4cf-7912-4877-b4e8-93b9e18cf29b",
+    }
+
+
+def test_run_failure_alert_is_grouped_per_job():
+    run = SimpleNamespace(run_id="r-42", job_name="idmc_gx")
+    assert observability_defs.run_failure_alert(run, "a")["fingerprint"] == ["dagster-run-failed|", "idmc_gx"]
+
+
+def _finished(run_id, failed):
+    status = dg.DagsterRunStatus.FAILURE if failed else dg.DagsterRunStatus.SUCCESS
+    return SimpleNamespace(dagster_run=SimpleNamespace(run_id=run_id, status=status))
+
+
+def test_failure_streak_counts_leading_failures_newest_first():
+    records = [_finished("r3", True), _finished("r2", True), _finished("r1", False), _finished("r0", True)]
+    assert observability_defs.failure_streak(records) == (2, "r2")
+    assert observability_defs.failure_streak([_finished("r1", True)]) == (1, "r1")
+    assert observability_defs.failure_streak([]) == (0, None)
+
+
+def test_failure_streak_past_the_lookback_has_no_start(monkeypatch):
+    monkeypatch.setattr(observability_defs, "FAILURE_STREAK_LOOKBACK", 3)
+    records = [_finished(f"r{i}", True) for i in range(3)]
+    assert observability_defs.failure_streak(records) == (3, None)
+
+
+def test_repeated_failure_alert_fires_from_the_second_failure_once_per_streak():
+    run = SimpleNamespace(run_id="r3", job_name="idmc_gx")
+    assert observability_defs.repeated_failure_alert(run, 1, "r3", "boom") is None
+    second = observability_defs.repeated_failure_alert(run, 2, "r2", "boom")
+    third = observability_defs.repeated_failure_alert(SimpleNamespace(run_id="r4", job_name="idmc_gx"), 3, "r2", "boom")
+    assert second["fingerprint"] == third["fingerprint"] == ["dagster-repeated-failure|", "idmc_gx", "|", "r2"]
+    assert second["message"].startswith("Dagster job failing repeatedly: idmc_gx failed its last 2 runs")
+    assert second["tags"]["failure_streak"] == "2"
+    # Past the lookback the start is unknown: no new fingerprint, so no second issue.
+    assert observability_defs.repeated_failure_alert(run, 50, None, "boom") is None
+
+
+def test_failure_streak_counts_from_the_triggering_run_not_a_later_success():
+    # r3 and r2 failed, then r4 succeeded before the daemon handled r3's failure.
+    records = [_finished("r4", False), _finished("r3", True), _finished("r2", True), _finished("r1", False)]
+    assert observability_defs.failure_streak(records, "r3") == (2, "r2")
+    assert observability_defs.failure_streak(records) == (0, None)
+    assert observability_defs.failure_streak(records, "unknown") == (0, None)
+
+
+def test_long_streak_keeps_one_issue(monkeypatch):
+    monkeypatch.setattr(observability_defs, "FAILURE_STREAK_LOOKBACK", 3)
+    run = SimpleNamespace(run_id="r2", job_name="idmc_gx")
+    fingerprints = set()
+    for n in range(1, 6):  # streak grows 1..5 with a lookback of 3
+        records = [_finished(f"r{i}", True) for i in range(n, 0, -1)]
+        streak, start = observability_defs.failure_streak(records, f"r{n}")
+        alert = observability_defs.repeated_failure_alert(run, streak, start, "boom")
+        if alert:
+            fingerprints.add(tuple(alert["fingerprint"]))
+    assert fingerprints == {("dagster-repeated-failure|", "idmc_gx", "|", "r1")}
+
+
+def test_run_failure_sensor_alerts_on_a_streak_a_later_success_came_after(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        observability_defs, "capture_message", lambda msg, **kw: sent.append((msg, kw.get("level"), kw.get("fingerprint")))
+    )
+    run = SimpleNamespace(run_id="r3", job_name="idmc_gx")
+    records = [_finished("r4", False), _finished("r3", True), _finished("r2", True), _finished("r1", False)]
+    instance = SimpleNamespace(get_run_records=lambda **kw: records)
+    context = SimpleNamespace(dagster_run=run, failure_event=SimpleNamespace(message="boom"), instance=instance)
+    observability_defs.run_failure_glitchtip_sensor._run_status_sensor_fn(context)
+    assert [level for _, level, _ in sent] == ["error", "fatal"]
+    assert sent[1][2] == ["dagster-repeated-failure|", "idmc_gx", "|", "r2"]
+
+
+def test_run_failure_sensor_sends_the_repeated_alert_when_the_last_run_failed(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        observability_defs, "capture_message", lambda msg, **kw: sent.append((msg, kw.get("level"), kw.get("fingerprint")))
+    )
+    run = SimpleNamespace(run_id="r3", job_name="idmc_gx")
+    records = [_finished("r3", True), _finished("r2", True), _finished("r1", False)]
+    instance = SimpleNamespace(get_run_records=lambda **kw: records)
+    context = SimpleNamespace(dagster_run=run, failure_event=SimpleNamespace(message="boom"), instance=instance)
+    observability_defs.run_failure_glitchtip_sensor._run_status_sensor_fn(context)
+    assert [level for _, level, _ in sent] == ["error", "fatal"]
+    assert sent[1][2] == ["dagster-repeated-failure|", "idmc_gx", "|", "r2"]
+
+
 class _CapturingTransport(sentry_sdk.transport.Transport):
     def __init__(self, options=None):
         super().__init__(options)
@@ -279,3 +410,25 @@ def test_stuck_run_sensor_pushes_a_heartbeat_every_tick(monkeypatch):
     ctx = dg.build_sensor_context(instance=instance)
     observability_defs.stuck_run_monitor_sensor(ctx)
     assert beats == [(0, 0.0)]  # idle: still reports, so a silent daemon is detectable
+
+
+def test_dagster_log_lines_reach_glitchtip_with_the_job_step_fingerprint(monkeypatch):
+    import json
+    import logging
+
+    transport = _CapturingTransport()
+    real_init = sentry_sdk.init
+    monkeypatch.setattr(sentry_sdk, "init", lambda **kw: real_init(transport=transport, **kw))
+    monkeypatch.setattr(observability.settings, "sentry_dsn", "http://key@127.0.0.1:1/1")
+    monkeypatch.setattr(observability, "_initialized", False)
+    try:
+        observability.init_sentry()
+        logging.getLogger("dagster").error("iom_dtm_flash_alerts_gx - e209a4cf - silver failed", extra={"dagster_meta": _meta()})
+        sentry_sdk.flush()
+    finally:
+        real_init()
+
+    events = [json.loads(line) for env in transport.envelopes for line in env.splitlines() if '"fingerprint"' in line]
+    assert events, transport.envelopes
+    assert events[0]["fingerprint"][:2] == ["dagster-log|", "job=iom_dtm_flash_alerts_gx|"]
+    assert events[0]["tags"]["run_id"] == "e209a4cf-7912-4877-b4e8-93b9e18cf29b"

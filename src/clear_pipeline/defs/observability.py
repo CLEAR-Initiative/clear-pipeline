@@ -87,10 +87,67 @@ def oldest_run_age_s(records, now_ts: float) -> float:
 
 def run_failure_alert(run, failure_message: str) -> dict:
     """Pure core of the run-failure sensor: the GlitchTip message + tags for a
-    failed run. Separated so its wording and tags are unit-testable."""
+    failed run. Separated so its wording and tags are unit-testable.
+
+    Grouped per job, so every failure of a job is one GlitchTip issue whatever
+    the failure message says (#1526)."""
+    job = run.job_name or "unknown"
     return {
         "message": f"Dagster run failed: {run.job_name} — {failure_message}",
-        "tags": {"run_id": run.run_id, "job": run.job_name or "unknown"},
+        "tags": {"run_id": run.run_id, "job": job},
+        "fingerprint": ["dagster-run-failed|", job],
+    }
+
+
+# How far back the repeated-failure check looks. A streak longer than this stops
+# sending repeated-failure events rather than opening a second issue for it.
+FAILURE_STREAK_LOOKBACK = 50
+
+
+def failure_streak(records, run_id: str | None = None) -> tuple[int, str | None]:
+    """Consecutive failures of a job ending at the run ``run_id``, newest first.
+
+    ``records`` are the job's finished runs, newest first. Runs newer than
+    ``run_id`` are ignored: the daemon can handle a failure after a later run has
+    already succeeded, and that success must not hide the streak the failure
+    belongs to. With no ``run_id`` (or one not in ``records``) the streak is
+    counted from the newest run.
+
+    Returns ``(count, first_run_id)``: how many runs failed in a row, and the run
+    id where that streak began (None when the streak reaches past the lookback,
+    so its start is unknown)."""
+    records = list(records)
+    ids = [rec.dagster_run.run_id for rec in records]
+    if run_id is not None and run_id in ids:
+        records = records[ids.index(run_id):]
+    count = 0
+    first = None
+    for rec in records[:FAILURE_STREAK_LOOKBACK]:
+        if rec.dagster_run.status != dg.DagsterRunStatus.FAILURE:
+            return count, first
+        count += 1
+        first = rec.dagster_run.run_id
+    return count, (None if count >= FAILURE_STREAK_LOOKBACK else first)
+
+
+def repeated_failure_alert(run, streak: int, streak_start: str | None, failure_message: str) -> dict | None:
+    """The louder alert for a job that has failed on its last two or more runs.
+
+    One GlitchTip issue per streak (fingerprinted on the run the streak began
+    with), so the "new issue" alert rule posts it once, on the second failure in
+    a row; later failures add events to it. A job that recovers and breaks again
+    starts a new streak and alerts again. None when the streak is under two, and
+    None once the streak reaches past the lookback: its start is then unknown, so
+    a new fingerprint would open a second issue for the same streak; the issue
+    opened at its second failure, and the per-job run-failure issue, carry on."""
+    if streak < 2 or streak_start is None:
+        return None
+    job = run.job_name or "unknown"
+    count = str(streak)
+    return {
+        "message": f"Dagster job failing repeatedly: {job} failed its last {count} runs — {failure_message}",
+        "tags": {"run_id": run.run_id, "job": job, "failure_streak": count},
+        "fingerprint": ["dagster-repeated-failure|", job, "|", streak_start],
     }
 
 
@@ -141,9 +198,29 @@ def stuck_run_monitor_sensor(context: dg.SensorEvaluationContext) -> dg.SkipReas
     default_status=dg.DefaultSensorStatus.RUNNING,
 )
 def run_failure_glitchtip_sensor(context: dg.RunFailureSensorContext) -> None:
-    """Report every run failure to GlitchTip with run id + job + reason."""
-    alert = run_failure_alert(context.dagster_run, context.failure_event.message)
-    capture_message(alert["message"], level="error", **alert["tags"])
+    """Report every run failure to GlitchTip with run id + job + reason, and
+    raise a fatal repeated-failure alert when the job's previous run failed too."""
+    run = context.dagster_run
+    message = context.failure_event.message
+    alert = run_failure_alert(run, message)
+    capture_message(alert["message"], level="error", fingerprint=alert["fingerprint"], **alert["tags"])
+    if not run.job_name:
+        return
+    records = context.instance.get_run_records(
+        filters=dg.RunsFilter(
+            job_name=run.job_name,
+            statuses=[dg.DagsterRunStatus.SUCCESS, dg.DagsterRunStatus.FAILURE],
+        ),
+        # Slack for runs that finished after this one before the daemon got here.
+        limit=FAILURE_STREAK_LOOKBACK + 20,
+        order_by="update_timestamp",
+    )
+    streak, streak_start = failure_streak(records, run.run_id)
+    repeated = repeated_failure_alert(run, streak, streak_start, message)
+    if repeated:
+        capture_message(
+            repeated["message"], level="fatal", fingerprint=repeated["fingerprint"], **repeated["tags"]
+        )
 
 
 def check_outcomes(events) -> list[CheckOutcome]:
