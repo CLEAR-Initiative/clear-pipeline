@@ -95,6 +95,27 @@ PRs are squash-merged, so the PR title becomes the commit on `dev`. Give it the 
 - Add the `no-automerge` label to keep a PR for a human.
 - PRs from forks, drafts and bot authors are never auto-merged. A maintainer merges them.
 
+### Shipping to prod
+
+A "Sync prod with dev" PR (head `dev`, base `prod`) is the release. Open it and
+leave the description alone: [`sync-pr-body.yml`](.github/workflows/sync-pr-body.yml)
+fills it in with every PR the sync ships and the **Manual deploy steps** those
+PRs declared, as a checklist. Anything you write outside the generated block is
+kept.
+
+Work down the checklist against prod, ticking each box as you go — the `Sync PR
+body` check stays red until every `prod` box is ticked, and re-running it keeps
+the ticks you have already earned. PRs merged before the Manual deploy steps
+section was required have their **Merge Danger** notes reproduced instead; read
+those by hand.
+
+To see what the next sync would say before opening it:
+
+```bash
+GITHUB_REPOSITORY=CLEAR-Initiative/clear-pipeline \
+  node .github/scripts/build-sync-pr-body.mjs render
+```
+
 ### Rules that matter here
 
 - **Never write to a database directly.** Every read and write goes through clear-api's GraphQL API ([`providers/clear_api.py`](src/clear_pipeline/providers/clear_api.py)). clear-api owns the domain schema.
