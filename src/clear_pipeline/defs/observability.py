@@ -102,9 +102,12 @@ def run_failure_alert(run, failure_message: str) -> dict:
 # How far back the repeated-failure check looks. A streak longer than this stops
 # sending repeated-failure events rather than opening a second issue for it.
 FAILURE_STREAK_LOOKBACK = 50
+# Rows fetched: the lookback plus slack for runs that finished after the failing
+# run before the daemon handled it.
+FAILURE_STREAK_FETCH = FAILURE_STREAK_LOOKBACK + 20
 
 
-def failure_streak(records, run_id: str | None = None) -> tuple[int, str | None]:
+def failure_streak(records, run_id: str | None = None, fetched: int | None = None) -> tuple[int, str | None]:
     """Consecutive failures of a job ending at the run ``run_id``, newest first.
 
     ``records`` are the job's finished runs, newest first. Runs newer than
@@ -113,10 +116,15 @@ def failure_streak(records, run_id: str | None = None) -> tuple[int, str | None]
     belongs to. With no ``run_id`` (or one not in ``records``) the streak is
     counted from the newest run.
 
+    ``fetched`` is the query's limit: when ``records`` is that long, older runs
+    may exist, so a streak that runs to the end of ``records`` has an unknown
+    start (a delayed callback must not take a cut-off history for a new streak).
+
     Returns ``(count, first_run_id)``: how many runs failed in a row, and the run
-    id where that streak began (None when the streak reaches past the lookback,
-    so its start is unknown)."""
+    id where that streak began (None when its start is unknown: past the
+    lookback, or cut off by the query)."""
     records = list(records)
+    truncated = fetched is not None and len(records) >= fetched
     ids = [rec.dagster_run.run_id for rec in records]
     if run_id is not None and run_id in ids:
         records = records[ids.index(run_id):]
@@ -127,7 +135,10 @@ def failure_streak(records, run_id: str | None = None) -> tuple[int, str | None]
             return count, first
         count += 1
         first = rec.dagster_run.run_id
-    return count, (None if count >= FAILURE_STREAK_LOOKBACK else first)
+    window = records[:FAILURE_STREAK_LOOKBACK]
+    if count >= FAILURE_STREAK_LOOKBACK or (truncated and count == len(window)):
+        return count, None
+    return count, first
 
 
 def repeated_failure_alert(run, streak: int, streak_start: str | None, failure_message: str) -> dict | None:
@@ -211,11 +222,10 @@ def run_failure_glitchtip_sensor(context: dg.RunFailureSensorContext) -> None:
             job_name=run.job_name,
             statuses=[dg.DagsterRunStatus.SUCCESS, dg.DagsterRunStatus.FAILURE],
         ),
-        # Slack for runs that finished after this one before the daemon got here.
-        limit=FAILURE_STREAK_LOOKBACK + 20,
+        limit=FAILURE_STREAK_FETCH,
         order_by="update_timestamp",
     )
-    streak, streak_start = failure_streak(records, run.run_id)
+    streak, streak_start = failure_streak(records, run.run_id, FAILURE_STREAK_FETCH)
     repeated = repeated_failure_alert(run, streak, streak_start, message)
     if repeated:
         capture_message(
