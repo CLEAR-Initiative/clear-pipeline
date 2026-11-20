@@ -78,6 +78,7 @@ from clear_pipeline.providers.clear_api import (
     pipeline_run,
     update_signal_content,
 )
+from clear_pipeline.providers.intake_record import IntakeRecord
 from clear_pipeline.providers.signal_classifier import classify_signal
 from clear_pipeline.providers.event import ACTIVE_EVENTS_WINDOW_DAYS
 from clear_pipeline.signals.config import settings
@@ -349,6 +350,15 @@ def build_gx_source_assets(source: GXSource) -> list:
                 id_failed += 1
                 continue
             signal_input["rawS3Key"] = bronze_row["s3Key"]
+            # Silver's output is a source-agnostic IntakeRecord (C-1445 §3), the
+            # shared artifact the router forks on. The event branch gets the
+            # clear-api input back via `to_signal_input()`; V0 retains
+            # `signal_input` verbatim, so everything below is byte-identical.
+            intake = IntakeRecord.from_signal_input(
+                signal_input, external_id=ext_id, source=src,
+                published_at=bronze_row["publishedAt"],
+            )
+            signal_input = intake.to_signal_input()
 
             key = lake.raw_key(src, bronze_row["publishedAt"], ext_id, layer="silver")
             lake.write_json(s3, bucket, key, {**signal_input, "id": sid})
@@ -357,12 +367,12 @@ def build_gx_source_assets(source: GXSource) -> list:
                 "externalId": ext_id,
                 "signalId": sid,
                 "publishedAt": bronze_row["publishedAt"],
-                "title": signal_input.get("title"),
-                "description": signal_input.get("description"),
-                "severity": signal_input.get("severity"),
-                "lat": signal_input.get("lat"),
-                "lng": signal_input.get("lng"),
-                "geoparsedData": signal_input.get("geoparsedData"),
+                "title": intake.title,
+                "description": intake.lead,
+                "severity": intake.severity,
+                "lat": intake.lat,
+                "lng": intake.lng,
+                "geoparsedData": intake.geoparsed_data,
                 "signalInput": signal_input,
             })
 

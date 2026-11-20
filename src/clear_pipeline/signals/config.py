@@ -235,6 +235,17 @@ class Settings(BaseSettings):
     # error (OpenRouter/Jev likely degraded — signals are being requeued, not
     # classified). Only evaluated when at least one signal was attempted in the run.
     signal_jev_failure_alert_rate: float = 0.25
+    # ── Ingestion router (C-1445 §4) — occurrence/analysis routing ──────────────
+    # Gate 2 (Jev occurrence/analysis, providers/router.py) emits two INDEPENDENT
+    # Noul probabilities. Per label: asserted (yes) at/above `router_assert_threshold`,
+    # denied (no) at/below `router_deny_threshold`. Jev DECIDES only when BOTH labels
+    # land outside that uncertain middle band; any label left inside it abstains the
+    # item to the LLM backstop (Gate 3). A wider band ⇒ more LLM calls (higher cost,
+    # fewer Jev mistakes). CALIBRATE on a live routing eval before tightening — these
+    # are first-cut defaults, not measured. router_assert_threshold must exceed
+    # router_deny_threshold.
+    router_assert_threshold: float = 0.6
+    router_deny_threshold: float = 0.4
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination

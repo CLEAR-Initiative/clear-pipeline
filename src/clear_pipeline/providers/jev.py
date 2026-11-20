@@ -57,6 +57,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 
 import httpx
@@ -313,3 +314,119 @@ def classify_with_jev(
         disaster_types, code_confidence, relevance, classification.severity, source_severity,
     )
     return classification
+
+
+# ── Occurrence/analysis router gate (C-1445 §4.2) ───────────────────────────────
+# A SECOND, independent Jev question used by providers/router.py. The glide Choice
+# above answers "what disaster type"; this answers "is this a discrete occurrence,
+# an analysis, both, or neither" — the routing decision, which extract_event/glide
+# deliberately do NOT carry (§4.3).
+
+# The two questions are INDEPENDENT — a single item (an INSO weekly report, a
+# sitrep) can REPORT a discrete incident AND carry cumulative analytics, and must
+# score yes on both so the router sends it to BOTH pipelines (C-1445 §4.2). Each
+# instruction therefore tells Jev to ignore the other dimension when answering.
+_OCCURRENCE_INSTRUCTIONS = (
+    "Does `text` REPORT A DISCRETE OCCURRENCE — a specific event that happened or "
+    "is happening at an identifiable time and place (an attack, a flood, a "
+    "displacement wave, an outbreak, a specific incident)? Answer yes for a "
+    "firsthand or news report of such an incident — EVEN IF the same text also "
+    "contains analysis, context or cumulative figures; that is judged separately "
+    "and does not change this answer. A bounded span where `event_start` ≈ "
+    "`event_end` is a strong yes cue. Answer no ONLY when the text reports no "
+    "discrete event at all — it is purely commentary, trend analysis, cumulative "
+    "statistics, a forecast or background."
+)
+_ANALYSIS_INSTRUCTIONS = (
+    "Does `text` provide ANALYSIS, CONTEXT or a CUMULATIVE assessment — a trend, a "
+    "situation overview, a total-to-date figure, an explainer, a forecast? Answer "
+    "yes whenever such content is present — EVEN IF the same text also reports a "
+    "discrete incident; that is judged separately and does not change this answer. "
+    "An open-ended or cumulative span (\"since January\", \"as of\", no clear end) "
+    "is a strong yes cue. Answer no ONLY when the text is a plain report of a "
+    "single incident that adds no analysis."
+)
+
+
+@dataclass(frozen=True)
+class OccurrenceAnalysis:
+    """Jev's two INDEPENDENT router probabilities (C-1445 §4.2): P(occurrence) and
+    P(analysis). The labels are not mutually exclusive — an item can score high on
+    both (a sitrep announcing a new displacement wave AND analysing the trend) or
+    low on both. The router (providers/router.py) turns these into a routing
+    decision via the abstain band."""
+
+    occurrence_p: float
+    analysis_p: float
+
+
+def _noul_probability(answer: dict) -> float:
+    """Extract P(yes) from a Jev Noul answer. The Decisions API field name for a
+    Noul is not yet pinned against a live response here, so this reads the likely
+    keys defensively; CONFIRM against a real Decisions Noul payload before relying
+    on it in production (the glide Choice uses `confidence`/`probabilities`)."""
+    for key in ("probability", "p", "yes"):
+        v = answer.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    value = answer.get("value")
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    raise JevError(f"Jev noul answer missing a probability: {answer!r}")
+
+
+def classify_occurrence_analysis(
+    title: str | None,
+    description: str | None,
+    *,
+    event_span: tuple[str | None, str | None] | None = None,
+) -> OccurrenceAnalysis:
+    """Run the occurrence/analysis router gate for one item (C-1445 §4.2).
+
+    Two independent Nouls over the bounded surface (title + lead, plus the span as
+    a structural cue). Returns both probabilities; the router applies the abstain
+    band. Raises ``JevError`` on any failure (incl. an open circuit or malformed
+    answer) — unlike the glide gate the ROUTER does not requeue on this; it abstains
+    to the LLM backstop (§4.3)."""
+    if _BREAKER.is_open():
+        raise JevError("Jev circuit breaker is open — skipping call")
+
+    text = " ".join(filter(None, [title, description])) or "unknown item"
+    state: dict[str, str] = {"text": text}
+    if event_span:
+        start, end = event_span
+        if start:
+            state["event_start"] = start
+        if end:
+            state["event_end"] = end
+
+    body = {
+        "model": JEV_MODEL,
+        "state": state,
+        "questions": {
+            "occurrence": {"type": "noul", "instructions": _OCCURRENCE_INSTRUCTIONS},
+            "analysis": {"type": "noul", "instructions": _ANALYSIS_INSTRUCTIONS},
+        },
+    }
+    try:
+        answers = _post_decisions(body)
+        occ, ana = answers.get("occurrence"), answers.get("analysis")
+        if not isinstance(occ, dict) or not isinstance(ana, dict):
+            raise JevError("Jev occurrence/analysis response missing an answer")
+        result = OccurrenceAnalysis(
+            occurrence_p=_noul_probability(occ),
+            analysis_p=_noul_probability(ana),
+        )
+    except JevError:
+        _BREAKER.record_failure()
+        raise
+    except Exception as exc:  # noqa: BLE001 — any other shape/parse error → JevError
+        _BREAKER.record_failure()
+        raise JevError(f"Jev occurrence/analysis failed: {exc}") from exc
+
+    _BREAKER.record_success()
+    logger.info(
+        "[JEV ROUTE] occurrence_p=%.2f analysis_p=%.2f (%s)",
+        result.occurrence_p, result.analysis_p, text[:60],
+    )
+    return result
