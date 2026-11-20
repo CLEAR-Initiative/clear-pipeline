@@ -4,13 +4,19 @@
 //
 // Why this exists: sync PRs were opened with an empty body bundling ~10 PRs, so
 // the manual steps their authors had written down never reached the person
-// merging. clear-pipeline #204 shipped #149 that way and prod ran for seven days
-// without the `iom_dtm_flash_alerts` source row — a repeat of the 2026-10-20
-// idmc incident. See the 2026-11-13 postmortem, recommendation 4 (clear #1525).
+// merging. On 2026-11-13 clear-api #340 and clear-pipeline #204 merged a minute
+// apart; between them they shipped clear-api #282 (the `iom_dtm_flash_alerts`
+// row, seed-only) and clear-pipeline #149 (the code that looks it up), and prod
+// ran for seven days without the row — a repeat of the 2026-10-20 idmc
+// incident. See the 2026-11-13 postmortem, recommendation 4 (clear #1525).
 //
 // The steps themselves are parsed with the same module that gates every PR into
 // dev (check-manual-deploy-steps.mjs, clear #1524), so this reads exactly the
 // grammar the PR template asks authors for.
+//
+// Nothing here is repo-specific: the repo comes from GITHUB_REPOSITORY and the
+// branches from BASE/HEAD_REF. The same file lives in clear-api and
+// clear-pipeline, as check-manual-deploy-steps.mjs does; keep them in step.
 //
 // Run by .github/workflows/sync-pr-body.yml. Tests:
 //   node --test .github/scripts/build-sync-pr-body.test.mjs
@@ -210,8 +216,20 @@ export function pendingProdBoxes(body) {
 
 // ─── GitHub access ──────────────────────────────────────────────────────────
 
-function gh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+// A sync bundles ~10 PRs, so a render makes ~11 API calls and a single network
+// blip would otherwise abort the whole body. Retry, then fail: a body that
+// silently omits a PR is the exact failure this script exists to prevent, so
+// there is no partial-success path.
+function gh(args, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      if (attempt >= attempts) throw error;
+      console.error(`gh ${args[1]} failed (attempt ${attempt}/${attempts}), retrying: ${error.message.split("\n")[0]}`);
+      execFileSync("sleep", [String(attempt * 2)]);
+    }
+  }
 }
 
 /** The PRs in `base..head`, in commit order. `--paginate` is deliberately not
