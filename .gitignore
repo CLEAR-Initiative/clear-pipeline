@@ -239,3 +239,6 @@ data-source-specs
 # out of the repo. The design docs themselves (docs/*.md) are the tracked
 # source of truth.
 *.pptx
+
+# Per-developer Claude Code permission overrides — local, never shared.
+.claude/settings.local.json
