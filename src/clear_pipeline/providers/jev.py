@@ -55,6 +55,7 @@ Config (env):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -364,11 +365,20 @@ def _noul_probability(answer: dict) -> float:
     """Extract P(yes) from a Jev Noul answer. The Decisions API field name for a
     Noul is not yet pinned against a live response here, so this reads the likely
     keys defensively; CONFIRM against a real Decisions Noul payload before relying
-    on it in production (the glide Choice uses `confidence`/`probabilities`)."""
+    on it in production (the glide Choice uses `confidence`/`probabilities`).
+
+    A parsed number must be finite and within [0, 1]: a NaN, an inf, or a value
+    outside the unit interval is a malformed answer, not a confident one. Returning
+    it would let ``gate_jev`` DECIDE on garbage (e.g. NaN clears neither abstain-band
+    comparison, so it reads as a confident "no") instead of abstaining to the LLM;
+    rejecting it with ``JevError`` routes the item to the backstop (§4.3)."""
     for key in ("probability", "p", "yes"):
         v = answer.get(key)
         if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return float(v)
+            p = float(v)
+            if not math.isfinite(p) or not 0.0 <= p <= 1.0:
+                raise JevError(f"Jev noul probability out of range: {v!r}")
+            return p
     value = answer.get("value")
     if isinstance(value, bool):
         return 1.0 if value else 0.0

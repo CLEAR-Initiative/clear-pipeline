@@ -1,5 +1,6 @@
 from datetime import date
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -246,6 +247,21 @@ class Settings(BaseSettings):
     # router_deny_threshold.
     router_assert_threshold: float = 0.6
     router_deny_threshold: float = 0.4
+
+    @model_validator(mode="after")
+    def _check_router_thresholds(self) -> "Settings":
+        """The abstain band is meaningless unless deny < assert, both in [0, 1].
+        Equal or reversed thresholds (e.g. from env overrides) would collapse the
+        band so every Jev answer DECIDES and the LLM backstop is never reached —
+        reject at load rather than silently routing on borderline scores."""
+        lo, hi = self.router_deny_threshold, self.router_assert_threshold
+        if not 0.0 <= lo < hi <= 1.0:
+            raise ValueError(
+                "router thresholds must satisfy "
+                f"0 <= router_deny_threshold ({lo}) < router_assert_threshold ({hi}) <= 1"
+            )
+        return self
+
     dedup_ttl_hours: int = 48
     dataminr_source_name: str = "dataminr"
     max_pages_per_poll: int = 50  # Safety cap on pagination

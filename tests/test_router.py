@@ -5,8 +5,11 @@ quality."""
 
 import types
 
+import pytest
+from pydantic import ValidationError
+
 from clear_pipeline.providers.intake_record import IntakeRecord
-from clear_pipeline.providers.jev import JevError, OccurrenceAnalysis
+from clear_pipeline.providers.jev import JevError, OccurrenceAnalysis, _noul_probability
 from clear_pipeline.providers.router import (
     ANALYSIS,
     OCCURRENCE,
@@ -16,7 +19,7 @@ from clear_pipeline.providers.router import (
     gate_source_kind,
     route,
 )
-from clear_pipeline.signals.config import settings
+from clear_pipeline.signals.config import Settings, settings
 
 
 def _record(source: str, *, title="t", lead="l", start=None, end=None) -> IntakeRecord:
@@ -176,3 +179,44 @@ def test_routing_decision_label_helpers():
 def test_assert_threshold_exceeds_deny_threshold():
     # The band only makes sense if assert > deny; guard the config invariant.
     assert settings.router_assert_threshold > settings.router_deny_threshold
+
+
+# ── Real Jev Noul parser (not injected probabilities) ──────────────────────────
+def test_noul_probability_parses_valid_scores():
+    assert _noul_probability({"probability": 0.7}) == 0.7
+    assert _noul_probability({"p": 0}) == 0.0
+    assert _noul_probability({"yes": 1}) == 1.0
+    assert _noul_probability({"value": True}) == 1.0
+    assert _noul_probability({"value": False}) == 0.0
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf"), 1.5, -0.1])
+def test_noul_probability_rejects_out_of_range_scores(bad):
+    # Invalid scores must raise so gate_jev abstains to the LLM, not DECIDE on
+    # garbage (NaN clears neither band comparison and would read as a confident no).
+    with pytest.raises(JevError):
+        _noul_probability({"probability": bad})
+
+
+def test_noul_probability_rejects_missing_probability():
+    with pytest.raises(JevError):
+        _noul_probability({"irrelevant": "x"})
+
+
+def test_gate_jev_abstains_when_parser_rejects_a_nan_score():
+    # End-to-end: a Jev call returning NaN surfaces as JevError → gate_jev abstains.
+    def _nan(title, description, *, event_span=None):
+        raise JevError("Jev noul probability out of range: nan")
+    assert gate_jev(_record("dataminr"), jev_fn=_nan) is None
+
+
+# ── Settings threshold validation ──────────────────────────────────────────────
+@pytest.mark.parametrize("deny,assert_", [(0.6, 0.4), (0.5, 0.5), (-0.1, 0.6), (0.4, 1.2)])
+def test_settings_rejects_bad_router_thresholds(deny, assert_):
+    with pytest.raises(ValidationError):
+        Settings(router_deny_threshold=deny, router_assert_threshold=assert_)
+
+
+def test_settings_accepts_valid_router_thresholds():
+    s = Settings(router_deny_threshold=0.3, router_assert_threshold=0.7)
+    assert (s.router_deny_threshold, s.router_assert_threshold) == (0.3, 0.7)
