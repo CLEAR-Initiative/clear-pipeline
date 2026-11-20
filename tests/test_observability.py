@@ -432,3 +432,45 @@ def test_dagster_log_lines_reach_glitchtip_with_the_job_step_fingerprint(monkeyp
     assert events, transport.envelopes
     assert events[0]["fingerprint"][:2] == ["dagster-log|", "job=iom_dtm_flash_alerts_gx|"]
     assert events[0]["tags"]["run_id"] == "e209a4cf-7912-4877-b4e8-93b9e18cf29b"
+
+
+def test_delayed_callback_on_a_cut_off_history_opens_no_second_issue(monkeypatch):
+    # 100 failures in a row (r100 newest). The query returns only the 70 newest
+    # (r100..r31). A delayed callback for r70 sees r70..r31, all failures, and the
+    # history is cut off: the streak's start is unknown, so no new fingerprint.
+    monkeypatch.setattr(observability_defs, "FAILURE_STREAK_LOOKBACK", 50)
+    records = [_finished(f"r{i}", True) for i in range(100, 30, -1)]
+    assert len(records) == 70
+    assert observability_defs.failure_streak(records, "r70", 70) == (40, None)
+    run = SimpleNamespace(run_id="r70", job_name="idmc_gx")
+    assert observability_defs.repeated_failure_alert(run, 40, None, "boom") is None
+
+
+def test_a_short_history_is_not_cut_off():
+    # Fewer rows than the query limit: the oldest run is the job's first, so the
+    # streak's start is known.
+    records = [_finished("r3", True), _finished("r2", True)]
+    assert observability_defs.failure_streak(records, "r3", 70) == (2, "r2")
+
+
+def test_a_streak_that_ends_inside_a_full_history_keeps_its_start():
+    records = [_finished(f"r{i}", True) for i in range(70, 60, -1)] + [
+        _finished(f"r{i}", False) for i in range(60, 0, -1)
+    ]
+    assert len(records) == 70
+    assert observability_defs.failure_streak(records, "r70", 70) == (10, "r61")
+
+
+def test_run_failure_sensor_sends_no_repeated_alert_for_a_delayed_callback_on_a_cut_off_history(monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        observability_defs, "capture_message", lambda msg, **kw: sent.append((msg, kw.get("level"), kw.get("fingerprint")))
+    )
+    fetch = getattr(observability_defs, "FAILURE_STREAK_FETCH", observability_defs.FAILURE_STREAK_LOOKBACK + 20)
+    # The job has failed far longer than the query reaches; r70 is handled late.
+    records = [_finished(f"r{i}", True) for i in range(fetch + 30, 30, -1)][:fetch]
+    run = SimpleNamespace(run_id="r70", job_name="idmc_gx")
+    instance = SimpleNamespace(get_run_records=lambda **kw: records)
+    context = SimpleNamespace(dagster_run=run, failure_event=SimpleNamespace(message="boom"), instance=instance)
+    observability_defs.run_failure_glitchtip_sensor._run_status_sensor_fn(context)
+    assert [level for _, level, _ in sent] == ["error"]
