@@ -144,7 +144,11 @@ A hotfix merged straight into `prod` keeps the body its author wrote —
 steps** section *is* now checked, though (clear
 [#1550](https://www.exponential.im/w/clear/products/clear/tickets/1550)):
 `check.yml` runs on every PR into `dev` or `prod`, and its manual-steps gate on
-every such PR whose head branch is not `dev`. Hotfixes run the tests now too.
+every such PR a person wrote the body of. The one exemption is this repo's own
+`dev` → `prod` sync — base `prod`, head `dev`, *and* same repository, since a
+fork's own branch can be called `dev` too. The gate is the last step in the job
+and runs even when an earlier step failed, so a missing section never hides the
+ruff or pytest result. Hotfixes run the tests now too.
 
 **Under time pressure the gate warns; it does not block.** This is a deliberate
 choice, not an oversight. The check reds the PR, so a missing step is visible to
