@@ -63,17 +63,20 @@ def required_source_names() -> frozenset[str]:
     that it needs a clear-api migration too.
 
     What this leaves out, on purpose: the analyst-facing names
-    (``manual``, ``field_officer``, ``partner``, ``government``) and
-    ``sudan-war-x``. The pipeline never resolves those — clear-api creates
-    those signals, from an analyst or from ``POST /api/x/ingest`` — so a
-    missing row there breaks a clear-api mutation, not a deploy of this
-    repo, and clear-api owns both the check and the migration. Measured
-    2026-11-21: dev has no ``manual`` row at all, and clear-api's
-    ``createManualSignal`` does not accept ``manual`` either
+    (``field_officer``, ``partner``, ``government``) and ``sudan-war-x``.
+    The pipeline never resolves those — clear-api creates those signals,
+    from an analyst or from ``POST /api/x/ingest`` — so a missing row there
+    breaks a clear-api mutation, not a deploy of this repo, and clear-api
+    owns both the check and the migration.
+
+    That distinction is not academic. The first version of this check
+    required every registered name, and run against dev on 2026-11-21 it
+    reported ``manual`` missing — correctly: dev had no such row, and
+    clear-api's ``createManualSignal`` does not accept ``manual`` either
     (``TRUSTED_SOURCE_NAMES`` is ``field_officer``/``partner``/
-    ``government``), so requiring it here would have blocked every dev
-    deploy over a row nothing wants. A gate with a false positive is a gate
-    someone turns off.
+    ``government``). Requiring it would have blocked every dev deploy over a
+    row nothing wants, and a gate with a false positive is a gate someone
+    turns off. ``manual`` is no longer registered at all (clear #1567).
 
     The check stays one-directional either way: extra rows in an environment
     (``whatsapp``, and the hundreds of report-attribution names) are fine.

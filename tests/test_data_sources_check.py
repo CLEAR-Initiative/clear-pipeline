@@ -27,10 +27,11 @@ EXPECTED_REQUIRED = {
 
 # Registered, but never resolved here: clear-api creates these signals (an
 # analyst, or POST /api/x/ingest), so a missing row breaks a clear-api mutation
-# rather than a deploy of this repo. See required_source_names' docstring —
-# requiring `manual` would red every dev deploy today over a row clear-api's
-# createManualSignal does not even accept.
-EXPECTED_EXCLUDED = {"manual", "field_officer", "partner", "government", "sudan-war-x"}
+# rather than a deploy of this repo. See required_source_names' docstring.
+#
+# `manual` was in this set too. It is not any more — it is no longer registered
+# at all (clear #1567), because nothing could ever create a signal with it.
+EXPECTED_EXCLUDED = {"field_officer", "partner", "government", "sudan-war-x"}
 
 
 def test_required_source_names_matches_the_registries():

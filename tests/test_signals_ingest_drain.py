@@ -38,10 +38,10 @@ from clear_pipeline.providers.translation_hash import (
 )
 
 
-# Analyst-created sources: `manual`, plus the DataSource names clear-api's
-# createManualSignal accepts (its TRUSTED_SOURCE_NAMES). Spelled out rather than
-# read from settings so the test pins the contract with clear-api.
-MANUAL_SOURCES = ("manual", "field_officer", "partner", "government")
+# Analyst-created sources: the DataSource names clear-api's createManualSignal
+# accepts (its TRUSTED_SOURCE_NAMES). Spelled out rather than read from settings
+# so the test pins the contract with clear-api. A fourth name, `manual`, was in
+# here until clear #1567; see test_manual_is_not_a_registered_source.
 TRUSTED_SOURCES = ("field_officer", "partner", "government")
 
 
@@ -103,7 +103,6 @@ EXPECTED_FLAGS = {
     "sudan_witness": (False, True),
     "iom_dtm_flash_alerts": (False, True),
     "inso": (False, True),
-    "manual": (False, True),
     "field_officer": (False, True),
     "partner": (False, True),
     "government": (False, True),
@@ -125,7 +124,7 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["gdacs"], GDACSConnector)
     assert isinstance(CONNECTORS_BY_SOURCE["darfur24"], Darfur24Connector)
     assert isinstance(CONNECTORS_BY_SOURCE["idmc"], IDMCConnector)
-    for name in MANUAL_SOURCES:
+    for name in TRUSTED_SOURCES:
         assert isinstance(CONNECTORS_BY_SOURCE[name], ManualConnector)
         assert CONNECTORS_BY_SOURCE[name].source == name
     assert isinstance(CONNECTORS_BY_SOURCE["sudan-war-x"], SudanWarXConnector)
@@ -133,16 +132,29 @@ def test_connectors_by_source_map():
     assert isinstance(CONNECTORS_BY_SOURCE["inso"], InsoConnector)
 
 
-def test_manual_source_names_keep_legacy_setting_and_dedupe():
-    # A deployment that overrides MANUAL_SOURCE_NAME keeps draining that source;
-    # the trusted names are added alongside it, never instead of it.
-    with (
-        patch.object(connectors.settings, "manual_source_name", "analyst"),
-        patch.object(
-            connectors.settings, "manual_trusted_source_names", " field_officer,partner,,analyst ,government"
-        ),
+def test_manual_source_names_trim_and_dedupe():
+    # MANUAL_TRUSTED_SOURCE_NAMES is hand-edited per environment, so a stray
+    # comma, surrounding whitespace or a repeated name must not register a
+    # connector for "" or claim one source twice (_index_by_source raises on a
+    # duplicate, which would stop the code location loading).
+    with patch.object(
+        connectors.settings,
+        "manual_trusted_source_names",
+        " field_officer,partner,, government ,partner,field_officer",
     ):
-        assert connectors._manual_source_names() == ["analyst", "field_officer", "partner", "government"]
+        assert connectors._manual_source_names() == ["field_officer", "partner", "government"]
+
+
+def test_manual_is_not_a_registered_source():
+    # `manual` was a Celery-era source name, registered here until clear #1567.
+    # It was dead in every sense: clear-api's createManualSignal rejects any name
+    # outside TRUSTED_SOURCE_NAMES, dev had no `manual` data_sources row at all
+    # (so the foreign key made such a signal impossible), prod had no signal from
+    # it, and no deployment set MANUAL_SOURCE_NAME. Registering it again would
+    # also put it back in the deploy-time row check, where it reported a missing
+    # row nobody wants — see tests/test_data_sources_check.py.
+    assert "manual" not in CONNECTORS_BY_SOURCE
+    assert not hasattr(connectors.settings, "manual_source_name")
 
 
 def test_index_by_source_rejects_a_name_two_connectors_claim():
@@ -255,7 +267,7 @@ def test_project_polled_with_s3_key_still_reads_s3():
 
 
 def test_project_manual_and_sudan_war_x_never_touch_s3():
-    for name in ("manual", "sudan-war-x"):
+    for name in ("field_officer", "sudan-war-x"):
         with patch.object(lake, "s3_client") as s3:
             _connector, view = stages._project({"id": "m", "source": {"name": name}, "title": "t"})
         s3.assert_not_called()
@@ -326,9 +338,12 @@ def test_raw_key_with_revision_is_one_immutable_blob_per_revision():
 # ── per-source projection dispatch (stages._project) ─────────────────────────
 
 def test_project_manual_from_signal_row():
+    # The originLocation fallback, which the generalLocation case below doesn't
+    # cover. `field_officer` rather than `manual`: the latter is no longer a
+    # registered source (clear #1567).
     created = {
         "id": "m1",
-        "source": {"name": "manual"},
+        "source": {"name": "field_officer"},
         "title": "Reported shelling",
         "description": "analyst note",
         "publishedAt": "2026-08-13T09:00:00Z",
@@ -397,7 +412,7 @@ def test_project_unknown_source_returns_reason():
     assert stages._project({"id": "x", "source": {"name": "mystery"}}) == "unknown_source"
 
 
-@pytest.mark.parametrize("source_name", MANUAL_SOURCES)
+@pytest.mark.parametrize("source_name", TRUSTED_SOURCES)
 def test_drain_classifies_and_groups_manual_signal(source_name):
     # End to end through the drain, mocking only the clear-api / Redis / model
     # boundaries: a signal from any analyst-created source is classified,
