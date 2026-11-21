@@ -8,19 +8,81 @@ on:
   push:
     branches: [prod]
   workflow_dispatch:
+    inputs:
+      skip_data_source_check:
+        description: "Build even if a registered data source has no clear-api row. Emergency override only — the missing row still breaks that source's ingest."
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # ─── Deploy gate (clear #1523) ──────────────────────────────────────────
+  # Every source the pipeline ingests resolves its clear-api DataSource id by
+  # name, and the row is created by a clear-api migration in another repo on
+  # another cadence. When the two disagree the pipeline only finds out inside
+  # that source's next scheduled run — which is how the 2026-10-20 `idmc` and
+  # 2026-11-13 `iom_dtm_flash_alerts` incidents both stayed hidden for days.
+  # So ask before the image exists: a failure here means no new image, and the
+  # environment keeps serving the last good one while the rows are added.
+  #
+  # Deliberately NOT a code-location-load check: raising on import would turn
+  # "one source cannot ingest" into "nothing runs and the UI is down", on a
+  # clear-api blip as readily as on a real missing row. See the module
+  # docstring in src/clear_pipeline/checks/data_sources.py.
+  data-sources:
+    name: clear-api data_sources rows exist
+    # Same ref guard as `build` below, so a manual run from another branch
+    # doesn't check prod's rows for a build that is then skipped. The override
+    # is a manual run with the input ticked, and the only one: it is recorded
+    # in the run's inputs, so it stays visible — loud, not absolute, like
+    # prod's `enforce_admins: false`.
+    if: ${{ github.ref == 'refs/heads/prod' && inputs.skip_data_source_check != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12" # matches the Dockerfile's python:3.12-slim
+          enable-cache: true
+
+      # The check reads CONNECTORS and GX_SOURCES, which import every provider,
+      # so it needs the real environment rather than a trimmed one. ~Minutes on
+      # a cold cache; the alternative is shipping code whose rows do not exist.
+      - name: Install dependencies (from uv.lock)
+        run: uv sync --frozen
+
+      - name: Every registered source has a data_sources row
+        env:
+          # Public DNS, also set in clear-infrastructure's tfvars. A repo
+          # variable overrides it without a code change if the host moves.
+          CLEAR_API_URL: ${{ vars.CLEAR_API_URL_PROD || 'https://api.clearinitiative.io/graphql' }}
+          CLEAR_API_KEY: ${{ secrets.CLEAR_API_KEY_PROD }}
+        run: |
+          if [ -z "$CLEAR_API_KEY" ]; then
+            echo "::error::CLEAR_API_KEY_PROD is not set, so this deploy gate cannot run. Add it as a repository secret (a clear-api key with the admin or pipeline role)."
+            exit 1
+          fi
+          uv run --frozen python -m clear_pipeline.checks.data_sources
+
   build:
     name: Build & push image
-    # workflow_dispatch's branch filter is NOT restricted by `push.branches`, and
-    # this job hardcodes environment=prod — so without this guard a manual run
-    # from another branch would publish that branch's code as :prod. Only ever
-    # tag/build from the prod branch.
-    if: github.ref == 'refs/heads/prod'
+    needs: data-sources
+    # Two guards in one condition.
+    # `github.ref`: workflow_dispatch's branch filter is NOT restricted by
+    # `push.branches`, and this job hardcodes environment=prod — so without it a
+    # manual run from another branch would publish that branch's code as :prod.
+    # Only ever tag/build from the prod branch.
+    # `always()` + the result check: a skipped `needs` would otherwise skip this
+    # job too, and the gate skips itself when the override input is ticked. Only
+    # success-or-override builds; a *failed* gate still blocks.
+    if: ${{ always() && github.ref == 'refs/heads/prod' && (needs.data-sources.result == 'success' || inputs.skip_data_source_check == true) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

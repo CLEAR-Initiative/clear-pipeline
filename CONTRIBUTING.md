@@ -145,7 +145,11 @@ gh pr view <sync-pr> --json body --jq .body \
 - **All LLM calls go through [`providers/llm.py`](src/clear_pipeline/providers/llm.py)** (`make_llm_provider(role)`). That is where provider and model choice, timeouts, fallbacks and token usage are handled, so don't call a provider SDK directly.
 - **Extraction schemas are versioned.** Every extracted row carries its `SCHEMA_VERSION`, and aggregation only combines rows of the same version. A bump applies to reports as they are next extracted, and older reports need an explicit backfill to move to the new version. Re-extraction costs real money, so bundle schema changes into one bump. See [Schema versioning](docs/humanitarian-datapoint-extraction.md#7-schema-versioning).
 - **Use the domain vocabulary.** [CONTEXT.md](CONTEXT.md) defines the terms (Population Affected vs People in Need, Report vs Incident, why unknown severity stays null). Design decisions live in [docs/adr/](docs/adr/).
-- **Adding a signal source** means adding a connector to `CONNECTORS` in [`defs/signals/connectors.py`](src/clear_pipeline/defs/signals/connectors.py).
+- **Adding a signal source** means adding a connector to `CONNECTORS` in [`defs/signals/connectors.py`](src/clear_pipeline/defs/signals/connectors.py), and a clear-api migration seeding its `data_sources` row — the source resolves its id by name, so without the row its ingest fails at run time. Update `EXPECTED_REQUIRED` in [`tests/test_data_sources_check.py`](tests/test_data_sources_check.py) in the same PR (the test fails until you do) and put the migration under **Manual deploy steps**. The release workflows refuse to build an image for an environment that is missing a row ([clear #1523](https://www.exponential.im/w/clear/products/clear/tickets/1523)); check any environment yourself with:
+
+  ```bash
+  CLEAR_API_URL=… CLEAR_API_KEY=… uv run --frozen python -m clear_pipeline.checks.data_sources
+  ```
 
 ## Environment variables
 
