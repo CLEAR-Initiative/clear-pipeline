@@ -33,8 +33,14 @@ promotionChain:
 
 ### Prod sync and hotfixes
 
-- **Sync:** a PR from `dev` into `prod`, titled "Sync prod with dev". It ships every PR merged into `dev` since the last sync, so it must carry their **Manual deploy steps**, and nobody merges it until each prod step is done (clear [#1525](https://www.exponential.im/w/clear/products/clear/tickets/1525)).
-- **Hotfix:** branch from `prod`, PR into `prod` (for example #182, #184), then merge the fix back into `dev` the same day so the next sync doesn't revert it.
+- **Sync:** a PR from `dev` into `prod`, titled "Sync prod with dev". It ships every PR merged into `dev` since the last sync, so it must carry their **Manual deploy steps**, and nobody merges it until each prod step is done (clear [#1525](https://www.exponential.im/w/clear/products/clear/tickets/1525)). `sync-pr-body.yml` writes the body and holds the PR at `BLOCKED` with a *changes requested* review while any `prod` box is unticked.
+- **Hotfix:** branch from `prod`, PR into `prod` (for example #182, #184), then merge the fix back into `dev` the same day so the next sync doesn't revert it. A hotfix now needs one approving review like any prod merge, and nothing checks its **Manual deploy steps** (clear [#1550](https://www.exponential.im/w/clear/products/clear/tickets/1550)).
+
+### `prod` branch protection
+
+Set 2026-11-20 (clear [#1556](https://www.exponential.im/w/clear/products/clear/tickets/1556)): one approving review required, no force pushes, no deletions, and **no required status checks** — `check.yml` here runs only on PRs into `dev`, so requiring a check on `prod` would leave every prod PR pending on a check that never reports. clear-api's protection is identical, deliberately, even though its `check.yml` does run on prod PRs.
+
+`enforce_admins` is **off** on purpose: an administrator can merge without an approval, so an emergency hotfix is never wedged behind an absent reviewer. The gate is loud, not absolute, and an override shows in the PR timeline.
 
 The model changed from trunk-based (`dev` as deployTrigger) on 2026-11-20 ([clear #1530](https://www.exponential.im/w/clear/products/clear/tickets/1530)): with `dev` as the trigger, Tickets read `DONE` before their code was live, which hid that the iom_dtm_flash_alerts source never worked on prod ([postmortem](https://www.exponential.im/w/clear/pages/cmwop8nqh0001jk07nek6zwjn)).
 
