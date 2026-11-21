@@ -26,8 +26,8 @@ promotionChain:
 
 | Branch | Role |
 |---|---|
-| `dev` | Trunk and featureBase. GitHub's default branch. A push runs `release-dev.yml`, which builds and pushes the dev image. |
-| `prod` | Production and deployTrigger. Advanced by "Sync prod with dev" PRs and by prod hotfix PRs, both merged by a person (no auto-merge). A push runs `release-prod.yml`, which tags a MAJOR version and builds the prod image. |
+| `dev` | Trunk and featureBase. GitHub's default branch. A push runs `release-dev.yml`, which checks dev's clear-api data source rows (below) and then builds and pushes the dev image. |
+| `prod` | Production and deployTrigger. Advanced by "Sync prod with dev" PRs and by prod hotfix PRs, both merged by a person (no auto-merge). A push runs `release-prod.yml`, which checks prod's clear-api data source rows (below), then tags a MAJOR version and builds the prod image. |
 | `master` | **Legacy — do not target.** History only. |
 | `feat/*`, `fix/*`, `<ticket>-*` | Feature branches. Branch from `dev`, PR back into `dev`. |
 
@@ -41,6 +41,33 @@ promotionChain:
 Set 2026-11-20 (clear [#1556](https://www.exponential.im/w/clear/products/clear/tickets/1556)): one approving review required, no force pushes, no deletions, and **no required status checks** — `check.yml` here runs only on PRs into `dev`, so requiring a check on `prod` would leave every prod PR pending on a check that never reports. clear-api's protection is identical, deliberately, even though its `check.yml` does run on prod PRs.
 
 `enforce_admins` is **off** on purpose: an administrator can merge without an approval, so an emergency hotfix is never wedged behind an absent reviewer. The gate is loud, not absolute, and an override shows in the PR timeline.
+
+### Deploy gate: a clear-api `data_sources` row per ingested source
+
+Both release workflows run one job before the image is built (clear [#1523](https://www.exponential.im/w/clear/products/clear/tickets/1523)):
+
+```bash
+uv run --frozen python -m clear_pipeline.checks.data_sources
+```
+
+It reads every source that resolves a clear-api `DataSource` id by name out of `CONNECTORS` and `GX_SOURCES`, reads `dataSources` out of the environment the image is about to run against, and lists **every** name that environment is missing. A failure means no new image, so the environment keeps serving the last good one while the rows are added — the running pipeline is never left part-deployed.
+
+| | dev | prod |
+|---|---|---|
+| URL | `vars.CLEAR_API_URL_DEV`, default `https://dev-api.clearinitiative.io/graphql` | `vars.CLEAR_API_URL_PROD`, default `https://api.clearinitiative.io/graphql` |
+| key | `secrets.CLEAR_API_KEY_DEV` | `secrets.CLEAR_API_KEY_PROD` |
+
+Exit codes are distinct on purpose: `1` is "rows are missing, write a clear-api migration", `2` is "clear-api could not be read, which is not a verdict on the rows".
+
+It is **not** a code-location-load check. Raising on import would turn "one source cannot ingest" into "nothing runs and the Dagster UI is down", and would fire on a clear-api blip as readily as on a real missing row — see the module docstring in `src/clear_pipeline/checks/data_sources.py`, and `CONTRIBUTING.md`'s "a missing credential must not stop the definitions loading".
+
+The override is a manual run with `skip_data_source_check` ticked. `--ref prod` is not optional: `gh workflow run` defaults to the repository's default branch, `dev`, and both jobs here require the `prod` ref, so without it the run starts and does nothing.
+
+```bash
+gh workflow run release-prod.yml --ref prod -f skip_data_source_check=true
+```
+
+Like `enforce_admins: false` above, it is loud rather than absolute: the input is recorded in the run for good.
 
 The model changed from trunk-based (`dev` as deployTrigger) on 2026-11-20 ([clear #1530](https://www.exponential.im/w/clear/products/clear/tickets/1530)): with `dev` as the trigger, Tickets read `DONE` before their code was live, which hid that the iom_dtm_flash_alerts source never worked on prod ([postmortem](https://www.exponential.im/w/clear/pages/cmwop8nqh0001jk07nek6zwjn)).
 
