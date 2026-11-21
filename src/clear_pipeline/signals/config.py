@@ -126,15 +126,21 @@ class Settings(BaseSettings):
     inso_poll_interval_minutes: int = 24 * 60
 
     # Manual — analyst-created signals (no poll, no lake blob). The drain reads
-    # NEW signals with this source name straight from clear-api. No ingest asset;
-    # a drain sensor checks for pending manual signals every N minutes (low so
-    # an analyst's signal is classified/grouped promptly). MANUAL_SOURCE_NAME must
-    # match a data_sources row and the `source` clear-api tags on those signals.
-    manual_source_name: str = "manual"
-    # The data_sources rows clear-api's createManualSignal accepts — a mirror of
-    # its TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts). Drained exactly
-    # like MANUAL_SOURCE_NAME; a name missing here is marked FAILED as an unknown
-    # source instead of being grouped. Comma-separated.
+    # NEW signals with these source names straight from clear-api. No ingest
+    # asset; a drain sensor checks for pending manual signals every N minutes
+    # (low so an analyst's signal is classified/grouped promptly).
+    #
+    # A mirror of clear-api's TRUSTED_SOURCE_NAMES (src/resolvers/signal.resolver.ts):
+    # the data_sources rows its createManualSignal accepts. Each must match a
+    # data_sources row and the `source` clear-api tags on those signals; a name
+    # missing here is marked FAILED as an unknown source instead of being
+    # grouped. Comma-separated.
+    #
+    # There was a separate MANUAL_SOURCE_NAME here, defaulting to `manual`, from
+    # the Celery era. It was dead and is gone (clear #1567): createManualSignal
+    # rejects any name outside the three below, dev had no `manual` row at all,
+    # prod had no signal from it, and no deployment set the variable. "Manual"
+    # survives as the data_sources *type* of these three rows, not as a name.
     manual_trusted_source_names: str = "field_officer,partner,government"
     manual_poll_interval_minutes: int = 1
     # Whether `signals_drain_sensor` ships RUNNING. Non-polled sources (manual

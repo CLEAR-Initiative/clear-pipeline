@@ -256,7 +256,7 @@ _DRAIN_SEVERITY_WRITE_ATTEMPTS = 3
 # using the SAME unified extractor the builders use. GDACS keeps its alert-level
 # map and is never overwritten.
 def _drain_time_severity_sources() -> frozenset[str]:
-    names = [settings.manual_source_name, settings.sudan_war_x_source_name]
+    names = [settings.sudan_war_x_source_name]
     names.extend(
         n.strip()
         for n in settings.manual_trusted_source_names.split(",")

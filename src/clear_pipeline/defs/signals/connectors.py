@@ -20,19 +20,20 @@ capability flags:
   │ sudan_wit.†│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ inso       │  False  │  True   │ downloaded by gx; drain reads its S3 file   │
   │ iom_dtm_f.‡│  False  │  True   │ downloaded by gx; drain reads its S3 file   │
-  │ manual *   │  False  │  True   │ no ingest — analyst-created; feeds stages   │
+  │ trusted *  │  False  │  True   │ no ingest — analyst-created; feeds stages   │
   │ sudan-war-x│  False  │  True   │ no ingest — pushed to API; feeds stages     │
   └────────────┴─────────┴─────────┴───────────────────────────────────────────┘
-  * one ``ManualConnector`` per analyst-created source: ``manual``
-    (``MANUAL_SOURCE_NAME``) plus ``field_officer`` / ``partner`` / ``government``
-    (``MANUAL_TRUSTED_SOURCE_NAMES``), the sources clear-api's
-    ``createManualSignal`` accepts.
+  * one ``ManualConnector`` per analyst-created source — ``field_officer`` /
+    ``partner`` / ``government`` (``MANUAL_TRUSTED_SOURCE_NAMES``), the only
+    sources clear-api's ``createManualSignal`` accepts. A fourth, ``manual``
+    (``MANUAL_SOURCE_NAME``), was registered here until clear #1567 and was
+    dead: no row, no signal, and rejected by that mutation.
   † ``sudan_witness`` (``SudanWitnessConnector``).
   ‡ ``iom_dtm_flash_alerts`` (``IOMDTMFlashAlertsConnector``).
 
 - **polled** — polled by this pipeline: an ingest asset + poll sensor write lake
   blobs and ``createSignal(status=NEW, rawS3Key=…)``. ``False`` = created in
-  clear-api elsewhere: analysts (``manual``), an external poller (``sudan-war-x``,
+  clear-api elsewhere: analysts (the trusted names above), an external poller (``sudan-war-x``,
   ``POST /api/x/ingest``) or gx (``idmc``, ``sudan_witness``,
   ``iom_dtm_flash_alerts``, ``inso``). The drain projects from the blob
   (``parse`` → ``project``) when the row has a ``rawS3Key``, else ``record=None``.
@@ -718,9 +719,12 @@ class SudanWarXConnector:
 
 
 def _manual_source_names() -> list[str]:
-    """``MANUAL_SOURCE_NAME`` plus clear-api's trusted sources
-    (``MANUAL_TRUSTED_SOURCE_NAMES``), in order, without duplicates."""
-    names = [settings.manual_source_name, *settings.manual_trusted_source_names.split(",")]
+    """clear-api's trusted sources (``MANUAL_TRUSTED_SOURCE_NAMES``), in order,
+    trimmed, without blanks or duplicates — the setting is hand-edited per
+    environment, so a stray comma or a repeated name must not register a
+    connector for ``""`` or claim a source twice (``_index_by_source`` raises on
+    a duplicate)."""
+    names = settings.manual_trusted_source_names.split(",")
     return list(dict.fromkeys(n.strip() for n in names if n.strip()))
 
 
@@ -751,7 +755,7 @@ def _index_by_source(connectors: list[SignalSource]) -> dict[str, SignalSource]:
         if c.source in by_source:
             raise ValueError(
                 f"Two connectors claim source {c.source!r} — check "
-                "MANUAL_SOURCE_NAME / MANUAL_TRUSTED_SOURCE_NAMES"
+                "MANUAL_TRUSTED_SOURCE_NAMES"
             )
         by_source[c.source] = c
     return by_source
