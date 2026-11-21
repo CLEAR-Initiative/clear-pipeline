@@ -61,7 +61,13 @@ Exit codes are distinct on purpose: `1` is "rows are missing, write a clear-api 
 
 It is **not** a code-location-load check. Raising on import would turn "one source cannot ingest" into "nothing runs and the Dagster UI is down", and would fire on a clear-api blip as readily as on a real missing row — see the module docstring in `src/clear_pipeline/checks/data_sources.py`, and `CONTRIBUTING.md`'s "a missing credential must not stop the definitions loading".
 
-The override is a manual run with `skip_data_source_check` ticked (`gh workflow run release-prod.yml -f skip_data_source_check=true`). Like `enforce_admins: false` above, it is loud rather than absolute: the input is recorded in the run for good.
+The override is a manual run with `skip_data_source_check` ticked. `--ref prod` is not optional: `gh workflow run` defaults to the repository's default branch, `dev`, and both jobs here require the `prod` ref, so without it the run starts and does nothing.
+
+```bash
+gh workflow run release-prod.yml --ref prod -f skip_data_source_check=true
+```
+
+Like `enforce_admins: false` above, it is loud rather than absolute: the input is recorded in the run for good.
 
 The model changed from trunk-based (`dev` as deployTrigger) on 2026-11-20 ([clear #1530](https://www.exponential.im/w/clear/products/clear/tickets/1530)): with `dev` as the trigger, Tickets read `DONE` before their code was live, which hid that the iom_dtm_flash_alerts source never worked on prod ([postmortem](https://www.exponential.im/w/clear/pages/cmwop8nqh0001jk07nek6zwjn)).
 
